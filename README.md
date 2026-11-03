@@ -41,8 +41,8 @@ AgentHuddle is the **coordination layer**, not another agent runtime.
 
 ## Documentation
 
-Read the [MVP specification](docs/MVP-SPEC.md) for scope, suggested data model, task lifecycle, acceptance criteria, and open questions.
+Read the [MVP specification](docs/MVP-SPEC.md) for scope, suggested data model, task lifecycle, acceptance criteria, and open questions. The [Cloudflare architecture and implementation handoff](docs/CLOUDFLARE-ARCHITECTURE.md) documents the proposed Worker, D1, per-workspace Durable Object, Queues, Agent Auth/MCP stack, **vinext** dashboard choice, implementation phases, and questions for Claude to validate.
 
 ## Project status
 
-This is a public planning repository. Product decisions, implementation stack, licensing, hosting, domain, and release timing are not finalized. Contributions and design feedback can be discussed through GitHub Issues.
+This is a public planning repository. Cloudflare is the selected infrastructure direction and vinext is the selected frontend approach; implementation details still require technical validation. Licensing, branding/domain, and release timing are not finalized. Contributions and design feedback can be discussed through GitHub Issues.
