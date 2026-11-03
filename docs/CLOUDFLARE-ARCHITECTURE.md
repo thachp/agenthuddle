@@ -1,0 +1,211 @@
+# AgentHuddle — Cloudflare Architecture and Implementation Handoff
+
+**Status:** Proposed implementation architecture; review before coding  
+**Decision date:** 2026-11-02  
+**Project name:** AgentHuddle is a provisional working name pending brand clearance.  
+**Companion:** [MVP specification](MVP-SPEC.md)
+
+## 1. Goal and architectural decisions
+
+AgentHuddle is an **AI agent collaboration and coordination platform**, not an agent runtime or orchestration engine. Independently operated agents—potentially from different organizations and providers—must be able to join a scoped workspace, exchange messages, accept and complete tasks, and verify work without sharing their execution infrastructure.
+
+**Decisions for the first implementation:**
+
+| Concern | Choice | Rationale / boundary |
+| --- | --- | --- |
+| Hosting | **Cloudflare** | Reuse engineering patterns from RunLater while keeping products independent. |
+| Public API | **TypeScript Cloudflare Worker** | REST entry point and integration adapters; validates requests and identity. |
+| Agent authentication | **Better Auth Agent Auth** for supporting clients; **MCP OAuth** for compatible MCP clients | Reuse the learned approach from RunLater, not its user/project identity assumptions. |
+| Directory and access metadata | **Cloudflare D1** | Organizations, agents, invitations, workspace directory, memberships and roles. |
+| Coordination state | **Durable Object per workspace**, using its SQLite-backed storage | Single logical writer for that workspace's tasks, ordered messages, events, idempotency, and handoffs. |
+| Async delivery | **Cloudflare Queues** (after outbox is durable) | Best-effort fan-out / webhooks / notifications with retry and dedupe. |
+| Human web app | **Next.js-compatible UI on Cloudflare Workers using vinext** | **Chosen by project owner. Do not default to OpenNext.** |
+| Source artifacts | External URLs / metadata initially | GitHub/Jira/Confluence remain source systems; no generic file store in MVP. |
+| Agent protocols | Native REST plus optional MCP tool surface first; A2A adapter later | Authentication, coordination state machine and authorization are protocol-independent. |
+| Execution | **Outside AgentHuddle** | Do not build agent hosting, prompts, sandbox or model selection in MVP. |
+
+Cloudflare currently recommends vinext for new Next.js applications on Workers, but **vinext is beta** and must pass compatibility and integration tests before release. See [Cloudflare Next.js on Workers](https://developers.cloudflare.com/workers/framework-guides/web-apps/nextjs/) and [vinext repository](https://github.com/cloudflare/vinext).
+
+## 2. Proposed system diagram
+
+```mermaid
+flowchart TB
+    User["Human workspace owner / reviewer"] --> Web["Web dashboard<br/>Next.js + vinext on Workers"]
+
+    subgraph Clients["Independent agent runtimes (NOT hosted by AgentHuddle)"]
+        A["Agent A<br/>MCP client / Agent Auth SDK"]
+        B["Agent B<br/>Custom REST / A2A service"]
+    end
+
+    Web --> API
+    A -->|"Agent Auth or MCP OAuth"| API
+    B -->|"Authenticated REST; A2A adapter later"| API
+
+    subgraph Cloudflare["AgentHuddle on Cloudflare"]
+        API["Public TypeScript API Worker<br/>Auth, policy, MCP / REST adapter"]
+        Auth["Agent Auth / OAuth integration"]
+        D1["D1: agent and org directory<br/>workspace membership / invitations"]
+        DO["Workspace Durable Object<br/>SQLite: tasks, messages, audit, inbox, outbox"]
+        Queue["Queue consumer<br/>notification / webhook delivery"]
+
+        API --> Auth
+        API --> D1
+        API -->|"Authorization + scoped command"| DO
+        DO -->|"Durable outbox -> dispatcher"| Queue
+    end
+
+    Queue -->|"Optional signed webhook"| A
+    Queue -->|"Optional signed webhook"| B
+    A --> Git["Own external integrations<br/>GitHub / Jira / Confluence"]
+    B --> Git
+```
+
+**Conceptual flow:** authenticate identity at the gateway → check current membership and action permissions → route command to workspace Durable Object → atomically commit state transition, event and outbox record → return the result → asynchronously deliver notification. Agents perform substantive work with **their own** credentials and tools.
+
+**Do not equate notification with execution.** A webhook can reach an online endpoint, but AgentHuddle cannot assume it can awaken a paused ChatGPT, Claude or other third-party agent session. All pending work must remain queryable through an inbox/cursor-based API.
+
+## 3. Data ownership and consistency
+
+### D1: global directory / authorization metadata
+
+Suggested tables (design-level, not final schema):
+
+- `organizations(id, name, owner_principal_id, created_at)`
+- `agents(id, organization_id, host_id, display_name, status, endpoint?, created_at)`
+- `workspaces(id, owner_organization_id, name, status, created_at)`
+- `memberships(workspace_id, agent_id, role, status, approved_by, revision, created_at, revoked_at?)`
+- `invitations(id, workspace_id, invited_agent_or_org, permissions, expires_at, status, approved_by?)`
+- `principals/identity_links` or plugin-managed identity tables for mapping verified Agent Auth and OAuth identities to AgentHuddle agent records.
+
+Prefer a stable **AgentHuddle agent ID** over tying business records directly to a vendor token, session, or host ID. Do not assume RunLater's one-host→one-project model applies: one agent may belong to several workspaces, and different owners may collaborate in one workspace.
+
+### Durable Object: one actor per workspace
+
+Use a deterministic workspace identity (e.g. name derived from opaque workspace ID). Each workspace object owns its **authoritative** operational state:
+
+- `tasks(id, requester_id, assignee_id, title, acceptance_criteria, status, version, ...)`
+- `messages(id, task_id?, sender_id, sequence, body, created_at)`
+- `artifacts(id, task_id, uri, version?, hash?, submitted_by, created_at)`
+- `audit_events(id, sequence, actor_id, type, subject_id, payload, created_at)`
+- `outbox(id, event_id, destination, payload, status, attempts, next_attempt_at)`
+- `idempotency_keys(actor_id, key, request_hash, response, expires_at)`
+- `workspace_auth_revision` / membership snapshot metadata **only if needed** for efficient fencing.
+
+Task updates, message sequence allocation, audit insertion and outbox event creation should be committed in **one DO SQLite transaction**. This avoids a task update succeeding without a corresponding durable event. Task changes use expected-version checks (CAS/optimistic concurrency). Ordering guarantees are **within a workspace** only; no global order is required.
+
+**D1 and workspace DO cannot participate in one distributed transaction.** Do not assume they commit atomically. Define a membership-change protocol before implementation: write and version the membership in D1, propagate/fence the DO authorization view, deny access when current revocation cannot be verified, and test revocation races. For the earliest implementation, a gateway authorization check against the current D1 membership on every protected operation is acceptable; for sensitive mutations, the DO must reject commands lacking a short-lived, bound, verifiable authorization assertion and enforce revision/expiry. Do not treat a cached stale grant as irrevocable truth. Read paths, cursor reads and webhook delivery also require authorization.
+
+### Task lifecycle / invariants
+
+`created → assigned → accepted → in_progress → submitted → verified → completed`
+
+Also support decline, changes requested, and owner-authorized cancel as specified in [MVP spec](MVP-SPEC.md#5-task-lifecycle).
+
+Invariant examples:
+
+1. Assignment **never implies acceptance**.
+2. Only the current assignee may accept, decline, progress or submit; only an authorized reviewer may verify/complete.
+3. Every mutation records actor, workspace, task ID, prior/new status, version and time.
+4. A repeated request with the same actor + idempotency key and request body returns the original result. A reused key with a different request body is rejected.
+5. Submission is not completion. Completion needs successful verification.
+6. Revoked agents cannot read new inbox entries, receive sensitive webhooks, or mutate tasks. Security tests must include in-flight requests during revocation.
+
+## 4. Authentication and authorization
+
+**Reuse principles from RunLater, but not implicit shared identity or credentials.**
+
+- RunLater uses `@better-auth/agent-auth` with Better Auth, Ed25519-capable agent identity, dynamic host registration, short-lived tokens and a separate hosted MCP OAuth path. Refer to its current source for patterns, **not a copy-paste of its host→project authorization logic**: [RunLater architecture](https://github.com/thachp/runlater/blob/main/docs/spec/ARCHITECTURE.md).
+- Agent Auth verifies the calling agent/host and capability grant. AgentHuddle then makes a **second, domain-level decision**: is that principal a current member of this workspace, with permission for this task action?
+- MCP users authenticate through the appropriate OAuth flow; map the authenticated principal to a stable agent identity and enforce exactly the same domain authorization checks as REST/Agent Auth.
+- External organizations require explicit invitations and approval; a successful agent registration does **not** permit joining an arbitrary workspace.
+- Bind requests to authenticated principal, workspace ID, action, expiry and permitted scope. Never accept `agent_id`, `organization_id` or `workspace_id` in the body as proof of authority.
+- Encrypt/protect integration credentials; never share one agent's MCP tokens, external GitHub/Jira access, secrets, or private chat history with another agent.
+- Expose and test key rotation, host/agent revocation, invitation expiry and audit trails.
+
+**Review question for Claude:** verify the current Better Auth Agent Auth plugin API/version and supported flows, and whether a fully autonomous host can also participate in explicitly owner-approved cross-org memberships. Design an adapter if the plugin's identity model cannot directly represent the required organization ownership.
+
+## 5. Public surface (illustrative, not yet an API contract)
+
+Use one domain service/state machine, exposed through independent adapters:
+
+| Action | Example REST operation | MCP capability (proposed) |
+| --- | --- | --- |
+| Identify current actor | `GET /v1/me` | `get_identity` |
+| List authorized workspaces | `GET /v1/workspaces` | `list_workspaces` |
+| Read tasks/inbox since cursor | `GET /v1/workspaces/{id}/events?cursor=` | `read_inbox` |
+| Create task | `POST /v1/workspaces/{id}/tasks` | `create_task` |
+| Assign / accept / decline | `POST /v1/tasks/{id}/assign|accept|decline` | `assign_task`, `accept_task`, `decline_task` |
+| Send task message | `POST /v1/tasks/{id}/messages` | `send_message` |
+| Submit artifact | `POST /v1/tasks/{id}/submit` | `submit_task` |
+| Verify / request changes / complete | `POST /v1/tasks/{id}/verify|request-changes|complete` | `verify_task`, `request_changes`, `complete_task` |
+
+These are **design examples, not existing deployed endpoints**. Prefer explicitly workspace-scoped routes for task mutations to keep authorization context unambiguous; define stable error semantics, cursor format, pagination, expected-version and idempotency in OpenAPI before coding. The table's compact `|`-separated suffixes are shorthand, not literal URL path syntax.
+
+Poll/read inbox first. For later push delivery: enqueue a durable event, sign outbound notifications, enforce endpoint allowlisting / SSRF protections, rate limits, bounded retries and dead-letter handling. Delivery is at least once; consumers deduplicate by event ID.
+
+A2A integration belongs behind an adapter that maps A2A tasks/messages to AgentHuddle domain concepts, **after** the native two-agent scenario works. Do not imply protocol conformance without interoperability tests.
+
+## 6. Suggested repository structure
+
+```text
+agenthuddle/
+├── apps/
+│   ├── gateway/           # TypeScript Worker; REST, auth, MCP tools
+│   └── web/               # Next.js-compatible app via vinext on Workers
+├── packages/
+│   ├── core/              # Pure TS task state machine + authorization policy types
+│   └── contracts/         # OpenAPI, schemas, generated client/types
+├── infrastructure/
+│   ├── migrations/        # D1 SQL and workspace DO schema migrations
+│   └── wrangler/          # Config/templates or keep wrangler config per app
+├── docs/
+│   ├── MVP-SPEC.md
+│   ├── CLOUDFLARE-ARCHITECTURE.md
+│   └── adr/               # Record material implementation decisions
+└── .github/workflows/     # CI and deploy workflows
+```
+
+Start as a small TypeScript monorepo with separate gateway and web deployables. A Rust worker is **not** required for the MVP; borrow RunLater's design practices without introducing a second language prematurely. Add a separate notification worker only when needed.
+
+### vinext is selected
+
+- **Use vinext**, not OpenNext, for the *new* web app. Prefer the maintained generator: `pnpm create vinext-app@latest apps/web` (adapt command/workspace tooling as necessary); review generated files rather than assuming older templates.
+- Target Cloudflare Workers with Wrangler-managed bindings. Prefer distinct public routes/domains for UI and gateway; do not expose DO instances or internal state mutation endpoints directly.
+- Follow vinext's current configuration, build and deploy instructions rather than copying RunLater's OpenNext setup. Cloudflare binding access is documented under `cloudflare:workers` for supported server-side contexts.
+- **Acceptance gate:** run a production build and deploy a staging smoke test covering login/session, route handlers, forms/server actions used by the dashboard, and all needed bindings. vinext is beta; record any blocker and propose a targeted workaround or explicit ADR before changing frameworks.
+- Documentation: [Cloudflare vinext guide](https://developers.cloudflare.com/workers/framework-guides/web-apps/nextjs/), [vinext setup and limitations](https://github.com/cloudflare/vinext).
+
+## 7. Implementation phases and observable acceptance gates
+
+**Phase 0 — Review and contracts (no runtime behavior claimed).** Claude reviews this proposal and [MVP spec](MVP-SPEC.md), validates Cloudflare/Agent Auth/vinext package versions and current capabilities, identifies contradictions, and writes an ADR plus domain and OpenAPI contracts. Choose one membership/revocation protocol, with tests, before accepting code.
+
+**Phase 1 — Coordination kernel.** D1 migrations for identity/workspace directory; one workspace DO with SQLite task state, ordered message/events, idempotency and version guards; authenticated REST reads/writes. Tests prove concurrent accepts and submissions do not produce invalid states, and repeated requests are idempotent.
+
+**Phase 2 — Agent connectivity.** Agent Auth for supported autonomous agents, MCP/OAuth integration for compatible tool clients, stable identity mapping, invitation/approval, least-privilege checks, and polling inbox. Test unrelated and revoked agents cannot access another workspace, including after reconnect.
+
+**Phase 3 — Two-agent demonstration.** Agent A requests work; Agent B explicitly accepts, posts a message, submits an artifact URI; A verifies and completes; both independently reconnect and read identical authoritative history. Repeat operations with the same idempotency key and race a revocation against an in-flight operation.
+
+**Phase 4 — Dashboard and notifications.** Basic human oversight UI built with **vinext** on Workers; signed queued webhook notifications if a tested external endpoint exists. Queues must not be necessary for correctness; polls must always recover missing delivery.
+
+**Later, not MVP:** Full template catalog, GitHub/Jira/Confluence issue creation/synchronization, A2A conformance, real-time WebSockets, marketplace, automatic agent wakeups or runtime hosting.
+
+The **minimum success criterion** is one task, two independently operated agents, one verified handoff, and no unauthorized access. A showcase with a full PM/Architect/Developer/QA team is a later product demonstration, not a prerequisite for the first validated slice.
+
+## 8. Testing, operations and risks
+
+- **Unit:** pure state machine, role and task permission matrix, idempotency collision, expected-version conflict, out-of-order and duplicated events.
+- **Integration:** Workers + D1 + Durable Objects locally through supported Cloudflare test tooling; schema migrations, workspace routing, signed auth assertions, DO wake/restart durability, inbox cursor continuity.
+- **Security:** cross-tenant isolation, invitation expiry, revoked host/agent, D1↔DO membership propagation race, untrusted message/prompt injection, SSRF/webhook destination validation, secret handling.
+- **Delivery:** Queue retries and duplicates, enqueue failure, dispatcher retries after crash, dead-letter behavior, signed webhook replay protection, offline agent catch-up.
+- **End-to-end:** two independent test clients using separate credentials and organizations, including all failure/negative paths in [MVP acceptance test](MVP-SPEC.md#8-mvp-acceptance-test).
+- **Observability:** request and workspace correlation IDs, event IDs, structured logs without sensitive message contents/tokens, latency and failure metrics, rate limits and alerts.
+- **Environments:** development, staging, production with isolated D1/DO/Queue resources, secrets, OAuth callbacks and migrations. No production data in local tests.
+- **Recovery:** document backup/export and restore strategy for D1/DO data and migration rollback/forward-only policy before any production service. Estimate cost/scale after proving the MVP.
+
+## 9. Explicit choices vs decisions to validate
+
+**Chosen now:** Cloudflare infrastructure; TypeScript API Worker; D1 directory; per-workspace DO coordination; Queues for asynchronous delivery; **vinext** for new web app; agents execute externally; Agent Auth-first identity for supporting agents; MVP proves one verified two-agent handoff.
+
+**Claude should validate rather than silently decide:** exact Agent Auth package support and mapping; D1↔DO auth-revocation consistency mechanism; single-worker vs split worker deployment; DO transactional outbox dispatch mechanism; exact REST/OpenAPI schemas; whether MCP OAuth and Agent Auth identities can be mapped to a single logical agent; vinext compatibility for chosen UI dependencies; test harness; internal identity/role model. Write an ADR when changing an architectural decision.
+
+**Do not start coding under an assumption that all listed components already exist.** This document is a reviewable implementation target. The repository currently contains plans/specification, not a deployed platform.
