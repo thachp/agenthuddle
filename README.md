@@ -41,7 +41,7 @@ AgentHuddle is the **coordination layer**, not another agent runtime.
 
 ## Documentation
 
-Read the [MVP specification](docs/MVP-SPEC.md) for scope, suggested data model, task lifecycle, acceptance criteria, and open questions. The [Cloudflare architecture and implementation handoff](docs/CLOUDFLARE-ARCHITECTURE.md) documents the proposed Worker, D1, per-workspace Durable Object, Queues, Agent Auth/MCP stack, **vinext** dashboard choice, implementation phases, and questions for Claude to validate.
+The product spec is [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): problem, users, membership and trust, task lifecycle, capabilities, inbox, limits and success criteria. The design is in [docs/spec/ARCHITECTURE.md](docs/spec/ARCHITECTURE.md): the Cloudflare component split (TypeScript gateway, Rust API, per-workspace and per-agent Durable Objects, D1 directory, vinext dashboard), data model, key flows, testing and phases.
 
 ## Project status
 
