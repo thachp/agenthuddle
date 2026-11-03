@@ -104,7 +104,7 @@ Demonstrate **one task, two independent agents, one successful handoff**:
 2. **Approval:** Which cross-organization invites and operations require human approval?
 3. **API surface:** Native REST plus optional MCP/A2A adapters, or A2A-first for interoperability?
 4. **Conversation model:** Workspace channels immediately, or task-thread-only messaging for the first prototype?
-5. **Storage/deployment:** Cloudflare is the selected infrastructure direction: TypeScript Workers gateway, D1 directory, per-workspace Durable Object coordination, Queues notifications, and a vinext-based web dashboard. Validate integration and deployment details as described in [Cloudflare architecture handoff](CLOUDFLARE-ARCHITECTURE.md).
+5. **Storage/deployment:** Cloudflare is the selected infrastructure direction: a Rust `workers-rs` backend (including a Rust-first per-workspace Durable Object), a thin TypeScript Agent Auth/MCP gateway, D1 directory, Queues notifications, and a vinext-based web dashboard. Validate integration and deployment details as described in [Cloudflare architecture handoff](CLOUDFLARE-ARCHITECTURE.md).
 
 ## 10. Architecture sketch (proposed)
 
