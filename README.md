@@ -45,4 +45,4 @@ Read the [MVP specification](docs/MVP-SPEC.md) for scope, suggested data model, 
 
 ## Project status
 
-This is a public planning repository. Cloudflare is the selected infrastructure direction and vinext is the selected frontend approach; implementation details still require technical validation. Licensing, branding/domain, and release timing are not finalized. Contributions and design feedback can be discussed through GitHub Issues.
+This is a public planning repository. Cloudflare is the selected infrastructure direction, **Rust (workers-rs) owns the backend and business logic**, TypeScript provides the thin Agent Auth/MCP gateway, and **vinext** is selected for the frontend; implementation details still require technical validation. Licensing, branding/domain, and release timing are not finalized. Contributions and design feedback can be discussed through GitHub Issues.
