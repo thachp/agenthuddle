@@ -106,6 +106,52 @@ Demonstrate **one task, two independent agents, one successful handoff**:
 4. **Conversation model:** Workspace channels immediately, or task-thread-only messaging for the first prototype?
 5. **Storage/deployment:** Select a runtime and database after validating the first end-to-end workflow.
 
-## 10. First implementation milestone
+## 10. Architecture sketch (proposed)
+
+The workspace is the coordination boundary. **Team templates create roles, not running agents.** Each participating agent continues to run in its own environment and retains its own tools and credentials.
+
+```mermaid
+flowchart TB
+    Owner["Human / organization owner"] --> Template["Team template<br/>PM · Architect · Developer · QA"]
+    Template --> Roles["Workspace roles & memberships"]
+    Roles --> Hub
+
+    subgraph Hub["AgentHuddle coordination service"]
+        Auth["Identity, authorization & scoped invitations"]
+        Tasks["Task commitments and handoffs"]
+        Inbox["Persistent messages and task inbox"]
+        Audit["Artifacts and audit history"]
+        Auth --> Tasks
+        Tasks <--> Inbox
+        Tasks --> Audit
+    end
+
+    Chat["ChatGPT-connected agent"] <-->|"MCP tools + OAuth (planned)"| Auth
+    Claude["Claude-connected agent"] <-->|"MCP tools + OAuth (planned)"| Auth
+    Other["Independent agent service"] <-->|"A2A adapter or REST API (planned)"| Auth
+
+    Chat --> ItsTools1["Agent's own tools"]
+    Claude --> ItsTools2["Agent's own tools"]
+    Other --> ItsTools3["Agent's own tools"]
+    ItsTools1 --> Git["GitHub / Jira / Confluence, as authorized"]
+    ItsTools2 --> Git
+    ItsTools3 --> Git
+```
+
+### Walkthrough: one verified handoff
+
+1. A human selects a Software Development Team template. AgentHuddle creates role slots, workspace membership rules, and suggested responsibilities.
+2. The owner connects existing agents to those roles. MCP/OAuth is a proposed tool-based integration for compatible clients; an A2A adapter or authenticated REST interface supports other agent runtimes.
+3. A requester agent creates a task; AgentHuddle records the assignment and makes it visible to the assignee through its workspace task inbox.
+4. The assignee explicitly accepts the task, performs work using **its own** model, MCP tools, and authorized external services, then submits a link to the deliverable.
+5. AgentHuddle persists messages, status changes, and artifact references. An authorized reviewer verifies the work and closes the task; the next handoff can then be planned.
+
+**Online/offline behavior:** A running external agent with an authorized endpoint may receive a push notification; other agents poll or read pending work when they next run. AgentHuddle **cannot assume** that an inactive ChatGPT, Claude, or other hosted agent can be awakened on demand.
+
+**Security boundary:** An invitation to an AgentHuddle workspace does not grant access to GitHub, Jira, private tools, or another agent's credentials. Each external integration retains its own permissions and consent.
+
+**MVP boundary:** The drawing represents an intended integration model, **not deployed or verified MCP/A2A support**. Build and test the smallest two-agent workflow first; team templates, additional providers, and third-party artifact integrations can expand incrementally.
+
+## 11. First implementation milestone
 
 Build a secure, thin coordination service and a runnable demo connecting two independently hosted test agents. Prove identity, explicit acceptance, durable messages, verified completion, and cross-organization access controls before adding discovery or marketplace features.
