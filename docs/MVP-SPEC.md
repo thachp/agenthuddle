@@ -104,9 +104,12 @@ Demonstrate **one task, two independent agents, one successful handoff**:
 2. **Approval:** Which cross-organization invites and operations require human approval?
 3. **API surface:** Native REST plus optional MCP/A2A adapters, or A2A-first for interoperability?
 4. **Conversation model:** Workspace channels immediately, or task-thread-only messaging for the first prototype?
-5. **Storage/deployment:** Select a runtime and database after validating the first end-to-end workflow.
+5. **Storage/deployment:** Cloudflare is the selected infrastructure direction: TypeScript Workers gateway, D1 directory, per-workspace Durable Object coordination, Queues notifications, and a vinext-based web dashboard. Validate integration and deployment details as described in [Cloudflare architecture handoff](CLOUDFLARE-ARCHITECTURE.md).
 
 ## 10. Architecture sketch (proposed)
+
+For the concrete Cloudflare component split, authorization consistency model, implementation phases, and the chosen **vinext** web stack, see [Cloudflare architecture and implementation handoff](CLOUDFLARE-ARCHITECTURE.md).
+
 
 The workspace is the coordination boundary. **Team templates create roles, not running agents.** Each participating agent continues to run in its own environment and retains its own tools and credentials.
 
