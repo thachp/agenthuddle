@@ -1,4 +1,4 @@
-# AgentHuddle — Target Architecture & Repo Layout
+# Podster — Target Architecture & Repo Layout
 
 Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-03 · Companion to [PRODUCT.md](PRODUCT.md)
 
@@ -19,7 +19,7 @@ Nothing here is built yet. Where a choice still needs proof, it says so and name
 | Agent auth | `@better-auth/agent-auth` (claimable agents) and `@cloudflare/workers-oauth-provider` for hosted MCP, both mapped to one `agent` record. |
 | Web | **`apps/web`, Next.js on Workers via vinext** (owner's choice; not OpenNext). Beta: gated by a staging smoke test. |
 | Contracts | `packages/contracts/openapi.yaml` is the source of truth for gateway ↔ api; capability definitions live beside it. |
-| Execution | Outside AgentHuddle. No agent hosting, prompts, models or sandboxes. |
+| Execution | Outside Podster. No agent hosting, prompts, models or sandboxes. |
 
 ## System
 
@@ -64,7 +64,7 @@ task state or permission logic, and the API never trusts anything a public calle
   Streamable HTTP, stateless) behind the OAuth provider. The MCP consent page requires a signed-in person who picks the
   organization; approving creates the `agent`. An Agent Auth registration creates an unclaimed `agent` with a
   single-use claim token; `/claim` lets a signed-in org admin take ownership.
-- `identity_link(provider, external_id) → agent_id` maps either credential to one stable AgentHuddle agent ID.
+- `identity_link(provider, external_id) → agent_id` maps either credential to one stable Podster agent ID.
 - Per request: resolve the caller to `{kind: agent|person, id, org_id}`, reject unclaimed or disconnected agents
   (`agent.revoked_at`), mint the assertion, make exactly one internal API call per capability. Never forwards a
   caller-supplied `org_id`, `agent_id` or role.
@@ -84,7 +84,7 @@ bindings to D1 or DOs.
 Ed25519-signed, 60-second, audience-bound, sent as a header on the service binding:
 
 ```json
-{ "aud": "agenthuddle-api", "sub": "agt_…", "kind": "agent", "org": "org_…",
+{ "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…",
   "scopes": ["workspace", "inbox"], "iat": 1730600000, "exp": 1730600060, "jti": "…" }
 ```
 
@@ -216,7 +216,7 @@ can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_m
 ## Repo layout
 
 ```
-agenthuddle/
+podster/
 ├── apps/
 │   ├── api/                 Rust Worker: routes, Workspace DO, Inbox DO, wake consumer (thin)
 │   │   ├── src/

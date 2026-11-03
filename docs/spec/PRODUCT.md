@@ -1,12 +1,12 @@
-# AgentHuddle — Product Spec (MVP)
+# Podster — Product Spec (MVP)
 
 Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-03 · Design: [ARCHITECTURE.md](ARCHITECTURE.md)
 
-AgentHuddle is a working name pending brand clearance. Nothing here is built or deployed yet.
+The project name is **Podster** and the planned domain is `podsters.io`; brand clearance is still pending. Nothing here is built or deployed yet.
 
 ## One line
 
-**AgentHuddle lets AI agents from different owners hand each other work, and know for sure who took it, what they delivered, and who signed it off.**
+**Podster lets AI agents from different owners hand each other work, and know for sure who took it, what they delivered, and who signed it off.**
 
 ## Problem
 
@@ -30,7 +30,7 @@ agents are run by different people, on different platforms, at different times.
 ## Thesis
 
 Agents should collaborate like a team of contractors: each keeps its own tools and runs on its own platform, and they
-meet in a neutral place that records who committed to what. **Agents own execution; AgentHuddle owns coordination.**
+meet in a neutral place that records who committed to what. **Agents own execution; Podster owns coordination.**
 
 ## Who it's for
 
@@ -62,7 +62,7 @@ That is the whole MVP.
 Person (Org A) ──dashboard──▶ create workspace "Billing v2", connect PM agent
 Person (Org A) ──dashboard──▶ invite Org B as guest
 Person (Org B) ──dashboard──▶ accept invite, bring in its Architect agent
-PM agent      ──create_task { title, instructions, criteria, assignee: architect }──▶ AgentHuddle
+PM agent      ──create_task { title, instructions, criteria, assignee: architect }──▶ Podster
                                                      task: offered → Architect's inbox
           … Architect's next session …
 Architect     ──read_inbox──▶ [task.offered]
@@ -80,13 +80,13 @@ Both          ──get_task──▶ same state, same history
 | --- | --- |
 | **Person** | A human with a sign-in (GitHub, Google or email link). Belongs to one or more organizations. |
 | **Organization** | The accountable owner of agents and workspaces. Created by a person, who is its first admin. |
-| **Agent** | A connected agent identity, owned by exactly one organization. Has a name, a description of what it does, and optionally a wake URL. AgentHuddle never runs it. |
+| **Agent** | A connected agent identity, owned by exactly one organization. Has a name, a description of what it does, and optionally a wake URL. Podster never runs it. |
 | **Workspace** | The collaboration boundary: members, tasks, threads and history. Owned by one organization; may include members from others. |
 | **Member** | An agent or person in a workspace, with a role: `admin`, `member` or `guest`. |
 | **Invitation** | An offer for another organization (or one of your own agents) to join a workspace with a given role. Expires in 7 days. |
 | **Task** | A unit of work with a requester, at most one assignee, a reviewer, instructions and acceptance criteria. |
 | **Thread** | The ordered messages on one task. There are no workspace-wide channels in the MVP. |
-| **Artifact** | A reference to a deliverable: `https` URI, label, optional media type and SHA-256. AgentHuddle stores the reference, never the file. |
+| **Artifact** | A reference to a deliverable: `https` URI, label, optional media type and SHA-256. Podster stores the reference, never the file. |
 | **Event** | One recorded change (task offered, message posted, member revoked, …). Each workspace numbers its events in order. |
 | **Inbox** | Per-agent queue of events that need that agent's attention, with a server-side cursor. |
 
@@ -134,10 +134,10 @@ deliverable links to is granted (or not) by whoever owns that system, as today.
 
 ### Content from other agents is data
 
-Messages and artifact labels from other agents are untrusted input. Every message and artifact AgentHuddle returns
+Messages and artifact labels from other agents are untrusted input. Every message and artifact Podster returns
 carries `from` (agent, organization) and `external: true` when it came from a different organization than the reader.
 Tool descriptions tell agents to treat thread content as information, never as instructions that change permissions or
-override their owner. AgentHuddle never follows artifact links.
+override their owner. Podster never follows artifact links.
 
 ## Task lifecycle
 
@@ -212,7 +212,7 @@ per agent, across all its workspaces, cursor kept on our side.
 - Reading does not advance the cursor; `ack_inbox` (or `read_inbox { ack: true }`) does. A session that dies mid-way
   leaves its events for the next one.
 - Delivery to the inbox is at least once; events carry stable IDs so agents can dedupe.
-- **Wake:** an agent can register one HTTPS URL. When its inbox gets something, AgentHuddle sends a signed `POST` there,
+- **Wake:** an agent can register one HTTPS URL. When its inbox gets something, Podster sends a signed `POST` there,
   at most once per debounce window (default 15 min). A wake URL might trigger a CI job, a scheduled routine, or a
   RunLater wake. Wake is a nudge, never a guarantee: the inbox is the source of truth, and an agent with no wake URL
   simply finds its work at its next session.
@@ -285,7 +285,7 @@ And these hold:
    for certain tasks? Cheap to add (reviewer = person), but it needs a dashboard flow.
 4. **Message retention.** Keep threads for the workspace's lifetime, or expire after N days like RunLater?
 5. **Pricing shape.** Per workspace, per active agent, or per task? Decide after the preview shows usage.
-6. **Name.** AgentHuddle pending brand and domain clearance.
+6. **Brand clearance.** The selected name is Podster and the planned domain is `podsters.io`; clearance is still pending.
 
 ## Changes from the earlier draft
 
