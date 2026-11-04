@@ -112,6 +112,49 @@ It says who the caller is, never what they may do: no workspace, no role. `gen` 
 member table. Key rotation: the API accepts a small set of public keys (`kid`), so the gateway can roll its key
 without downtime.
 
+## Code design: CQRS
+
+Status: **proposed**. The Rust backend separates commands, which change state, from queries, which only read. Both use the same authority rules.
+
+```mermaid
+flowchart LR
+    GW["Gateway"] --> Cmd["Command handler"]
+    GW --> Qry["Query handler"]
+    Cmd --> Dec["crates/policy, then crates/core"]
+    Dec --> Txn["One transaction: state, event, outbox, idempotency"]
+    Txn --> Out["Outbox and projections"]
+    Out --> RM["Read models"]
+    Qry --> Pol["crates/policy visibility filter"]
+    Pol --> RM
+```
+
+**Commands** such as `accept_task` and `revoke_member` run in the `Workspace` or `Principal` DO:
+
+1. `crates/policy` checks current authority.
+2. `crates/core` decides the transition as pure Rust, with no I/O.
+3. The DO commits state, event, outbox rows and the idempotency record in one `transactionSync`.
+
+A command returns the resulting object, so a caller gets its new `version` without a second read.
+
+**Queries** such as `get_task` and `list_tasks` have no side effects and need no idempotency key. They still pass through `crates/policy`, so a guest's results are filtered on every read.
+
+| Read model | Lives in | Updated | Consistency |
+| --- | --- | --- | --- |
+| Tasks, threads, members | `Workspace` DO | Same transaction as the command | Immediate |
+| Activity, collaboration edges | `Workspace` DO | Same transaction as the command | Immediate |
+| Inbox | `Principal` DO | Outbox delivery | Eventual, usually seconds |
+| `membership_index`, `public_workroom_index` | D1 | Projected from events | Eventual, seconds |
+
+Rules:
+
+- **Read models never authorize.** Only current state in the owning DO decides, so a stale projection can list something but never grant it.
+- **Read your own writes from the DO.** Anything that must reflect a command just made reads the `Workspace` DO, not D1.
+- **Projections are idempotent and ordered by `seq`,** so retries can't restore old data.
+
+**Not event sourcing.** The state tables are the source of truth, and events are a record used for audit, activity and delivery. Podster has no replay-to-rebuild state, separate read database or message bus: the outbox and single-writer DOs already give the needed guarantees. Adding them would be a new decision.
+
+**One deliberate exception:** `read_inbox { ack: true }` reads and advances the cursor in one call, so a session doesn't need two tool calls for the common case. It is implemented as a command that returns events. Plain `read_inbox` stays a query.
+
 ## Data
 
 ### D1 (directory)
@@ -463,7 +506,7 @@ podster/
 │   │   └── wrangler.jsonc
 │   └── web/                 Next.js + vinext: dashboard, docs
 ├── crates/
-│   ├── core/                Pure Rust: task state machine, validation, limits. Native unit tests.
+│   ├── core/                Pure Rust: command decisions, task state machine, validation, limits. Native unit tests.
 │   ├── policy/              Pure Rust: role × action × party permission matrix, guest visibility.
 │   └── egress/              Wake URL policy + request signing.
 ├── packages/
