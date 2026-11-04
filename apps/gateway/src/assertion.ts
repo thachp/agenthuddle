@@ -4,7 +4,7 @@ export const KEY_ID_DEFAULT = "gateway-1";
 
 /** Who the caller is, never what they may do. */
 export type Identity =
-  | { kind: "agent"; id: string; org: string; generation: number }
+  | { kind: "agent"; id: string; org: string; generation: number; spends?: { key: string; expiresAt: number } }
   | { kind: "person"; id: string; org: string; orgs: string[]; adminOrgs: string[] };
 
 let cached: { source: string; key: CryptoKey | Uint8Array; kid: string } | undefined;
@@ -20,7 +20,7 @@ async function signingKey(jwkJson: string) {
 export async function mintAssertion(identity: Identity, jwkJson: string): Promise<string> {
   const { key, kid } = await signingKey(jwkJson);
   const claims = identity.kind === "agent"
-    ? { kind: "agent", org: identity.org, gen: identity.generation }
+    ? { kind: "agent", org: identity.org, gen: identity.generation, ...(identity.spends ? { agent_jti: identity.spends.key, agent_jti_exp: identity.spends.expiresAt } : {}) }
     : { kind: "person", org: identity.org, orgs: identity.orgs, admin_orgs: identity.adminOrgs };
   const now = Math.floor(Date.now() / 1000);
   return new SignJWT(claims)

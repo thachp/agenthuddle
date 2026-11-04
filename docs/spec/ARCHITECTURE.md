@@ -107,6 +107,8 @@ Ed25519-signed, 60-second, audience-bound, sent as a header on the service bindi
 { "iss": "podster-gateway", "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…", "gen": 3, "iat": 1730600000, "exp": 1730600060, "jti": "…" }
 ```
 
+A request made with an Agent Auth token also carries `agent_jti` and `agent_jti_exp`, naming the token it spends.
+
 It says who the caller is, never what they may do: no workspace, no role. `gen` is the agent's connection generation, so an assertion from before a disconnect and reconnect is refused. The `Workspace` DO decides that from its own
 member table. Key rotation: the API accepts a small set of public keys (`kid`), so the gateway can roll its key
 without downtime.
@@ -152,7 +154,7 @@ Rules:
 
 **Not event sourcing.** The state tables are the source of truth, and events are a record used for audit, activity and delivery. Podster has no replay-to-rebuild state, separate read database or message bus: the outbox and single-writer DOs already give the needed guarantees. Adding them would be a new decision.
 
-**One deliberate exception:** `read_inbox { ack: true }` reads and advances the cursor in one call, so a session doesn't need two tool calls for the common case. It is implemented as a command that returns events. Plain `read_inbox` stays a query.
+**One deliberate exception:** `read_inbox { ack: true }` reads and advances the cursor in one call, so a session doesn't need two tool calls for the common case. It is a `GET` with `ack=true` that returns events and moves the cursor, with no idempotency key. Retrying it returns the next page and leaves the earlier page acked, and the reader can reread with `after`. Plain `read_inbox` stays a query.
 
 ## Data
 
@@ -200,14 +202,16 @@ Commands return errors rather than panic. A panic inside the `worker` crate's as
 ### `Principal` DO (SQLite, one per agent or person)
 
 ```
-inbox_event(seq, event_id UNIQUE, workspace_id, type, payload_json, created_at)
-cursor(acked_seq)
+inbox_event(seq, event_id UNIQUE, workspace_id, type, task_id, actor_id, created_at)
+inbox_state(acked_seq, last_seq, dropped)
+inbox_floor(workspace_id, event_seq)
+seen_jti(key, expires_at)   -- agents only
 wake(url, headers_json, debounce_s, last_sent_at, consecutive_failures)   -- agents only
 connection(generation, status: active|disconnecting|disconnected, participation_policy)
 room_registry(workspace_id, registered_at, revoke_acked_floor?)
 ```
 
-**Proposed: inbox events are thin.** `payload_json` holds only identifiers, event type and actor ID, never task titles, message bodies or artifact content, because `read_inbox` checks only `Principal` state. The reader gets all agent-written content through `get_task` or `list_messages`, which check current authority. This satisfies the access-control rule that delayed delivery rechecks authority before disclosure. Until a revocation's cleanup entry arrives, a former participant may still see those identifiers, but no content.
+**Proposed: inbox events are thin.** They hold only identifiers, event type and actor ID, never task titles, message bodies or artifact content, because `read_inbox` checks only `Principal` state. The reader gets all agent-written content through `get_task` or `list_messages`, which check current authority. This satisfies the access-control rule that delayed delivery rechecks authority before disclosure. Until a revocation's cleanup entry arrives, a former participant may still see those identifiers, but no content.
 
 `deliver(event)` is idempotent on `event_id`. Inbox rules:
 
@@ -215,8 +219,8 @@ room_registry(workspace_id, registered_at, revoke_acked_floor?)
 - **Page size** is 1 to 50, default 10, because every event lands in the agent's context.
 - **Acking past the newest event** fails with `ack_beyond_inbox`, because it means the agent is acking events it hasn't read.
 - **`read_inbox { ack: true }` with `after` past the cursor** is rejected, because it would ack the unread events skipped over.
-- **Replay protection:** each agent JWT's `jti` is consumed atomically, because the plugin's default guard is a per-isolate map. The gateway does this in D1 for now, and Phase 3 moves it to the `Principal` DO.
-- **A full inbox** drops the oldest acked event, otherwise the oldest unread event, and counts it in `dropped`. It never refuses delivery or silently loses unread work.
+- **Replay protection:** each agent JWT's `jti` is spent in the agent's `Principal` DO, in the same call that checks its connection, because the plugin's default guard is a per-isolate map. The assertion names the token. A request refused for its connection doesn't spend it, while one refused by the room does.
+- **A full inbox** drops the oldest acked event, otherwise the oldest unread event. It never refuses delivery. `dropped` counts lost unread work, including unread events past retention, and not acked events, because only lost work needs the reader's attention.
 - **Retention** follows the limits in the product spec.
 
 ## Key flows
@@ -334,7 +338,7 @@ Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with 
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
 participant, who already knows the room exists), `agent_not_found` (404), `invitation_not_found` (404), `invitation_required` (403), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
-`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400), `invalid_assertion` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `not_implemented` (501), `internal_error` (500).
+`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (409), `invalid_assertion` (401), `jwt_replay` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `not_implemented` (501), `internal_error` (500).
 
 Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Migrations therefore run on room creation and on later access, never in the constructor, each in its own transaction. Authority is resolved before anything else about a request, so an outsider gets one answer for a real room and an unknown one. Room IDs are random, and for private rooms non-member responses take the same path as for a room that does not exist. Together these prevent private-room existence from leaking (AC-09).
 
@@ -552,7 +556,15 @@ Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.m
 
 ### Phase 1 status
 
-Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery waits for Phase 3, so outbox rows accumulate until then.
+Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery arrived in Phase 3.
+
+### Phase 3 status
+
+Passes locally, not deployed. The `Workspace` alarm delivers its outbox to each recipient's `Principal` DO, in order per recipient. A recipient that fails backs off for up to 5 minutes without holding up anyone else. One that hangs delays the room by at most 10 seconds on each attempt, then backs off the same way. A send that times out can still arrive later, so a removal notice sets a floor in the room's event order, and older events from that room are refused. `read_inbox` and `ack_inbox` work over both connection methods with one shared cursor, and a removal notice clears that room's events from the inbox.
+
+The API supports oversight through `GET /v1/agents/{agent}/inbox` and inboxes for people, and the gateway doesn't expose them until the Phase 4 dashboard. `set_wake` and `delete_wake` return `not_implemented` until Phase 4.
+
+Phase 3 isn't done until the journey passes on staging, which needs a deployment, a sign-in page and an OAuth app.
 
 ### Phase 2 status
 

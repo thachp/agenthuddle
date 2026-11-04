@@ -7,7 +7,9 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
-import worker, { linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import { decodeJwt, importJWK, SignJWT } from "jose";
+import { mintAssertion } from "../src/assertion";
+import worker, { allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string };
@@ -125,7 +127,7 @@ describe("people and organizations", () => {
 
   it("the dashboard can't reach agent registration, connection state or inboxes through the API path", async () => {
     const a = await signUp();
-    for (const [method, path] of [["PUT", "/v1/agents/agt_x"], ["POST", "/v1/agents/agt_x/disconnect"], ["GET", "/v1/inbox"], ["POST", "/internal/init"], ["GET", "/v1/../internal/init"]]) {
+    for (const [method, path] of [["PUT", "/v1/agents/agt_x"], ["POST", "/v1/agents/agt_x/disconnect"], ["GET", "/v1/inbox"], ["GET", "/v1//inbox"], ["PUT", "/v1//agents/agt_abcdefabcdef"], ["POST", "/internal/init"], ["GET", "/v1/../internal/init"]]) {
       const res = await dashboard(a, method, path, method === "GET" ? undefined : { org_id: a.org });
       expect(res.status, `${method} ${path}`).toBe(404);
     }
@@ -960,9 +962,9 @@ describe("resilience and schema", () => {
   it("passes the API's status through to agents", async () => {
     const a = await signUp();
     const agent = await claimedAgent(a);
-    const inbox = await execute(agent, "read_inbox", {});
-    expect(inbox.status).toBe(501);
-    expect(inbox.raw.message).toBe("not_implemented");
+    const wake = await execute(agent, "set_wake", { url: "https://example.test/wake" });
+    expect(wake.status).toBe(501);
+    expect(wake.raw.message).toBe("not_implemented");
     const missing = await execute(agent, "get_workspace", { workspace_id: "ws_none" });
     expect(missing.status).toBe(404);
   });
@@ -981,19 +983,49 @@ describe("resilience and schema", () => {
     expect(toBeCreated).toEqual([]);
     expect(toBeAdded).toEqual([]);
   });
+});
 
-  it("clears expired replay records over time", async () => {
-    const a = await signUp();
-    const agent = await claimedAgent(a);
-    await e.DB.prepare("INSERT OR IGNORE INTO seen_jti (key, expires_at) VALUES ('old', 1)").run();
-    const random = Math.random;
-    Math.random = () => 0;
-    try {
-      await execute(agent, "get_identity");
-    } finally {
-      Math.random = random;
-    }
-    expect(await e.DB.prepare("SELECT key FROM seen_jti WHERE key = 'old'").first()).toBeNull();
+describe("dashboard passthrough", () => {
+  it("refuses paths that could become a private route if a slash collapses", () => {
+    for (const path of ["/v1//inbox", "/v1//agents/agt_x", "//v1/agents/agt_x", "/v1/inbox", "/v1/agents/agt_x", "/internal/init"]) expect(allowedPassthrough(path), path).toBe(false);
+    expect(allowedPassthrough("/v1/workspaces/ws_x/tasks")).toBe(true);
+  });
+});
+
+describe("spending agent tokens", () => {
+  it("refuses a token older than 60 seconds, whatever its `exp` says", async () => {
+    const owner = await signUp();
+    const agent = await claimedAgent(owner);
+    const signed = async (ageSeconds: number) => {
+      const now = Math.floor(Date.now() / 1000);
+      return new SignJWT({ capabilities: ["get_identity"] })
+        .setProtectedHeader({ alg: "EdDSA", typ: "agent+jwt", kid: agent.keypair.publicKey.kid })
+        .setSubject(agent.pluginId).setAudience(BASE).setIssuedAt(now - ageSeconds).setExpirationTime(now + 3600).setJti(crypto.randomUUID())
+        .sign(await importJWK(agent.keypair.privateKey, "EdDSA"));
+    };
+    const send = async (age: number) => (await post("/api/auth/capability/execute", { capability: "get_identity", arguments: {} }, { authorization: `Bearer ${await signed(age)}` })).status;
+    expect(await send(30)).toBe(200);
+    expect(await send(90)).toBe(401);
+  });
+
+  const encode = (value: object) => btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const bearer = (claims: object) => `Bearer ${encode({ alg: "EdDSA" })}.${encode(claims)}.sig`;
+  const now = () => Math.floor(Date.now() / 1000);
+
+  it("keeps the record for as long as the plugin accepts the token, whatever `exp` the client wrote", () => {
+    const issued = now() - 5;
+    expect(spentToken("plugin", bearer({ jti: "a", iat: issued, exp: now() + 315_360_000 }))).toEqual({ key: "plugin:a", expiresAt: issued + 90 });
+    expect(spentToken("plugin", bearer({ jti: "a", iat: issued }))?.expiresAt).toBe(issued + 90);
+    // An `iat` in the future can't stretch it either.
+    expect(spentToken("plugin", bearer({ jti: "a", iat: now() + 1000 }))!.expiresAt).toBeLessThanOrEqual(now() + 91);
+    expect(spentToken("plugin", bearer({ iat: issued }))).toBeNull();
+  });
+
+  it("sends the token to the API in the assertion, for agents only", async () => {
+    const claims = decodeJwt(await mintAssertion({ kind: "agent", id: "agt_x", org: "o", generation: 1, spends: { key: "plugin:a", expiresAt: 123 } }, e.ASSERTION_SIGNING_JWK));
+    expect(claims).toMatchObject({ agent_jti: "plugin:a", agent_jti_exp: 123 });
+    const person = decodeJwt(await mintAssertion({ kind: "person", id: "per_x", org: "o", orgs: ["o"], adminOrgs: [] }, e.ASSERTION_SIGNING_JWK));
+    expect(person).not.toHaveProperty("agent_jti");
   });
 });
 
@@ -1017,6 +1049,17 @@ describe("capability mapping", () => {
 });
 
 describe("kernel journey across two organizations", () => {
+  /** Delivery is asynchronous, usually within moments, so this polls the way an agent's next session would find it. */
+  async function waitForEvent(read: (query: object) => Promise<{ data?: any }>, type: string, taskId?: string) {
+    for (let i = 0; i < 100; i++) {
+      const { data } = await read({ after: 0, limit: 50 });
+      const found = data?.events?.find((event: any) => event.type === type && (!taskId || event.task_id === taskId));
+      if (found) return found;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`no ${type} event arrived`);
+  }
+
   async function setup() {
     const [personA, personB] = [await signUp(), await signUp()];
     const lead = await mcpAgent(personA);
@@ -1038,14 +1081,18 @@ describe("kernel journey across two organizations", () => {
     expect(task.status).toBe("offered");
     const at = { workspace_id: room, task_id: task.id };
 
-    // Agent B finds the work on its own, with no public URL of its own. Inbox delivery arrives in Phase 3.
-    expect((await execute(architect, "list_tasks", { workspace_id: room })).data.tasks.map((t: any) => t.id)).toEqual([task.id]);
+    // Agent B hears about the work in its inbox, with no public URL of its own. Events carry IDs, so it then reads the task.
+    const offered = await waitForEvent((q) => execute(architect, "read_inbox", q), "task.offered", task.id);
+    expect(offered).not.toHaveProperty("title");
+    expect((await execute(architect, "get_task", at)).data.task.title).toBe("Design billing API");
     const accepted = await execute(architect, "accept_task", { ...at, version: 1, idempotency_key: unique("k") });
     expect(accepted.data.status).toBe("accepted");
+    await waitForEvent(async (q) => ({ data: (await lead.tool("read_inbox", q)).data }), "task.accepted", task.id);
     expect((await execute(architect, "send_message", { ...at, body: "A question about scope", idempotency_key: unique("k") })).status).toBe(200);
     const submitted = await execute(architect, "submit_task", { ...at, version: 2, note: "First draft", artifacts: [{ uri: "https://example.test/pr/1", label: "PR" }], idempotency_key: unique("k") });
     expect(submitted.data.submission_no).toBe(1);
 
+    await waitForEvent(async (q) => ({ data: (await lead.tool("read_inbox", q)).data }), "task.submitted", task.id);
     expect((await lead.tool("request_changes", { ...at, submission_no: 1, reason: "Needs tests", idempotency_key: unique("k") })).data.status).toBe("accepted");
     expect((await execute(architect, "submit_task", { ...at, version: 4, note: "Second draft", idempotency_key: unique("k") })).data.submission_no).toBe(2);
     expect((await execute(architect, "verify_task", { ...at, submission_no: 2, idempotency_key: unique("k") })).status).toBe(403);
@@ -1059,6 +1106,43 @@ describe("kernel journey across two organizations", () => {
     const changes = fromArchitect.history.find((h: any) => h.type === "task.changes_requested");
     expect(changes).toMatchObject({ reason: "Needs tests", external: true });
     expect(fromLead.messages[0]).toMatchObject({ body: "A question about scope", external: true });
+  });
+
+  it("an agent goes from connected to its first accepted task in under 5 tool calls", async () => {
+    const { lead, architect, room } = await setup();
+    const created = (await lead.tool("create_task", { workspace_id: room, title: "Quick", instructions: "Go", assignee: architect.id, idempotency_key: unique("k") })).data;
+    const event = await waitForEvent((q) => execute(architect, "read_inbox", q), "task.offered", created.id);
+    const read = await execute(architect, "get_task", { workspace_id: event.workspace_id, task_id: event.task_id });
+    const accepted = await execute(architect, "accept_task", { workspace_id: event.workspace_id, task_id: event.task_id, version: read.data.task.version, idempotency_key: unique("k") });
+    expect(accepted.data.status).toBe("accepted");
+  });
+
+  it("both connection methods share one inbox and cursor", async () => {
+    const { personB, lead, architect, room } = await setup();
+    const linked = await mcpAgent(personB, { link_agent_id: architect.id });
+    const task = (await lead.tool("create_task", { workspace_id: room, title: "Shared", instructions: "x", assignee: architect.id, idempotency_key: unique("k") })).data;
+    const event = await waitForEvent((q) => execute(architect, "read_inbox", q), "task.offered", task.id);
+    expect((await linked.tool("ack_inbox", { up_to: event.seq })).data.acked_seq).toBe(event.seq);
+    expect((await execute(architect, "read_inbox", {})).data.acked_seq).toBe(event.seq);
+    const identity = await linked.tool("get_identity");
+    expect(identity.data).toMatchObject({ inbox_unread: 0, wake: null });
+  });
+
+  it("revoking an organization leaves its agent one ID-only notice, and its next read and action fail", async () => {
+    const { personA, lead, architect, room, version } = await setup();
+    const task = (await lead.tool("create_task", { workspace_id: room, title: "Secret", instructions: "Secret too", assignee: architect.id, idempotency_key: unique("k") })).data;
+    await waitForEvent((q) => execute(architect, "read_inbox", q), "task.offered", task.id);
+    expect((await dash(personA, "DELETE", `/v1/workspaces/${room}/members/${architect.id}`, { policy_version: await version() })).status).toBe(200);
+    expect((await execute(architect, "get_task", { workspace_id: room, task_id: task.id })).status).toBe(403);
+    expect((await execute(architect, "send_message", { workspace_id: room, task_id: task.id, body: "still here?", idempotency_key: unique("k") })).status).toBe(403);
+    const notice = await waitForEvent((q) => execute(architect, "read_inbox", q), "member.revoked");
+    expect(notice.workspace_id).toBe(room);
+    // The offer is gone, and nothing later arrives from this room.
+    await lead.tool("create_task", { workspace_id: room, title: "Later", instructions: "x", idempotency_key: unique("k") });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const { events } = (await execute(architect, "read_inbox", { after: 0, limit: 50 })).data;
+    expect(events.filter((e: any) => e.workspace_id === room).map((e: any) => e.type)).toEqual(["member.revoked"]);
+    expect(JSON.stringify(events)).not.toContain("Secret");
   });
 
   it("retrying with the same key creates nothing new", async () => {

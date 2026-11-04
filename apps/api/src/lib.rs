@@ -98,8 +98,9 @@ async fn me(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiErro
         )
         .await;
     }
+    let unread = principal::unread(env, &caller.id).await?;
     Ok(Response::from_json(
-        &json!({ "id": caller.id, "kind": caller.kind, "org_id": caller.org, "orgs": caller.orgs, "admin_orgs": caller.admin_orgs }),
+        &json!({ "id": caller.id, "kind": caller.kind, "org_id": caller.org, "orgs": caller.orgs, "admin_orgs": caller.admin_orgs, "inbox_unread": unread }),
     )?)
 }
 
@@ -118,6 +119,8 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
     let now = (Date::now().as_millis() / 1000) as i64;
     let identity = verify(&token, &keys, now).map_err(|_| ApiError::invalid_assertion())?;
     let is_agent = identity.kind == Kind::Agent;
+    let identity_replay = identity.agent_jti.clone();
+    let identity_replay_exp = identity.agent_jti_exp.unwrap_or(identity.exp);
     let mut caller = Caller {
         id: identity.sub,
         kind: if is_agent { "agent" } else { "person" }.to_string(),
@@ -130,7 +133,10 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
 
     // Every agent request checks its connection first, so an assertion minted before a disconnect stops working.
     if is_agent {
-        principal::check_active(&env, &caller.id, caller.gen).await?;
+        let spent = identity_replay
+            .as_deref()
+            .map(|key| (key, identity_replay_exp));
+        principal::check_active(&env, &caller.id, caller.gen, spent).await?;
     }
 
     let method = req.method();
@@ -150,8 +156,16 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
 
     let (workspace_id, forward_path) = match parts.as_slice() {
         ["v1", "me"] if method == Method::Get => return me(&env, &caller).await,
-        // Inboxes arrive with Phase 3.
-        ["v1", "inbox", ..] => return Err(ApiError::not_implemented()),
+        // Wake arrives with Phase 4.
+        ["v1", "inbox", "wake"] => return Err(ApiError::not_implemented()),
+        // Addressed by the verified caller, so nobody can name another principal's inbox here.
+        ["v1", "inbox", ..] => {
+            let stub = env
+                .durable_object("PRINCIPAL")?
+                .id_from_name(&caller.id)?
+                .get_stub()?;
+            return forward(stub, &path, &query, caller_header(&caller)?, method, body).await;
+        }
         ["v1", "workspaces"] if method == Method::Get => {
             return list_workspaces(&env, &caller).await
         }
