@@ -926,6 +926,7 @@ fn remove_member(
 }
 
 /// Revokes a participant. Later requests fail, and the departure rules apply to their tasks.
+/// An agent that's already out can still be removed, so the room's decision holds if it tries to return.
 fn handle_revoke_member(
     sql: &SqlStorage,
     caller: &Caller,
@@ -937,7 +938,7 @@ fn handle_revoke_member(
     require_policy_version(sql, body)?;
     let found = rows(
         sql,
-        "SELECT role FROM member WHERE principal_id = ? AND revoked_at IS NULL",
+        "SELECT kind, role, revoked_at, revocation_reason FROM member WHERE principal_id = ?",
         vec![principal.into()],
     )?;
     let Some(member) = found.first() else {
@@ -945,6 +946,28 @@ fn handle_revoke_member(
     };
     if member["role"].as_str() == Some("admin") {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
+    }
+    if !member["revoked_at"].is_null() {
+        if member["kind"].as_str() != Some("agent")
+            || member["revocation_reason"].as_str() == Some("room_removed")
+        {
+            return Err(ApiError::invalid_argument());
+        }
+        exec(
+            sql,
+            "UPDATE member SET revocation_reason = 'room_removed' WHERE principal_id = ?",
+            vec![principal.into()],
+        )?;
+        audit(
+            sql,
+            caller,
+            "member.removal_recorded",
+            principal,
+            Some(json!({ "reason": member["revocation_reason"] }).to_string()),
+            None,
+            now,
+        )?;
+        return Ok(json!({ "principal_id": principal, "status": "revoked" }));
     }
     remove_member(
         sql,
@@ -1217,10 +1240,18 @@ impl Workspace {
         }
         transaction_sync(&self.state, move || {
             let now = now_ms();
+            let prior = rows(
+                &sql,
+                "SELECT min_generation FROM principal_fence WHERE principal_id = ?",
+                vec![principal.as_str().into()],
+            )?;
+            let raises = prior.first().map_or(0, |f| int(&f["min_generation"])) < floor;
             exec(&sql, "INSERT INTO principal_fence (principal_id, min_generation) VALUES (?, ?)
               ON CONFLICT (principal_id) DO UPDATE SET min_generation = max(min_generation, excluded.min_generation)", vec![principal.as_str().into(), floor.into()])?;
-            // A disconnect cancels any earlier consent to return.
-            exec(&sql, "UPDATE member SET owner_consented_at = NULL WHERE principal_id = ? AND revoked_at IS NOT NULL", vec![principal.as_str().into()])?;
+            // A new disconnect cancels earlier consent to return. A delayed retry of an old one doesn't.
+            if raises {
+                exec(&sql, "UPDATE member SET owner_consented_at = NULL WHERE principal_id = ? AND revoked_at IS NOT NULL", vec![principal.as_str().into()])?;
+            }
             let found = rows(&sql, "SELECT join_generation FROM member WHERE principal_id = ? AND revoked_at IS NULL AND kind = 'agent'", vec![principal.as_str().into()])?;
             if found
                 .first()
@@ -1610,7 +1641,7 @@ impl Workspace {
                 .and_then(|v| v.parse().ok());
             *self.test_generation.borrow_mut() = forced;
         }
-        // These two come from the other organization or an agent's owner, who may have no role in this room.
+        // An agent's owner may have no role in this room.
 
         if method == Method::Post {
             if let Some(["members", agent, verb @ ("withdraw" | "owner-consent")]) =
@@ -1690,6 +1721,10 @@ impl Workspace {
                     ))?;
                     require_id(agent)?;
                     let org = field(&body, "org_id")?.ok_or_else(ApiError::invalid_argument)?;
+                    // Other organizations join by invitation, so this route never touches their agents' Principals.
+                    if org != room_owner_org(&sql)? {
+                        return Err(ApiError::invitation_required());
+                    }
                     let generation =
                         principal::register_room(&self.env, agent, &org, &identity.workspace_id)
                             .await

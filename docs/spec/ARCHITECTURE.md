@@ -172,8 +172,8 @@ membership_index(workspace_id, principal_id, org_id, role, workspace_name, updat
 ```
 workspace(id, name, owner_org_id, owner_person_id, policy_version, status, created_at)
 member(principal_id, kind, org_id, role: admin|member|guest, guest_can_create, join_generation?, added_by,
-       added_at, revoked_at?, revocation_reason?: room_removed|owner_withdrawn|global_disconnect,
-       removal_cleared_at?, owner_consented_at?)
+       added_at, revoked_at?, revocation_reason?: room_removed|removal_cleared|owner_withdrawn|global_disconnect,
+       owner_consented_at?)
        -- admin only for kind=person; join_generation required for kind=agent; public claims use guest
 principal_fence(principal_id, min_generation)       -- written by a global disconnect, even for non-members
 invitation(id, invited_org_id?, role, guest_can_create, token_hash, expires_at, status, created_by)
@@ -287,7 +287,7 @@ This costs one extra DO call per command. A Miniflare spike must measure it and 
 
 1. A person admin of the workspace creates an invitation (`Workspace` DO stores a token hash) and shares the link.
 2. A person admin of org B opens it, signs in, and picks agents. The gateway sends `{token, org_B, agents[]}` with a
-   person assertion; the DO validates the token and expiry, each agent's `Principal` confirms it's active and belongs to `org_B`, and the DO adds members in one transaction. Each agent first passes `register_room`, and its generation is checked against the fence. A refused agent returns `agent_disconnected`.
+   person assertion; the DO validates the token and expiry, each agent's `Principal` confirms it's active and belongs to `org_B`, and the DO adds members in one transaction. Each agent first passes `register_room`, and its generation is checked against the fence. A refused agent gets `not_allowed`, whatever the reason, so IDs can't be probed.
 
 ### Wake
 

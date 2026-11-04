@@ -39,7 +39,7 @@ async function api(who: Who, method: string, path: string, body?: unknown, opts:
   const headers: Record<string, string> = { "x-podster-assertion": opts.token ?? (await assertion(who)), "content-type": "application/json" };
   const isCommand = method !== "GET";
   const b = body as any;
-  if (method === "POST" && /\/members$/.test(path) && b?.kind === "agent" && !opts.rawAccess && b.principal_id?.startsWith("agt_") && b.org_id) await register({ id: b.principal_id, org: b.org_id }).catch(() => {});
+  if (method === "POST" && /\/members$/.test(path) && b?.kind === "agent" && !opts.rawAccess && b.principal_id?.startsWith("agt_") && b.org_id === "org_a") await register({ id: b.principal_id, org: b.org_id }).catch(() => {});
   const access = isCommand && /^\/v1\/workspaces\/[^/]+\/(members|invitations)/.test(path) && !/\/(withdraw|owner-consent)$/.test(path);
   if (access && !(body && typeof body === "object" && "policy_version" in (body as object)) && !opts.rawAccess) {
     const room = path.split("/")[3];
@@ -455,7 +455,8 @@ describe("review findings", () => {
     for (const principal_id of ["agt bob", "a/b", "agt:x?y", "", "x".repeat(129)]) {
       expect((await api(OWNER, "POST", members(id), { principal_id, kind: "agent", org_id: "org_a", role: "guest" })).code, principal_id).toBe("invalid_argument");
     }
-    expect((await api(OWNER, "POST", members(id), { principal_id: "agt_ok", kind: "agent", org_id: "", role: "guest" })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "POST", members(id), { principal_id: "agt_ok", kind: "agent", org_id: "", role: "guest" })).code).toBe("invitation_required");
+    expect((await api(OWNER, "POST", members(id), { principal_id: "per_ok", kind: "person", org_id: "", role: "guest" })).code).toBe("invalid_argument");
     for (let i = 0; i < 44; i++) expect((await api(OWNER, "POST", members(id), { principal_id: `agt_${i}`, kind: "agent", org_id: "org_a", role: "guest" })).status).toBe(200);
     expect((await api(OWNER, "POST", members(id), { principal_id: "agt_over", kind: "agent", org_id: "org_a", role: "guest" })).code).toBe("limit_exceeded");
   });
@@ -563,10 +564,10 @@ describe("review findings", () => {
   it("a stale form can't restore revoked access or apply over newer changes", async () => {
     const { id } = await room();
     const v = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
-    expect((await api(OWNER, "DELETE", `${members(id)}/${CAROL.id}`, { policy_version: v })).status).toBe(200);
-    const stale = { principal_id: CAROL.id, kind: "agent", org_id: CAROL.org, role: "member", policy_version: v };
+    expect((await api(OWNER, "DELETE", `${members(id)}/${REVIEWER.id}`, { policy_version: v })).status).toBe(200);
+    const stale = { principal_id: REVIEWER.id, kind: "agent", org_id: REVIEWER.org, role: "member", policy_version: v };
     expect((await api(ADMIN, "POST", members(id), stale)).code).toBe("version_conflict");
-    expect((await api(CAROL, "GET", `/v1/workspaces/${id}`)).code).toBe("access_revoked");
+    expect((await api(REVIEWER, "GET", `/v1/workspaces/${id}`)).code).toBe("access_revoked");
     expect((await api(OWNER, "POST", `${members(id)}/${LEAD.id}/role`, { role: "guest", policy_version: v })).code).toBe("version_conflict");
     expect((await api(OWNER, "DELETE", `${members(id)}/${LEAD.id}`, { policy_version: v })).code).toBe("version_conflict");
     expect((await api(OWNER, "DELETE", `${members(id)}/${LEAD.id}`, {}, { rawAccess: true })).code).toBe("invalid_argument");
@@ -895,6 +896,31 @@ describe("global disconnect fence", () => {
     }
   });
 
+  it("needs the owner's consent to return after a disconnect, and a delayed old revoke doesn't cancel it", async () => {
+    const { id } = await room();
+    const agent = await fresh("back");
+    const members = `/v1/workspaces/${id}/members`;
+    const add = { principal_id: agent.id, kind: "agent", org_id: "org_a", role: "member" };
+    await api(OWNER, "POST", members, add);
+    await disconnect(agent);
+    await reconnect(agent);
+    expect((await api(ADMIN, "POST", members, add)).code).toBe("not_allowed");
+    await api(orgAdmin("org_a"), "POST", `${members}/${agent.id}/owner-consent`, {});
+    await stub(id).fetch("https://workspace/internal/revoke", { method: "POST", body: JSON.stringify({ principal: agent.id, floor: 2 }) });
+    expect((await api(ADMIN, "POST", members, add)).status).toBe(200);
+  });
+
+  it("a room can't probe other organizations' agents or add to their room lists", async () => {
+    const { id } = await room();
+    const other = await fresh("probe", "org_b");
+    const off = await fresh("probeoff", "org_b");
+    await disconnect(off);
+    const add = (principal_id: string) => api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id, kind: "agent", org_id: "org_b", role: "guest" }, { rawAccess: false });
+    for (const target of [other.id, off.id, "agt_nobody_here"]) expect((await add(target)).code, target).toBe("invitation_required");
+    const entries = await runInDurableObject(principal(other), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM room_registry").one().n);
+    expect(entries).toBe(0);
+  });
+
   it("cancels earlier consent, and arms a retry until the fan-out finishes", async () => {
     const { id } = await room();
     const agent = await fresh("consent");
@@ -1057,6 +1083,34 @@ describe("invitations", () => {
     const { token } = await invite(id);
     expect((await accept(orgAdmin("org_b"), token, "org_b", [agent.id])).code).toBe("not_allowed");
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: "per_robot", kind: "robot", org_id: "org_a", role: "guest" })).code).toBe("invalid_argument");
+  });
+
+  it("records a room's removal of an agent that's already out, so an invitation can't bring it back", async () => {
+    const { id } = await room();
+    const members = `/v1/workspaces/${id}/members`;
+    await api(orgAdmin("org_b"), "POST", `${members}/${BOB.id}/withdraw`, {});
+    expect((await api(OWNER, "DELETE", `${members}/${BOB.id}`, {})).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `${members}/${BOB.id}`, {})).code).toBe("invalid_argument");
+    expect((await admit(id, BOB)).code).toBe("not_allowed");
+    // The room's reason replaced the withdrawal, and clearing it is the room's call.
+    expect((await api(OWNER, "POST", `${members}/${BOB.id}/clear-removal`, {})).status).toBe(200);
+    expect((await admit(id, BOB)).status).toBe(200);
+  });
+
+  it("another person holding the same token gets no answer, and clearing is only for a room's own removal", async () => {
+    const { id } = await room();
+    const a: Who = { id: `agt_replay_${++counter}`, org: "org_b" };
+    await register(a);
+    const { token } = await invite(id);
+    expect((await accept(orgAdmin("org_b"), token, "org_b", [a.id])).status).toBe(200);
+    expect((await accept(orgAdmin("org_b", "per_other_admin"), token, "org_b", [a.id])).code).toBe("invitation_not_found");
+
+    const members = `/v1/workspaces/${id}/members`;
+    await api(orgAdmin("org_b"), "POST", `${members}/${a.id}/withdraw`, {});
+    expect((await api(OWNER, "POST", `${members}/${a.id}/clear-removal`, {})).code).toBe("invalid_argument");
+    await api(OWNER, "DELETE", `${members}/${BOB.id}`, {});
+    const stale = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version - 1;
+    expect((await api(OWNER, "POST", `${members}/${BOB.id}/clear-removal`, { policy_version: stale })).code).toBe("version_conflict");
   });
 
   it("refuses a late acceptance below the room's floor", async () => {
