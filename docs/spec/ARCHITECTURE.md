@@ -215,7 +215,7 @@ room_registry(workspace_id, registered_at, revoke_acked_floor?)
 - **Page size** is 1 to 50, default 10, because every event lands in the agent's context.
 - **Acking past the newest event** fails with `ack_beyond_inbox`, because it means the agent is acking events it hasn't read.
 - **`read_inbox { ack: true }` with `after` past the cursor** is rejected, because it would ack the unread events skipped over.
-- **Replay protection:** the `Principal` DO consumes each agent JWT's `jti` atomically, because the plugin's default guard is a per-isolate map.
+- **Replay protection:** each agent JWT's `jti` is consumed atomically, because the plugin's default guard is a per-isolate map. The gateway does this in D1 for now, and Phase 3 moves it to the `Principal` DO.
 - **A full inbox** drops the oldest acked event, otherwise the oldest unread event, and counts it in `dropped`. It never refuses delivery or silently loses unread work.
 - **Retention** follows the limits in the product spec.
 
@@ -556,7 +556,7 @@ Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` 
 
 ### Phase 2 status
 
-In progress. `apps/api` has the `Principal` DO with connection state, the disconnect fence, invitations, agent-owner withdrawal and consent, and the D1 listing, tested locally and not deployed. The gateway is next, so tests sign assertions directly.
+Passes locally, not deployed. `apps/api` has the `Principal` DO with connection state, the disconnect fence, invitations, agent-owner withdrawal and consent, and the D1 listing. `apps/gateway` is the public entry: Better Auth sign-in with GitHub and Google, Agent Auth, hosted MCP over OAuth, organizations and the capability mapping, tested end to end against the real Rust API. Still to do: email magic links, which need an email provider; rate limits; and the real claim page, since `/claim` is only an API until the dashboard.
 
 A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership and invitation acceptance, never for room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
 

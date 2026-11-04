@@ -1,0 +1,12 @@
+{
+  // The only public entry. It authenticates and translates; the Rust API decides.
+  "name": "podster-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "services": [{ "binding": "API", "service": "podster-api" }],
+  // Real IDs are set when staging is created. Secrets: AUTH_SECRET, ASSERTION_SIGNING_JWK, and GITHUB_* or GOOGLE_* for sign-in.
+  "d1_databases": [{ "binding": "DB", "database_name": "podster-gateway", "database_id": "local-only", "migrations_dir": "migrations" }],
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "local-only" }],
+  "vars": { "BASE_URL": "https://gateway.podster.dev" }
+}
