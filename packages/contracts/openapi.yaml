@@ -96,7 +96,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
-    get: { operationId: getTask, tags: [queries], summary: One task with submissions, artifacts, recent messages and history, responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getTask, tags: [queries], summary: "One task with submissions, artifacts, recent messages and history", responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/tasks/{t}/update:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
     post:
