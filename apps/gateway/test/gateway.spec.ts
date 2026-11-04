@@ -999,6 +999,22 @@ describe("HTTPS only", () => {
     }
   });
 
+  it("can't be made to redirect to another host", async () => {
+    for (const path of ["//evil.test/x", "///evil.test/", "/\\evil.test/x", "/.//evil.test/x", "/x/..//evil.test", "//evil.test:443@x/", "/%2f/evil.test", "/%5cevil.test", "/%09/evil.test", "/@evil.test"]) {
+      const res = await worker.fetch(new Request(`http://gateway.test${path}`), e as never, { waitUntil() {}, passThroughOnException() {} } as never);
+      expect(res.status, path).toBe(301);
+      const location = new URL(res.headers.get("location")!);
+      expect(location.origin, path).toBe(BASE);
+      expect(location.username + location.password, path).toBe("");
+    }
+  });
+
+  it("redirects HEAD too, and refuses a preflight", async () => {
+    const head = await SELF.fetch("http://gateway.test/sign-in", { method: "HEAD", redirect: "manual" });
+    expect(head.status).toBe(301);
+    expect((await SELF.fetch("http://gateway.test/mcp", { method: "OPTIONS", redirect: "manual" })).status).toBe(400);
+  });
+
   it("refuses anything sent with a body over HTTP, rather than acting on it", async () => {
     for (const [method, path] of [["POST", "/oauth/token"], ["POST", "/mcp"], ["POST", "/api/auth/capability/execute"], ["PUT", "/api/v1/x"], ["DELETE", "/api/v1/x"]]) {
       const res = await SELF.fetch(`http://gateway.test${path}`, { method, redirect: "manual", headers: { "content-type": "application/json" }, body: "{}" });
@@ -1018,6 +1034,13 @@ describe("HTTPS only", () => {
     const mcp = await call("/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     expect(mcp.status).toBe(401);
     expect(mcp.headers.get("www-authenticate")).toContain("resource_metadata");
+    expect(mcp.headers.get("strict-transport-security")).toBe("max-age=31536000");
+    // Wrapping a response must keep every cookie, and sign-out sets several.
+    const person = await signUp();
+    const out = await call("/api/auth/sign-out", { method: "POST", headers: { origin: BASE, cookie: person.cookie, "content-type": "application/json" }, body: "{}" });
+    expect(out.status).toBe(200);
+    expect(out.headers.getSetCookie().length).toBeGreaterThan(1);
+    expect(out.headers.get("strict-transport-security")).toBe("max-age=31536000");
   });
 
   it("leaves a local deployment on HTTP alone", async () => {

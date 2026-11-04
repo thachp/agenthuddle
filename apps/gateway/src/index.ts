@@ -755,7 +755,8 @@ function insecureRequest(request: Request, env: Env): Response | null {
   const url = new URL(request.url);
   if (url.protocol === "https:" || !env.BASE_URL.startsWith("https:")) return null;
   if (request.method !== "GET" && request.method !== "HEAD") return denied("https_required", 400);
-  return new Response(null, { status: 301, headers: { location: new URL(url.pathname + url.search, env.BASE_URL).toString() } });
+  // Joined as text: `new URL("//evil.test", base)` would point at another host.
+  return new Response(null, { status: 301, headers: { location: `${new URL(env.BASE_URL).origin}${url.pathname}${url.search}` } });
 }
 
 export default {
