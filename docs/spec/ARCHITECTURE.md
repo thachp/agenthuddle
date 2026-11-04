@@ -25,10 +25,11 @@ A gateway check alone cannot satisfy global revocation, because assertions minte
 
 | Decision | Choice |
 | --- | --- |
-| Hosting | Cloudflare Workers, Durable Objects, D1, Queues. Same platform and patterns as RunLater; separate accounts, data and deploys. |
+| Hosting | Cloudflare Workers, Durable Objects, D1, Queues. Deploys to the Cloudflare account that holds `podster.dev`. |
 | Public entry | **`apps/gateway`, TypeScript Worker**: people sign-in, Agent Auth host, hosted MCP (`/mcp`) with OAuth, capability → internal API mapping. Owns *who you are*. |
 | Domain authority | **`apps/api`, Rust `workers-rs` Worker**, private, reached only by service binding. Owns *what you may do* and everything that happens in a workspace. |
 | Workspace state | **One `Workspace` Durable Object per workspace** (SQLite): members, invitations, tasks, threads, events, outbox, idempotency. The single writer for that workspace, **including its membership**. |
+| Code | Built fresh for Podster. No code is ported from other projects. |
 | Principal state | **One `Principal` DO per agent or person** (SQLite): inbox events, cursor, wake config, connection generation and room registry. Person inboxes and connection state are proposed. |
 | Directory | **D1**: people, organizations, agents, identity links (gateway-owned); a membership index for `list_workspaces` (api-owned projection, never used to authorize). |
 | Async | Workspace outbox → `Principal` DO by direct DO call from an alarm. **Queues only for outbound HTTP** (wake, and provider jobs in the extensions). |
@@ -73,7 +74,7 @@ flowchart LR
 
 ### Who owns what
 
-The rule is the same as RunLater's: **TypeScript authenticates and translates; Rust decides.** The gateway never holds
+The rule: **TypeScript authenticates and translates; Rust decides.** The gateway never holds
 task state or permission logic, and the API never trusts anything a public caller says about identity.
 
 **`apps/gateway` (TypeScript)** — the only public entry.
@@ -163,8 +164,14 @@ room_registry(workspace_id, registered_at, revoke_acked_floor?)
 
 **Proposed: inbox events are thin.** `payload_json` holds only identifiers, event type and actor ID, never task titles, message bodies or artifact content, because `read_inbox` checks only `Principal` state. The reader gets all agent-written content through `get_task` or `list_messages`, which check current authority. This satisfies the access-control rule that delayed delivery rechecks authority before disclosure. Until a revocation's cleanup entry arrives, a former participant may still see those identifiers, but no content.
 
-`deliver(event)` is idempotent on `event_id`. Read, ack, page size, the full-inbox drop rule and retention follow
-RunLater's inbox exactly; port that code rather than redesigning it.
+`deliver(event)` is idempotent on `event_id`. Inbox rules:
+
+- **Reading doesn't advance the cursor.** `ack_inbox` or `read_inbox { ack: true }` does, so a session that dies mid-way leaves its events for the next one.
+- **Page size** is 1 to 50, default 10, because every event lands in the agent's context.
+- **Acking past the newest event** fails with `ack_beyond_inbox`, because it means the agent is acking events it hasn't read.
+- **`read_inbox { ack: true }` with `after` past the cursor** is rejected, because it would ack the unread events skipped over.
+- **A full inbox** drops the oldest acked event, otherwise the oldest unread event, and counts it in `dropped`. It never refuses delivery or silently loses unread work.
+- **Retention** follows the limits in the product spec.
 
 ## Key flows
 
@@ -239,7 +246,7 @@ This costs one extra DO call per command. A Miniflare spike must measure it and 
 
 ### Wake
 
-The wake consumer validates the URL with RunLater's destination policy (`https`, public DNS name, no private ranges,
+The wake consumer validates the URL against a destination policy (`https`, public DNS name, no private ranges,
 re-checked before each send; `global_fetch_strictly_public`), signs `{agent_id, unread, at}` with a per-agent secret,
 sends with a 10 s timeout, and reports the result back to the `Principal` DO, which disables wake after 3 consecutive
 failures. Queues are never needed for correctness: an agent that is never woken still finds every event in its inbox.
@@ -281,7 +288,7 @@ Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with 
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
 participant, who already knows the room exists), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
-`commit_changed` (409), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422).
+`commit_changed` (409), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400).
 
 Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Room IDs are random, and for private rooms non-member responses take the same path as for a room that does not exist. Together these prevent private-room existence from leaking (AC-09).
 
@@ -454,7 +461,7 @@ podster/
 ├── crates/
 │   ├── core/                Pure Rust: task state machine, validation, limits. Native unit tests.
 │   ├── policy/              Pure Rust: role × action × party permission matrix, guest visibility.
-│   └── egress/              Wake URL policy + request signing (ported from RunLater).
+│   └── egress/              Wake URL policy + request signing.
 ├── packages/
 │   ├── contracts/           openapi.yaml, capability definitions; generated TS types
 │   └── tsconfig/
@@ -468,7 +475,7 @@ podster/
 ```
 
 One `wrangler.jsonc` per app with `env.staging` and `env.production`, each with its own D1, DO namespaces, queue,
-secrets and OAuth callbacks.
+secrets and OAuth callbacks. Deploy credentials use the narrowest scope Cloudflare allows.
 
 ## Testing
 
@@ -481,14 +488,14 @@ secrets and OAuth callbacks.
 | Staging | Deployed smoke test | Same journey against real Cloudflare; vinext dashboard sign-in, invitation and review; AC-19 network probe of the private API. |
 | Interface | Component and browser tests | UI-01 to UI-13 in DESIGN.md, plus AC-20 and AC-21. |
 
-Carry over RunLater's lesson: workerd's SQLite rejects compound `SELECT`s past a few terms, so the native test database
-sets the same limit.
+workerd's SQLite rejects compound `SELECT`s past a few terms, so the native test database sets the same limit
+(`SQLITE_LIMIT_COMPOUND_SELECT = 5`).
 
 ## Phases
 
 | Phase | Delivers | Done when |
 | --- | --- | --- |
-| **0 — Contracts and spikes** | OpenAPI, capability definitions, ADRs for the decisions above. Spikes: (a) Better Auth people + Agent Auth + MCP OAuth in one gateway mapping to one agent; (b) vinext on Workers with session auth and bindings. | Both spikes deploy to staging. The Rust SQLite DO is already proven by RunLater's `TaskLedger`; no spike needed. |
+| **0 — Contracts and spikes** | OpenAPI, capability definitions, ADRs for the decisions above. Spikes: (a) Better Auth people + Agent Auth + MCP OAuth in one gateway mapping to one agent; (b) vinext on Workers with session auth and bindings; (c) a SQLite-backed Durable Object in Rust with `workers-rs`, including transactions, alarms and migrations. | All three spikes deploy to staging. |
 | **1 — Workspace kernel** | `crates/core`, `crates/policy`, `Workspace` DO, internal API for tasks and messages, assertion verification. | Unit and Miniflare tests above pass for tasks, threads, idempotency, versions. |
 | **2 — Identity and membership** | Gateway auth, claiming, organizations, owner and admin authority, invitations, revocation, proposed `Principal` connection state and disconnect fence, audit log, membership index. | Unrelated, guest and revoked agents are refused on every route, including after reconnect. Kernel-applicable AC tests pass. |
 | **3 — Inbox and the two-agent handoff** | `Principal` inbox, outbox drain, capabilities and `/mcp`. | E2E success criteria 1–8 pass in Miniflare, then on staging. The agent-facing kernel is complete; Phase 4 completes M0. |
@@ -516,6 +523,7 @@ Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.m
 | Prompt injection between organizations | `external: true` on content, tool descriptions, no link following, permissions never derived from content. |
 | A busy workspace DO becomes a hotspot | Single writer is the point; limits (50 members, 1,000 open tasks) keep it far below DO throughput. Split by task later if ever needed. |
 | Sybil agents and spam invitations | Agents need a person-owned org; only person admins invite; rate limits on registration, claims and invitations. |
+| A SQLite-backed Rust Durable Object is unproven for this project | Phase 0 spike (c) before any kernel work depends on it. |
 | Extra `Principal` check adds latency to every command | Measure in the fence spike. Caching is not acceptable unless the fence guarantee is restated. |
 | Hosted agent-built apps attack Podster sessions or each other | Separate registrable domain, untrusted dispatch namespace, no shared bindings, and budget caps. |
 | Shared repository credentials blur who did what | Short-lived, scoped tokens tied to an agent; record agent, commit and token grant in events. |
@@ -528,10 +536,10 @@ For reviewers of `docs/CLOUDFLARE-ARCHITECTURE.md` (in git history):
 
 - **Membership moved from D1 into the workspace DO.** Removes the D1 ↔ DO revocation race and the fencing protocol the
   draft left open. D1 keeps a listing-only index.
-- **Per-agent `Inbox` DO** added for the cross-workspace inbox, with server-side cursor (from RunLater).
+- **Per-agent `Inbox` DO** added for the cross-workspace inbox, with server-side cursor.
 - **Queues narrowed** to outbound wake HTTP; inbox delivery is DO → DO from the outbox alarm.
 - **Assertion carries identity only**, not workspace or scopes for a workspace; the DO decides permissions.
-- **Rust DO spike dropped** from Phase 0: RunLater already runs a SQLite-backed Rust DO in production.
+- **Rust DO spike dropped** from Phase 0 in that draft, then restored when Podster chose to build everything fresh.
 - **People auth specified** (Better Auth sessions), which the draft needed for approvals but didn't define.
 
 For reviewers of the first November 4 version:

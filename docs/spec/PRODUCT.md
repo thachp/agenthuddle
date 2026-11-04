@@ -183,7 +183,7 @@ An agent must belong to an organization before it can do anything in a workspace
   organization, and name the agent. The grant *is* the agent: one approved connection is one agent.
 - **Agent Auth**: an agent service registers itself and gets an identity with no organization. Until claimed it can
   only call `get_identity`, which returns a `claim_url`. The agent passes that to its person, who signs in and assigns
-  the agent to an organization. (Same pattern as RunLater's payment link: an agent cannot vouch for itself.)
+  the agent to an organization. An agent cannot vouch for itself.
 
 An authorized human representative of the agent-owning organization can disconnect its agent globally. This must revoke its participation across workrooms; the proposed enforcement and in-flight revocation tests in ACCESS-CONTROL.md must pass before claiming that guarantee.
 
@@ -369,8 +369,7 @@ Person-only dashboard actions stay outside this list: creating workrooms, appoin
 
 ## Inbox and wake
 
-The inbox works like RunLater's ([INBOX.md](https://github.com/thachp/runlater/blob/main/docs/spec/INBOX.md)): one
-per agent, across all its workspaces, cursor kept on our side.
+Each agent has one inbox across all its workspaces, and the cursor is kept on our side, because a session-based agent can't keep one itself.
 
 - An event lands in an agent's inbox when it needs that agent: a task offered to it, a submission it must review,
   changes requested on its task, a message on a task it is party to, a task of its canceled or reassigned, or the agent
@@ -379,8 +378,7 @@ per agent, across all its workspaces, cursor kept on our side.
   leaves its events for the next one.
 - Delivery to the inbox is at least once; events carry stable IDs so agents can dedupe.
 - **Wake:** an agent can register one HTTPS URL. When its inbox gets something, Podster sends a signed `POST` there,
-  at most once per debounce window (default 15 min). A wake URL might trigger a CI job, a scheduled routine, or a
-  RunLater wake. Wake is a nudge, never a guarantee: the inbox is the source of truth, and an agent with no wake URL
+  at most once per debounce window (default 15 min). A wake URL might trigger a CI job, or a scheduled routine. Wake is a nudge, never a guarantee: the inbox is the source of truth, and an agent with no wake URL
   simply finds its work at its next session.
 
 ### People's attention queue
@@ -526,6 +524,10 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 28 | Provider authentication for Runner | **Decided:** the owner's own API keys or equivalent automation credentials. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision | M7 |
 | 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
 
+## Build decisions, November 4, 2026
+
+- Podster is a standalone project and builds everything fresh, with no code ported from other projects. The specs now state their inbox, wake URL and test rules directly.
+
 ## Runner decisions, November 4, 2026
 
 - The owner delegated decisions 26 and 27 and asked for the safest options. Decisions 19, 26, 27, 28 and 29 are now settled.
@@ -569,7 +571,7 @@ For reviewers of the first draft (`docs/MVP-SPEC.md`, in git history). These des
 - **API surface decided:** capabilities over Agent Auth and hosted MCP; REST internal; A2A later (was an open question).
 - **Approval decided:** cross-organization invitations need a person on both sides; agents can't invite or accept
   outside organizations.
-- **Offline agents:** added RunLater-style inbox with server-side cursor and an optional wake URL, replacing "poll the
+- **Offline agents:** added an inbox with server-side cursor and an optional wake URL, replacing "poll the
   workspace event feed and keep your own cursor".
 - **No self-sign-off** rule added; untrusted-content marking (`external: true`) specified.
 
