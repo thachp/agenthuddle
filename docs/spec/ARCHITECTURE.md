@@ -335,7 +335,7 @@ Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with 
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
 participant, who already knows the room exists), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
-`commit_changed` (409), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400).
+`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400).
 
 Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Room IDs are random, and for private rooms non-member responses take the same path as for a room that does not exist. Together these prevent private-room existence from leaking (AC-09).
 
@@ -549,6 +549,10 @@ workerd's SQLite rejects compound `SELECT`s past a few terms, so the native test
 | **4 — Dashboard and wake** | vinext dashboard for the kernel: review, access, agents, person inbox; wake queue and consumer. | People can complete kernel jobs in the dashboard; wake retries and disablement tested. |
 
 Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.md#product-direction-and-delivery-scope) M1 to M7 cover the extensions below. A2A is core product scope, not a later optional adapter, and security acceptance in ACCESS-CONTROL.md must pass before launch. Later enhancements include team templates, Jira sync, workspace channels and real-time updates.
+
+### Phase 1 status
+
+In progress. `packages/contracts`, `crates/core` and `crates/policy` exist, with no Durable Object or gateway wiring yet.
 
 ### Phase 0 status
 

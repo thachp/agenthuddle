@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/policy"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# A panic inside a Durable Object hangs its request, so kernel code returns errors instead.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"

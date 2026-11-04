@@ -1,0 +1,11 @@
+[package]
+name = "podster-policy"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+podster-core = { path = "../core" }
+
+[lints]
+workspace = true

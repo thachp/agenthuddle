@@ -1,0 +1,260 @@
+openapi: 3.1.0
+info:
+  title: Podster internal API
+  version: 0.0.0
+  description: >-
+    Proposed contract between the gateway and the private Rust API, over a service binding. It isn't a public API.
+    POST routes are commands and GET routes are queries, except POST /v1/inbox/ack, which is also a command.
+servers:
+  - url: https://podster-api.internal
+    description: Service binding only. There is no public hostname.
+security:
+  - assertion: []
+tags:
+  - name: commands
+  - name: queries
+paths:
+  /v1/me:
+    get: { operationId: getMe, tags: [queries], summary: Current identity, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces:
+    get: { operationId: listWorkspaces, tags: [queries], summary: Workspaces from the listing read model, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get: { operationId: getWorkspace, tags: [queries], summary: One workspace, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}/tasks:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get:
+      operationId: listTasks
+      tags: [queries]
+      summary: Tasks this caller may see
+      parameters:
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/TaskStatus" } }
+        - { name: mine, in: query, schema: { type: boolean } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+    post:
+      operationId: createTask
+      tags: [commands]
+      summary: Create a task
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CreateTask" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    get: { operationId: getTask, tags: [queries], summary: One task, responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}/tasks/{t}/update:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: updateTask
+      tags: [commands]
+      summary: The updateTask command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/UpdateTask" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/set-reviewer:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: setReviewer
+      tags: [commands]
+      summary: The setReviewer command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetReviewer" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/set-requester:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: setRequester
+      tags: [commands]
+      summary: The setRequester command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetRequester" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/assign:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: assignTask
+      tags: [commands]
+      summary: The assignTask command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/AssignTask" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/accept:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: acceptTask
+      tags: [commands]
+      summary: The acceptTask command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/VersionedReason" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/decline:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: declineTask
+      tags: [commands]
+      summary: The declineTask command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RequiredReason" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/release:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: releaseTask
+      tags: [commands]
+      summary: The releaseTask command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RequiredReason" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/submit:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: submitTask
+      tags: [commands]
+      summary: The submitTask command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SubmitTask" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/request-changes:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: requestChanges
+      tags: [commands]
+      summary: The requestChanges command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RequestChanges" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/verify:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: verifyTask
+      tags: [commands]
+      summary: The verifyTask command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/VerifyTask" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/cancel:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: cancelTask
+      tags: [commands]
+      summary: The cancelTask command
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RequiredReason" } } } }
+      responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/messages:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    get:
+      operationId: listMessages
+      tags: [queries]
+      summary: Messages on a task thread
+      parameters: [{ name: after, in: query, schema: { type: integer } }]
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+    post:
+      operationId: sendMessage
+      tags: [commands]
+      summary: Post to a task thread
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [body], properties: { body: { type: string, maxLength: 16384 } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/inbox:
+    get:
+      operationId: readInbox
+      tags: [queries]
+      summary: Read this principal's inbox. Events carry IDs only
+      parameters:
+        - { name: after, in: query, schema: { type: integer } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 10 } }
+        - { name: ack, in: query, description: "Documented exception: also advances the cursor.", schema: { type: boolean } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/inbox/ack:
+    post:
+      operationId: ackInbox
+      tags: [commands]
+      summary: Advance the inbox cursor
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [up_to], properties: { up_to: { type: integer } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/inbox/wake:
+    put:
+      operationId: setWake
+      tags: [commands]
+      summary: Set the wake URL
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [url], properties: { url: { type: string, format: uri }, debounce: { type: integer } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+    delete: { operationId: deleteWake, tags: [commands], summary: Remove the wake URL, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+components:
+  securitySchemes:
+    assertion: { type: apiKey, in: header, name: X-Podster-Assertion, description: "Ed25519-signed gateway assertion, valid for 60 seconds." }
+  parameters:
+    ws: { name: ws, in: path, required: true, schema: { type: string } }
+    t: { name: t, in: path, required: true, schema: { type: string } }
+    idempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1 } }
+  responses:
+    Json: { description: Success, content: { application/json: { schema: { type: object } } } }
+    Task: { description: The task after the command, content: { application/json: { schema: { $ref: "#/components/schemas/Task" } } } }
+    Error: { description: A stable error code, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  schemas:
+    TaskStatus: { type: string, enum: [open, offered, accepted, submitted, completed, canceled] }
+    Task:
+      type: object
+      required: [id, title, instructions, requester, reviewer, status, version]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        instructions: { type: string }
+        acceptance_criteria: { type: [string, "null"] }
+        requester: { type: string }
+        assignee: { type: [string, "null"] }
+        reviewer: { type: string }
+        status: { $ref: "#/components/schemas/TaskStatus" }
+        version: { type: integer }
+        submission_no: { type: integer }
+        needs_attention: { type: boolean }
+    CreateTask:
+      type: object
+      required: [title, instructions]
+      properties:
+        title: { type: string, minLength: 1 }
+        instructions: { type: string, minLength: 1 }
+        acceptance_criteria: { type: string }
+        assignee: { type: string }
+        reviewer: { type: string }
+        due_at: { type: integer }
+        follow_up_of: { type: string }
+    UpdateTask:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version: { type: integer }
+        title: { type: string, minLength: 1 }
+        instructions: { type: string, minLength: 1 }
+        acceptance_criteria: { type: string }
+        due_at: { type: integer }
+    SetReviewer: { type: object, required: [version, reviewer], properties: { version: { type: integer }, reviewer: { type: string } } }
+    SetRequester: { type: object, required: [version, requester], properties: { version: { type: integer }, requester: { type: string } } }
+    AssignTask: { type: object, required: [version, assignee], properties: { version: { type: integer }, assignee: { type: string } } }
+    VersionedReason: { type: object, required: [version], properties: { version: { type: integer }, reason: { type: string } } }
+    RequiredReason: { type: object, required: [version, reason], properties: { version: { type: integer }, reason: { type: string, minLength: 1 } } }
+    Artifact: { type: object, required: [uri, label], properties: { uri: { type: string }, label: { type: string } } }
+    SubmitTask:
+      type: object
+      required: [version]
+      properties:
+        version: { type: integer }
+        artifacts: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/Artifact" } }
+        note: { type: string }
+        commit_sha: { type: string, description: Required when the task has a linked repository. }
+    RequestChanges: { type: object, required: [submission_no, reason], properties: { submission_no: { type: integer }, reason: { type: string, minLength: 1 } } }
+    VerifyTask: { type: object, required: [submission_no], properties: { submission_no: { type: integer }, commit_sha: { type: string, description: Required when the task has a linked repository. } } }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+            message: { type: string }
