@@ -7,7 +7,7 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
-import { callApi, codeMatchesLiveApproval, createAuth, isPublicAuthRoute, type Env } from "../src/index";
+import { callApi, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string };
@@ -239,6 +239,18 @@ describe("gateway refusals that don't rely on the API", () => {
     expect((await post("/claim", { agent_id: agent.pluginId, user_code: agent.userCode, org_id: a.org }, { cookie: member.cookie })).status).toBe(403);
     const { query } = await authorizeQuery();
     expect((await approve(member, query, { org_id: a.org })).status).toBe(403);
+  });
+
+  it("an ordinary member can't link a credential to the organization's agent", async () => {
+    const [a, member] = [await signUp(), await signUp()];
+    await addMember(a.org, member);
+    const existing = await claimedAgent(a);
+    const agent = await registerAgent();
+    expect((await post("/claim", { agent_id: agent.pluginId, user_code: agent.userCode, org_id: a.org, link_agent_id: existing.id }, { cookie: member.cookie })).status).toBe(403);
+    expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ status: "pending" });
+    const { query } = await authorizeQuery();
+    expect((await approve(member, query, { org_id: a.org, link_agent_id: existing.id })).status).toBe(403);
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE agent_id = ?").bind(existing.id).first()).toEqual({ n: 1 });
   });
 
   it("can't link a credential to a disconnected agent", async () => {
@@ -476,6 +488,40 @@ describe("registration", () => {
   });
 });
 
+describe("hosts with more than one agent", () => {
+  it("a second person's claim doesn't end the first person's agent on a shared host", async () => {
+    const [first, second] = [await signUp(), await signUp()];
+    const one = await registerAgent();
+    const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
+    expect(two.registered.host_id).toBe(one.registered.host_id);
+    expect((await claim(first, one)).status).toBe(200);
+    expect((await claim(second, two)).status).toBe(403);
+    expect((await execute(one, "get_identity")).status).toBe(200);
+    expect(await e.DB.prepare("SELECT userId FROM agentHost WHERE id = ?").bind(one.registered.host_id).first()).toEqual({ userId: (await e.DB.prepare("SELECT userId FROM agent WHERE id = ?").bind(one.pluginId).first<{ userId: string }>())!.userId });
+  });
+
+  it("the host's owner can claim its other agents", async () => {
+    const owner = await signUp();
+    const one = await registerAgent();
+    const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
+    expect((await claim(owner, one)).status).toBe(200);
+    expect((await claim(owner, two)).status).toBe(200);
+    expect((await execute(one, "get_identity")).status).toBe(200);
+    expect((await execute(two, "get_identity")).status).toBe(200);
+  });
+
+  it("only the person who approved can finish a claim that stopped partway", async () => {
+    const [owner, stranger] = [await signUp(), await signUp()];
+    const agent = await registerAgent();
+    // Approved, then the API or directory write failed: active, with no link and no Principal.
+    const approved = await createAuth(e).api.approveCapability({ headers: new Headers({ cookie: owner.cookie }), body: { agent_id: agent.pluginId, user_code: agent.userCode, action: "approve" } }) as unknown as { status?: string };
+    expect(approved.status).toBe("approved");
+    expect((await claim(stranger, { ...agent, userCode: "AAAA-AAAA" })).status).toBe(403);
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE external_id = ?").bind(agent.pluginId).first()).toEqual({ n: 0 });
+    expect((await claim(owner, { ...agent, userCode: "AAAA-AAAA" })).status).toBe(200);
+  });
+});
+
 describe("codes", () => {
   it("the gateway itself checks the code against a live approval", async () => {
     const agent = await registerAgent();
@@ -528,6 +574,32 @@ describe("after a disconnect", () => {
     expect((await execute(agent, "get_identity")).status).toBe(403);
     expect((await call("/mcp", { method: "POST", headers: { authorization: `Bearer ${linked.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" })).status).toBe(401);
     expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE agent_id = ?").bind(agent.id).first()).toEqual({ n: 0 });
+  });
+
+  describe("when the API's answer to the state check is unusual", () => {
+    const identityOf = async (who: Person) => {
+      const me = await person(who);
+      return { kind: "person" as const, id: me.id, org: who.org, orgs: me.orgs, adminOrgs: me.admin_orgs };
+    };
+    const stubbed = (answer: (method: string) => Response, seen: string[]) => ({ ...e, API: { fetch: async (request: Request) => (seen.push(request.method), answer(request.method)) } as unknown as Fetcher });
+
+    it("doesn't reconnect if the state can't be read", async () => {
+      const a = await signUp();
+      const agent = await claimedAgent(a);
+      const seen: string[] = [];
+      const res = await handleConnection(stubbed(() => new Response(JSON.stringify({ error: { code: "upstream_unavailable" } }), { status: 504 }), seen), await identityOf(a), agent.id, "reconnect");
+      expect(res.status).toBe(504);
+      expect(seen).toEqual(["GET"]);
+    });
+
+    it("ends credentials for any state but active", async () => {
+      const a = await signUp();
+      const agent = await claimedAgent(a);
+      const seen: string[] = [];
+      const answer = (method: string) => (method === "GET" ? new Response(JSON.stringify({ status: "disconnecting" })) : new Response(JSON.stringify({ error: { code: "conflict" } }), { status: 409 }));
+      expect((await handleConnection(stubbed(answer, seen), await identityOf(a), agent.id, "reconnect")).status).toBe(409);
+      expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE agent_id = ?").bind(agent.id).first()).toEqual({ n: 0 });
+    });
   });
 
   it("reconnecting an agent that's still connected keeps its credentials", async () => {
@@ -668,6 +740,10 @@ describe("resilience and schema", () => {
   it("password sign-in can't turn on with a real hostname", async () => {
     const auth = createAuth({ ...e, BASE_URL: "https://gateway.podster.dev", ENABLE_PASSWORD_SIGNIN: "true" });
     await expect(auth.api.signUpEmail({ body: { email: `${unique("q")}@example.test`, password: "local-test-password-123", name: "x" } })).rejects.toThrow();
+  });
+
+  it("doesn't check the schema on every request", () => {
+    expect(createAuth(e).options.advanced?.database?.validateSchema).toBe(false);
   });
 
   it("the committed migration matches the pinned auth packages", async () => {

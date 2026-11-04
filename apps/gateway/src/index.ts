@@ -152,6 +152,8 @@ export function createAuth(env: Env) {
     baseURL: env.BASE_URL,
     secret: env.AUTH_SECRET,
     emailAndPassword: { enabled: passwordSignInEnabled(env) },
+    // The schema check would run on every request, because an instance lasts one request. A test checks for drift instead.
+    advanced: { database: { validateSchema: false } },
     socialProviders: social,
     databaseHooks: {
       user: {
@@ -425,6 +427,9 @@ async function handleClaim(request: Request, env: Env, userId: string): Promise<
 
   // Approve first, so nothing is created for a bad code. The agent ID comes from the plugin's, so a retry reuses it.
   if (!(await claimedByThisPerson(env, pluginAgent, userId))) {
+    // Claiming an agent on a host someone else owns makes the plugin revoke that person's agents there.
+    const host = await env.DB.prepare(`SELECT h.userId FROM agent a JOIN agentHost h ON h.id = a.hostId WHERE a.id = ?`).bind(pluginAgent).first<{ userId: string | null }>();
+    if (host?.userId && host.userId !== userId) return denied("not_allowed", 403);
     if (!(await codeMatchesLiveApproval(env, pluginAgent, body.user_code))) return denied("not_allowed", 403);
     const approval = await createAuth(env).api.approveCapability({ headers: request.headers, body: { agent_id: pluginAgent, user_code: body.user_code, action: "approve" }, asResponse: true }).catch(() => null);
     const result = approval?.ok ? await approval.json<{ status?: string }>().catch(() => null) : null;
@@ -465,12 +470,14 @@ async function revokeCredentials(env: Env, agentId: string) {
 }
 
 /** Disconnect and reconnect. The API decides; the directory follows so new assertions carry the right generation. */
-async function handleConnection(request: Request, env: Env, identity: Identity, agentId: string, verb: "disconnect" | "reconnect"): Promise<Response> {
+export async function handleConnection(env: Env, identity: Identity, agentId: string, verb: "disconnect" | "reconnect"): Promise<Response> {
   if (verb === "reconnect") {
     // A disconnect can commit in the API and then lose this gateway's request, so its cleanup finishes here if needed.
+    // If its state can't be read, nothing reconnects, because that could bring old credentials back.
     const current = await callApi(env, identity, { method: "GET", path: `/v1/agents/${agentId}` });
     const agent = await current.json<{ status?: string }>();
-    if (current.status === 200 && agent.status === "disconnected") await revokeCredentials(env, agentId);
+    if (current.status !== 200) return json(agent, current.status);
+    if (agent.status !== "active") await revokeCredentials(env, agentId);
   }
   const response = await callApi(env, identity, { method: "POST", path: `/v1/agents/${agentId}/${verb}`, body: "{}" });
   const body = await response.json<any>();
@@ -508,7 +515,7 @@ function publicConfiguration(configuration: any) {
 const appHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    // Refusals come before the auth instance exists: starting it and walking away leaves its setup running.
+    // Refusals come before the auth instance exists, so an anonymous refusal doesn't start its setup.
     if (url.pathname === "/.well-known/agent-configuration" || url.pathname === "/api/auth/agent-configuration") return json(publicConfiguration(await createAuth(env).api.getAgentConfiguration({ headers: request.headers })));
     if (url.pathname.startsWith("/api/auth/")) {
       const route = url.pathname.slice("/api/auth".length);
@@ -544,7 +551,7 @@ const appHandler = {
     if (request.method !== "GET" && request.method !== "HEAD" && !sameOrigin(request, env)) return denied("not_allowed", 403);
 
     const connection = url.pathname.match(/^\/api\/agents\/([\w-]+)\/(disconnect|reconnect)$/);
-    if (connection && request.method === "POST") return handleConnection(request, env, identity, connection[1], connection[2] as "disconnect" | "reconnect");
+    if (connection && request.method === "POST") return handleConnection(env, identity, connection[1], connection[2] as "disconnect" | "reconnect");
     const agent = url.pathname.match(/^\/api\/agents\/([\w-]+)$/);
     if (agent && request.method === "GET") {
       const response = await callApi(env, identity, { method: "GET", path: `/v1/agents/${agent[1]}` });
