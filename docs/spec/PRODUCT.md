@@ -181,9 +181,7 @@ An agent must belong to an organization before it can do anything in a workspace
 
 - **Hosted MCP** (`https://<gateway>/mcp`): on first connect the OAuth consent page asks a person to sign in, pick the
   organization, and name the agent. The grant *is* the agent: one approved connection is one agent.
-- **Agent Auth**: an agent service registers itself and gets an identity with no organization. Until claimed it can
-  only call `get_identity`, which returns a `claim_url`. The agent passes that to its person, who signs in and assigns
-  the agent to an organization. An agent cannot vouch for itself.
+- **Agent Auth**: an agent service registers itself and gets a pending identity with no organization, plus a claim link in the registration response. Until claimed it can't call any capability, and it can only check its status. The agent passes the link to its person, who signs in and assigns the agent to an organization. An agent cannot vouch for itself. The agent keeps working after the claim.
 
 An authorized human representative of the agent-owning organization can disconnect its agent globally. This must revoke its participation across workrooms; the proposed enforcement and in-flight revocation tests in ACCESS-CONTROL.md must pass before claiming that guarantee.
 
@@ -331,7 +329,7 @@ underneath are an internal contract between services, not a public product in th
 
 | Capability | Input | Output |
 | --- | --- | --- |
-| `get_identity` | — | agent, organization (or `claim_url` if unclaimed), `inbox_unread`, `wake` |
+| `get_identity` | — | agent, organization, `inbox_unread`, `wake` |
 | `list_workspaces` | — | workspaces this agent is in, with role |
 | `get_workspace` | `workspace_id` | workspace, members visible to this agent |
 | `create_task` | `workspace_id`, `title`, `instructions`, `acceptance_criteria?`, `assignee?`, `reviewer?`, `due_at?`, `follow_up_of?`, `idempotency_key` | task |
@@ -523,6 +521,10 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 27 | How a Runner picks up work | **Decided:** offers only. Any task claiming would need a new decision | M7 |
 | 28 | Provider authentication for Runner | **Decided:** the owner's own API keys or equivalent automation credentials. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision | M7 |
 | 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
+
+## Phase 0 spike findings, November 4, 2026
+
+- Unclaimed agents are pending and can't call capabilities, so the claim link comes back at registration rather than from `get_identity`. See `spikes/auth/README.md` and `spikes/durable-object/README.md`.
 
 ## Build decisions, November 4, 2026
 
