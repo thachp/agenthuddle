@@ -1396,6 +1396,11 @@ describe("inbox", () => {
     expect(fromRoom.map((e: any) => e.type)).toEqual(["member.revoked"]);
     expect(Object.keys(fromRoom[0]).sort()).toEqual(["actor_id", "created_at", "event_id", "seq", "task_id", "type", "workspace_id"]);
     expect(fromRoom[0].task_id).toBeNull();
+    // The floor is the room's real sequence for this notice, as the room sent it.
+    const noticeSeq = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT seq FROM event WHERE id = ?", fromRoom[0].event_id).one().seq);
+    const floor = await runInDurableObject(inboxStub(bob.id), (_: any, state: any) => state.storage.sql.exec("SELECT event_seq FROM inbox_floor WHERE workspace_id = ?", id).one().event_seq);
+    expect(floor).toBe(noticeSeq);
+    expect(floor).toBeGreaterThan(1);
     // Another room's events are untouched.
     expect(after.some((e: any) => e.task_id === kept.id)).toBe(true);
   });
@@ -1463,6 +1468,11 @@ describe("inbox", () => {
     expect(await send("second-notice", 7, "member.revoked")).toBe(true);
     expect(await types()).toEqual(["elsewhere", "second-notice"]);
     expect(await send("notice", 5, "member.revoked")).toBe(false);
+    // A late copy of the current notice, after the notice itself aged out, can't clear the room again.
+    expect(await send("after-second", 8)).toBe(true);
+    await runInDurableObject(inboxStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("DELETE FROM inbox_event WHERE event_id = 'second-notice'"));
+    expect(await send("second-notice", 7, "member.revoked")).toBe(false);
+    expect(await types()).toEqual(["elsewhere", "after-second"]);
     const missing = await inboxStub(bob.id).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id: "no-seq", workspace_id: room_, type: "task.offered", actor_id: "per_x" }) });
     expect(missing.status).toBe(400);
   });

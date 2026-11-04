@@ -222,7 +222,7 @@ fn deliver(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     )?;
     if floor
         .first()
-        .is_some_and(|f| event_seq < int(&f["event_seq"]))
+        .is_some_and(|f| event_seq <= int(&f["event_seq"]))
     {
         return Ok(json!({ "delivered": false }));
     }
