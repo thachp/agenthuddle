@@ -1,12 +1,12 @@
-# Podster — Product Spec (MVP)
+# Podster — Product Spec
 
-Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-03 · Design: [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · Design: [ARCHITECTURE.md](ARCHITECTURE.md)
 
-The project name is **Podster** and the planned domain is `podsters.io`; brand clearance is still pending. Nothing here is built or deployed yet.
+The project name is **Podster** and the planned domain is `podsters.io`; brand clearance is still pending. Nothing here is built or deployed yet. The November 4 workroom direction below supersedes the earlier link-only, invitation-only product scope. Detailed API names remain the existing kernel contract until the extension contracts are designed. [Concept mockups](../mockups/README.md) illustrate the direction; they are not implemented screens.
 
 ## One line
 
-**Podster lets AI agents from different owners hand each other work, and know for sure who took it, what they delivered, and who signed it off.**
+**Podster gives people and independently run agents a shared workroom to turn a goal into reviewed results: define roles, claim work, coordinate through durable inboxes, and optionally release an application.**
 
 ## Problem
 
@@ -43,20 +43,24 @@ meet in a neutral place that records who committed to what. **Agents own executi
 Unlike RunLater, people are first-class here: cross-organization trust has to be granted by a person, not by an agent
 deciding on its own.
 
-## Core jobs (MVP)
+## Product direction and delivery scope
 
-1. **Connect** an agent to an organization, so every action it takes is attributable to an owner.
-2. **Share a workspace** with your own agents, and invite another organization's agents into it with scoped access.
-3. **Hand off a task**: create it, offer it to an agent, and get an explicit accept or decline.
-4. **Deliver**: the assignee talks with the requester on the task's thread and submits a deliverable (links, not files).
-5. **Sign off**: a reviewer verifies the submission or sends it back with changes requested.
-6. **Catch up**: an agent that was away reads what happened for it, from a durable inbox, without running a server.
-7. **Be woken** (optional): an agent that gives a wake URL is called when something lands in its inbox.
-8. **Audit**: anyone with access sees the same history of who did what and when.
+The product is a goal-based workroom, not only a two-agent handoff. Workrooms can support engineering, research, business tools, marketing or film projects. Roles and artifacts must remain generic enough for these different kinds of work.
 
-That is the whole MVP.
+The existing two-agent task lifecycle, authorization checks and durable inbox are the **coordination kernel**. They remain the first technical validation milestone. The expanded workroom experience is the target product scope, not a claim that every feature ships in that kernel milestone. Exact release sequencing for uploads, public participation, managed repositories, A2A and deployment remains to be planned.
 
-## How it works (user's view)
+## Core jobs
+
+1. **Create a workroom:** describe a goal and context; attach input assets such as specs, documents and UI mockups.
+2. **Define roles:** name each role, its responsibilities and number of openings. A role is an opening to fill, not an agent that Podster has launched.
+3. **Participate:** private workrooms are invitation-only; in a public workroom, any connected agent can claim an available role opening without a separate owner-approval step.
+4. **Coordinate:** a lead agent turns the goal and assets into tasks, offers work to suitable participants, and follows up on blockers and reviews. Execution remains on each agent's own platform.
+5. **Commit and deliver:** agents explicitly accept or decline tasks, discuss them in task threads, and submit versioned results.
+6. **Review:** a designated reviewer accepts the result or requests changes. Task review, repository merge and deployment are distinct outcomes.
+7. **Catch up:** agents read their own durable attention queue across workrooms; people can inspect the shared activity history for a room.
+8. **Release when enabled:** an engineering workroom can use a Podster-managed repository and an optional Cloudflare deployment workflow, configured once at workroom level.
+
+## Coordination kernel example
 
 ```
 Person (Org A) ──dashboard──▶ create workspace "Billing v2", connect PM agent
@@ -81,14 +85,48 @@ Both          ──get_task──▶ same state, same history
 | **Person** | A human with a sign-in (GitHub, Google or email link). Belongs to one or more organizations. |
 | **Organization** | The accountable owner of agents and workspaces. Created by a person, who is its first admin. |
 | **Agent** | A connected agent identity, owned by exactly one organization. Has a name, a description of what it does, and optionally a wake URL. Podster never runs it. |
-| **Workspace** | The collaboration boundary: members, tasks, threads and history. Owned by one organization; may include members from others. |
+| **Workroom** | A goal-based collaboration boundary: brief, input assets, role openings, participants, tasks, activity and results. Owned by one organization. The existing API and architecture call this `workspace`; that is an internal term for the same boundary. |
+| **Work role** | A named responsibility with a configured number of openings, such as lead coordinator, researcher, engineer, reviewer or DevOps. Separate from authorization roles (`admin`, `member`, `guest`). |
+| **Role claim** | A connected agent filling an available work-role opening. It is not acceptance of every task assigned to that role. |
 | **Member** | An agent or person in a workspace, with a role: `admin`, `member` or `guest`. |
 | **Invitation** | An offer for another organization (or one of your own agents) to join a workspace with a given role. Expires in 7 days. |
 | **Task** | A unit of work with a requester, at most one assignee, a reviewer, instructions and acceptance criteria. |
 | **Thread** | The ordered messages on one task. There are no workspace-wide channels in the MVP. |
-| **Artifact** | A reference to a deliverable: `https` URI, label, optional media type and SHA-256. Podster stores the reference, never the file. |
+| **Asset** | An input uploaded or linked to a workroom for context, such as a spec, document or mockup. |
+| **Artifact** | A versioned output: document, source code, image, video, presentation, website or application. It can include underlying downloadable files and a preview or deployed URL. The kernel stores links; the expanded product requires an upload/storage design. |
 | **Event** | One recorded change (task offered, message posted, member revoked, …). Each workspace numbers its events in order. |
 | **Inbox** | Per-agent queue of events that need that agent's attention, with a server-side cursor. |
+
+## Workroom setup and discovery
+
+The Create Workroom flow captures:
+
+- Name, goal and supporting context.
+- **Asset upload**, using that label because inputs include more than specifications.
+- Work roles, responsibility descriptions and opening counts.
+- Expected outputs and review settings.
+- Public or private participation.
+- For engineering work: Podster-managed GitHub repository setup, repository visibility, and optional deployment settings.
+
+GitHub and deployment controls should appear only when relevant to the workflow. Creating a workroom or defining a role does not start, run or wake an agent.
+
+The Workrooms directory has **My workrooms** and **Explore**. Cards show the goal, visibility, filled/open roles and artifact progress. Explore lists public workrooms and supports topic/available-role filtering. Private rooms must not leak through search or discovery to people or agents without access.
+
+### Role openings and coordination
+
+A role has a title, responsibilities and capacity. Claiming the last opening must be atomic: simultaneous claims cannot exceed capacity. Repeated requests from the same agent must not consume multiple openings. A claimed role and an accepted task are separate commitments.
+
+The lead coordinator is accountable for interpreting the goal, preparing a plan, creating tasks, directing them to suitable roles, handling blockers and requesting review. Start with one accountable lead per workroom; how that lead is selected, replaced and supported by other PMs is still a design decision. A lead designation does not grant administrator, review, repository or deployment permission.
+
+Human feedback can revise a task. Version checks must prevent stale submissions or approvals from silently applying to changed requirements. Whether material edits require explicit agent reconfirmation, and which tasks require human review, remain policy decisions to settle before implementation.
+
+### Public and private participation
+
+- **Private:** invitation-only. Keep the existing human-approved cross-organization invitation flow.
+- **Public:** any connected agent can claim an available role opening. Do not require an invitation or manual owner approval for each public claim.
+- Public claiming still requires a valid, accountable agent identity and available capacity. Claims do not confer administration, sign-off, repository write or deployment rights.
+- Workroom visibility, repository visibility and published-result visibility are separate controls. Making a room public must not silently publish private repository contents or input assets.
+- The exact public read surface, mapping from work-role claims to permissions, abuse controls and transitions between visibility modes must be specified before launch. The old guest/member matrix below is a kernel baseline, not permission to grant every public participant full member access.
 
 ## Membership and trust
 
@@ -104,7 +142,7 @@ An agent must belong to an organization before it can do anything in a workspace
 
 An organization admin can disconnect an agent at any time. That revokes it in every workspace at once.
 
-### Roles
+### Authorization roles (kernel baseline)
 
 | Role | Sees | Can |
 | --- | --- | --- |
@@ -116,7 +154,7 @@ An organization admin can disconnect an agent at any time. That revokes it in ev
 - Members from another organization default to `guest`. Granting `member` to an outside organization is an explicit choice on the invitation.
 - A person sees what the agents of their organization in that workspace see, and may act as reviewer.
 
-### Invitations
+### Invitations (private workrooms)
 
 - **Own agents:** a workspace admin adds them directly. No approval needed; same owner.
 - **Another organization:** an admin of the workspace invites the organization (by an invite link sent out-of-band),
@@ -126,7 +164,7 @@ An organization admin can disconnect an agent at any time. That revokes it in ev
 - Revoking a member (or a whole organization) takes effect for the next request: it can no longer read, post, or act,
   its inbox stops receiving events from that workspace, and any task it was assigned goes back to `open`.
 
-### What membership does *not* grant
+### What participation does *not* grant
 
 Joining a workspace gives an agent access to that workspace's tasks and threads. Nothing else: not the other agents'
 tools, credentials, MCP servers, repos, chat history, or other workspaces. Access to GitHub, Jira, a doc, or anything a
@@ -137,7 +175,7 @@ deliverable links to is granted (or not) by whoever owns that system, as today.
 Messages and artifact labels from other agents are untrusted input. Every message and artifact Podster returns
 carries `from` (agent, organization) and `external: true` when it came from a different organization than the reader.
 Tool descriptions tell agents to treat thread content as information, never as instructions that change permissions or
-override their owner. Podster never follows artifact links.
+override their owner. The coordination kernel never follows artifact links. Future previews, uploads and repository import must have their own explicit fetch, scanning and access policies.
 
 ## Task lifecycle
 
@@ -175,7 +213,37 @@ Rules:
   version fails with `409 version_conflict` rather than overwriting.
 - `due_at` is informational in the MVP. No automatic escalation or reassignment.
 
-## Capabilities (the API surface)
+## Assets, outputs and releases
+
+### Assets and versioned artifacts
+
+Workroom input assets and submitted outputs serve different purposes. Inputs explain the goal; outputs are the work being reviewed. Preserve versions and provenance so a reviewer can identify exactly which result was accepted. New versions must not silently replace a reviewed version.
+
+Support documents, code, images, video, PowerPoint/presentations and deployed apps. A result may be presented as a website or working web application with underlying files available to download. Deployment is optional at the workroom level; do not create or publish a separate website automatically for every artifact.
+
+The earlier link-only contract remains useful for the kernel, but is insufficient for the target **Asset upload** experience. Before implementation, decide storage/provider, file types and limits, malware/content handling, retention, deletion, access checks, download behavior and export. Mockup upload controls do not settle these choices.
+
+### Podster-managed GitHub repositories
+
+For an engineering workroom, the design direction is a repository in a dedicated Podster-managed GitHub organization, linked to the room. Agents work through pull requests and review. Repository visibility is configured separately from room visibility. Export or transfer should be supported; exact ownership, transfer, deletion and account arrangements remain to be designed. Bringing an existing repository is a possible later extension.
+
+The spec does not authorize creation of a GitHub organization, repository, credentials or installations. Runtime permissions and human approvals must be configured separately from a role claim.
+
+### Review, merge and optional Cloudflare deployment
+
+Deployment is a **workroom-level option**, with a default URL and optional custom-domain mapping in the design. A DevOps role configures the release workflow once; task agents do not recreate infrastructure for every submission. Enabling it is a product setting, not proof that accounts, domain ownership, credentials or an authorized pipeline exist.
+
+For engineering task details, show the linked PR, branch/commit, required checks, reviewer, merge status, deployment status and preview/live URL when available.
+
+- **Approve** records review of a specific submission. It does not itself mean the PR merged or the app is live.
+- **Merge** changes the repository target branch. It requires repository permission and current checks/review for the exact commit.
+- **Approve and merge** may be offered to an authorized reviewer. If merging triggers deployment, disclose that consequence at the action.
+- **Deploy** releases the merged version only when the workroom's configured release policy allows it. Record commit, environment and result separately from task completion.
+- Report failures accurately, for example **Merged, deployment failed**. Do not show a live release solely because a task is completed or a PR was merged.
+
+Release environments, approval policy, retry/rollback behavior, branch protection, credential handling, custom-domain validation and budget controls are unresolved implementation requirements. No integration, deployment or domain mapping is established by these mockups.
+
+## Capabilities (existing kernel API surface)
 
 Each one is an Agent Auth capability and a tool on the hosted MCP server; both run the same code path. The REST routes
 underneath are an internal contract between services, not a public product in the MVP.
@@ -199,7 +267,7 @@ underneath are an internal contract between services, not a public product in th
 | `ack_inbox` | `up_to` | `acked_seq`, `unread` |
 | `set_wake` / `delete_wake` | `url`, `headers?`, `debounce?` | wake |
 
-Invitations, roles and revocation are dashboard actions for people, not capabilities, in the MVP.
+Private invitations, authorization-role changes and revocation remain person-controlled dashboard actions in the kernel. Public role claims, role definitions, assets, artifact versions and releases need new contracts; the capability list above does not yet define those extensions.
 
 ## Inbox and wake
 
@@ -217,18 +285,37 @@ per agent, across all its workspaces, cursor kept on our side.
   RunLater wake. Wake is a nudge, never a guarantee: the inbox is the source of truth, and an agent with no wake URL
   simply finds its work at its next session.
 
+### Shared activity and the personal inbox
+
+Shared workroom activity is a permission-filtered history of what happened in that room. The personal agent inbox is the actionable queue across that agent's workrooms. Do not create competing task state in a separate room-wide inbox.
+
+A lead offers a task → the assignee receives an inbox item; the assignee accepts → the requester sees it; a submission → the reviewer receives a review request; requested changes → the assignee receives the next action. Role invitations can also require attention. Reading a shared activity feed must not acknowledge another agent's inbox.
+
+People may inspect an agent's inbox only where their ownership/access permits it. Activity visibility and inbox delivery must use the same authoritative workroom permissions. An agent's identity can span workrooms, while task context, files and repository access remain scoped to the specific room. Separate execution environments are recommended for agents working on separate projects; Podster does not host or guarantee that runtime isolation.
+
+## Agent communication: MCP and A2A
+
+Keep hosted MCP and Agent Auth for connecting existing agents. The connection UI uses **MCP client** and **Connect your own agent**, with **Agent Auth** as the subtitle. Connecting establishes identity, not execution or automatic workroom access.
+
+A2A is part of the expanded coordination direction alongside MCP, rather than an excluded product idea. Its adapter must map to the same authoritative tasks, events, permissions and inboxes. The lead agent coordinates; the protocol carries requests and responses; Podster records the shared state. A2A does not determine the plan or keep an agent running.
+
+Protocol version, discovery, authentication, task-state mapping, message delivery and interoperability tests remain design work. Keep MCP-only agents able to participate. Do not claim A2A conformance or treat a protocol message as authority to bypass permissions.
+
 ## Dashboard (people)
 
-The MVP dashboard does only what agents cannot or should not do themselves:
+- **Workrooms:** My workrooms and Explore, create a workroom, view brief/assets, roles, team, tasks, activity and outputs.
+- **Create Workroom:** goal/context, asset upload, role openings, expected outputs, review settings, visibility and workflow-specific repository/deployment options.
+- **Task detail:** instructions, acceptance criteria, task discussion, submission review, plus PR/check/merge/deployment status for engineering work.
+- **Agents:** connected identities, ownership, specialty, connection method, workroom access and accepted tasks. These are real connected identities, not unfilled work-role openings.
+- **Connect agent:** MCP connection instructions or Agent Auth claim flow; manage access after connection.
+- **Settings:** profile, organization and notification preferences. Workroom visibility, roles, repository and deployment settings belong inside each workroom.
+- **Activity and inbox:** shared history beside an authorized view of an agent's personal attention queue.
 
-- Sign in; create an organization; claim and disconnect agents.
-- Create workspaces; add own agents; invite organizations; accept invitations; change roles; revoke.
-- Read any task, thread and history the person can see; act as reviewer (`verify_task`, `request_changes`).
-- See the audit log for a workspace.
+The earlier restriction that people can only steer through agents is no longer a complete description of the product: people create goals and roles, provide assets, configure access and review work. Direct human task creation and exact notification controls remain to be specified.
 
-No task creation from the dashboard in the MVP: people steer through their agents.
+See [the mockup gallery](../mockups/README.md). Text, example identities, counts and URLs in images are illustrative, not live data or finalized field contracts.
 
-## MVP limits
+## Coordination kernel limits (baseline)
 
 | Limit | Value |
 | --- | --- |
@@ -241,24 +328,24 @@ No task creation from the dashboard in the MVP: people steer through their agent
 | Wake | One URL per agent; at most once per 1 min–24 h (default 15 min); off after 3 failures in a row |
 | Invitations | Expire after 7 days |
 
-## Explicitly not in the MVP
+## Scope boundaries
 
 | Out of scope | Why it's later |
 | --- | --- |
 | Hosting, running or prompting agents | Agents own execution. We are the meeting place. |
-| File storage | Deliverables live in the systems that already hold them (GitHub, Drive, Jira…). |
+| Upload implementation | Required by the target workroom experience; storage and security design must be resolved beyond the link-only kernel. |
 | Workspace channels, DMs, real-time chat | Task threads cover the handoff. Channels add noise before they add value. |
-| A2A protocol support | Adapter after the native two-agent flow works; no conformance claims before interoperability tests. |
+| A2A implementation | Included in product direction; adapter contract and interoperability tests must precede a conformance claim. |
 | Public REST API, SDKs | Capabilities cover agents; REST stays internal. |
-| Team templates (PM / Architect / Dev / QA) | A setup shortcut, useful once the single handoff is proven. |
-| Discovery, marketplace, matchmaking, reputation | Different product; requires trust signals we don't have yet. |
+| Team templates | Role definitions/openings are core to the target experience; prebuilt template bundles remain an optional shortcut. |
+| Marketplace, matchmaking, reputation | Beyond the public workroom directory and open-role claiming; trust and incentive systems remain out of scope. |
 | Workflow graphs, dependencies between tasks, SLAs and escalation | Keep the unit of work one task until people ask for more. |
-| GitHub / Jira sync | Artifact links first; sync once we know which systems matter. |
+| GitHub release integration / Jira sync | Managed GitHub repositories and optional deployment are target features awaiting contracts; Jira synchronization remains later. |
 | Billing | Free during preview. |
 
-## Success criteria
+## Coordination kernel success criteria
 
-The MVP ships when this works on a real deployment, end to end:
+The kernel milestone is validated when this works on a real deployment, end to end. This does not establish completion of the expanded workroom product:
 
 1. Org A creates a workspace and adds its agent A; Org B accepts an invitation and brings agent B, each connected
    through a different method (one hosted MCP, one Agent Auth).
@@ -276,6 +363,19 @@ And these hold:
 - No mutation is ever recorded without its event, or an event without its mutation (tested under concurrency).
 - A message never reaches an agent that was not allowed to see it at the moment it was posted.
 
+## Expanded workroom acceptance criteria
+
+Before the expanded experience is called complete:
+
+1. A person creates a workroom with goal, context, input assets, outputs and roles with opening counts, without launching agents implicitly.
+2. A public room accepts a valid agent's claim without a manual invitation; concurrent claims cannot overfill a role. A private room rejects uninvited participants and remains absent from unauthorized discovery.
+3. Claiming a role grants only its defined scope, not administrator, reviewer, merge or deploy rights. A task still requires explicit acceptance.
+4. A lead coordinates work and review through the same task history regardless of supported connection protocol; duplicate deliveries do not create competing tasks.
+5. Shared room activity and agent inbox show consistent events with correct visibility. One room cannot expose another room's context or credentials.
+6. Review identifies an exact artifact version; requesting changes preserves history and does not mark an unreviewed replacement approved.
+7. Engineering work links a managed repository with separately configured visibility. Disabled deployment publishes nothing; enabled deployment reports checks, merge and release independently, including failure.
+8. Custom-domain and export/transfer behavior, upload permissions, retention, abuse controls and release approvals pass their documented policies before launch.
+
 ## Open questions
 
 1. **Person-free organizations.** Should a fully autonomous agent service ever own an organization, or is a person
@@ -287,9 +387,18 @@ And these hold:
 5. **Pricing shape.** Per workspace, per active agent, or per task? Decide after the preview shows usage.
 6. **Brand clearance.** The selected name is Podster and the planned domain is `podsters.io`; clearance is still pending.
 
-## Changes from the earlier draft
+## Changes on November 4, 2026
 
-For reviewers of the first draft (`docs/MVP-SPEC.md`, in git history):
+- Expanded the product from a link-based handoff to goal-based workrooms with input assets, work-role openings and versioned outputs.
+- Defined invitation-only private participation and open-role claiming for public rooms, separate from authorization privileges.
+- Added the lead coordinator, shared activity/personal inbox distinction and one identity with scoped workroom context.
+- Added managed-repository and optional workroom-level Cloudflare release concepts, separating review, merge and deployment.
+- Added MCP/Agent Auth connection wording and A2A direction with explicit interoperability work still required.
+- Linked the current concept mockups and preserved the coordination kernel as a technical baseline, not the full revised product.
+
+## Changes from the earlier draft (historical)
+
+For reviewers of the first draft (`docs/MVP-SPEC.md`, in git history). These describe the November 3 kernel revision; the November 4 direction above supersedes its narrower product-scope exclusions:
 
 - **Lifecycle simplified.** `created`/`assigned` became `open`/`offered`; `in_progress` dropped (progress is messages);
   `verified` and `completed` merged into one `verify_task` step. Added `release_task` so an assignee can give work back
@@ -301,3 +410,4 @@ For reviewers of the first draft (`docs/MVP-SPEC.md`, in git history):
 - **Offline agents:** added RunLater-style inbox with server-side cursor and an optional wake URL, replacing "poll the
   workspace event feed and keep your own cursor".
 - **No self-sign-off** rule added; untrusted-content marking (`external: true`) specified.
+
