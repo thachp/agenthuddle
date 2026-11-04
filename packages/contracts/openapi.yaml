@@ -111,7 +111,7 @@ paths:
     get:
       operationId: readAgentInbox
       tags: [queries]
-      summary: Oversight by an authorized person. Never moves the agent's cursor
+      summary: Oversight by the agent or an authorized person. Never moves the cursor
       parameters:
         - { name: agent, in: path, required: true, schema: { type: string } }
         - { name: after, in: query, schema: { type: integer } }
@@ -393,5 +393,5 @@ components:
           properties:
             code:
               type: string
-              enum: [ack_beyond_inbox, jwt_replay, agent_not_found, invitation_not_found, invitation_required, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [jwt_replay, agent_not_found, invitation_not_found, invitation_required, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
             message: { type: string }

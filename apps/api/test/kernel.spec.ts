@@ -1,6 +1,6 @@
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 const BINDINGS = env as any;
 let key: any;
@@ -1316,6 +1316,16 @@ describe("inbox", () => {
     for (const query of ["limit=0", "limit=51", "limit=x", "after=-1", "after=x", "ack=maybe"]) expect((await api(bob, "GET", `/v1/inbox?${query}`)).status, query).toBe(400);
   });
 
+  it("tells someone their role changed, with no task attached", async () => {
+    const { id } = await setup();
+    const member = await fresh("org_a");
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: member.id, kind: "agent", org_id: "org_a", role: "member" })).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${member.id}/role`, { role: "guest" })).status).toBe(200);
+    await drain(id);
+    const changed = (await inbox(member, "?limit=50")).events.find((e: any) => e.type === "member.role_changed");
+    expect(changed).toMatchObject({ workspace_id: id, task_id: null, actor_id: OWNER.id });
+  });
+
   it("each caller only ever reaches its own inbox", async () => {
     const { id, tasks, bob } = await setup();
     await offerTo(tasks, bob);
@@ -1417,8 +1427,12 @@ describe("inbox", () => {
     expect((await inbox(carol, "?limit=50")).events.some((e: any) => e.task_id === toCarol.id)).toBe(true);
     const row = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT attempts, next_attempt_at FROM outbox WHERE recipient_principal_id = ? AND attempts > 0", bob.id).toArray() as any[]);
     expect(row).toHaveLength(1);
+    expect(row[0].attempts).toBe(1);
     expect(row[0].next_attempt_at).toBeGreaterThan(Date.now());
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).not.toBeNull();
+    // The alarm waits for the retry. Rows behind the head look overdue, and they must not make it fire in a loop.
+    const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
+    expect(alarm).toBeGreaterThan(Date.now() + 500);
+    expect(alarm).toBeLessThanOrEqual(row[0].next_attempt_at);
     // Still failing: another pass before the wait is over doesn't try again.
     await runDurableObjectAlarm(stub(id));
     expect((await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT max(attempts) AS n FROM outbox").one().n))).toBe(1);
@@ -1426,6 +1440,82 @@ describe("inbox", () => {
     await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE outbox SET next_attempt_at = 0"));
     await drain(id);
     expect((await inbox(bob)).events.map((e: any) => e.task_id)).toEqual([first.id, second.id]);
+  });
+
+  it("backs off longer each time, up to a limit", async () => {
+    const { id, tasks, bob } = await setup();
+    await runInDurableObject(inboxStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_fail_deliver (x)"));
+    await holdOutbox(id);
+    await offerTo(tasks, bob);
+    await releaseOutbox(id);
+    await runDurableObjectAlarm(stub(id));
+    const wait = () => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT attempts, next_attempt_at - ? AS wait FROM outbox WHERE recipient_principal_id = ?", Date.now(), bob.id).one() as any);
+    const first = await wait();
+    expect(first.attempts).toBe(1);
+    expect(first.wait).toBeGreaterThan(1000);
+    expect(first.wait).toBeLessThanOrEqual(2000);
+    await runInDurableObject(stub(id), async (_: any, state: any) => {
+      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = 0, attempts = 40");
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+    await runDurableObjectAlarm(stub(id));
+    const capped = await wait();
+    expect(capped.attempts).toBe(41);
+    expect(capped.wait).toBeGreaterThan(250_000);
+    expect(capped.wait).toBeLessThanOrEqual(300_000);
+  });
+
+  it("a stuck recipient gives way to the timeout, and doesn't hold up the room", async () => {
+    const { id, tasks, bob } = await setup();
+    const carol = await fresh("org_c");
+    expect((await admit(id, carol)).status).toBe(200);
+    await drain(id);
+    await runInDurableObject(inboxStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hang_deliver (x)"));
+    await holdOutbox(id);
+    await offerTo(tasks, bob);
+    const other = await offerTo(tasks, carol, "carol");
+    await releaseOutbox(id);
+    await runDurableObjectAlarm(stub(id));
+    expect((await inbox(carol, "?limit=50")).events.some((e: any) => e.task_id === other.id)).toBe(true);
+    const attempts = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT attempts FROM outbox WHERE recipient_principal_id = ?", bob.id).one().attempts);
+    expect(attempts).toBe(1);
+  });
+
+  it("a command schedules delivery on its own, even with an alarm set far off", async () => {
+    const { id, tasks, bob } = await setup();
+    await runInDurableObject(stub(id), (_: any, state: any) => state.storage.setAlarm(Date.now() + 3_600_000));
+    const task = await offerTo(tasks, bob);
+    await vi.waitFor(async () => expect((await inbox(bob)).events.map((e: any) => e.task_id)).toContain(task.id), { timeout: 5000, interval: 25 });
+    expect(await count(id, "outbox")).toBe(0);
+  });
+
+  it("the listing failing doesn't stop delivery, and retries more slowly", async () => {
+    const { id, tasks, bob } = await setup();
+    await holdOutbox(id);
+    const task = await offerTo(tasks, bob);
+    const extra = await fresh("org_c");
+    expect((await admit(id, extra)).status).toBe(200);
+    await BINDINGS.DB.prepare("ALTER TABLE membership_index RENAME TO membership_index_away").run();
+    try {
+      await releaseOutbox(id);
+      await runDurableObjectAlarm(stub(id));
+      expect((await inbox(bob)).events.map((e: any) => e.task_id)).toContain(task.id);
+      const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
+      expect(alarm).toBeGreaterThan(Date.now() + 2000);
+    } finally {
+      await BINDINGS.DB.prepare("ALTER TABLE membership_index_away RENAME TO membership_index").run();
+    }
+  });
+
+  it("keeps the time the event happened, not when it arrived", async () => {
+    const { id, tasks, bob } = await setup();
+    await holdOutbox(id);
+    await offerTo(tasks, bob);
+    const happened = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT e.created_at FROM outbox o JOIN event e ON e.id = o.event_id WHERE o.recipient_principal_id = ?", bob.id).one().created_at);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE event SET created_at = created_at - 5000"));
+    await releaseOutbox(id);
+    await drain(id);
+    expect((await inbox(bob)).events[0].created_at).toBe(happened - 5000);
   });
 
   it("delivery survives the object restarting", async () => {
@@ -1489,6 +1579,42 @@ describe("inbox", () => {
       const after = await inbox(old);
       expect(after.dropped).toBe(2);
       expect(after.events).toHaveLength(1);
+    });
+
+    it("moving the cursor over expired unread events still reports them as lost", async () => {
+      // Events on day 0, one more on day 20, and the agent returns on day 31.
+      const seededOld = async () => {
+        const who = await fresh();
+        await seed(who.id, 3, 31 * DAY);
+        expect((await deliverOne(who.id)).status).toBe(200);
+        return who;
+      };
+      const viaAck = await fresh();
+      await seed(viaAck.id, 3, 31 * DAY);
+      expect((await inbox(viaAck)).dropped).toBe(3);
+      await api(viaAck, "POST", "/v1/inbox/ack", { up_to: 3 });
+      expect((await inbox(viaAck)).dropped).toBe(3);
+      expect((await deliverOne(viaAck.id)).status).toBe(200);
+      expect((await inbox(viaAck)).dropped).toBe(3);
+
+      const viaRead = await seededOld();
+      // Delivering cleared them already, so this confirms the count holds through a read with ack.
+      const read = await inbox(viaRead, "?ack=true");
+      expect(read.dropped).toBe(3);
+      expect(read.events).toHaveLength(1);
+      expect((await inbox(viaRead)).dropped).toBe(3);
+
+      // A fresh event behind expired ones, with nothing yet cleared: reading with ack moves the cursor past them.
+      const readFirst = await fresh();
+      await seed(readFirst.id, 3, 31 * DAY);
+      await runInDurableObject(inboxStub(readFirst.id), (_: any, state: any) => {
+        state.storage.sql.exec("INSERT INTO inbox_event VALUES (4, 'seed-fresh', 'ws_seed', 'task.offered', NULL, 'agt_x', ?)", Date.now());
+        state.storage.sql.exec("UPDATE inbox_state SET last_seq = 4");
+      });
+      const page = await inbox(readFirst, "?ack=true");
+      expect(page.acked_seq).toBe(4);
+      expect(page.dropped).toBe(3);
+      expect((await inbox(readFirst)).dropped).toBe(3);
     });
 
     it("keeps numbering after events go, so an ack can't reuse a sequence", async () => {

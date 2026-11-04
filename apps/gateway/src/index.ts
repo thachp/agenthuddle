@@ -31,6 +31,7 @@ const personId = (userId: string) => `per_${userId}`;
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const MAX_NAME_BYTES = 200;
 const API_TIMEOUT_MS = 25_000;
+const AGENT_JWT_MAX_AGE_SECONDS = 60;
 const validName = (name: string) => name.length > 0 && new TextEncoder().encode(name).length <= MAX_NAME_BYTES;
 /** Agents choose their registered name, and its limit is in characters, so it's shortened to fit ours. */
 function fitName(name: string) {
@@ -136,11 +137,13 @@ async function runCapability(env: Env, identity: Identity, capability: Capabilit
  * The plugin's default replay guard doesn't span requests here, so the agent's Principal spends each token, in the same
  * call that checks its connection. The token is only named here. Without an ID it can't be tracked, so it's refused.
  */
-function spentToken(pluginAgent: string, authorization: string | null | undefined) {
-  const { jti, exp } = decodeJwt(authorization?.replace(/^Bearer\s+/i, "") ?? "");
+export function spentToken(pluginAgent: string, authorization: string | null | undefined) {
+  const { jti, iat } = decodeJwt(authorization?.replace(/^Bearer\s+/i, "") ?? "");
   if (!jti) return null;
-  // Slightly past expiry, so a token can't be replayed at the edge of the plugin's clock tolerance.
-  return { key: `${pluginAgent}:${jti}`, expiresAt: (exp ?? Math.floor(Date.now() / 1000)) + 30 };
+  // The plugin accepts a token for its maximum age from when it was issued, whatever `exp` the client wrote, so the
+  // record lasts that long plus clock tolerance. A far-off `exp` can't grow the record, and a missing one can't shorten it.
+  const now = Math.floor(Date.now() / 1000);
+  return { key: `${pluginAgent}:${jti}`, expiresAt: Math.min(iat ?? now, now) + AGENT_JWT_MAX_AGE_SECONDS + 30 };
 }
 
 export function createAuth(env: Env) {
@@ -179,6 +182,7 @@ export function createAuth(env: Env) {
         approvalMethods: ["device_authorization"],
         allowDynamicHostRegistration: true,
         deviceAuthorizationPage: "/claim",
+        jwtMaxAge: AGENT_JWT_MAX_AGE_SECONDS,
         // Long-running agents shouldn't expire or lose their grants when idle. Disconnecting is how access ends.
         agentSessionTTL: 0,
         agentMaxLifetime: 0,
@@ -236,8 +240,9 @@ async function personIdentity(env: Env, request: Request, userId: string): Promi
 const sameOrigin = (request: Request, env: Env) => request.headers.get("origin") === new URL(env.BASE_URL).origin;
 
 /** Dashboard routes people may reach through the session. Agent registration and connection have their own handlers. */
-function allowedPassthrough(path: string) {
-  if (!path.startsWith("/v1/")) return false;
+export function allowedPassthrough(path: string) {
+  // Something between here and the API may collapse a double slash, which would slip past the prefix checks below.
+  if (!path.startsWith("/v1/") || path.includes("//")) return false;
   return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox");
 }
 

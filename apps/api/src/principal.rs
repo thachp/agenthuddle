@@ -145,15 +145,27 @@ fn unread_count(sql: &SqlStorage, acked: i64, now: i64) -> R<i64> {
     Ok(found.first().map_or(0, |row| int(&row["n"])))
 }
 
-/// Clears expired events. Lost unread work is counted, because the reader needs to know. Acked events aren't.
-fn expire_inbox(sql: &SqlStorage, now: i64) -> R<()> {
-    let (acked, _, _) = inbox_state(sql)?;
+/// Unread events past retention that nothing has cleared yet.
+fn expired_unread(sql: &SqlStorage, acked: i64, now: i64) -> R<i64> {
+    if !inbox_exists(sql)? {
+        return Ok(0);
+    }
     let lost = rows(
         sql,
         "SELECT count(*) AS n FROM inbox_event WHERE seq > ? AND created_at < ?",
         vec![acked.into(), (now - UNREAD_KEPT_MS).into()],
     )?;
-    let lost = lost.first().map_or(0, |row| int(&row["n"]));
+    Ok(lost.first().map_or(0, |row| int(&row["n"])))
+}
+
+/// Clears expired events. Lost unread work is counted, because the reader needs to know. Acked events aren't.
+/// This must run before the cursor moves, or moving it over expired events would hide that they were lost.
+fn expire_inbox(sql: &SqlStorage, now: i64) -> R<()> {
+    if !inbox_exists(sql)? {
+        return Ok(());
+    }
+    let (acked, _, _) = inbox_state(sql)?;
+    let lost = expired_unread(sql, acked, now)?;
     exec(
         sql,
         "DELETE FROM inbox_event WHERE (seq > ? AND created_at < ?) OR (seq <= ? AND created_at < ?)",
@@ -281,7 +293,12 @@ fn parse_inbox_query(url: &Url) -> R<InboxQuery> {
 /// Reads a page. With `ack`, it also advances the cursor over that page, which is the documented command exception.
 /// Reading from past the cursor with `ack` is refused, because it would acknowledge the events it skipped.
 fn read_inbox(sql: &SqlStorage, query: &InboxQuery, now: i64) -> R<Value> {
+    if query.ack {
+        expire_inbox(sql, now)?;
+    }
     let (acked, _, dropped) = inbox_state(sql)?;
+    // A plain read only reads, so it adds what expiry will count later. The total doesn't change when that happens.
+    let dropped = dropped + expired_unread(sql, acked, now)?;
     let after = query.after.unwrap_or(acked);
     if query.ack && after > acked {
         return Err(ApiError::invalid_argument());
@@ -325,6 +342,7 @@ fn ack_inbox(sql: &SqlStorage, up_to: i64, now: i64) -> R<Value> {
     if up_to > last {
         return Err(ApiError::ack_beyond_inbox());
     }
+    expire_inbox(sql, now)?;
     let cursor = acked.max(up_to);
     if cursor != acked {
         exec(
@@ -332,7 +350,6 @@ fn ack_inbox(sql: &SqlStorage, up_to: i64, now: i64) -> R<Value> {
             "UPDATE inbox_state SET acked_seq = ?",
             vec![cursor.into()],
         )?;
-        expire_inbox(sql, now)?;
     }
     Ok(json!({ "acked_seq": cursor, "unread": unread_count(sql, cursor, now)? }))
 }
@@ -514,6 +531,16 @@ impl Principal {
                 {
                     return Err(ApiError::internal("injected delivery failure"));
                 }
+                #[cfg(feature = "failpoints")]
+                if !rows(
+                    &sql,
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hang_deliver'",
+                    vec![],
+                )?
+                .is_empty()
+                {
+                    Delay::from(Duration::from_secs(30)).await;
+                }
                 let body: Value = req.json().await?;
                 return deliver(&sql, &body, now_ms());
             }
@@ -618,7 +645,7 @@ impl Principal {
                 identity["wake"] = Value::Null;
                 Ok(identity)
             }
-            // Oversight only: an authorized person can look, and looking never moves the agent's cursor.
+            // Oversight: the agent or an authorized person can look, and looking never moves the cursor.
             (Method::Get, Some("inbox")) => {
                 let query = parse_inbox_query(&req.url()?)?;
                 if query.ack {

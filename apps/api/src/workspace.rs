@@ -31,6 +31,13 @@ const IDEMPOTENCY_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const PAGE_SIZE: i64 = 50;
 const OUTBOX_BATCH: i64 = 50;
 const OUTBOX_MAX_BACKOFF_MS: i64 = 5 * 60 * 1000;
+const OUTBOX_RETRY_MS: i64 = 5000;
+// Long enough for a busy recipient, short enough that a stuck one doesn't hold up the rest of the room.
+const DELIVERY_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
+    300
+} else {
+    10_000
+};
 const MAX_MEMBERS: i64 = 50;
 const MAX_OPEN_TASKS: i64 = 1000;
 const MAX_NAME_BYTES: usize = 200;
@@ -893,8 +900,15 @@ async fn send_to_inbox(env: &Env, recipient: &str, body: &Value) -> bool {
         let request = Request::new_with_init("https://principal/internal/deliver", &init)?;
         stub.fetch_with_request(request).await
     };
-    let result: Result<Response> = attempt.await;
-    matches!(result.map(|r| r.status_code()), Ok(200))
+    let timeout = Delay::from(std::time::Duration::from_millis(DELIVERY_TIMEOUT_MS));
+    match futures_util::future::select(Box::pin(attempt), timeout).await {
+        futures_util::future::Either::Left((result, _)) => {
+            let result: Result<Response> = result;
+            matches!(result.map(|r| r.status_code()), Ok(200))
+        }
+        // Delivery is idempotent, so a send that finishes late only makes the retry a no-op.
+        futures_util::future::Either::Right(_) => false,
+    }
 }
 
 /// Removes a participant and applies the departure rules, inside the caller's transaction.
@@ -1635,7 +1649,7 @@ impl Workspace {
 
     /// Schedules the alarm for whatever is due next, moving it earlier if needed. Never later: a pending alarm that
     /// finds nothing to do costs nothing, and a missed one would strand events.
-    async fn arm(&self, index_retry: bool) -> R<()> {
+    async fn arm(&self, index_failed: bool, outbox_failed: bool) -> R<()> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? {
             return Ok(());
@@ -1643,16 +1657,19 @@ impl Workspace {
         let now = Date::now().as_millis() as i64;
         let mut due: Option<i64> = None;
         if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty() {
-            due = Some(now + if index_retry { 5000 } else { 50 });
+            due = Some(now + if index_failed { 5000 } else { 50 });
         }
         if !outbox_held(&sql)? {
+            // A recipient is due when its latest wait is over. Only its head row carries the wait, and the rows behind
+            // it look overdue, so taking the earliest of all rows would fire the alarm in a loop while it waits.
             let next = rows(
                 &sql,
-                "SELECT min(next_attempt_at) AS due FROM outbox",
+                "SELECT min(due) AS due FROM (SELECT max(next_attempt_at) AS due FROM outbox GROUP BY recipient_principal_id)",
                 vec![],
             )?;
             if let Some(next) = next.first().and_then(|r| r["due"].as_f64()) {
-                let next = (next as i64).max(now + 10);
+                let soonest = now + if outbox_failed { OUTBOX_RETRY_MS } else { 10 };
+                let next = (next as i64).max(soonest);
                 due = Some(due.map_or(next, |d| d.min(next)));
             }
         }
@@ -1910,7 +1927,7 @@ impl DurableObject for Workspace {
         };
         if is_write {
             // The command has already committed, so a scheduling problem can't change its answer. The next write retries.
-            if let Err(error) = self.arm(false).await {
+            if let Err(error) = self.arm(false, false).await {
                 console_error!("couldn't schedule delivery: {:?}", error);
             }
         }
@@ -1927,7 +1944,7 @@ impl DurableObject for Workspace {
         if let Err(error) = &outbox {
             console_error!("outbox drain failed: {:?}", error);
         }
-        if let Err(error) = self.arm(index.is_err()).await {
+        if let Err(error) = self.arm(index.is_err(), outbox.is_err()).await {
             console_error!("couldn't schedule delivery: {:?}", error);
             self.state
                 .storage()

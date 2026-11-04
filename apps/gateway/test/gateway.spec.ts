@@ -7,7 +7,9 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
-import worker, { linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import { decodeJwt } from "jose";
+import { mintAssertion } from "../src/assertion";
+import worker, { allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string };
@@ -125,7 +127,7 @@ describe("people and organizations", () => {
 
   it("the dashboard can't reach agent registration, connection state or inboxes through the API path", async () => {
     const a = await signUp();
-    for (const [method, path] of [["PUT", "/v1/agents/agt_x"], ["POST", "/v1/agents/agt_x/disconnect"], ["GET", "/v1/inbox"], ["POST", "/internal/init"], ["GET", "/v1/../internal/init"]]) {
+    for (const [method, path] of [["PUT", "/v1/agents/agt_x"], ["POST", "/v1/agents/agt_x/disconnect"], ["GET", "/v1/inbox"], ["GET", "/v1//inbox"], ["PUT", "/v1//agents/agt_abcdefabcdef"], ["POST", "/internal/init"], ["GET", "/v1/../internal/init"]]) {
       const res = await dashboard(a, method, path, method === "GET" ? undefined : { org_id: a.org });
       expect(res.status, `${method} ${path}`).toBe(404);
     }
@@ -980,6 +982,35 @@ describe("resilience and schema", () => {
     const { toBeCreated, toBeAdded } = await getMigrations(createAuth(e).options);
     expect(toBeCreated).toEqual([]);
     expect(toBeAdded).toEqual([]);
+  });
+});
+
+describe("dashboard passthrough", () => {
+  it("refuses paths that could become a private route if a slash collapses", () => {
+    for (const path of ["/v1//inbox", "/v1//agents/agt_x", "//v1/agents/agt_x", "/v1/inbox", "/v1/agents/agt_x", "/internal/init"]) expect(allowedPassthrough(path), path).toBe(false);
+    expect(allowedPassthrough("/v1/workspaces/ws_x/tasks")).toBe(true);
+  });
+});
+
+describe("spending agent tokens", () => {
+  const encode = (value: object) => btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const bearer = (claims: object) => `Bearer ${encode({ alg: "EdDSA" })}.${encode(claims)}.sig`;
+  const now = () => Math.floor(Date.now() / 1000);
+
+  it("keeps the record for as long as the plugin accepts the token, whatever `exp` the client wrote", () => {
+    const issued = now() - 5;
+    expect(spentToken("plugin", bearer({ jti: "a", iat: issued, exp: now() + 315_360_000 }))).toEqual({ key: "plugin:a", expiresAt: issued + 90 });
+    expect(spentToken("plugin", bearer({ jti: "a", iat: issued }))?.expiresAt).toBe(issued + 90);
+    // An `iat` in the future can't stretch it either.
+    expect(spentToken("plugin", bearer({ jti: "a", iat: now() + 1000 }))!.expiresAt).toBeLessThanOrEqual(now() + 91);
+    expect(spentToken("plugin", bearer({ iat: issued }))).toBeNull();
+  });
+
+  it("sends the token to the API in the assertion, for agents only", async () => {
+    const claims = decodeJwt(await mintAssertion({ kind: "agent", id: "agt_x", org: "o", generation: 1, spends: { key: "plugin:a", expiresAt: 123 } }, e.ASSERTION_SIGNING_JWK));
+    expect(claims).toMatchObject({ agent_jti: "plugin:a", agent_jti_exp: 123 });
+    const person = decodeJwt(await mintAssertion({ kind: "person", id: "per_x", org: "o", orgs: ["o"], adminOrgs: [] }, e.ASSERTION_SIGNING_JWK));
+    expect(person).not.toHaveProperty("agent_jti");
   });
 });
 

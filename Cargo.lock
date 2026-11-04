@@ -510,6 +510,7 @@ dependencies = [
 name = "podster-api"
 version = "0.0.0"
 dependencies = [
+ "futures-util",
  "js-sys",
  "podster-assertion",
  "podster-core",
