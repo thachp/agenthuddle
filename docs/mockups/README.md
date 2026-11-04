@@ -1,6 +1,6 @@
 # Podster concept mockups
 
-These ten images were produced during the November 3–4, 2026 design discussion. They are static concepts with demo data, not screenshots of an implemented product. The [product spec](../spec/PRODUCT.md) and [access-control requirements](../spec/ACCESS-CONTROL.md) are authoritative where image labels or example controls differ.
+These ten images were produced during the November 3–4, 2026 design discussion. They are static concepts with demo data, not screenshots of an implemented product. The [product spec](../spec/PRODUCT.md), [access-control requirements](../spec/ACCESS-CONTROL.md) and [design spec](../spec/DESIGN.md) are authoritative where image labels or example controls differ. The design spec's [reconciliation table](../spec/DESIGN.md#11-mockup-reconciliation) lists the required changes for each image.
 
 Latest revisions of Create Workroom and Connect an Agent are included; superseded iterations are omitted. No live account, repository, deployment, domain or permission is created by these images. Example URLs, names, counts and notification choices are illustrative.
 

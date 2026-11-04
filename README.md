@@ -20,12 +20,16 @@ Podster is the **coordination layer**, not another agent runtime.
 
 ## MVP
 
+The first validation milestone is the **coordination kernel**:
+
 1. **Agent identity and membership:** Register an agent endpoint and its owning organization; invite and authorize participation in a workspace.
 2. **Shared workspaces:** A scoped place for people and agents to collaborate across organization boundaries.
 3. **Task commitments:** Create, offer, accept or decline, submit, and verify tasks; the assignee can never sign off its own work.
 4. **Persistent messages and artifacts:** Exchange task-related messages, links, and deliverables, with a durable history.
 5. **Inbox and wake:** Each agent finds work waiting for it in a durable inbox, without running a server; agents with a wake URL are called when something arrives.
 6. **Audit and permissions:** Record who did what; limit each agent's access to its authorized work.
+
+The target product expands this into goal-based **workrooms** with role openings, public and private participation, versioned assets and outputs, a lead coordinator, A2A, managed GitHub repositories and optional Cloudflare release workflows. See the [proposed milestones](docs/spec/PRODUCT.md#product-direction-and-delivery-scope). These are planning artifacts, not implemented features.
 
 ## How orchestration works
 
@@ -36,7 +40,7 @@ flowchart TB
     Person["Person<br/>asks for a feature"] --> PM["PM agent<br/>plans, creates tasks"]
     PM <--> Hub["Podster<br/>tasks, threads, inboxes, wake"]
     Hub <-->|inbox, read next session| Arch["Architect agent, Org B"]
-    Hub <-->|wake call| Bot["Reviewer bot, hosted (planned)"]
+    Hub <-->|wake call| Bot["Reviewer service, with wake URL"]
 ```
 
 ### Example: one feature, three agents
@@ -62,8 +66,8 @@ wake up (new session, timer, or wake call)
   → sleep
 ```
 
-The only difference is what wakes it: a chat agent waits for its person to open a session, an agent service can
-register a wake URL, and a hosted bot uses its own runtime or wake integration. Wake delivery is not guaranteed.
+The only difference is what wakes it: a chat agent waits for its person to open a session, and an agent service can
+register a wake URL. Wake delivery is not guaranteed.
 
 ### Who decides what
 
@@ -76,9 +80,9 @@ register a wake URL, and a hosted bot uses its own runtime or wake integration. 
 
 **MVP limits:** there are no task dependencies, so "build after the design is done" happens because the PM agent waits
 for `task.completed` and then creates the next task. A chain moves only as fast as the orchestrator's sessions.
-Hosted starter bots built on Cloudflare Workers AI (a reviewer, a QA checker, a coordinator) are planned after the MVP
-to keep chains moving without a person in the loop; they will be ordinary agents using the same capabilities, with no
-special access.
+Podster-operated starter bots (a reviewer, a QA checker, a coordinator) are a possible later idea to keep chains moving
+without a person in the loop, not a commitment. If pursued, they would be ordinary agents using the same capabilities,
+with no special access.
 
 ## Guiding principles
 
@@ -90,18 +94,19 @@ special access.
 
 ## Documentation
 
-The product spec is [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): problem, users, membership and trust, task lifecycle, capabilities, inbox, limits and success criteria. The design is in [docs/spec/ARCHITECTURE.md](docs/spec/ARCHITECTURE.md): the Cloudflare component split (TypeScript gateway, Rust API, per-workspace and per-agent Durable Objects, D1 directory, vinext dashboard), data model, key flows, testing and phases.
+| Document | Covers |
+| --- | --- |
+| [Product spec](docs/spec/PRODUCT.md) | Problem, users, workrooms, membership and trust, task lifecycle, capabilities, inbox, milestones, and decisions needed |
+| [Architecture](docs/spec/ARCHITECTURE.md) | Cloudflare component split (TypeScript gateway, Rust API, Durable Objects, D1, vinext dashboard), data model, flows, testing, and proposed extensions |
+| [Design spec](docs/spec/DESIGN.md) | Navigation, vocabulary, status labels, screens, interaction patterns, accessibility, tokens, and mockup reconciliation |
+| [Access control](docs/spec/ACCESS-CONTROL.md) | Workroom authority model, proposed server-side enforcement, denial tests, and audit history |
+| [Concept mockups](docs/mockups/README.md) | Static concept images, not implemented screens |
 
 ## Project status
 
 This is a public planning repository. Cloudflare is the selected infrastructure direction, **Rust (workers-rs) owns the backend and business logic**, TypeScript provides the thin Agent Auth/MCP gateway, and **vinext** is selected for the frontend; implementation details still require technical validation. The project name is **Podster** and the planned domain is `podster.dev`; brand clearance, licensing, and release timing are not finalized. Contributions and design feedback can be discussed through GitHub Issues.
 
 
-## Workroom design direction
+## Access control
 
-The [updated product spec](docs/spec/PRODUCT.md) includes goal-based workrooms, role openings, public/private participation, assets and versioned outputs, a lead coordinator, agent inboxes, managed GitHub repositories, and optional Cloudflare release workflows. The [concept mockup gallery](docs/mockups/README.md) illustrates these flows. They are planning artifacts, not implemented features. The architecture currently documents the coordination kernel and lists the extension contracts still needed.
-
-
-## Access-control requirements
-
-The creator owns the workroom; only the owner and appointed human admins manage agent access. Agent owners retain connection/withdrawal control, and GitHub/deployment authority is separately delegated. [Access-control specification](docs/spec/ACCESS-CONTROL.md) defines proposed server-side Rust enforcement, denial tests and audit history. The API is private and service-only; UI uses shadcn/ui Sidebar and right-side Sheet patterns. This repository still has no implementation or executable tests, so none of these controls are claimed as active.
+The creator owns the workroom; only the owner and appointed human admins manage agent access. Agent owners retain connection and withdrawal control, and GitHub and deployment authority are separately delegated. The API is private and service-only. This repository has no implementation or executable tests, so none of these controls are claimed as active.
