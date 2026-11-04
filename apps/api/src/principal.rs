@@ -3,10 +3,10 @@
 //! or person's inbox, and the agent tokens already spent. A person's object has an inbox and no connection.
 
 use crate::error::ApiError;
-use crate::store::{exec, int, rows, text};
+use crate::store::{exec, int, rows, text, transaction_sync};
 use crate::{Caller, CALLER_HEADER};
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{cell::RefCell, rc::Rc, time::Duration};
 use worker::*;
 
 type R<T> = std::result::Result<T, ApiError>;
@@ -187,7 +187,8 @@ fn expire_inbox(sql: &SqlStorage, now: i64) -> R<()> {
     Ok(())
 }
 
-/// Stores one event, once. No await runs here, so all of it commits together. A removal notice first clears
+/// Stores one event, once, in the caller's transaction, so a failure leaves nothing behind and the retry starts clean.
+/// A removal notice first clears
 /// everything from that room, read or not, so the notice is all that remains. It also sets a floor in the room's own
 /// event order, because a send that timed out can still arrive afterward, and the clearing makes it look new.
 fn deliver(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
@@ -563,7 +564,15 @@ impl Principal {
                     Delay::from(Duration::from_secs(30)).await;
                 }
                 let body: Value = req.json().await?;
-                return deliver(&sql, &body, now_ms());
+                let outcome = Rc::new(RefCell::new(None));
+                let slot = outcome.clone();
+                let (store, now) = (sql.clone(), now_ms());
+                transaction_sync(&self.state, move || {
+                    *slot.borrow_mut() = Some(deliver(&store, &body, now)?);
+                    Ok(())
+                })?;
+                let stored = outcome.borrow_mut().take();
+                return stored.ok_or_else(|| ApiError::internal("no delivery result"));
             }
             "/internal/unread" => {
                 let (acked, _, _) = inbox_state(&sql)?;

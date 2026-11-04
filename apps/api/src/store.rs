@@ -2,7 +2,9 @@
 use crate::error::ApiError;
 use podster_core::{Decision, EventKind, Task, TaskStatus};
 use serde_json::Value;
-use worker::{SqlStorage, SqlStorageValue as V};
+use std::{cell::RefCell, rc::Rc};
+use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+use worker::{SqlStorage, SqlStorageValue as V, State};
 
 type R<T> = std::result::Result<T, ApiError>;
 
@@ -294,4 +296,37 @@ pub fn record_decision(
         )?;
     }
     Ok(())
+}
+
+/// Calls the runtime's `storage.transactionSync`, which `worker` doesn't expose. Any error or trap rolls back.
+pub fn transaction_sync(state: &State, f: impl FnOnce() -> R<()> + 'static) -> R<()> {
+    let failure: Rc<RefCell<Option<ApiError>>> = Rc::new(RefCell::new(None));
+    let slot = failure.clone();
+    let storage: JsValue = state
+        .as_raw()
+        .storage()
+        .map_err(|e| ApiError::internal(&format!("{e:?}")))?
+        .into();
+    let func: js_sys::Function =
+        js_sys::Reflect::get(&storage, &JsValue::from_str("transactionSync"))
+            .and_then(|f| f.dyn_into())
+            .map_err(|e| ApiError::internal(&format!("{e:?}")))?;
+    let cell = RefCell::new(Some(f));
+    let body = Closure::<dyn FnMut() -> std::result::Result<JsValue, JsValue>>::new(move || {
+        let f = cell
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| JsValue::from_str("transaction ran twice"))?;
+        f().map(|()| JsValue::UNDEFINED).map_err(|e| {
+            *slot.borrow_mut() = Some(e);
+            JsValue::from_str("rollback")
+        })
+    });
+    match func.call1(&storage, body.as_ref().unchecked_ref()) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(failure
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| ApiError::internal(&format!("{e:?}")))),
+    }
 }
