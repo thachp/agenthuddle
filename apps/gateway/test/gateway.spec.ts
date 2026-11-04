@@ -9,7 +9,7 @@ import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
-import worker, { allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import worker, { safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string };
@@ -185,7 +185,10 @@ describe("hosted MCP", () => {
     const a = await signUp();
     expect((await call("/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401);
     const { query } = await authorizeQuery(`<script>alert(1)</script>`);
-    expect((await call(`/authorize${query}`)).status).toBe(401);
+    const unsigned = await call(`/authorize${query}`);
+    expect(unsigned.status).toBe(302);
+    expect(unsigned.headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent(`/authorize${query}`)}`);
+    expect((await call("/authorize", { method: "POST", headers: { origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: "" })).status).toBe(401);
     const before = await e.DB.prepare("SELECT count(*) AS n FROM identity_link").first<{ n: number }>();
     const page = await call(`/authorize${query}`, { headers: { cookie: a.cookie } });
     expect(page.status).toBe(200);
@@ -982,6 +985,90 @@ describe("resilience and schema", () => {
     const { toBeCreated, toBeAdded } = await getMigrations(createAuth(e).options);
     expect(toBeCreated).toEqual([]);
     expect(toBeAdded).toEqual([]);
+  });
+});
+
+describe("sign-in and claim pages", () => {
+  const form = (fields: Record<string, string>, headers: Record<string, string> = {}, path = "/sign-in") =>
+    call(path, { method: "POST", headers: { origin: BASE, "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams(fields) });
+
+  it("only returns people to our own pages", () => {
+    expect(safeNext("/authorize?client_id=x&state=y")).toBe("/authorize?client_id=x&state=y");
+    expect(safeNext("/claim?agent_id=a&code=b")).toBe("/claim?agent_id=a&code=b");
+    for (const bad of ["https://evil.test/authorize", "//evil.test/authorize", "/\\evil.test/claim", "/api/v1/me", "/authorize/../api/x", "javascript:alert(1)", "", null, undefined]) expect(safeNext(bad), String(bad)).toBe("/signed-in");
+  });
+
+  it("offers configured providers with no script, and escapes where it returns to", async () => {
+    const res = await call(`/sign-in?next=${encodeURIComponent(`/claim?code="><script>alert(1)</script>`)}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    expect(res.headers.get("referrer-policy")).toBe("same-origin");
+    const html = await res.text();
+    expect(html).toContain("Continue with GitHub");
+    expect(html).not.toContain("Continue with Google");
+    expect(html).not.toContain("<script>");
+  });
+
+  it("starts a provider's sign-in from a form on our own page only", async () => {
+    const started = await form({ provider: "github", next: "/claim?agent_id=a&code=b" });
+    expect(started.status).toBe(302);
+    const location = new URL(started.headers.get("location")!);
+    expect(location.origin).toBe("https://github.com");
+    expect(location.searchParams.get("client_id")).toBe("test-client-id");
+    expect(location.searchParams.get("redirect_uri")).toBe(`${BASE}/api/auth/callback/github`);
+    expect(location.searchParams.get("state")).toBeTruthy();
+    expect(started.headers.getSetCookie().length).toBeGreaterThan(0);
+    expect((await form({ provider: "github" }, { origin: "https://evil.test" })).status).toBe(403);
+    expect((await call("/sign-in", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "provider=github" })).status).toBe(403);
+    expect((await form({ provider: "google" })).status).toBe(400);
+    expect((await form({ provider: "evil" })).status).toBe(400);
+  });
+
+  it("sends a signed-out person to sign in and back to the claim", async () => {
+    const res = await call("/claim?agent_id=a&code=b");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent("/claim?agent_id=a&code=b")}`);
+  });
+
+  it("an agent's approval link leads to a page that connects it", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const link = new URL(agent.registered.approval.verification_uri_complete);
+    const res = await call(link.pathname + link.search, { headers: { cookie: owner.cookie } });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("<strong>agent</strong>");
+    expect(html).toContain(agent.userCode);
+    expect(html).toContain(owner.org);
+    // Opening the page approves nothing.
+    expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ status: "pending" });
+    const connected = await form({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org, name: "From the page", link_agent_id: "" }, { cookie: owner.cookie }, "/claim");
+    expect(connected.status).toBe(200);
+    expect(connected.headers.get("content-type")).toContain("text/html");
+    expect(await connected.text()).toContain("Your agent is connected");
+    expect((await execute(agent, "get_identity")).data).toMatchObject({ name: "From the page", status: "active" });
+  });
+
+  it("the claim page reveals nothing without the right code, and escapes what it's given", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const wrong = await (await call(`/claim?agent_id=${agent.pluginId}&code=AAAA-AAAA`, { headers: { cookie: owner.cookie } })).text();
+    expect(wrong).not.toContain("<strong>agent</strong>");
+    const hostile = await (await call(`/claim?agent_id=${encodeURIComponent(`"><script>x</script>`)}&code=${encodeURIComponent(`<script>y</script>`)}`, { headers: { cookie: owner.cookie } })).text();
+    expect(hostile).not.toContain("<script>");
+    const refused = await form({ agent_id: agent.pluginId, user_code: "AAAA-AAAA", org_id: owner.org }, { cookie: owner.cookie }, "/claim");
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).toContain("connect this agent");
+    expect((await form({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org }, { cookie: owner.cookie, origin: "https://evil.test" }, "/claim")).status).toBe(403);
+  });
+
+  it("only offers organizations the person administers", async () => {
+    const [a, member] = [await signUp(), await signUp()];
+    const me = await (await dashboard(member, "GET", "/v1/me")).json<any>();
+    await e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', 0)").bind(a.org, me.id).run();
+    const html = await (await call("/claim?agent_id=x&code=y", { headers: { cookie: member.cookie } })).text();
+    expect(html).toContain(member.org);
+    expect(html).not.toContain(a.org);
   });
 });
 

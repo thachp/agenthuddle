@@ -417,6 +417,18 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// Runs writes that belong together, so a failure partway leaves nothing behind and a retry starts clean.
+    fn in_transaction(&self, f: impl FnOnce() -> R<Value> + 'static) -> R<Value> {
+        let outcome = Rc::new(RefCell::new(None));
+        let slot = outcome.clone();
+        transaction_sync(&self.state, move || {
+            *slot.borrow_mut() = Some(f()?);
+            Ok(())
+        })?;
+        let value = outcome.borrow_mut().take();
+        value.ok_or_else(|| ApiError::internal("no transaction result"))
+    }
+
     /// Whether this fan-out still speaks for the current disconnect. Awaits can outlast it.
     fn is_current(sql: &SqlStorage, floor: i64) -> R<bool> {
         Ok(connection(sql)?.is_some_and(|c| {
@@ -564,15 +576,8 @@ impl Principal {
                     Delay::from(Duration::from_secs(30)).await;
                 }
                 let body: Value = req.json().await?;
-                let outcome = Rc::new(RefCell::new(None));
-                let slot = outcome.clone();
                 let (store, now) = (sql.clone(), now_ms());
-                transaction_sync(&self.state, move || {
-                    *slot.borrow_mut() = Some(deliver(&store, &body, now)?);
-                    Ok(())
-                })?;
-                let stored = outcome.borrow_mut().take();
-                return stored.ok_or_else(|| ApiError::internal("no delivery result"));
+                return self.in_transaction(move || deliver(&store, &body, now));
             }
             "/internal/unread" => {
                 let (acked, _, _) = inbox_state(&sql)?;
@@ -603,7 +608,9 @@ impl Principal {
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         match (segments.as_slice(), req.method()) {
             (["v1", "inbox"], Method::Get) => {
-                return read_inbox(&sql, &parse_inbox_query(&req.url()?)?, now_ms());
+                let query = parse_inbox_query(&req.url()?)?;
+                let (store, now) = (sql.clone(), now_ms());
+                return self.in_transaction(move || read_inbox(&store, &query, now));
             }
             (["v1", "inbox", "ack"], Method::Post) => {
                 let body: Value = serde_json::from_str(&req.text().await?)
@@ -611,7 +618,8 @@ impl Principal {
                 let up_to = body["up_to"]
                     .as_i64()
                     .ok_or_else(ApiError::invalid_argument)?;
-                return ack_inbox(&sql, up_to, now_ms());
+                let (store, now) = (sql.clone(), now_ms());
+                return self.in_transaction(move || ack_inbox(&store, up_to, now));
             }
             (["v1", "inbox", ..], _) => return Err(ApiError::not_found()),
             _ => {}
@@ -650,12 +658,16 @@ impl Principal {
                 }
                 return Ok(connection_json(&existing));
             }
-            exec(&sql, SCHEMA, vec![])?;
-            exec(&sql, "INSERT INTO connection (id, org_id, name, generation, status, created_at) VALUES (?, ?, ?, 1, ?, ?)",
-                vec![agent_id.as_str().into(), org.as_str().into(), name.as_str().into(), ACTIVE.into(), now_ms().into()])?;
-            return Ok(connection_json(
-                &connection(&sql)?.ok_or_else(|| ApiError::internal("no connection"))?,
-            ));
+            let (store, id, created) = (sql.clone(), agent_id.clone(), now_ms());
+            // Together, because a schema with no connection row could never be registered again.
+            return self.in_transaction(move || {
+                exec(&store, SCHEMA, vec![])?;
+                exec(&store, "INSERT INTO connection (id, org_id, name, generation, status, created_at) VALUES (?, ?, ?, 1, ?, ?)",
+                    vec![id.as_str().into(), org.as_str().into(), name.as_str().into(), ACTIVE.into(), created.into()])?;
+                Ok(connection_json(
+                    &connection(&store)?.ok_or_else(|| ApiError::internal("no connection"))?,
+                ))
+            });
         }
 
         // Reads are limited to the agent and its organization's admins. The gateway calls PUT only after a claim, so
