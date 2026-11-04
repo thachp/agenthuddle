@@ -23,8 +23,7 @@
         { "name": "WORKSPACE", "class_name": "Workspace" },
         { "name": "PRINCIPAL", "class_name": "Principal" }
       ] },
-      // Filled in when it's created.
-      "d1_databases": [{ "binding": "DB", "database_name": "podster-api-staging", "database_id": "set-when-created", "migrations_dir": "migrations" }]
+      "d1_databases": [{ "binding": "DB", "database_name": "podster-api-staging", "database_id": "31b8cc7a-1e7a-424d-8689-f95f96f0a487", "migrations_dir": "migrations" }]
     }
   }
 }
