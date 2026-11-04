@@ -6,7 +6,7 @@ use crate::error::ApiError;
 use crate::principal;
 use crate::store::{
     self, exec, flag, int, load_task, opt, participant, record_decision, record_event, rows,
-    save_task, text, Transition,
+    save_task, text, transaction_sync, Transition,
 };
 use crate::{
     Caller as Verified, AGENT_ID_PREFIX, CALLER_HEADER, INTERNAL_ACCEPT_PATH, INTERNAL_INIT_PATH,
@@ -22,7 +22,7 @@ use podster_policy::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{cell::RefCell, rc::Rc};
-use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+use wasm_bindgen::JsValue;
 use worker::{SqlStorageValue as V, *};
 
 type R<T> = std::result::Result<T, ApiError>;
@@ -51,39 +51,6 @@ type Identity = Verified;
 struct Participant {
     caller: Caller,
     org: String,
-}
-
-/// Calls the runtime's `storage.transactionSync`, which `worker` doesn't expose. Any error or trap rolls back.
-fn transaction_sync(state: &State, f: impl FnOnce() -> R<()> + 'static) -> R<()> {
-    let failure: Rc<RefCell<Option<ApiError>>> = Rc::new(RefCell::new(None));
-    let slot = failure.clone();
-    let storage: JsValue = state
-        .as_raw()
-        .storage()
-        .map_err(|e| ApiError::internal(&format!("{e:?}")))?
-        .into();
-    let func: js_sys::Function =
-        js_sys::Reflect::get(&storage, &JsValue::from_str("transactionSync"))
-            .and_then(|f| f.dyn_into())
-            .map_err(|e| ApiError::internal(&format!("{e:?}")))?;
-    let cell = RefCell::new(Some(f));
-    let body = Closure::<dyn FnMut() -> std::result::Result<JsValue, JsValue>>::new(move || {
-        let f = cell
-            .borrow_mut()
-            .take()
-            .ok_or_else(|| JsValue::from_str("transaction ran twice"))?;
-        f().map(|()| JsValue::UNDEFINED).map_err(|e| {
-            *slot.borrow_mut() = Some(e);
-            JsValue::from_str("rollback")
-        })
-    });
-    match func.call1(&storage, body.as_ref().unchecked_ref()) {
-        Ok(_) => Ok(()),
-        Err(e) => Err(failure
-            .borrow_mut()
-            .take()
-            .unwrap_or_else(|| ApiError::internal(&format!("{e:?}")))),
-    }
 }
 
 fn parse_kind(kind: &str) -> PrincipalKind {

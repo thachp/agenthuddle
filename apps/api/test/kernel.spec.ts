@@ -1396,6 +1396,11 @@ describe("inbox", () => {
     expect(fromRoom.map((e: any) => e.type)).toEqual(["member.revoked"]);
     expect(Object.keys(fromRoom[0]).sort()).toEqual(["actor_id", "created_at", "event_id", "seq", "task_id", "type", "workspace_id"]);
     expect(fromRoom[0].task_id).toBeNull();
+    // The floor is the room's real sequence for this notice, as the room sent it.
+    const noticeSeq = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT seq FROM event WHERE id = ?", fromRoom[0].event_id).one().seq);
+    const floor = await runInDurableObject(inboxStub(bob.id), (_: any, state: any) => state.storage.sql.exec("SELECT event_seq FROM inbox_floor WHERE workspace_id = ?", id).one().event_seq);
+    expect(floor).toBe(noticeSeq);
+    expect(floor).toBeGreaterThan(1);
     // Another room's events are untouched.
     expect(after.some((e: any) => e.task_id === kept.id)).toBe(true);
   });
@@ -1463,8 +1468,37 @@ describe("inbox", () => {
     expect(await send("second-notice", 7, "member.revoked")).toBe(true);
     expect(await types()).toEqual(["elsewhere", "second-notice"]);
     expect(await send("notice", 5, "member.revoked")).toBe(false);
+    // A late copy of the current notice, after the notice itself aged out, can't clear the room again.
+    expect(await send("after-second", 8)).toBe(true);
+    await runInDurableObject(inboxStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("DELETE FROM inbox_event WHERE event_id = 'second-notice'"));
+    expect(await send("second-notice", 7, "member.revoked")).toBe(false);
+    expect(await types()).toEqual(["elsewhere", "after-second"]);
     const missing = await inboxStub(bob.id).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id: "no-seq", workspace_id: room_, type: "task.offered", actor_id: "per_x" }) });
     expect(missing.status).toBe(400);
+  });
+
+  it("a notice that fails to store changes nothing, and its retry still arrives", async () => {
+    const { id, tasks, bob } = await setup();
+    const task = await offerTo(tasks, bob);
+    await drain(id);
+    const principalSql = (statement: string) => runInDurableObject(inboxStub(bob.id), (_: any, state: any) => void state.storage.sql.exec(statement));
+    await principalSql("CREATE TRIGGER test_fail_notice BEFORE INSERT ON inbox_event WHEN NEW.type = 'member.revoked' BEGIN SELECT RAISE(ABORT, 'injected'); END");
+    await holdOutbox(id);
+    await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${bob.id}`);
+    await releaseOutbox(id);
+    await runDurableObjectAlarm(stub(id));
+    // The room's row is still queued, and the failed attempt cleared nothing and set no floor.
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT max(attempts) AS n FROM outbox").one().n)).toBe(1);
+    expect((await inbox(bob)).events.map((e: any) => e.task_id)).toEqual([task.id]);
+    expect(await runInDurableObject(inboxStub(bob.id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM inbox_floor WHERE workspace_id = ?", id).one().n)).toBe(0);
+    await principalSql("DROP TRIGGER test_fail_notice");
+    await runInDurableObject(stub(id), async (_: any, state: any) => {
+      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = 0");
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+    await drain(id);
+    const after = (await inbox(bob, "?after=0&limit=50")).events.filter((e: any) => e.workspace_id === id);
+    expect(after.map((e: any) => e.type)).toEqual(["member.revoked"]);
   });
 
   it("the alarm follows whichever recipient is due first, not the one waiting longest", async () => {
