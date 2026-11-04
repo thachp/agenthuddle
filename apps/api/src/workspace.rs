@@ -7,7 +7,9 @@ use crate::store::{
     self, exec, flag, int, load_task, opt, participant, record_decision, record_event, rows,
     save_task, text, Transition,
 };
-use crate::{Caller as Verified, CALLER_HEADER, INTERNAL_INIT_PATH};
+use crate::{
+    Caller as Verified, AGENT_ID_PREFIX, CALLER_HEADER, INTERNAL_ACCEPT_PATH, INTERNAL_INIT_PATH,
+};
 use podster_core::{
     apply_departure, decide, decide_create, Artifact, Command, NewTask, Observed, Task, TaskPatch,
     TaskStatus, MAX_MESSAGE_BYTES,
@@ -610,6 +612,7 @@ fn handle_add_member(
     if !["person", "agent"].contains(&kind.as_str())
         || !["admin", "member", "guest"].contains(&role.as_str())
         || is_owner(sql, &principal)?
+        || (kind == "person") == principal.starts_with(AGENT_ID_PREFIX)
     {
         return Err(ApiError::invalid_argument());
     }
@@ -747,7 +750,7 @@ fn handle_create_invitation(
         Some(json!({ "role": role, "invited_org_id": invited_org }).to_string()),
         now,
     )?;
-    // The token is returned once. Only its hash is stored, and the idempotent replay never returns it again.
+    // The token is returned once. Only its hash is stored, and `command` removes it from the idempotency record.
     Ok(
         json!({ "id": id, "token": format!("inv_{room}.{id}.{secret}"), "role": role, "expires_at": expires_at }),
     )
@@ -954,6 +957,41 @@ fn handle_revoke_member(
     Ok(json!({ "principal_id": principal, "status": "revoked" }))
 }
 
+/// Clears a room's removal, so the agent can return through an invitation. It's the room's decision alone.
+fn handle_clear_removal(
+    sql: &SqlStorage,
+    caller: &Caller,
+    principal: &str,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    require_policy_version(sql, body)?;
+    let found = rows(
+        sql,
+        "SELECT revocation_reason FROM member WHERE principal_id = ? AND revoked_at IS NOT NULL",
+        vec![principal.into()],
+    )?;
+    if found.first().and_then(|m| m["revocation_reason"].as_str()) != Some("room_removed") {
+        return Err(ApiError::invalid_argument());
+    }
+    exec(
+        sql,
+        "UPDATE member SET revocation_reason = 'removal_cleared' WHERE principal_id = ?",
+        vec![principal.into()],
+    )?;
+    audit(
+        sql,
+        caller,
+        "member.removal_cleared",
+        principal,
+        None,
+        None,
+        now,
+    )?;
+    Ok(json!({ "principal_id": principal, "status": "removal_cleared" }))
+}
+
 fn kind_name(caller: &Caller) -> &'static str {
     if caller.kind == PrincipalKind::Person {
         "person"
@@ -1149,8 +1187,13 @@ impl Workspace {
                 return Ok(());
             }
             let value = handler(&sql, &who, now)?;
+            // A secret in a response is returned once and never stored, so a replay can't reveal it.
+            let mut stored = value.clone();
+            if let Some(map) = stored.as_object_mut() {
+                map.remove("token");
+            }
             exec(&sql, "INSERT OR REPLACE INTO idempotency (actor_id, key, request_hash, response_json, expires_at) VALUES (?, ?, ?, ?, ?)", vec![
-                identity.id.as_str().into(), key.as_str().into(), hash.as_str().into(), value.to_string().into(), (now + IDEMPOTENCY_TTL_MS).into(),
+                identity.id.as_str().into(), key.as_str().into(), hash.as_str().into(), stored.to_string().into(), (now + IDEMPOTENCY_TTL_MS).into(),
             ])?;
             #[cfg(feature = "failpoints")]
             if test_fail {
@@ -1176,6 +1219,8 @@ impl Workspace {
             let now = now_ms();
             exec(&sql, "INSERT INTO principal_fence (principal_id, min_generation) VALUES (?, ?)
               ON CONFLICT (principal_id) DO UPDATE SET min_generation = max(min_generation, excluded.min_generation)", vec![principal.as_str().into(), floor.into()])?;
+            // A disconnect cancels any earlier consent to return.
+            exec(&sql, "UPDATE member SET owner_consented_at = NULL WHERE principal_id = ? AND revoked_at IS NOT NULL", vec![principal.as_str().into()])?;
             let found = rows(&sql, "SELECT join_generation FROM member WHERE principal_id = ? AND revoked_at IS NULL AND kind = 'agent'", vec![principal.as_str().into()])?;
             if found
                 .first()
@@ -1257,29 +1302,23 @@ impl Workspace {
     /// Accepts an invitation for agents of the caller's organization. Both sides are people.
     async fn accept_invitation(&self, identity: &Identity, body: &Value) -> R<Value> {
         let sql = self.state.storage().sql();
+        if identity.kind != "person" {
+            return Err(ApiError::not_allowed());
+        }
+        if !store::is_initialized(&sql)? {
+            return Err(ApiError::invitation_not_found());
+        }
+        if store::needs_migration(&sql)? {
+            let migrating = sql.clone();
+            transaction_sync(&self.state, move || store::migrate(&migrating))?;
+        }
         let token = required(body, "token")?;
         let (id, secret) = parse_token(&token).ok_or_else(ApiError::invitation_not_found)?;
         let now = now_ms();
         let invitation =
             find_invitation(&sql, &id, &secret, now)?.ok_or_else(ApiError::invitation_not_found)?;
-        // A retry by the same person gets the first answer, so a lost response is safe.
-        if invitation["status"].as_str() == Some("accepted") {
-            if invitation["accepted_by"].as_str() == Some(identity.id.as_str()) {
-                return Ok(serde_json::from_str(
-                    invitation["accepted_response"].as_str().unwrap_or("null"),
-                )?);
-            }
-            return Err(ApiError::invitation_not_found());
-        }
         let org = required(body, "org_id")?;
-        if !identity.admin_orgs.contains(&org)
-            || invitation["invited_org_id"]
-                .as_str()
-                .is_some_and(|o| o != org)
-        {
-            return Err(ApiError::not_allowed());
-        }
-        let agents: Vec<String> = body
+        let mut agents: Vec<String> = body
             .get("agents")
             .and_then(Value::as_array)
             .ok_or_else(ApiError::invalid_argument)?
@@ -1290,6 +1329,33 @@ impl Workspace {
                     .ok_or_else(ApiError::invalid_argument)
             })
             .collect::<R<_>>()?;
+        agents.sort();
+        agents.dedup();
+        let request = json!({ "org_id": org, "agents": agents }).to_string();
+        // A retry of the same request by the same person gets the first answer, so a lost response is safe.
+        let replay = |row: &Value| -> R<Option<Value>> {
+            if row["status"].as_str() != Some("accepted") {
+                return Ok(None);
+            }
+            if row["accepted_by"].as_str() == Some(identity.id.as_str())
+                && row["accepted_request"].as_str() == Some(request.as_str())
+            {
+                return Ok(Some(serde_json::from_str(
+                    row["accepted_response"].as_str().unwrap_or("null"),
+                )?));
+            }
+            Err(ApiError::invitation_not_found())
+        };
+        if let Some(answer) = replay(&invitation)? {
+            return Ok(answer);
+        }
+        if !identity.admin_orgs.contains(&org)
+            || invitation["invited_org_id"]
+                .as_str()
+                .is_some_and(|o| o != org)
+        {
+            return Err(ApiError::not_allowed());
+        }
         if agents.is_empty() || agents.len() > MAX_ACCEPT_AGENTS {
             return Err(ApiError::invalid_argument());
         }
@@ -1301,12 +1367,9 @@ impl Workspace {
         let mut registered = Vec::new();
         for agent in &agents {
             require_id(agent)?;
-            let (generation, agent_org) =
-                principal::register_room(&self.env, agent, &identity.workspace_id).await?;
-            if agent_org != org {
-                principal::unregister_room(&self.env, agent, &identity.workspace_id).await?;
-                return Err(ApiError::not_allowed());
-            }
+            // One answer whether the agent is unknown, elsewhere or disconnected, so IDs can't be probed here.
+            let generation =
+                principal::register_room(&self.env, agent, &org, &identity.workspace_id).await?;
             registered.push((agent.clone(), test_generation.unwrap_or(generation)));
         }
         let person = identity.id.clone();
@@ -1315,8 +1378,18 @@ impl Workspace {
         transaction_sync(&self.state, move || {
             let now = now_ms();
             let found = find_invitation(&sql, &id, &secret, now)?
-                .filter(|i| i["status"].as_str() == Some("pending"))
                 .ok_or_else(ApiError::invitation_not_found)?;
+            if found["status"].as_str() == Some("accepted") {
+                if found["accepted_by"].as_str() == Some(person.as_str())
+                    && found["accepted_request"].as_str() == Some(request.as_str())
+                {
+                    *slot.borrow_mut() = Some(serde_json::from_str(
+                        found["accepted_response"].as_str().unwrap_or("null"),
+                    )?);
+                    return Ok(());
+                }
+                return Err(ApiError::invitation_not_found());
+            }
             let role = text(&found["role"]).unwrap_or_else(|| "guest".to_string());
             let guest_can_create = int(&found["guest_can_create"]) != 0;
             let actor = Caller {
@@ -1328,11 +1401,23 @@ impl Workspace {
             let mut joined = Vec::new();
             for (agent, generation) in &registered {
                 if is_owner(&sql, agent)? {
-                    return Err(ApiError::invalid_argument());
+                    return Err(ApiError::not_allowed());
                 }
                 require_past_fence(&sql, agent, *generation)?;
-                if participant(&sql, agent)?.is_some() {
-                    continue;
+                let existing = rows(&sql, "SELECT kind, org_id, revoked_at, revocation_reason FROM member WHERE principal_id = ?", vec![agent.as_str().into()])?;
+                let mut returning = false;
+                if let Some(row) = existing.first() {
+                    if row["revoked_at"].is_null() {
+                        continue;
+                    }
+                    // An invitation can't undo the room's decision or take over another identity.
+                    if row["revocation_reason"].as_str() == Some("room_removed")
+                        || row["kind"].as_str() != Some("agent")
+                        || row["org_id"].as_str() != Some(org.as_str())
+                    {
+                        return Err(ApiError::not_allowed());
+                    }
+                    returning = true;
                 }
                 if active_count(&sql)? + 1 >= MAX_MEMBERS {
                     return Err(ApiError::limit_exceeded());
@@ -1353,7 +1438,7 @@ impl Workspace {
                     &actor,
                     "member.added",
                     agent,
-                    None,
+                    returning.then(|| json!({ "revoked": true }).to_string()),
                     Some(
                         json!({ "role": role, "kind": "agent", "org_id": org, "invitation": id })
                             .to_string(),
@@ -1371,8 +1456,13 @@ impl Workspace {
                 )?;
                 joined.push(agent.clone());
             }
+            // Accepting for agents already here changes nothing, so it doesn't use up the invitation.
+            if joined.is_empty() {
+                return Err(ApiError::already_member());
+            }
             let response = json!({ "status": "accepted", "agents": joined });
-            exec(&sql, "UPDATE invitation SET status = 'accepted', accepted_by = ?, accepted_response = ? WHERE id = ?", vec![person.as_str().into(), response.to_string().into(), id.as_str().into()])?;
+            exec(&sql, "UPDATE invitation SET status = 'accepted', accepted_by = ?, accepted_request = ?, accepted_response = ? WHERE id = ?",
+                vec![person.as_str().into(), request.as_str().into(), response.to_string().into(), id.as_str().into()])?;
             *slot.borrow_mut() = Some(response);
             Ok(())
         })?;
@@ -1487,6 +1577,17 @@ impl Workspace {
         let path = req.path();
         let url = req.url()?;
 
+        if path == INTERNAL_ACCEPT_PATH {
+            if cfg!(feature = "failpoints") {
+                *self.test_generation.borrow_mut() = req
+                    .headers()
+                    .get("x-test-join-generation")?
+                    .and_then(|v| v.parse().ok());
+            }
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return self.accept_invitation(&identity, &body).await;
+        }
         if path == INTERNAL_INIT_PATH {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
@@ -1495,11 +1596,7 @@ impl Workspace {
 
         // An unknown room answers from a read, so it stays empty.
         if !store::is_initialized(&sql)? {
-            return Err(if path.ends_with("/invitations/accept") {
-                ApiError::invitation_not_found()
-            } else {
-                ApiError::workspace_not_found()
-            });
+            return Err(ApiError::workspace_not_found());
         }
         if store::needs_migration(&sql)? {
             let migrating = sql.clone();
@@ -1514,11 +1611,7 @@ impl Workspace {
             *self.test_generation.borrow_mut() = forced;
         }
         // These two come from the other organization or an agent's owner, who may have no role in this room.
-        if method == Method::Post && path_parts.get(3..) == Some(&["invitations", "accept"][..]) {
-            let body: Value = serde_json::from_str(&req.text().await?)
-                .map_err(|_| ApiError::invalid_argument())?;
-            return self.accept_invitation(&identity, &body).await;
-        }
+
         if method == Method::Post {
             if let Some(["members", agent, verb @ ("withdraw" | "owner-consent")]) =
                 path_parts.get(3..)
@@ -1596,22 +1689,21 @@ impl Workspace {
                         WorkroomAction::ManageAccess,
                     ))?;
                     require_id(agent)?;
-                    let (generation, org) =
-                        principal::register_room(&self.env, agent, &identity.workspace_id)
+                    let org = field(&body, "org_id")?.ok_or_else(ApiError::invalid_argument)?;
+                    let generation =
+                        principal::register_room(&self.env, agent, &org, &identity.workspace_id)
                             .await
                             .map_err(|_| ApiError::invalid_argument())?;
                     registered = Some((self.test_generation.borrow().unwrap_or(generation), org));
                 }
-                let result = self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
                     handle_add_member(sql, &who.caller, &body, registered, now)
-                });
-                if let (Err(_), Some(agent)) = (&result, &agent) {
-                    if participant(&sql, agent)?.is_none() {
-                        principal::unregister_room(&self.env, agent, &identity.workspace_id)
-                            .await?;
-                    }
-                }
-                result
+                })
+            }
+            (Method::Post, ["members", _, "clear-removal"]) => {
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_clear_removal(sql, &who.caller, &target, &body, now)
+                })
             }
             (Method::Post, ["invitations"]) => {
                 let room = identity.workspace_id.clone();
@@ -1662,11 +1754,16 @@ impl DurableObject for Workspace {
                     .unwrap_or(false),
                 _ => false,
             };
-            if queued {
-                self.state
+            // The command has already committed, so a scheduling problem can't change its answer. The next write retries.
+            if queued && matches!(self.state.storage().get_alarm().await, Ok(None)) {
+                if let Err(error) = self
+                    .state
                     .storage()
                     .set_alarm(std::time::Duration::from_millis(50))
-                    .await?;
+                    .await
+                {
+                    console_error!("couldn't schedule index projection: {error}");
+                }
             }
         }
         response

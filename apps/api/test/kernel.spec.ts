@@ -6,7 +6,7 @@ const BINDINGS = env as any;
 let key: any;
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
-  await BINDINGS.DB.exec("CREATE TABLE IF NOT EXISTS membership_index (workspace_id TEXT NOT NULL, principal_id TEXT NOT NULL, org_id TEXT NOT NULL, role TEXT, workspace_name TEXT NOT NULL, removed INTEGER NOT NULL DEFAULT 0, updated_seq INTEGER NOT NULL, PRIMARY KEY (workspace_id, principal_id))");
+  for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
   for (const who of [LEAD, REVIEWER, BOB, CAROL, OUTSIDER]) await register(who);
 });
 
@@ -146,6 +146,8 @@ describe("rooms", () => {
       ["GET", ""], ["GET", "/tasks"], ["GET", "/tasks/tsk_1"], ["GET", "/bogus"], ["GET", "/events"], ["GET", "/audit"],
       ["POST", "/tasks", valid], ["POST", "/tasks", valid, "k"], ["POST", "/tasks", "{bad json", "k"], ["POST", "/bogus", valid, "k"],
       ["PUT", "", valid], ["PUT", "/tasks", valid, "k"], ["DELETE", "/members/x"], ["DELETE", "/members/x", undefined, "k"], ["POST", "/members", "{}", "k"],
+      ["POST", "/invitations", valid, "k"], ["POST", "/invitations", "{bad", "k"], ["POST", "/invitations/accept", "{}"], ["POST", "/invitations/accept", "{bad"], ["DELETE", "/invitations/x", "{}", "k"],
+      ["POST", "/members/agt_x/withdraw", "{}"], ["POST", "/members/agt_x/owner-consent", "{}"], ["POST", "/members/agt_x/clear-removal", "{}", "k"], ["POST", "/members/agt_x/role", "{}", "k"],
     ];
     for (const [method, tail, body, key] of requests) {
       const [onReal, onFake] = [await raw(id, method, tail, body, key), await raw("ws_also_fake", method, tail, body, key)];
@@ -441,6 +443,9 @@ describe("review findings", () => {
   it("a revoked participant returns only with the same identity", async () => {
     const { id } = await room();
     await api(OWNER, "DELETE", `${members(id)}/${BOB.id}`);
+    expect((await admit(id, BOB)).code).toBe("not_allowed");
+    expect((await api(LEAD, "POST", `${members(id)}/${BOB.id}/clear-removal`, {})).code).toBe("not_allowed");
+    expect((await api(OWNER, "POST", `${members(id)}/${BOB.id}/clear-removal`, {})).status).toBe(200);
     expect((await admit(id, BOB)).status).toBe(200);
     expect((await api(BOB, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
   });
@@ -598,13 +603,9 @@ describe("review findings", () => {
     await api(OWNER, "POST", members(id), { principal_id: "per_m", kind: "person", org_id: "org_a", role: "member" });
     expect((await api(ADMIN, "POST", `${members(id)}/per_m/role`, { role: "admin" })).code).toBe("not_allowed");
     expect((await api(OWNER, "POST", `${members(id)}/per_m/role`, { role: "admin" })).status).toBe(200);
-    await api(OWNER, "POST", members(id), { principal_id: "per_typo", kind: "person", org_id: "org_a", role: "guest" });
-    await api(OWNER, "DELETE", `${members(id)}/per_typo`);
-    await register({ id: "per_typo", org: "org_a" });
-    const correct = { principal_id: "per_typo", kind: "agent", org_id: "org_a", role: "guest" };
-    expect((await api(ADMIN, "POST", members(id), correct)).code).toBe("not_allowed");
-    expect((await api(OWNER, "POST", members(id), correct)).status).toBe(200);
-    expect((await api({ id: "per_typo", org: "org_a" }, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    // Person and agent IDs live in separate namespaces, so neither can pose as the other.
+    expect((await api(OWNER, "POST", members(id), { principal_id: "agt_person", kind: "person", org_id: "org_a", role: "guest" })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "POST", members(id), { principal_id: "per_agent", kind: "agent", org_id: "org_a", role: "guest" })).code).toBe("invalid_argument");
   });
 
   it("a wrong identity can't learn about a revocation, and people must match their stored org", async () => {
@@ -694,6 +695,7 @@ describe("agent identity and connection", () => {
     expect((await put(orgAdmin("org_a"), "agt_new1", "org_a")).status).toBe("active");
     expect((await put(orgAdmin("org_m"), "agt_new1", "org_m")).error.code).toBe("not_allowed");
     expect((await put(orgAdmin("org_a"), "bad id", "org_a")).error.code).toBe("agent_not_found");
+    expect((await put(orgAdmin("org_a"), "per_looks_like_a_person", "org_a")).error.code).toBe("not_allowed");
   });
 
   it("an unregistered agent is refused everywhere, and agents can see only themselves", async () => {
@@ -769,7 +771,7 @@ describe("global disconnect fence", () => {
     const { id } = await room();
     const agent = await fresh("late");
     // The join passes its Principal check, then stalls before reaching the room.
-    await principal(agent).fetch("https://principal/internal/register-room", { method: "POST", body: JSON.stringify({ workspace_id: id }) });
+    await principal(agent).fetch("https://principal/internal/register-room", { method: "POST", body: JSON.stringify({ workspace_id: id, org_id: agent.org }) });
     expect((await disconnect(agent)).status).toBe("disconnected");
     const floor = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT min_generation AS m FROM principal_fence WHERE principal_id = ?", agent.id).one().m);
     expect(floor).toBe(2);
@@ -860,12 +862,57 @@ describe("global disconnect fence", () => {
     expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
   });
 
-  it("removes a refused join from the agent's room list", async () => {
+  it("a refused join never removes a member's room entry, so a later disconnect still reaches the room", async () => {
     const { id } = await room();
-    const other = await fresh("cross", "org_b");
-    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: other.id, kind: "agent", org_id: "org_b", role: "guest" })).code).toBe("invitation_required");
-    const count = await runInDurableObject(principal(other), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM room_registry").one().n);
-    expect(count).toBe(0);
+    const member = await fresh("kept", "org_b");
+    expect((await admit(id, member)).status).toBe(200);
+    // Another organization tries to accept an invitation naming this agent.
+    const { token } = (await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" })).body;
+    expect((await api(orgAdmin("org_c"), "POST", "/v1/invitations/accept", { token, org_id: "org_c", agents: [member.id] })).code).toBe("not_allowed");
+    // A refused direct add, including one racing a valid add.
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: member.id, kind: "agent", org_id: "org_b", role: "guest" })).code).toBe("invitation_required");
+    const rooms = () => runInDurableObject(principal(member), (_: any, state: any) => state.storage.sql.exec("SELECT workspace_id FROM room_registry").toArray().map((r: any) => r.workspace_id) as string[]);
+    expect(await rooms()).toEqual([id]);
+    expect((await disconnect(member)).status).toBe("disconnected");
+    const row = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT revoked_at AS r FROM member WHERE principal_id = ?", member.id).one().r);
+    expect(row).not.toBeNull();
+    await reconnect(member);
+    expect((await api(generation(member, 3), "GET", `/v1/workspaces/${id}`)).code).toBe("access_revoked");
+  });
+
+  it("concurrent adds keep the room entry whichever one is refused", async () => {
+    const { id } = await room();
+    for (let run = 0; run < 5; run++) {
+      const agent = await fresh("race");
+      const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+      const body = { principal_id: agent.id, kind: "agent", org_id: "org_a", role: "member" };
+      await Promise.all([
+        api(OWNER, "POST", `/v1/workspaces/${id}/members`, { ...body, policy_version: version - 1 }),
+        api(OWNER, "POST", `/v1/workspaces/${id}/members`, { ...body, policy_version: version }),
+      ]);
+      const entries = await runInDurableObject(principal(agent), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM room_registry").one().n);
+      expect(entries).toBe(1);
+    }
+  });
+
+  it("cancels earlier consent, and arms a retry until the fan-out finishes", async () => {
+    const { id } = await room();
+    const agent = await fresh("consent");
+    const members = `/v1/workspaces/${id}/members`;
+    const add = { principal_id: agent.id, kind: "agent", org_id: "org_a", role: "member" };
+    await api(OWNER, "POST", members, add);
+    await api(orgAdmin("org_a"), "POST", `${members}/${agent.id}/withdraw`, {});
+    await api(orgAdmin("org_a"), "POST", `${members}/${agent.id}/owner-consent`, {});
+    await disconnect(agent);
+    await reconnect(agent);
+    expect((await api(ADMIN, "POST", members, add)).code).toBe("not_allowed");
+
+    const held = await fresh("armed");
+    await disconnect(held, { "x-test-hold-fan-out": "1" });
+    const alarm = () => runInDurableObject(principal(held), (_: any, state: any) => state.storage.getAlarm());
+    expect(await alarm()).not.toBeNull();
+    await api(orgAdmin("org_a"), "POST", `/v1/agents/${held.id}/test-release-fan-out`, {});
+    expect(await alarm()).toBeNull();
   });
 });
 
@@ -932,13 +979,103 @@ describe("invitations", () => {
     expect((await accept(admin, withdrawn.token, "org_b", [BOB.id])).code).toBe("invitation_not_found");
   });
 
+  it("doesn't keep the token, and a replay can't reveal it", async () => {
+    const { id } = await room();
+    const key = nextKey();
+    const path = `/v1/workspaces/${id}/invitations`;
+    const body = { role: "guest", policy_version: (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version };
+    const first = await api(OWNER, "POST", path, body, { key });
+    const secret = first.body.token.split(".")[2];
+    const replay = await api(OWNER, "POST", path, body, { key });
+    expect(replay.body.id).toBe(first.body.id);
+    expect(replay.body.token).toBeUndefined();
+    const stored = await runInDurableObject(stub(id), (_: any, state: any) => JSON.stringify(state.storage.sql.exec("SELECT * FROM idempotency").toArray()));
+    expect(stored).not.toContain(secret);
+  });
+
+  it("agents can't accept, even carrying admin_orgs or using the room's path", async () => {
+    const { id } = await room();
+    const { token } = await invite(id);
+    const agent = { ...BOB, adminOrgs: ["org_b"] };
+    const signed = await assertion(agent, { claims: { admin_orgs: ["org_b"] } });
+    expect((await api(agent, "POST", "/v1/invitations/accept", { token, org_id: "org_b", agents: [BOB.id] }, { token: signed })).code).toBe("not_allowed");
+    const direct = await stub(id).fetch("https://do/internal/accept", { method: "POST", headers: { "x-podster-caller": JSON.stringify({ id: BOB.id, kind: "agent", org: "org_b", admin_orgs: ["org_b"], gen: 1, workspace_id: id }) }, body: JSON.stringify({ token, org_id: "org_b", agents: [BOB.id] }) });
+    expect((await direct.json<any>()).error.code).toBe("not_allowed");
+    const viaRoom = await api(orgAdmin("org_b"), "POST", `/v1/workspaces/${id}/invitations/accept`, { token, org_id: "org_b", agents: [BOB.id] });
+    expect(viaRoom.code).toBe("workspace_not_found");
+  });
+
+  it("can't overwrite a person's row or use up an invitation for nothing", async () => {
+    const { id } = await room();
+    await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: "per_victim", kind: "person", org_id: "org_a", role: "member" });
+    await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/per_victim`);
+    const put = await SELF.fetch("https://api.internal/v1/agents/per_victim", { method: "PUT", headers: { "x-podster-assertion": await assertion(orgAdmin("org_b")) }, body: JSON.stringify({ org_id: "org_b" }) });
+    expect(put.status).toBe(403);
+    const { token } = await invite(id);
+    expect((await accept(orgAdmin("org_b"), token, "org_b", ["per_victim"])).code).toBe("not_allowed");
+    // Bob is already here, so the invitation stays usable.
+    expect((await accept(orgAdmin("org_b"), token, "org_b", [BOB.id])).code).toBe("already_member");
+    const newcomer: Who = { id: `agt_after_${++counter}`, org: "org_b" };
+    await register(newcomer);
+    expect((await accept(orgAdmin("org_b"), token, "org_b", [newcomer.id])).status).toBe(200);
+    // A retry naming someone else isn't the same request.
+    expect((await accept(orgAdmin("org_b"), token, "org_b", [BOB.id])).code).toBe("invitation_not_found");
+  });
+
+  it("applies the invitation's settings and limits, and one of two racing acceptors wins", async () => {
+    const { id, tasks } = await room();
+    const creator: Who = { id: `agt_guest_${++counter}`, org: "org_b" };
+    await register(creator);
+    const first = await invite(id, { guest_can_create: true });
+    expect((await accept(orgAdmin("org_b"), first.token, "org_b", [creator.id])).status).toBe(200);
+    expect((await api(creator, "POST", tasks, { title: "x", instructions: "y" })).status).toBe(200);
+
+    const racing = await invite(id);
+    const [a, b]: Who[] = [{ id: `agt_r1_${++counter}`, org: "org_b" }, { id: `agt_r2_${++counter}`, org: "org_c" }];
+    await register(a);
+    await register(b);
+    const results = await Promise.all([accept(orgAdmin("org_b"), racing.token, "org_b", [a.id]), accept(orgAdmin("org_c"), racing.token, "org_c", [b.id])]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 404]);
+
+    const stale = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version - 1;
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: stale })).code).toBe("version_conflict");
+
+    await runInDurableObject(stub(id), (_: any, state: any) => {
+      for (let i = 0; i < 50; i++) state.storage.sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at, join_generation) VALUES (?, 'agent', 'org_z', 'guest', 'seed', 0, 1)", `agt_seed${i}`);
+    });
+    const over: Who = { id: `agt_over_${++counter}`, org: "org_b" };
+    await register(over);
+    const late = await invite(id);
+    expect((await accept(orgAdmin("org_b"), late.token, "org_b", [over.id])).code).toBe("limit_exceeded");
+  });
+
+  it("can't take over a revoked row with another identity, and refuses unknown kinds", async () => {
+    const { id } = await room();
+    const agent: Who = { id: `agt_seeded_${++counter}`, org: "org_b" };
+    await register(agent);
+    await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at, revoked_at, revocation_reason, join_generation) VALUES (?, 'agent', 'org_z', 'guest', 'seed', 0, 1, 'owner_withdrawn', 1)", agent.id));
+    const { token } = await invite(id);
+    expect((await accept(orgAdmin("org_b"), token, "org_b", [agent.id])).code).toBe("not_allowed");
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: "per_robot", kind: "robot", org_id: "org_a", role: "guest" })).code).toBe("invalid_argument");
+  });
+
+  it("refuses a late acceptance below the room's floor", async () => {
+    const { id } = await room();
+    const agent: Who = { id: `agt_lateaccept_${++counter}`, org: "org_b" };
+    await register(agent);
+    await stub(id).fetch("https://workspace/internal/revoke", { method: "POST", body: JSON.stringify({ principal: agent.id, floor: 5 }) });
+    const { token } = await invite(id);
+    const res = await SELF.fetch("https://api.internal/v1/invitations/accept", { method: "POST", headers: { "x-podster-assertion": await assertion(orgAdmin("org_b")), "x-test-join-generation": "1" }, body: JSON.stringify({ token, org_id: "org_b", agents: [agent.id] }) });
+    expect((await res.json<any>()).error.code).toBe("agent_disconnected");
+  });
+
   it("refuses a disconnected agent, and other organizations can't be added without one", async () => {
     const { id } = await room();
     const off: Who = { id: `agt_off_${++counter}`, org: "org_b" };
     await register(off);
     await api(orgAdmin("org_b"), "POST", `/v1/agents/${off.id}/disconnect`, {});
     const { token } = await invite(id);
-    expect((await accept(orgAdmin("org_b"), token, "org_b", [off.id])).code).toBe("agent_disconnected");
+    expect((await accept(orgAdmin("org_b"), token, "org_b", [off.id])).code).toBe("not_allowed");
     const direct = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: "per_other", kind: "person", org_id: "org_b", role: "guest" });
     expect(direct.code).toBe("invitation_required");
   });
@@ -957,6 +1094,17 @@ describe("agent-owner withdrawal", () => {
     expect((await api(BOB, "GET", `/v1/workspaces/${id}`)).code).toBe("access_revoked");
     const after = (await api(LEAD, "GET", `${tasks}/${t.id}`)).body.task;
     expect([after.status, after.assignee]).toEqual(["open", null]);
+  });
+
+  it("applies only to agents, and consent means nothing while active", async () => {
+    const { id } = await room();
+    const members = `/v1/workspaces/${id}/members`;
+    await api(OWNER, "POST", members, { principal_id: "per_staff", kind: "person", org_id: "org_a", role: "member" });
+    expect((await api(orgAdmin("org_a"), "POST", `${members}/per_staff/withdraw`, {})).code).toBe("workspace_not_found");
+    expect((await api({ id: "per_staff", kind: "person", org: "org_a" }, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    expect((await api(orgAdmin("org_a"), "POST", `${members}/${LEAD.id}/owner-consent`, {})).status).toBe(200);
+    await api(orgAdmin("org_a"), "POST", `${members}/${LEAD.id}/withdraw`, {});
+    expect((await api(ADMIN, "POST", members, { principal_id: LEAD.id, kind: "agent", org_id: "org_a", role: "member" })).code).toBe("not_allowed");
   });
 
   it("a withdrawn agent returns only with its owner's consent, not the room's say-so", async () => {
@@ -1001,6 +1149,11 @@ describe("workspace listing", () => {
     await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${BOB.id}`);
     await runDurableObjectAlarm(stub(id));
     expect(await list(BOB)).not.toContain(id);
+    // A delayed older update can't restore a newer row.
+    await BINDINGS.DB.prepare("UPDATE membership_index SET updated_seq = 1000000, removed = 1 WHERE workspace_id = ? AND principal_id = ?").bind(id, LEAD.id).run();
+    await api(OWNER, "POST", `/v1/workspaces/${id}/members/${LEAD.id}/role`, { role: "guest" });
+    await runDurableObjectAlarm(stub(id));
+    expect(await list(LEAD)).not.toContain(id);
     // A forged or stale listing row grants nothing.
     await BINDINGS.DB.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, 'org_x', 'admin', 'x', 0, 999)").bind(id, OUTSIDER.id).run();
     expect(await list(OUTSIDER)).toContain(id);

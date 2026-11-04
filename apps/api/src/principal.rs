@@ -66,35 +66,22 @@ pub async fn check_active(env: &Env, agent: &str, generation: Option<u64>) -> R<
     }
 }
 
-/// Records a room before a join commits, so a later disconnect always reaches it. Refused unless the agent is active.
-pub async fn register_room(env: &Env, agent: &str, workspace_id: &str) -> R<(u64, String)> {
+/// Records a room before a join commits, so a later disconnect always reaches it. Refused unless the agent is
+/// active and belongs to `org`. Entries are never removed: a stale one costs only a harmless extra revoke, while
+/// removing one could let a disconnect miss a room.
+pub async fn register_room(env: &Env, agent: &str, org: &str, workspace_id: &str) -> R<u64> {
     let mut response = internal(
         env,
         agent,
         "/internal/register-room",
-        &json!({ "workspace_id": workspace_id }),
+        &json!({ "workspace_id": workspace_id, "org_id": org }),
     )
     .await?;
     if response.status_code() != 200 {
-        return Err(ApiError::agent_disconnected());
+        return Err(ApiError::not_allowed());
     }
     let body: Value = response.json().await?;
-    Ok((
-        int(&body["generation"]) as u64,
-        text(&body["org_id"]).unwrap_or_default(),
-    ))
-}
-
-/// Removes a registry entry after a room refuses the join.
-pub async fn unregister_room(env: &Env, agent: &str, workspace_id: &str) -> R<()> {
-    internal(
-        env,
-        agent,
-        "/internal/unregister-room",
-        &json!({ "workspace_id": workspace_id }),
-    )
-    .await?;
-    Ok(())
+    Ok(int(&body["generation"]) as u64)
 }
 
 async fn internal(env: &Env, agent: &str, path: &str, body: &Value) -> R<Response> {
@@ -120,6 +107,13 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// Whether this fan-out still speaks for the current disconnect. Awaits can outlast it.
+    fn is_current(sql: &SqlStorage, floor: i64) -> R<bool> {
+        Ok(connection(sql)?.is_some_and(|c| {
+            c["status"].as_str() == Some(DISCONNECTING) && int(&c["generation"]) == floor
+        }))
+    }
+
     /// Sends the current floor to every room that hasn't acknowledged it. Only then is the agent disconnected.
     async fn fan_out(&self) -> R<()> {
         let sql = self.state.storage().sql();
@@ -129,6 +123,11 @@ impl Principal {
         if conn["status"].as_str() != Some(DISCONNECTING) {
             return Ok(());
         }
+        // Armed before the first await, so an eviction mid-way still retries.
+        self.state
+            .storage()
+            .set_alarm(Duration::from_secs(RETRY_SECS))
+            .await?;
         #[cfg(feature = "failpoints")]
         if !rows(
             &sql,
@@ -137,16 +136,11 @@ impl Principal {
         )?
         .is_empty()
         {
-            self.state
-                .storage()
-                .set_alarm(Duration::from_secs(RETRY_SECS))
-                .await?;
             return Ok(());
         }
         let floor = int(&conn["generation"]);
         let agent = text(&conn["id"]).unwrap_or_default();
         let pending = rows(&sql, "SELECT workspace_id FROM room_registry WHERE revoke_acked_floor IS NULL OR revoke_acked_floor < ?", vec![floor.into()])?;
-        let mut remaining = 0;
         for room in &pending {
             let workspace_id = text(&room["workspace_id"]).unwrap_or_default();
             let stub = self
@@ -178,26 +172,21 @@ impl Principal {
                 )?
                 .is_empty();
             if acked {
-                exec(
-                    &sql,
-                    "UPDATE room_registry SET revoke_acked_floor = ? WHERE workspace_id = ?",
-                    vec![floor.into(), workspace_id.as_str().into()],
-                )?;
-            } else {
-                remaining += 1;
+                exec(&sql, "UPDATE room_registry SET revoke_acked_floor = max(coalesce(revoke_acked_floor, 0), ?) WHERE workspace_id = ?", vec![floor.into(), workspace_id.as_str().into()])?;
             }
         }
-        if remaining == 0 {
+        // A later disconnect or reconnect may have started during those awaits. It finishes its own fan-out.
+        if !Self::is_current(&sql, floor)? {
+            return Ok(());
+        }
+        let unacked = rows(&sql, "SELECT workspace_id FROM room_registry WHERE revoke_acked_floor IS NULL OR revoke_acked_floor < ? LIMIT 1", vec![floor.into()])?;
+        if unacked.is_empty() {
             exec(
                 &sql,
                 "UPDATE connection SET status = ?",
                 vec![DISCONNECTED.into()],
             )?;
-        } else {
-            self.state
-                .storage()
-                .set_alarm(Duration::from_secs(RETRY_SECS))
-                .await?;
+            self.state.storage().delete_alarm().await?;
         }
         Ok(())
     }
@@ -219,23 +208,14 @@ impl Principal {
             "/internal/register-room" => {
                 let body: Value = req.json().await?;
                 let conn = connection(&sql)?.ok_or_else(ApiError::agent_disconnected)?;
-                if conn["status"].as_str() != Some(ACTIVE) {
+                if conn["status"].as_str() != Some(ACTIVE)
+                    || conn["org_id"].as_str() != body["org_id"].as_str()
+                {
                     return Err(ApiError::agent_disconnected());
                 }
                 exec(&sql, "INSERT OR IGNORE INTO room_registry (workspace_id, registered_at) VALUES (?, ?)",
                     vec![body["workspace_id"].as_str().unwrap_or("").into(), now_ms().into()])?;
-                return Ok(json!({ "generation": conn["generation"], "org_id": conn["org_id"] }));
-            }
-            "/internal/unregister-room" => {
-                let body: Value = req.json().await?;
-                if connection(&sql)?.is_some() {
-                    exec(
-                        &sql,
-                        "DELETE FROM room_registry WHERE workspace_id = ?",
-                        vec![body["workspace_id"].as_str().unwrap_or("").into()],
-                    )?;
-                }
-                return Ok(json!({ "ok": true }));
+                return Ok(json!({ "generation": conn["generation"] }));
             }
             _ => {}
         }
@@ -262,10 +242,15 @@ impl Principal {
                 .as_str()
                 .ok_or_else(ApiError::invalid_argument)?
                 .to_string();
-            let name = body["name"].as_str().unwrap_or("agent").to_string();
+            let name = match body.get("name") {
+                None | Some(Value::Null) => "agent".to_string(),
+                Some(Value::String(name)) if !name.trim().is_empty() => name.clone(),
+                Some(_) => return Err(ApiError::invalid_argument()),
+            };
             if caller.kind != "person"
                 || !caller.admin_orgs.contains(&org)
                 || !crate::valid_id(&agent_id)
+                || !agent_id.starts_with(crate::AGENT_ID_PREFIX)
                 || !crate::valid_id(&org)
                 || name.len() > 200
             {
@@ -285,7 +270,8 @@ impl Principal {
             ));
         }
 
-        // An agent's existence is shared only with itself and its organization's admins.
+        // Reads are limited to the agent and its organization's admins. The gateway calls PUT only after a claim, so
+        // PUT's answer reveals nothing to clients.
         let conn = connection(&sql)?.ok_or_else(ApiError::agent_not_found)?;
         let org = conn["org_id"].as_str().unwrap_or_default();
         let is_org_admin = caller.kind == "person" && caller.admin_orgs.iter().any(|o| o == org);

@@ -275,7 +275,7 @@ sequenceDiagram
     P-->>Owner: Status: Disconnected
 ```
 
-1. **Registering a room.** A join calls `Principal.register_room`, which returns the current generation, before the workspace transaction commits. It is refused unless the connection is `active`. A retained entry after a crash only causes a harmless extra revoke, and a room that refuses the join removes the entry. The registry is therefore a superset of the agent's rooms, unlike the lagging D1 index.
+1. **Registering a room.** A join calls `Principal.register_room`, which returns the current generation, before the workspace transaction commits. It is refused unless the connection is `active`. Entries are never removed: a stale one causes only a harmless extra revoke, while removing one can't be made atomic with a concurrent join and could let a disconnect miss a room. The registry is therefore a superset of the agent's rooms, unlike the lagging D1 index.
 2. **Checking every command.** The API checks `Principal.active(gen)` before calling a workspace, including for reads and asynchronous disclosure, and passes `gen` to the room. An assertion minted before the disconnect fails from the moment the `Principal` commit in step 3 lands.
 3. **Fencing each room.** `revoke(agent, floor)` always sets `min_generation = max(existing, floor)` in the room's `principal_fence`, even if the agent is not yet a member, then revokes any membership whose `join_generation` is below `floor`. The room refuses any join or command carrying a generation below the floor. So a delayed join cannot commit after its room acknowledges, and a retried old revoke cannot remove a later membership. A room that does not exist acknowledges without creating state.
 4. **Linearization.** The disconnect takes effect at the `Principal` commit, and `podster_agent.revoked_at` in D1 then gives the gateway a fast refusal. A command that passed its check before that commit may still land, in which case its room's own transaction orders it before the revocation, and it is recorded. Only when every registry row has acknowledged the current floor does the state become **Disconnected**, so an acknowledgment from an earlier disconnect never counts. That is the point at which the product can say no further commit is possible.
@@ -287,8 +287,7 @@ This costs one extra DO call per command. A Miniflare spike must measure it and 
 
 1. A person admin of the workspace creates an invitation (`Workspace` DO stores a token hash) and shares the link.
 2. A person admin of org B opens it, signs in, and picks agents. The gateway sends `{token, org_B, agents[]}` with a
-   person assertion; the DO validates the token, expiry and that each agent belongs to `org_B` (agent→org comes from
-   the gateway, signed in the request), then adds members in one transaction. Each agent first passes `register_room`, and its generation is checked against the fence. A refused agent returns `agent_disconnected`.
+   person assertion; the DO validates the token and expiry, each agent's `Principal` confirms it's active and belongs to `org_B`, and the DO adds members in one transaction. Each agent first passes `register_room`, and its generation is checked against the fence. A refused agent returns `agent_disconnected`.
 
 ### Wake
 
@@ -333,7 +332,7 @@ GET    /health                                    private service binding only
 
 Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with stable codes:
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
-participant, who already knows the room exists), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
+participant, who already knows the room exists), `agent_not_found` (404), `invitation_not_found` (404), `invitation_required` (403), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
 `commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400), `invalid_assertion` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `not_implemented` (501), `internal_error` (500).
 

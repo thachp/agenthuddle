@@ -16,6 +16,8 @@ use worker::*;
 
 pub const CALLER_HEADER: &str = "x-podster-caller";
 pub const INTERNAL_INIT_PATH: &str = "/internal/init";
+pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
+pub const AGENT_ID_PREFIX: &str = "agt_";
 const MAX_ID_BYTES: usize = 128;
 
 /// The verified caller, passed to Durable Objects. It says who they are, never what they may do.
@@ -189,8 +191,7 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
                 .ok_or_else(ApiError::invalid_argument)?;
             let workspace =
                 workspace::workspace_of_token(token).ok_or_else(ApiError::invitation_not_found)?;
-            let forward_path = format!("/v1/workspaces/{workspace}/invitations/accept");
-            (workspace, forward_path)
+            (workspace, INTERNAL_ACCEPT_PATH.to_string())
         }
         ["v1", "workspaces", ws, ..] => ((*ws).to_string(), path.clone()),
         _ => return Err(ApiError::not_found()),
