@@ -147,6 +147,8 @@ export function spentToken(pluginAgent: string, authorization: string | null | u
 }
 
 export function createAuth(env: Env) {
+  // Better Auth falls back to a public default outside production, and Workers don't set NODE_ENV.
+  if (!env.AUTH_SECRET) throw new Error("AUTH_SECRET is not set");
   const social: Record<string, { clientId: string; clientSecret: string }> = {};
   if (env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) social.github = { clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET };
   if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) social.google = { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET };
@@ -155,13 +157,19 @@ export function createAuth(env: Env) {
     baseURL: env.BASE_URL,
     secret: env.AUTH_SECRET,
     emailAndPassword: { enabled: passwordSignInEnabled(env) },
+    // Never join accounts on a matching email: an address can move to someone else, or be verified somewhere it shouldn't.
+    account: { accountLinking: { disableImplicitLinking: true } },
+    // A failed sign-in comes back to our page, which only offers another try, instead of a page with no way back.
+    onAPIError: { errorURL: "/sign-in" },
     // The schema check would run on every request, because an instance lasts one request. A test checks for drift instead.
     advanced: { database: { validateSchema: false } },
     socialProviders: social,
     databaseHooks: {
       user: {
-        // Everyone starts with a personal organization, so individuals aren't a second ownership model.
         create: {
+          // An unverified email could claim someone else's address and lock out its real owner.
+          before: async (user) => (user.emailVerified || passwordSignInEnabled(env) ? undefined : false),
+          // Everyone starts with a personal organization, so individuals aren't a second ownership model.
           after: async (user) => {
             const org = newId("org");
             const now = Date.now();
@@ -293,14 +301,105 @@ async function grantIds(env: Env, person: string, externalId: string) {
 
 type ConsentChoices = { clientName: string; redirectHosts: string[]; query: string; orgs: { id: string; name: string }[]; agents: { id: string; org_id: string; name: string }[] };
 
+/** Our pages run no script and load nothing. Every value in `body` must already be escaped. */
+function page(title: string, body: string, status = 200) {
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title></head><body>
+<h1>${escapeHtml(title)}</h1>
+${body}
+</body></html>`;
+  // No form-action: Chromium applies it to the redirect after a form, which would block the return to a client or provider.
+  // Referrer policy same-origin: under no-referrer, Chromium sends `Origin: null` on a form's POST, which we refuse.
+  return new Response(html, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": `default-src 'none'; frame-ancestors 'none'; base-uri 'none'`, "x-frame-options": "DENY", "referrer-policy": "same-origin" },
+  });
+}
+
+/**
+ * Where sign-in may return to. Only our own pages that need a session, so a link can't use sign-in to send someone
+ * elsewhere. Anything else falls back to a plain confirmation.
+ */
+export function safeNext(value: string | null | undefined) {
+  const fallback = "/signed-in";
+  if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return fallback;
+  try {
+    const url = new URL(value, "https://gateway.invalid");
+    if (url.origin !== "https://gateway.invalid") return fallback;
+    return url.pathname === "/authorize" || url.pathname === "/claim" ? url.pathname + url.search : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+const signInRedirect = (request: Request) => {
+  const url = new URL(request.url);
+  return new Response(null, { status: 302, headers: { location: `/sign-in?next=${encodeURIComponent(url.pathname + url.search)}` } });
+};
+
+const SIGN_IN_PROVIDERS = { github: "GitHub", google: "Google" } as const;
+type SignInProvider = keyof typeof SIGN_IN_PROVIDERS;
+
+const configuredProviders = (env: Env): SignInProvider[] =>
+  [env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET ? ("github" as const) : null, env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? ("google" as const) : null].filter((p) => p !== null);
+
+function signInPage(env: Env, next: string, failed: boolean) {
+  const providers = configuredProviders(env);
+  // Fixed text, so a link can't put its own words on our page.
+  const notice = failed ? "<p>That sign-in didn't finish. Please try again, using the account you first signed in with, which needs a verified email.</p>" : "";
+  const buttons = providers.map((provider) => `<form method="post" action="/sign-in"><input type="hidden" name="provider" value="${provider}"><input type="hidden" name="next" value="${escapeHtml(next)}"><button type="submit">Continue with ${SIGN_IN_PROVIDERS[provider]}</button></form>`).join("");
+  return page("Sign in to Podster", notice + (buttons || "<p>Sign-in isn't set up here yet.</p>"), providers.length ? 200 : 503);
+}
+
+/** Starts a provider's sign-in as a form POST, so it needs no script on our page. */
+async function handleSignIn(request: Request, env: Env): Promise<Response> {
+  if (!sameOrigin(request, env)) return denied("not_allowed", 403);
+  const form = await request.formData().catch(() => null);
+  if (!form) return denied("invalid_argument", 400);
+  const provider = String(form.get("provider") ?? "");
+  const next = safeNext(String(form.get("next") ?? ""));
+  if (!(configuredProviders(env) as string[]).includes(provider)) return denied("invalid_argument", 400);
+  const started = await createAuth(env).api.signInSocial({ headers: request.headers, body: { provider, callbackURL: new URL(next, env.BASE_URL).toString(), errorCallbackURL: new URL(`/sign-in?next=${encodeURIComponent(next)}`, env.BASE_URL).toString() }, asResponse: true });
+  const body = await started.json<{ url?: string }>().catch(() => null);
+  if (!started.ok || !body?.url) return denied("sign_in_unavailable", 502);
+  const headers = new Headers({ location: body.url });
+  for (const cookie of started.headers.getSetCookie()) headers.append("set-cookie", cookie);
+  return new Response(null, { status: 302, headers });
+}
+
+/** What a person sees from an agent's approval link. It reveals nothing about the agent unless the code is right. */
+async function claimPage(request: Request, env: Env, userId: string) {
+  const url = new URL(request.url);
+  const agentId = url.searchParams.get("agent_id") ?? "";
+  const code = url.searchParams.get("code") ?? "";
+  const { adminOrgs } = await memberships(env, personId(userId));
+  if (adminOrgs.length === 0) return page("Connect an agent", "<p>You need to be an admin of an organization to connect an agent.</p>", 403);
+  const placeholders = adminOrgs.map(() => "?").join(",");
+  const orgs = await env.DB.prepare(`SELECT id, name FROM organization WHERE id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; name: string }>();
+  const agents = await env.DB.prepare(`SELECT id, org_id, name FROM podster_agent WHERE revoked_at IS NULL AND org_id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; org_id: string; name: string }>();
+  const orgName = (id: string) => orgs.results.find((o) => o.id === id)?.name ?? id;
+  // Nothing from the link appears until its code proves a real request, so a link can't put its own words on our page.
+  if (agentId === "" || !(await codeMatchesLiveApproval(env, agentId, code))) return page("Connect an agent", "<p>This link isn't valid or has expired. Ask the agent for a new one.</p>", 404);
+  const registered = await env.DB.prepare(`SELECT name FROM agent WHERE id = ?`).bind(agentId).first<{ name: string | null }>();
+  const who = registered?.name ? `An agent calling itself <strong>${escapeHtml(registered.name)}</strong>` : "An agent";
+  return page("Connect an agent", `<p>${who} is asking to join your organization. Podster hasn't verified this name.</p>
+<p>Only continue if you started this, and your agent showed you this code: <strong>${escapeHtml(code)}</strong></p>
+<p>Connecting doesn't run or wake the agent, and workroom access is set separately.</p>
+<form method="post" action="/claim">
+<input type="hidden" name="agent_id" value="${escapeHtml(agentId)}">
+<input type="hidden" name="user_code" value="${escapeHtml(code)}">
+<label>Organization <select name="org_id" required>${orgs.results.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name)}</option>`).join("")}</select></label>
+<label>Connect as <select name="link_agent_id"><option value="">A new agent</option>${agents.results.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(`${a.name} (${orgName(a.org_id)})`)}</option>`).join("")}</select></label>
+<label>Name for a new agent <input name="name" maxlength="${MAX_NAME_BYTES}"></label>
+<button type="submit">Connect</button>
+</form>`);
+}
+
 function consentPage(choices: ConsentChoices) {
   const orgOptions = choices.orgs.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name)}</option>`).join("");
   const orgName = (id: string) => choices.orgs.find((o) => o.id === id)?.name ?? id;
   const agentOptions = choices.agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(`${a.name} (${orgName(a.org_id)})`)}</option>`).join("");
   const hosts = choices.redirectHosts.map(escapeHtml).join(", ");
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect an agent to Podster</title></head><body>
-<h1>Connect an agent to Podster</h1>
-<p>An app calling itself <strong>${escapeHtml(choices.clientName)}</strong> wants to act as an agent in your organization. Podster hasn't verified this name.</p>
+  return page("Connect an agent to Podster", `<p>An app calling itself <strong>${escapeHtml(choices.clientName)}</strong> wants to act as an agent in your organization. Podster hasn't verified this name.</p>
 <p>After you approve, it receives access at <strong>${hosts}</strong>. Only continue if you started this and trust that site.</p>
 <p>It can use the agent's tools in any workroom that agent has joined. Connecting doesn't create, run or wake an agent, and workroom access is set separately.</p>
 <form method="post" action="/authorize">
@@ -310,12 +409,7 @@ function consentPage(choices: ConsentChoices) {
 <label>Name for a new agent <input name="agent_name" maxlength="${MAX_NAME_BYTES}"></label>
 <p>If this app is already connected to the organization, it keeps its agent and name.</p>
 <button type="submit">Connect</button>
-</form></body></html>`;
-  // No form-action: Chromium applies it to the redirect after this form, which would block the return to the client.
-  // Referrer policy same-origin: under no-referrer, Chromium sends `Origin: null` on the form's POST, which we refuse.
-  return new Response(html, {
-    headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": `default-src 'none'; frame-ancestors 'none'; base-uri 'none'`, "x-frame-options": "DENY", "referrer-policy": "same-origin" },
-  });
+</form>`);
 }
 
 async function parseOAuth(env: Env, request: Request) {
@@ -348,7 +442,8 @@ async function handleAuthorize(request: Request, env: Env, userId: string): Prom
 
   // Approving is a POST from our own page, so a link can't connect an agent on someone's behalf.
   if (request.method !== "POST" || !sameOrigin(request, env)) return denied("not_allowed", 403);
-  const form = await request.formData();
+  const form = await request.formData().catch(() => null);
+  if (!form) return denied("invalid_argument", 400);
   const org = String(form.get("org_id") ?? "");
   const linkAgent = String(form.get("link_agent_id") ?? "");
   const name = String(form.get("agent_name") ?? "").trim() || "MCP agent";
@@ -439,9 +534,23 @@ export async function codeMatchesLiveApproval(env: Env, pluginAgent: string, cod
   return true;
 }
 
+/** A form answers with a page, and anything else with JSON. */
 async function handleClaim(request: Request, env: Env, userId: string): Promise<Response> {
   if (!sameOrigin(request, env)) return denied("not_allowed", 403);
-  const body = await request.json<{ agent_id?: unknown; user_code?: unknown; org_id?: unknown; name?: unknown; link_agent_id?: unknown }>().catch(() => null);
+  const isForm = request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded") ?? false;
+  const body = isForm ? Object.fromEntries(await request.formData()) : await request.json<ClaimBody>().catch(() => null);
+  const answer = await claim(request, env, userId, body as ClaimBody | null);
+  if (!isForm) return answer;
+  const result = await answer.json<{ agent_id?: string; error?: { code?: string } }>();
+  if (answer.ok) return page("Agent connected", `<p>Your agent is connected as <strong>${escapeHtml(result.agent_id ?? "")}</strong>. You can close this page.</p>`);
+  if (answer.status >= 500) return page("Couldn't connect this agent", "<p>Something went wrong on our side. Reload this page to try again.</p>", answer.status);
+  const reason = result.error?.code === "invalid_argument" ? "Check the name, which can be at most 200 bytes." : "The code may be wrong or expired, this agent may already be connected, or it may belong to another organization.";
+  return page("Couldn't connect this agent", `<p>${reason}</p>`, answer.status);
+}
+
+type ClaimBody = { agent_id?: unknown; user_code?: unknown; org_id?: unknown; name?: unknown; link_agent_id?: unknown };
+
+async function claim(request: Request, env: Env, userId: string, body: ClaimBody | null): Promise<Response> {
   if (!body || typeof body.agent_id !== "string" || typeof body.user_code !== "string" || typeof body.org_id !== "string") return denied("invalid_argument", 400);
   const pluginAgent = body.agent_id;
   const org = body.org_id;
@@ -561,13 +670,20 @@ const appHandler = {
 
     const auth = createAuth(env);
     const session = await auth.api.getSession({ headers: request.headers });
+    if (url.pathname === "/sign-in" && request.method === "GET") return signInPage(env, safeNext(url.searchParams.get("next")), url.searchParams.has("error"));
+    if (url.pathname === "/sign-in" && request.method === "POST") return handleSignIn(request, env);
+    if (url.pathname === "/signed-in" && request.method === "GET") return page("You're signed in", "<p>You can close this page.</p>");
     if (url.pathname === "/authorize") {
-      if (!session) return denied("sign_in_required", 401);
+      if (!session) return request.method === "GET" ? signInRedirect(request) : denied("sign_in_required", 401);
       return handleAuthorize(request, env, session.user.id);
     }
     if (url.pathname === "/claim" && request.method === "POST") {
       if (!session) return denied("sign_in_required", 401);
       return handleClaim(request, env, session.user.id);
+    }
+    if (url.pathname === "/claim" && request.method === "GET") {
+      if (!session) return signInRedirect(request);
+      return claimPage(request, env, session.user.id);
     }
     if (!url.pathname.startsWith("/api/")) return denied("not_found", 404);
     if (!session) return denied("sign_in_required", 401);

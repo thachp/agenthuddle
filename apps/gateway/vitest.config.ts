@@ -18,6 +18,8 @@ export default defineConfig({
           AUTH_SECRET: "local-test-only-not-a-real-secret-0123456789",
           ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid: "test" }),
           ENABLE_PASSWORD_SIGNIN: "true",
+          GITHUB_CLIENT_ID: "test-client-id",
+          GITHUB_CLIENT_SECRET: "test-client-secret",
           TEST_DIRECTORY_SCHEMA: read("./migrations/0001_directory.sql"),
           TEST_AUTH_SCHEMA: read("./migrations/0002_auth.sql"),
           TEST_API_SCHEMA: read("../api/migrations/0001_membership_index.sql"),

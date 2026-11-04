@@ -1,4 +1,5 @@
 .wrangler
+.dev.vars*
 build
 node_modules
 target

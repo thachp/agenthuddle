@@ -1501,6 +1501,36 @@ describe("inbox", () => {
     expect(after.map((e: any) => e.type)).toEqual(["member.revoked"]);
   });
 
+  it("a failure while acknowledging keeps lost events counted, and the retry still works", async () => {
+    const bob = await fresh();
+    const sql = (statement: string) => runInDurableObject(inboxStub(bob.id), (_: any, state: any) => void state.storage.sql.exec(statement));
+    await sql("CREATE TABLE inbox_state (id INTEGER PRIMARY KEY CHECK (id = 1), acked_seq INTEGER NOT NULL, last_seq INTEGER NOT NULL, dropped INTEGER NOT NULL); INSERT INTO inbox_state VALUES (1, 0, 3, 0);");
+    await sql("CREATE TABLE inbox_event (seq INTEGER PRIMARY KEY, event_id TEXT UNIQUE NOT NULL, workspace_id TEXT NOT NULL, type TEXT NOT NULL, task_id TEXT, actor_id TEXT NOT NULL, created_at INTEGER NOT NULL)");
+    await sql(`INSERT INTO inbox_event VALUES (1, 'a', 'ws', 't', NULL, 'x', 0), (2, 'b', 'ws', 't', NULL, 'x', 0), (3, 'c', 'ws', 't', NULL, 'x', 0)`);
+    await sql("CREATE TRIGGER test_fail BEFORE UPDATE OF dropped ON inbox_state BEGIN SELECT RAISE(ABORT, 'injected'); END");
+    for (const attempt of [() => api(bob, "POST", "/v1/inbox/ack", { up_to: 3 }), () => api(bob, "GET", "/v1/inbox?ack=true")]) {
+      expect((await attempt()).status).toBe(500);
+      expect((await inbox(bob)).dropped).toBe(3);
+    }
+    await sql("DROP TRIGGER test_fail");
+    expect((await api(bob, "POST", "/v1/inbox/ack", { up_to: 3 })).body.acked_seq).toBe(3);
+    expect((await inbox(bob)).dropped).toBe(3);
+  });
+
+  it("registration that fails partway can be retried", async () => {
+    const who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_b" };
+    const put = async (name: unknown) => SELF.fetch(`https://api.internal/v1/agents/${who.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(orgAdmin(who.org)) }, body: JSON.stringify({ org_id: who.org, name }) });
+    await runInDurableObject(inboxStub(who.id), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE seen_jti (x)"));
+    expect((await put("first")).status).toBe(500);
+    await runInDurableObject(inboxStub(who.id), (_: any, state: any) => {
+      const tables = state.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'connection'").toArray();
+      expect(tables).toEqual([]);
+      state.storage.sql.exec("DROP TABLE seen_jti");
+    });
+    expect((await put("second")).status).toBe(200);
+    expect((await api(who, "GET", "/v1/me")).body.name).toBe("second");
+  });
+
   it("the alarm follows whichever recipient is due first, not the one waiting longest", async () => {
     const { id, tasks, bob } = await setup();
     const carol = await fresh("org_c");

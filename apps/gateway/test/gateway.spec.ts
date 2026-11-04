@@ -9,7 +9,7 @@ import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
-import worker, { allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import worker, { safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string };
@@ -185,7 +185,10 @@ describe("hosted MCP", () => {
     const a = await signUp();
     expect((await call("/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(401);
     const { query } = await authorizeQuery(`<script>alert(1)</script>`);
-    expect((await call(`/authorize${query}`)).status).toBe(401);
+    const unsigned = await call(`/authorize${query}`);
+    expect(unsigned.status).toBe(302);
+    expect(unsigned.headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent(`/authorize${query}`)}`);
+    expect((await call("/authorize", { method: "POST", headers: { origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: "" })).status).toBe(401);
     const before = await e.DB.prepare("SELECT count(*) AS n FROM identity_link").first<{ n: number }>();
     const page = await call(`/authorize${query}`, { headers: { cookie: a.cookie } });
     expect(page.status).toBe(200);
@@ -409,6 +412,7 @@ describe("consent", () => {
 
   it("refuses bad requests and scopes with a clear answer", async () => {
     const a = await signUp();
+    expect((await call("/authorize", { method: "POST", headers: { cookie: a.cookie, origin: BASE, "content-type": "application/json" }, body: "{}" })).status).toBe(400);
     expect((await call("/authorize?client_id=nope", { headers: { cookie: a.cookie } })).status).toBe(400);
     const { query } = await authorizeQuery();
     const wrongScope = query.replace("scope=mcp", "scope=admin");
@@ -982,6 +986,185 @@ describe("resilience and schema", () => {
     const { toBeCreated, toBeAdded } = await getMigrations(createAuth(e).options);
     expect(toBeCreated).toEqual([]);
     expect(toBeAdded).toEqual([]);
+  });
+});
+
+describe("sign-in and claim pages", () => {
+  const form = (fields: Record<string, string>, headers: Record<string, string> = {}, path = "/sign-in") =>
+    call(path, { method: "POST", headers: { origin: BASE, "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams(fields) });
+
+  it("only returns people to our own pages", () => {
+    expect(safeNext("/authorize?client_id=x&state=y")).toBe("/authorize?client_id=x&state=y");
+    expect(safeNext("/claim?agent_id=a&code=b")).toBe("/claim?agent_id=a&code=b");
+    for (const bad of ["https://evil.test/authorize", "//evil.test/authorize", "/\\evil.test/claim", "/api/v1/me", "/authorize/../api/x", "javascript:alert(1)", "", null, undefined]) expect(safeNext(bad), String(bad)).toBe("/signed-in");
+  });
+
+  it("offers configured providers with no script, and escapes where it returns to", async () => {
+    const res = await call(`/sign-in?next=${encodeURIComponent(`/claim?code="><script>alert(1)</script>`)}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    expect(res.headers.get("referrer-policy")).toBe("same-origin");
+    const html = await res.text();
+    expect(html).toContain("Continue with GitHub");
+    expect(html).not.toContain("Continue with Google");
+    expect(html).not.toContain("<script>");
+    const away = await (await call(`/sign-in?next=${encodeURIComponent("https://evil.test/x")}`)).text();
+    expect(away).not.toContain("evil.test");
+    expect(away).toContain('value="/signed-in"');
+    expect(await (await call("/signed-in")).text()).toContain("signed in");
+  });
+
+  it("says when sign-in failed, in its own words, and says so when nothing is set up", async () => {
+    const failed = await (await call(`/sign-in?error=${encodeURIComponent("<b>call 555-0100</b>")}&next=${encodeURIComponent("/claim?agent_id=a&code=b")}`)).text();
+    expect(failed).toContain("didn't finish");
+    expect(failed).not.toContain("555-0100");
+    expect(failed).toContain("agent_id=a");
+    expect(await (await call("/sign-in")).text()).not.toContain("didn't finish");
+    const bare = await worker.fetch(new Request(`${BASE}/sign-in`), { ...e, GITHUB_CLIENT_ID: undefined } as never, { waitUntil() {}, passThroughOnException() {} } as never);
+    expect(bare.status).toBe(503);
+  });
+
+  it("a callback with a bad state comes back to sign-in, not a dead end", async () => {
+    const res = await call("/api/auth/callback/github?code=x&state=forged");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("/sign-in?error=");
+  });
+
+  it("won't run without a secret, join accounts by email, or create a user from an unverified email", async () => {
+    expect(() => createAuth({ ...e, AUTH_SECRET: "" })).toThrow("AUTH_SECRET");
+    // The flag can't switch this off on a real hostname.
+    const real = createAuth({ ...e, BASE_URL: "https://gateway.podster.dev", ENABLE_PASSWORD_SIGNIN: "true" }).options as any;
+    expect(real.account.accountLinking.disableImplicitLinking).toBe(true);
+    const before = real.databaseHooks.user.create.before;
+    expect(await before({ emailVerified: false })).toBe(false);
+    expect(await before({ emailVerified: true })).toBeUndefined();
+  });
+
+  it("starts a provider's sign-in from a form on our own page only", async () => {
+    const started = await form({ provider: "github", next: "/claim?agent_id=a&code=b" });
+    expect(started.status).toBe(302);
+    const location = new URL(started.headers.get("location")!);
+    expect(location.origin).toBe("https://github.com");
+    expect(location.searchParams.get("client_id")).toBe("test-client-id");
+    expect(location.searchParams.get("redirect_uri")).toBe(`${BASE}/api/auth/callback/github`);
+    expect(location.searchParams.get("state")).toBeTruthy();
+    expect(started.headers.getSetCookie().length).toBeGreaterThan(0);
+    // Sign-in remembers where to return, and where to go if it fails.
+    const stored = await e.DB.prepare("SELECT value FROM verification WHERE identifier LIKE ?").bind(`%${location.searchParams.get("state")}`).first<{ value: string }>();
+    expect(stored?.value).toContain(`${BASE}/claim?agent_id=a&code=b`);
+    expect(stored?.value).toContain(`${BASE}/sign-in?next=${encodeURIComponent("/claim?agent_id=a&code=b")}`);
+    const offsite = await form({ provider: "github", next: "https://evil.test/claim" });
+    const offsiteState = new URL(offsite.headers.get("location")!).searchParams.get("state");
+    const offsiteStored = await e.DB.prepare("SELECT value FROM verification WHERE identifier LIKE ?").bind(`%${offsiteState}`).first<{ value: string }>();
+    expect(offsiteStored?.value).not.toContain("evil.test");
+    expect(offsiteStored?.value).toContain(`${BASE}/signed-in`);
+    expect((await call("/sign-in", { method: "POST", headers: { origin: BASE, "content-type": "application/json" }, body: "{}" })).status).toBe(400);
+    expect((await form({ provider: "github" }, { origin: "https://evil.test" })).status).toBe(403);
+    expect((await call("/sign-in", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "provider=github" })).status).toBe(403);
+    expect((await form({ provider: "google" })).status).toBe(400);
+    expect((await form({ provider: "evil" })).status).toBe(400);
+  });
+
+  it("sends a signed-out person to sign in and back to the claim", async () => {
+    const res = await call("/claim?agent_id=a&code=b");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent("/claim?agent_id=a&code=b")}`);
+  });
+
+  it("an agent's approval link leads to a page that connects it", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const link = new URL(agent.registered.approval.verification_uri_complete);
+    const res = await call(link.pathname + link.search, { headers: { cookie: owner.cookie } });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("<strong>agent</strong>");
+    expect(html).toContain(agent.userCode);
+    expect(html).toContain(owner.org);
+    // Opening the page approves nothing.
+    expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ status: "pending" });
+    const connected = await form({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org, name: "From the page", link_agent_id: "" }, { cookie: owner.cookie }, "/claim");
+    expect(connected.status).toBe(200);
+    expect(connected.headers.get("content-type")).toContain("text/html");
+    expect(await connected.text()).toContain("Your agent is connected");
+    expect((await execute(agent, "get_identity")).data).toMatchObject({ name: "From the page", status: "active" });
+  });
+
+  it("the claim page reveals nothing without the right code, and escapes what it's given", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const wrong = await call(`/claim?agent_id=${agent.pluginId}&code=${encodeURIComponent("CALL 555-0100")}`, { headers: { cookie: owner.cookie } });
+    expect(wrong.status).toBe(404);
+    const wrongHtml = await wrong.text();
+    expect(wrongHtml).not.toContain("<strong>agent</strong>");
+    expect(wrongHtml).not.toContain("555-0100");
+    expect(wrongHtml).not.toContain("<form");
+    const hostile = await (await call(`/claim?agent_id=${encodeURIComponent(`"><script>x</script>`)}&code=${encodeURIComponent(`<script>y</script>`)}`, { headers: { cookie: owner.cookie } })).text();
+    expect(hostile).not.toContain("<script>");
+    const refused = await form({ agent_id: agent.pluginId, user_code: "AAAA-AAAA", org_id: owner.org }, { cookie: owner.cookie }, "/claim");
+    expect(refused.status).toBe(403);
+    const refusedText = await refused.text();
+    expect(refusedText).toContain("connect this agent");
+    expect(refusedText).toContain("may be wrong or expired");
+    expect(refusedText).not.toContain("at most 200 bytes");
+    expect((await form({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org }, { cookie: owner.cookie, origin: "https://evil.test" }, "/claim")).status).toBe(403);
+  });
+
+  it("only offers organizations the person administers", async () => {
+    const [a, member] = [await signUp(), await signUp()];
+    const me = await (await dashboard(member, "GET", "/v1/me")).json<any>();
+    await e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', 0)").bind(a.org, me.id).run();
+    const agent = await registerAgent();
+    const page = () => call(`/claim?agent_id=${agent.pluginId}&code=${agent.userCode}`, { headers: { cookie: member.cookie } });
+    const html = await (await page()).text();
+    expect(html).toContain(member.org);
+    expect(html).not.toContain(a.org);
+    // Someone who administers nothing is told so.
+    await e.DB.prepare("DELETE FROM org_member WHERE person_id = ? AND org_id = ?").bind(me.id, member.org).run();
+    expect((await page()).status).toBe(403);
+  });
+
+  it("escapes names from agents and organizations, and lists only the person's own agents", async () => {
+    const [owner, other] = [await signUp(), await signUp()];
+    const orgId = (await dash(owner, "POST", "/orgs", { name: "<u>org</u>" })).body.id as string;
+    const mine = await registerAgent();
+    expect((await claim(owner, mine, { org_id: orgId, name: "<i>mine</i>" })).status).toBe(200);
+    const theirs = await claimedAgent(other);
+    const [host, key] = [await generateKeypair(), await generateKeypair()];
+    const jwt = await signHostJWT({ hostKeypair: host, audience: BASE, agentPublicKey: key.publicKey, hostName: "h" } as never);
+    const registered = await (await post("/api/auth/agent/register", { name: "<b>Podster</b>", mode: "delegated", capabilities: ["get_identity"], preferred_method: "device_authorization" }, { authorization: `Bearer ${jwt}` })).json<any>();
+    // The plugin cleans names when it stores them, so this checks our page doesn't rely on that.
+    await e.DB.prepare("UPDATE agent SET name = ? WHERE id = ?").bind("<b>Podster</b>", registered.agent_id).run();
+    const html = await (await call(`/claim?agent_id=${registered.agent_id}&code=${registered.approval.user_code}`, { headers: { cookie: owner.cookie } })).text();
+    for (const raw of ["<u>org</u>", "<i>mine</i>", "<b>Podster</b>"]) expect(html, raw).not.toContain(raw);
+    expect(html).toContain("&#60;u&#62;org");
+    expect(html).toContain("&#60;i&#62;mine");
+    expect(html).not.toContain(theirs.id);
+  });
+
+  it("a failure on our side says so, and reloading finishes the claim", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const body = new URLSearchParams({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org, link_agent_id: "" });
+    const headers = { origin: BASE, cookie: owner.cookie, "content-type": "application/x-www-form-urlencoded" };
+    const down = { ...e, API: { fetch: () => Promise.reject(new Error("no such service")) } } as never;
+    const ctx = { waitUntil() {}, passThroughOnException() {} } as never;
+    const failed = await worker.fetch(new Request(`${BASE}/claim`, { method: "POST", headers, body }), down, ctx);
+    expect(failed.status).toBe(502);
+    const text = await failed.text();
+    expect(text).toContain("Reload this page");
+    expect(text).not.toContain("may be wrong or expired");
+    const reloaded = await call("/claim", { method: "POST", headers, body });
+    expect(reloaded.status).toBe(200);
+    expect((await execute(agent, "get_identity")).status).toBe(200);
+  });
+
+  it("a claim form with a bad name says so", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const res = await form({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org, name: "x".repeat(201) }, { cookie: owner.cookie }, "/claim");
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("at most 200 bytes");
   });
 });
 

@@ -8,5 +8,17 @@
   // Real IDs are set when staging is created. Secrets: AUTH_SECRET, ASSERTION_SIGNING_JWK, and GITHUB_* or GOOGLE_* for sign-in.
   "d1_databases": [{ "binding": "DB", "database_name": "podster-gateway", "database_id": "local-only", "migrations_dir": "migrations" }],
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "local-only" }],
-  "vars": { "BASE_URL": "https://gateway.podster.dev" }
+  "vars": { "BASE_URL": "https://gateway.podster.dev" },
+  "env": {
+    "staging": {
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [{ "pattern": "gateway-staging.podster.dev", "custom_domain": true }],
+      "services": [{ "binding": "API", "service": "podster-api-staging" }],
+      // Filled in when these are created. Secrets: AUTH_SECRET, ASSERTION_SIGNING_JWK, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET.
+      "d1_databases": [{ "binding": "DB", "database_name": "podster-gateway-staging", "database_id": "set-when-created", "migrations_dir": "migrations" }],
+      "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "set-when-created" }],
+      "vars": { "BASE_URL": "https://gateway-staging.podster.dev" }
+    }
+  }
 }
