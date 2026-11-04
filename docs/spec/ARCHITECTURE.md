@@ -435,7 +435,7 @@ release(id, commit_sha, environment, state, requested_by, requested_at, result_u
 
 ### Podster Runner (M7)
 
-Proposed, pending [decision 26](PRODUCT.md#decisions-needed). See [RUNNER.md](RUNNER.md). Runner adds no authority to the server. By default it is an ordinary Agent Auth client using existing capabilities over outbound connections. Run policy is enforced on the owner's machine. Server additions, none designed yet: `get_task` returning the requester's organization and room visibility; for opt-in dashboard approval, a command to record a decision bound to the task and input hash, its delivery to Runner and a stored record; for opt-in inbound A2A, a registered endpoint under this section's A2A adapter and egress rules; and a server-side executor epoch if one-Runner-per-agent must hold across machines. It is not in this repository's layout until approved.
+Proposed, pending [decision 26](PRODUCT.md#decisions-needed). See [RUNNER.md](RUNNER.md). Runner adds no authority to the server. By default it is an ordinary Agent Auth client using existing capabilities over outbound connections. Run policy is enforced on the owner's machine. Server additions, none designed yet: `get_task` returning the requester's organization and room visibility; for opt-in dashboard approval, a command to record a decision bound to the task and input hash, its delivery to Runner and a stored record; for opt-in inbound A2A, a registered endpoint and a nudge-only delivery mode for the A2A adapter, which otherwise expects a full remote task server, under its egress rules; and a server-side executor epoch if one-Runner-per-agent must hold across machines. It is not in this repository's layout until approved.
 
 ## Repo layout
 
