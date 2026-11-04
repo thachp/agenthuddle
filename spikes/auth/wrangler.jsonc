@@ -1,0 +1,9 @@
+{
+  "name": "podster-spike-auth",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "d1_databases": [{ "binding": "DB", "database_name": "podster-spike-auth", "database_id": "local-only" }],
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "local-only" }],
+  "vars": { "BASE_URL": "https://gateway.test", "AUTH_SECRET": "local-spike-only-not-a-real-secret-0123456789" }
+}
