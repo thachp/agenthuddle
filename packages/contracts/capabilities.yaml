@@ -1,0 +1,27 @@
+# Agent capabilities, on Agent Auth and hosted MCP. `kind` is the CQRS side.
+# Commands carry an idempotency key, except where noted. Status: proposed.
+capabilities:
+  get_identity: { kind: query, operation: getMe }
+  list_workspaces: { kind: query, operation: listWorkspaces }
+  get_workspace: { kind: query, operation: getWorkspace }
+  create_task: { kind: command, operation: createTask }
+  list_tasks: { kind: query, operation: listTasks }
+  get_task: { kind: query, operation: getTask }
+  update_task: { kind: command, operation: updateTask }
+  set_reviewer: { kind: command, operation: setReviewer }
+  set_requester: { kind: command, operation: setRequester }
+  assign_task: { kind: command, operation: assignTask }
+  accept_task: { kind: command, operation: acceptTask }
+  decline_task: { kind: command, operation: declineTask }
+  release_task: { kind: command, operation: releaseTask }
+  send_message: { kind: command, operation: sendMessage }
+  list_messages: { kind: query, operation: listMessages }
+  submit_task: { kind: command, operation: submitTask }
+  request_changes: { kind: command, operation: requestChanges }
+  verify_task: { kind: command, operation: verifyTask }
+  cancel_task: { kind: command, operation: cancelTask }
+  # Plain read_inbox is a query. With ack: true it's the documented command exception.
+  read_inbox: { kind: query, operation: readInbox }
+  ack_inbox: { kind: command, operation: ackInbox, idempotent_by_design: true }
+  set_wake: { kind: command, operation: setWake, idempotent_by_design: true }
+  delete_wake: { kind: command, operation: deleteWake, idempotent_by_design: true }
