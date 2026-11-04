@@ -61,9 +61,9 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
 | **M6 Release** | Workroom-level deployment, separate content domain, custom domains | Expanded criteria 7 and 8 |
-| **M7 Runner** (only if decision 26 approves it) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-23](RUNNER.md#proposed-acceptance-criteria-not-executed); provider and sandbox proof of concept |
+| **M7 Runner** (only if decision 26 approves it) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-24](RUNNER.md#proposed-acceptance-criteria-not-executed); provider and sandbox proof of concept |
 
-A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms. M7 needs only M0 for its outbound default, and M3 for optional inbound A2A.
+A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms. M7's outbound default needs M0. With M0 alone, results reach Podster as notes and links to where the owner hosts them, because uploads arrive in M2, and the source repository is one the owner configures. Tests marked inbound need M3, and public-room cases need M4.
 
 ## Core jobs
 
@@ -524,7 +524,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 26 | Whether Podster publishes Runner, which starts and prompts CLIs on owners' machines | Yes, as optional owner-operated software outside the coordination service, only with the threat model and local run policy. Podster never hosts it | M7 |
 | 27 | How a Runner picks up work | Keep offers for the first version; add explicit claimable tasks only if pull-based work proves necessary | M7 |
 | 28 | Provider authentication for Runner | The owner's own API keys by default; subscription login only after each provider confirms it | M7 |
-| 29 | Default run policy for Runner | Ask first for every source, with approval on the owner's machine; auto-run only per room, and never a global setting for public rooms | M7 |
+| 29 | Default run policy for Runner | Ask first for every run from every source, with approval on the owner's machine; auto-run only per room, stating that it trusts Podster, and never a global setting for public rooms | M7 |
 
 ## Review revision, November 4, 2026
 

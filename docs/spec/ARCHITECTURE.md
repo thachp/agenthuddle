@@ -37,7 +37,7 @@ A gateway check alone cannot satisfy global revocation, because assertions minte
 | Web | **`apps/web`, Next.js on Workers via vinext** (owner's choice; not OpenNext), with the [design spec](DESIGN.md)'s shadcn/ui Sidebar and right-side Sheet. Cloudflare still labels vinext beta, and it has no build-time static pre-rendering yet: gated by a staging smoke test. |
 | Contracts | `packages/contracts/openapi.yaml` is the source of truth for gateway ↔ api; capability definitions live beside it. |
 | A2A | Core product interoperability requirement alongside MCP/Agent Auth. All adapters use the same Rust policy and authoritative task/inbox state. [Proposed profile](#a2a-adapter) targets A2A 1.0; conformance is not claimed. |
-| Execution | Outside Podster. No agent hosting, prompts, models or sandboxes. |
+| Execution | Outside Podster. No agent hosting, prompts, models or sandboxes in the service. Owner-operated [Runner](RUNNER.md) software is a separate proposal. |
 
 ## System
 
@@ -435,7 +435,7 @@ release(id, commit_sha, environment, state, requested_by, requested_at, result_u
 
 ### Podster Runner (M7)
 
-Proposed, pending [decision 26](PRODUCT.md#decisions-needed). See [RUNNER.md](RUNNER.md). Runner adds no authority to the server. By default it is an ordinary Agent Auth client using existing capabilities over outbound connections, with one `identity_link` per agent. The server additions are a run-approval event type and, for optional inbound A2A, a registered endpoint under this section's A2A adapter and egress rules. Run policy is enforced on the owner's machine. It is not in this repository's layout until approved.
+Proposed, pending [decision 26](PRODUCT.md#decisions-needed). See [RUNNER.md](RUNNER.md). Runner adds no authority to the server. By default it is an ordinary Agent Auth client using existing capabilities over outbound connections. Run policy is enforced on the owner's machine. Server additions, none designed yet: `get_task` returning the requester's organization and room visibility; for opt-in dashboard approval, a command to record a decision bound to the task and input hash, its delivery to Runner and a stored record; for opt-in inbound A2A, a registered endpoint under this section's A2A adapter and egress rules; and a server-side executor epoch if one-Runner-per-agent must hold across machines. It is not in this repository's layout until approved.
 
 ## Repo layout
 
@@ -494,7 +494,7 @@ sets the same limit.
 | **3 — Inbox and the two-agent handoff** | `Principal` inbox, outbox drain, capabilities and `/mcp`. | E2E success criteria 1–8 pass in Miniflare, then on staging. The agent-facing kernel is complete; Phase 4 completes M0. |
 | **4 — Dashboard and wake** | vinext dashboard for the kernel: review, access, agents, person inbox; wake queue and consumer. | People can complete kernel jobs in the dashboard; wake retries and disablement tested. |
 
-Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.md#product-direction-and-delivery-scope) M1 to M6 cover the extensions below. A2A is core product scope, not a later optional adapter, and security acceptance in ACCESS-CONTROL.md must pass before launch. Later enhancements include team templates, Jira sync, workspace channels and real-time updates.
+Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.md#product-direction-and-delivery-scope) M1 to M7 cover the extensions below. A2A is core product scope, not a later optional adapter, and security acceptance in ACCESS-CONTROL.md must pass before launch. Later enhancements include team templates, Jira sync, workspace channels and real-time updates.
 
 ## Operations
 
