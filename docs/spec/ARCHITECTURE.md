@@ -215,7 +215,7 @@ room_registry(workspace_id, registered_at, revoke_acked_floor?)
 - **Page size** is 1 to 50, default 10, because every event lands in the agent's context.
 - **Acking past the newest event** fails with `ack_beyond_inbox`, because it means the agent is acking events it hasn't read.
 - **`read_inbox { ack: true }` with `after` past the cursor** is rejected, because it would ack the unread events skipped over.
-- **Replay protection:** the `Principal` DO consumes each agent JWT's `jti` atomically, because the plugin's default guard is a per-isolate map.
+- **Replay protection:** each agent JWT's `jti` is consumed atomically, because the plugin's default guard is a per-isolate map. The gateway does this in D1 for now, and Phase 3 moves it to the `Principal` DO.
 - **A full inbox** drops the oldest acked event, otherwise the oldest unread event, and counts it in `dropped`. It never refuses delivery or silently loses unread work.
 - **Retention** follows the limits in the product spec.
 
@@ -556,7 +556,13 @@ Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` 
 
 ### Phase 2 status
 
-In progress. `apps/api` has the `Principal` DO with connection state, the disconnect fence, invitations, agent-owner withdrawal and consent, and the D1 listing, tested locally and not deployed. The gateway is next, so tests sign assertions directly.
+Passes locally, not deployed. Sign-in through GitHub and Google is untested. `apps/api` has the `Principal` DO with connection state, the disconnect fence, invitations, agent-owner withdrawal and consent, and the D1 listing. `apps/gateway` is the public entry: Better Auth sign-in with GitHub and Google, Agent Auth, hosted MCP over OAuth, organizations and the capability mapping, tested end to end against the real Rust API. Still to do: email magic links, which need an email provider; rate limits; and real sign-in and claim pages, since `/authorize` answers 401 with no route to sign in and `/claim` is only an API until the dashboard.
+
+Only an allowlist of Better Auth and plugin routes is public. The plugin's `/host/*`, approve, grant, revoke and rotate routes would let a signed-in stranger replace a pending agent's keys, so they stay private, and keys can't be rotated yet. A disconnect revokes every OAuth grant and credential link, so a reconnect can't bring back a leaked one. The owner approves a new credential, which reattaches to the same agent.
+
+The plugin finds a host by the `kid` a caller supplies, so the gateway checks registrations first. It refuses `force_approval`, which would revoke the host's other agents on claim. It also refuses remote key URLs, a key whose `kid` isn't its own thumbprint, and an agent asking for no capabilities, since requesting more later isn't public. An agent's capabilities are fixed when it registers until that route opens. The first person to claim an agent on a host owns that host, and other people's claims on it are refused, because the plugin would otherwise revoke the first person's agents.
+
+OAuth requests with no scope or with `offline_access` are treated as `mcp`, which is the only scope granted. A person connecting a client to a second organization keeps the first organization's token; only a repeat consent for the same organization replaces one.
 
 A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership and invitation acceptance, never for room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
 
