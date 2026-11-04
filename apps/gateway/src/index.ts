@@ -377,6 +377,18 @@ async function handleAuthorize(request: Request, env: Env, userId: string): Prom
   return Response.redirect(redirectTo, 302);
 }
 
+/** Writes a claim's link. If the write fails because a double submit got there first, the same link counts as success. */
+export async function linkOnce(env: Env, pluginAgent: string, agentId: string, write: () => Promise<unknown>) {
+  try {
+    await write();
+    return true;
+  } catch (error) {
+    const row = await env.DB.prepare(`SELECT agent_id FROM identity_link WHERE provider = 'agent_auth' AND external_id = ?`).bind(pluginAgent).first<{ agent_id: string }>();
+    if (!row) throw error;
+    return row.agent_id === agentId;
+  }
+}
+
 /** A person may only finish a claim they started, so a failure partway can be retried. */
 async function claimedByThisPerson(env: Env, pluginAgent: string, userId: string) {
   const row = await env.DB.prepare(`SELECT status, userId FROM agent WHERE id = ?`).bind(pluginAgent).first<{ status: string; userId: string | null }>();
@@ -390,7 +402,7 @@ async function claimedByThisPerson(env: Env, pluginAgent: string, userId: string
 export async function claimHost(env: Pick<Env, "DB">, pluginAgent: string, userId: string) {
   const now = new Date().toISOString();
   const result = await env.DB.prepare(
-    `UPDATE agentHost SET userId = ?, status = 'active', activatedAt = COALESCE(activatedAt, ?), updatedAt = ? WHERE id = (SELECT hostId FROM agent WHERE id = ?) AND (userId IS NULL OR userId = ?)`,
+    `UPDATE agentHost SET userId = ?, status = 'active', activatedAt = COALESCE(activatedAt, ?), updatedAt = ? WHERE id = (SELECT hostId FROM agent WHERE id = ?) AND status IN ('pending', 'active') AND (userId IS NULL OR userId = ?)`,
   ).bind(userId, now, now, pluginAgent, userId).run();
   return result.meta.changes === 1;
 }
@@ -450,13 +462,13 @@ async function handleClaim(request: Request, env: Env, userId: string): Promise<
   const registered = await env.DB.prepare(`SELECT name FROM agent WHERE id = ?`).bind(pluginAgent).first<{ name: string | null }>();
   const name = suppliedName || fitName(registered?.name ?? "") || "agent";
   if (linked) {
-    await linkStatement(env, "agent_auth", pluginAgent, linked, person, Date.now()).run();
+    if (!(await linkOnce(env, pluginAgent, linked, () => linkStatement(env, "agent_auth", pluginAgent, linked, person, Date.now()).run()))) return denied("not_allowed", 403);
     return json({ agent_id: linked, org_id: org });
   }
   const agentId = `agt_${await sha256Hex(pluginAgent)}`;
   const status = await registerWithApi(env, identity, agentId, org, name);
   if (status !== 200) return registrationRefused(status);
-  await createAgent(env, org, name, "agent_auth", pluginAgent, agentId, person);
+  if (!(await linkOnce(env, pluginAgent, agentId, () => createAgent(env, org, name, "agent_auth", pluginAgent, agentId, person)))) return denied("not_allowed", 403);
   return json({ agent_id: agentId, org_id: org });
 }
 
