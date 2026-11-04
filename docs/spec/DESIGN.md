@@ -78,7 +78,7 @@ Each status uses a text label plus an icon. Color is never the only signal. Tone
 
 | Kernel state | Label | Tone | Who needs to act |
 | --- | --- | --- | --- |
-| `open` | Open | Neutral | Requester or lead assigns |
+| `open` | Open | Neutral | Requester or admin assigns |
 | `offered` | Awaiting acceptance | Amber | Offered agent, not the person viewing |
 | `accepted` | Accepted | Blue | Assignee |
 | `submitted` | Awaiting review | Violet | Named reviewer |
@@ -153,15 +153,15 @@ Use an AlertDialog only to confirm a consequence: revoke access, disconnect an a
 | Wake turned off | Wake turned off after 3 failed attempts. Work still reaches *Architect*'s inbox. **Review wake URL** |
 | Version conflict | This task changed while you were editing. Your changes aren't saved. **Review latest** |
 | Merge consequence | Merging will start the workroom's deployment to *production*. |
-| Partial result | Approved, but the merge failed: the pull request has new commits. **Review changes** |
+| Partial result | Approved, but the merge failed: the pull request has new commits. **Create follow-up task** |
 | Access save footer | Saving workroom access doesn't grant GitHub, merge or deployment access. |
-| Connect footer | Connecting doesn't create, run or wake an agent. Choose workroom access afterward. |
+| Connect footer | Connecting doesn't create, run or wake an agent. Workroom access is set separately. |
 
 ## 6. Screens
 
 ### Needs attention
 
-Items that need **this person** to decide, grouped by type and then newest first: reviews assigned to them, role invitations awaiting them, access requests, wake or connection problems on agents they own, and release approvals. Row actions open the relevant Sheet. Agent-owned work, such as a task awaiting an agent's acceptance, is not an item here; the concept dashboard's "Awaiting acceptance" and "Completed" groups move to the Tasks tab. Marking an item read affects only this person's queue.
+Items that need **this person** to decide, grouped by type and then newest first: reviews assigned to them, role invitations awaiting them, wake or connection problems on agents they own, and release approvals. Row actions open the relevant Sheet. Agent-owned work, such as a task awaiting an agent's acceptance, is not an item here; the concept dashboard's "Awaiting acceptance" and "Completed" groups move to the Tasks tab. Items clear when the decision is made. Acknowledging affects only this person's queue.
 
 ### Workroom directory
 
@@ -331,14 +331,14 @@ Warnings, including merge consequences, use amber. Reserve red for failure and d
 | [Workroom directory](../mockups/workroom-directory.png) | Cards show one role, and "ready" is undefined | Add an all-roles summary; ready means an approved artifact version is linked |
 | [Agents](../mockups/agents.png) | Manage access on the agent-owner page suggests agent ownership grants room administration | Launch from the Team tab; Agents page shows read-only access and owner actions |
 | Agents | "Capabilities" means self-description; "Owner: You" conflicts with organization ownership | "Skills (self-described)"; show owning organization |
-| [Connect an agent](../mockups/connect-agent.png) | Modal Dialog conflicts with the right-side Sheet rule | Use Sheet; keep tabs and copy |
+| [Connect an agent](../mockups/connect-agent.png) | Modal Dialog conflicts with the right-side Sheet rule; "Return here to manage access" implies agent owners manage room access | Use Sheet; keep tabs; step 3 points to participation policy, and room owners manage workroom access |
 | [Merge and deploy](../mockups/merge-and-deploy.png) | Full-page layout conflicts with the Sheet rule; red warning is used for a normal consequence | Task Sheet, with optional expansion; amber warning plus confirmation |
-| Merge and deploy | "Auto-deploy enabled" and a preview link appear alongside "No deployment yet" | Show a preview only when it exists for this commit |
+| Merge and deploy | "Auto-deploy enabled" and a preview link appear alongside "No deployment for this PR yet"; acceptance criteria show as checked | Show a preview only when it exists for this commit; read-only criteria |
 | Merge and deploy | Approve and merge reads as one outcome | Record review, merge and deploy separately and show partial results |
-| [Activity and inbox](../mockups/activity-and-inbox.png) | Tab set omits Team and Settings; internal links show external-link icons | Use the standard tab set; external icon only for external links |
+| [Activity and inbox](../mockups/activity-and-inbox.png) | Tab set omits Team, Collaboration and Settings; internal links show external-link icons; per-item Read and Unread conflict with the inbox cursor | Use the standard tab set; external icon only for external links; show unread by cursor position |
 | Activity and inbox | "Role invitation" is not a kernel concept | Invitations can target a role opening, per PRODUCT.md |
 | [Collaboration map](../mockups/collaboration-map.png) | Online and Idle imply knowledge Podster lacks | Last active derived from authenticated calls |
-| Collaboration map | "Handoff" and its reply states are undefined; no alternative to the graph | Handoffs defined in PRODUCT.md, with reply state derived from task events; add List view |
+| Collaboration map | Tab set omits Team and Settings; "Handoff" and its reply states are undefined; hand-written labels on recorded edges; no alternative to the graph | Standard tab set; handoffs defined in PRODUCT.md show task state and link to the thread, and Awaiting reply and Answered are removed because no data supports them; recorded edges use event kind or task title; add List view |
 | [Manage access](../mockups/manage-access.png) | Workroom dropdown inside the Sheet creates AC-21 risk; opened from Agents page | Fixed target; launch from the Team tab |
 | Manage access | "Owner only" and "Personal account" | "Owner and admins only"; personal accounts are personal organizations |
 | [Settings](../mockups/settings.png) | "Your team and workspace"; weekly summary has no delivery design | "Your organization"; show only delivered notification types |

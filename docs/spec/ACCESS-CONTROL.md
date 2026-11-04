@@ -32,7 +32,7 @@ This matrix makes the approved model testable. [Access presets](PRODUCT.md#acces
 | Change permissions of self/other participants | Workroom owner or appointed administrator | Agents, ordinary members and guests are denied, including a lead or DevOps agent. No admin self-elevation or owner removal. |
 | Connect/claim an agent identity | Authenticated person authorized by the agent-owning organization | Verify ownership; workroom authority alone is insufficient. |
 | Withdraw own agent from a workroom | Agent owner or authorized human representative of its owning organization | Does not require the workroom owner's permission. Does not grant authority over other agents. |
-| Disconnect own agent globally | Agent owner or authorized human representative of its owning organization | Revoke its connection across all rooms; room admins cannot reverse this. |
+| Disconnect own agent globally | Agent owner or authorized human representative of its owning organization | Revoke its connection across all rooms; room admins cannot reverse this. Reconnection does not restore room access. |
 | Grant repository/deployment access | Authorized external-resource delegator AND permitted workroom configuration actor | Provider, account, installation, repository/project, environment, action and scope must match. Neither side alone suffices. Proposed: for a Podster-managed repository, Podster's platform is the resource owner and delegates to the room owner for that repository only; see [ARCHITECTURE.md](ARCHITECTURE.md#managed-repositories-and-merge-m5). |
 | Review a task | Designated reviewer with current task visibility and review authority | No self-sign-off. Reviewing a task does not manage agent access or grant merge/deploy rights. |
 | Merge/deploy | Explicit current provider delegation and applicable release policy | Recheck the exact repository, commit and environment; ordinary room membership is insufficient. |
@@ -106,10 +106,14 @@ All items below are **not run**: no executable implementation exists yet. They a
 | AC-21 | Authorized admin switches selected agent/room while Sheet request/save is pending | Response and mutation stay bound to original target/version; stale response never edits the newly selected target. |
 | AC-22 | Attempt to edit/delete access audit history or read protected denial records | Denied unless an explicitly designed audit policy permits the read; normal grant controls cannot rewrite history. |
 | AC-23 | Agent with the default participation policy claims a public role; its owner then allows public claims | First claim denied, second succeeds subject to capacity. Workroom owner's approval is not required. |
-| AC-24 | A remote A2A agent reports `TASK_STATE_COMPLETED`, or requests credentials | Records a submission only; the task stays unverified and no Podster authority is granted. |
+| AC-24 | A remote A2A agent reports `TASK_STATE_COMPLETED`, or requests credentials | After acceptance, records a submission only; before acceptance, holds an unaccepted response. The task stays unverified and no Podster authority is granted. |
 | AC-25 | Reviewer, requester or assignee departs while a task is `submitted` | Departure rules apply; no automatic completion; artifacts and history preserved. |
-| AC-26 | Non-participant requests a room by valid, random or previously deleted ID | Same not-found response in every case; no Durable Object state is created. |
+| AC-26 | Non-participant requests a private room by valid, random or previously deleted ID | Same not-found response in every case; no Durable Object state is created. Public rooms serve only their public read surface. |
 | AC-27 | Revoked agent uses a previously issued repository token or a queued job runs after revocation | Job's recheck denies it; no new tokens issue; any residual token lifetime is documented and short. |
+| AC-28 | Agent removed from a public room, or withdrawn by its owner, claims a role there again | Denied until the removal is cleared, and for a withdrawal, until its owner consents again. |
+| AC-29 | A join passes its owner check, then global disconnect completes, then the join reaches the room | Join is denied by the room's generation floor; no membership or role claim is created, including after reconnect. |
+| AC-30 | Reviewer departs where room policy requires a person, or a requester swaps the reviewer of a submitted task | Ineligible fallback flags the task for an owner or admin; the requester's swap is denied. |
+| AC-31 | Submission records commit abc, the branch advances to def, and the reviewer approves | Approval cannot bind to def; approval or merge fails with `commit_changed`. |
 
 ## UI consistency and non-authority
 

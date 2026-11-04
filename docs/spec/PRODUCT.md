@@ -54,8 +54,8 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 
 | Milestone | Delivers | Gate |
 | --- | --- | --- |
-| **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus the kernel's AC tests |
-| **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1, 3, 4 and 5 for private rooms |
+| **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-12 to AC-17, AC-19 to AC-22, AC-25 and AC-26, for the features M0 includes |
+| **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets, which M2 adds), 3, 4 and 5 for private rooms |
 | **M2 Assets and artifacts** | Upload, scanning, versioned outputs, exact-version review | Expanded criterion 6; upload policy |
 | **M3 A2A** | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
@@ -138,7 +138,7 @@ A role has a title, responsibilities and capacity. Claiming the last opening mus
 
 The lead coordinator is accountable for interpreting the goal, preparing a plan, creating tasks, directing them to suitable roles, handling blockers and requesting review. Start with one accountable lead per workroom. A lead designation does not grant administrator, review, repository or deployment permission.
 
-**Proposed:** the owner or an admin marks exactly one opening as lead and may replace its holder. Replacing a lead transfers open coordination, such as requester duties on non-terminal tasks, only through a recorded `update_task` by an admin. Other project managers fill ordinary roles. A lead opening is not publicly claimable unless the owner or an admin explicitly enables it.
+**Proposed:** the owner or an admin marks exactly one opening as lead and may replace its holder. Replacing a lead transfers open coordination, such as requester duties on non-terminal tasks, only through a recorded `set_requester`. Other project managers fill ordinary roles. A lead opening is not publicly claimable unless the owner or an admin explicitly enables it.
 
 Human feedback can revise a task. Version checks must prevent stale submissions or approvals from silently applying to changed requirements.
 
@@ -146,7 +146,7 @@ Human feedback can revise a task. Version checks must prevent stale submissions 
 
 ### Collaboration view
 
-The Collaboration tab shows who works with whom and what actually happened. **Planned relationships** are intended flows between work roles, set by the lead, owner or admins. **Recorded activity** is derived from task events and thread messages, never entered by hand. Lines are descriptive only: neither kind grants access or proves delivery. Visibility follows the viewer's permissions, including counts. Podster does not report agents as online; it can show when an agent last made an authenticated call.
+The Collaboration tab shows who works with whom and what actually happened. **Planned relationships** are intended flows between work roles, set by the lead, owner or admins. **Recorded activity** is derived from task events and thread messages, and labeled by event kind or task title, never by hand. Lines are descriptive only: neither kind grants access or proves delivery. Visibility follows the viewer's permissions, including counts. Podster does not report agents as online; it can show when an agent last made an authenticated call.
 
 ### Public and private participation
 
@@ -209,7 +209,7 @@ Presets make the `Manage access` scopes testable, and map the kernel roles onto 
 | **Public participant** | Own tasks | Read shared, submit on own tasks | Own task threads | None |
 | **Guest** (kernel `guest`) | Own tasks | Own tasks | Own task threads | When named reviewer |
 | **Member** (kernel `member`) | All; create and offer | All | All | When named reviewer |
-| **Coordinator** (for the lead) | All; create, offer and manage all | All | All | When named reviewer |
+| **Coordinator** (for the lead) | All; create and offer; take over tasks whose requester has left | All | All | When named reviewer |
 
 "Own tasks" means tasks where the participant is requester, assignee or reviewer.
 
@@ -245,14 +245,18 @@ override their owner. The coordination kernel never follows artifact links. Futu
    ├─────────────────┘                  │
    └───────────────release──────────────┘
 
-  any state but completed ──cancel──▶ canceled
+  any non-terminal state ──cancel──▶ canceled
+
+  Proposed: accepted ──material update_task──▶ offered
+  Proposed: submitted ──request_changes after assignee left──▶ open
 ```
 
 | Action | Who | From → to |
 | --- | --- | --- |
 | `create_task` | Requester (any member; guests if allowed) | → `open`, or straight to `offered` if an assignee is given |
-| `update_task` | Requester or admin, with current `version` | Same state; **Proposed:** changing instructions or criteria from `accepted` returns to `offered`. Not allowed in `submitted`: request changes first |
-| `set_reviewer` | Requester or admin, with current `version` | Same state; never the assignee |
+| `update_task` | Requester or admin, with current `version` | Non-terminal states only. Edits `title`, `instructions`, `acceptance_criteria` and `due_at`, and nothing else. **Proposed:** changing instructions or criteria from `accepted` returns to `offered`. Not allowed in `submitted`: request changes first |
+| `set_reviewer` | Requester or admin, with current `version`; only the owner or an admin once `submitted` | Non-terminal states only. Never the assignee. The new reviewer must have review scope and meet the room's person-review policy |
+| `set_requester` | **Proposed:** owner or admin; or a Coordinator, only for itself and only when the requester has left | Non-terminal states, including `submitted` |
 | `assign_task` | Requester or admin | `open` → `offered`; or re-offer from `offered` to someone else. Never the current reviewer |
 | `accept_task` | The offered agent | `offered` → `accepted` |
 | `decline_task` | The offered agent, with a reason | `offered` → `open` |
@@ -268,7 +272,7 @@ Rules:
 - **Submission is not completion.** Only the reviewer can complete a task, and only from `submitted`.
 - **No self-sign-off.** The reviewer defaults to the requester and can be set to any other member or person, but never to
   the assignee. Offering a task to its reviewer fails. To do so, first set a different reviewer.
-- **Tasks are offered, never claimed.** Only role openings are claimed. Nobody assigns a task to itself without being
+- **Proposed: tasks are offered, never claimed.** Only role openings are claimed. Nobody assigns a task to itself without being
   its requester; a role claim never creates a task commitment.
 - Progress is reported as thread messages, not states. There is no `in_progress`: `accepted` means "I'm on it".
 - Every transition records actor, time, prior and new state, task version and reason or artifacts, as an event.
@@ -284,8 +288,10 @@ These rules apply to revocation, agent-owner withdrawal and global disconnect. H
 | --- | --- | --- |
 | Assignee | `offered` or `accepted` | Task returns to `open`. |
 | Assignee | `submitted` | **Proposed:** task stays `submitted` and can still be reviewed. `request_changes` returns it to `open` because nobody can resume it. |
-| Reviewer | `submitted` or earlier | **Proposed:** reviewer falls back to the requester, unless that is the assignee or also departed; then the task is flagged for an owner or admin to run `set_reviewer`. The task never completes by default. |
-| Requester | Non-terminal | **Proposed:** the task is flagged for the lead or an admin to take over with `update_task`. Work already accepted continues. |
+| Reviewer | `submitted` or earlier | **Proposed:** reviewer falls back to the requester, if the requester has not departed, is not the assignee, and meets the same eligibility as `set_reviewer`. Otherwise the task is flagged for an owner or admin to run `set_reviewer`. The task never completes by default. |
+| Requester | Non-terminal | **Proposed:** the task is flagged for the lead or an admin to take over with `set_requester`. Work already accepted continues. |
+
+**Proposed:** departure also ends the participant's role claims and frees those openings. A removed or withdrawn agent cannot re-claim a role in that room until an owner or admin clears the removal, and a withdrawal also needs its owner's new consent.
 
 ## Assets, outputs and releases
 
@@ -305,7 +311,7 @@ The spec does not authorize creation of a GitHub organization, repository, crede
 
 ### Review, merge and optional Cloudflare deployment
 
-Deployment is a **workroom-level option**, with a default URL and optional custom-domain mapping in the design. A DevOps role configures the release workflow once; task agents do not recreate infrastructure for every submission. Enabling it is a product setting, not proof that accounts, domain ownership, credentials or an authorized pipeline exist.
+Deployment is a **workroom-level option**, with a default URL and optional custom-domain mapping in the design. A human owner or admin configures the release workflow once, and a DevOps role can propose its settings; task agents do not recreate infrastructure for every submission. Enabling it is a product setting, not proof that accounts, domain ownership, credentials or an authorized pipeline exist.
 
 For engineering task details, show the linked PR, branch/commit, required checks, reviewer, merge status, deployment status and preview/live URL when available.
 
@@ -328,17 +334,18 @@ underneath are an internal contract between services, not a public product in th
 | `list_workspaces` | — | workspaces this agent is in, with role |
 | `get_workspace` | `workspace_id` | workspace, members visible to this agent |
 | `create_task` | `workspace_id`, `title`, `instructions`, `acceptance_criteria?`, `assignee?`, `reviewer?`, `due_at?`, `idempotency_key` | task |
-| `update_task` | `workspace_id`, `task_id`, changed fields, `version`, `idempotency_key` | task |
+| `update_task` | `workspace_id`, `task_id`, `title?`, `instructions?`, `acceptance_criteria?`, `due_at?`, `version`, `idempotency_key` | task |
 | `set_reviewer` | `workspace_id`, `task_id`, `reviewer`, `version`, `idempotency_key` | task |
+| `set_requester` | `workspace_id`, `task_id`, `requester`, `version`, `idempotency_key` | task |
 | `list_tasks` | `workspace_id`, `status?`, `mine?`, `cursor?` | page of tasks |
 | `get_task` | `workspace_id`, `task_id` | task, artifacts, last 20 messages, history |
 | `assign_task` | `workspace_id`, `task_id`, `assignee`, `version`, `idempotency_key` | task |
 | `accept_task` / `decline_task` / `release_task` | `workspace_id`, `task_id`, `version`, `reason?`, `idempotency_key` | task |
 | `send_message` | `workspace_id`, `task_id`, `body`, `idempotency_key` | message |
 | `list_messages` | `workspace_id`, `task_id`, `after?` | page of messages |
-| `submit_task` | `workspace_id`, `task_id`, `artifacts[]`, `note?`, `idempotency_key` | task |
-| `request_changes` / `verify_task` | `workspace_id`, `task_id`, `submission_no`, `reason?`, `idempotency_key` | task |
-| `cancel_task` | `workspace_id`, `task_id`, `reason`, `idempotency_key` | task |
+| `submit_task` | `workspace_id`, `task_id`, `artifacts[]`, `note?`, `commit_sha?`, `version`, `idempotency_key` | task |
+| `request_changes` / `verify_task` | `workspace_id`, `task_id`, `submission_no`, `commit_sha?`, `reason?`, `idempotency_key` | task |
+| `cancel_task` | `workspace_id`, `task_id`, `reason`, `version`, `idempotency_key` | task |
 | `read_inbox` | `after?`, `limit?`, `ack?` | `events`, `acked_seq`, `unread`, `dropped` |
 | `ack_inbox` | `up_to` | `acked_seq`, `unread` |
 | `set_wake` / `delete_wake` | `url`, `headers?`, `debounce?` | wake |
@@ -499,6 +506,14 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 15 | Message retention | Keep threads for the workspace's lifetime in preview; set policy with M2 retention | M2 |
 | 16 | Pricing shape | Decide after the preview shows usage | Later |
 | 17 | Brand clearance | Selected name is Podster and planned domain is `podster.dev`; clearance is still pending | Public launch |
+| 18 | Who holds authority over managed repositories | Podster's platform is the resource owner and delegates to the room owner for that repository only | M5 |
+| 19 | Remove the member right to "take tasks" | Yes: tasks are offered, and only role openings are claimed | M0 |
+| 20 | Access presets and per-agent scopes | The presets above | M1 |
+| 21 | Person inboxes | Yes, with the same rules as agent inboxes | M0 |
+| 22 | Which people can create tasks from the dashboard | Owner, admin and member people | M0 |
+| 23 | Personal accounts | A personal organization, not a second ownership model | M0 |
+| 24 | Who can take over a task when its requester leaves | Owner, admin, or the Coordinator for itself, with `set_requester` | M0 |
+| 25 | How changed code is handled after approval | A follow-up task with its own review | M5 |
 
 ## Review revision, November 4, 2026
 
