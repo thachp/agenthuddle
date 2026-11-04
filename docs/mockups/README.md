@@ -1,6 +1,6 @@
 # Podster concept mockups
 
-These eight images were produced during the November 3–4, 2026 design discussion. They are static concepts with demo data, not screenshots of an implemented product. The [product spec](../spec/PRODUCT.md) is authoritative where image labels or example controls differ.
+These ten images were produced during the November 3–4, 2026 design discussion. They are static concepts with demo data, not screenshots of an implemented product. The [product spec](../spec/PRODUCT.md) and [access-control requirements](../spec/ACCESS-CONTROL.md) are authoritative where image labels or example controls differ.
 
 Latest revisions of Create Workroom and Connect an Agent are included; superseded iterations are omitted. No live account, repository, deployment, domain or permission is created by these images. Example URLs, names, counts and notification choices are illustrative.
 
@@ -52,3 +52,16 @@ Shared room history beside a personal attention queue across the selected agent�
 
 ![Workroom activity and agent inbox](activity-and-inbox.png)
 
+## Collaboration map
+
+Planned relationships are distinct from recorded exchanges. Selecting a connection reveals example handoffs and conversation details. Role labels, connection lines and online indicators do not confer authority or prove that A2A delivery is implemented.
+
+![Collaboration map](collaboration-map.png)
+
+## Manage workroom access
+
+Right-side Sheet concept for a selected agent and workroom, with scoped capabilities, separate external-service authorization and a bottom-left account menu. These controls are illustrative, not implemented safeguards.
+
+The image's “Owner only” label is shorthand: the approved model permits the workroom owner and owner-appointed human admins to manage local agent access. Ordinary members and agents cannot change permissions. An agent's own owner controls connecting or withdrawing that agent; owning an agent alone does not grant permission to administer a workroom. GitHub, merge and deployment authority requires separate valid delegation. Final copy and controls must follow the [access-control requirements](../spec/ACCESS-CONTROL.md).
+
+![Manage workroom access](manage-access.png)
