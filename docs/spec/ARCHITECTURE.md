@@ -1,23 +1,17 @@
 # Podster — Target Architecture & Repo Layout
 
-Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · Companion to [PRODUCT.md](PRODUCT.md)
+Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · Companions: [Product](PRODUCT.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
 
 Nothing here is built yet. Where a choice still needs proof, it says so and names the spike.
 
 ## Scope of this architecture
 
-This document specifies the **coordination kernel** from November 3. The November 4 [product revision](PRODUCT.md) expands the target experience. `Workspace` remains the internal name for the user-facing **workroom**. Existing diagrams, schema and routes below do not yet implement the new concepts.
+This document has two levels of commitment:
 
-Before implementation, extend this design with contracts/ADRs for:
+- **Coordination kernel:** everything outside the extensions section, revised here to meet the access-control gate. `Workspace` remains the internal name for the user-facing **workroom**.
+- **[Proposed workroom extensions](#proposed-workroom-extensions):** designs for the expanded [product](PRODUCT.md). They are recommendations awaiting ADRs, not approved contracts, and they follow the product's milestones.
 
-- Workroom goal/context, visibility and discovery; work-role responsibilities, opening capacity and atomic public claims, distinct from authorization roles.
-- Asset uploads and versioned artifacts: storage, access checks, scanning, retention and downloads. The kernel's artifact-reference table is not a file-storage design.
-- Lead coordination and permission-filtered shared activity, using the existing durable per-agent inbox rather than a second source of task state.
-- A2A alongside MCP/Agent Auth, mapped into the same commands/events and tested for authentication and state-machine interoperability.
-- Podster-managed repositories with separate visibility, scoped repository permissions and export/transfer policy.
-- Optional workroom-level Cloudflare release configuration and custom domains, with review, merge and deployment tracked independently and failures visible.
-
-Keep the single-authority permission checks, transactional events/outbox, idempotency and execution-outside-Podster boundary. Public participation requires a deliberate permission design; do not grant the existing full `member` role automatically on a public claim. The phase plan below proves the kernel only. Expanded-product implementation order, costs and launch gates are not yet committed.
+Keep the single-authority permission checks, transactional events and outbox, idempotency and execution-outside-Podster boundary throughout.
 
 ## Access-control launch gate
 
@@ -25,7 +19,7 @@ The [approved ownership/access model and proposed acceptance tests](ACCESS-CONTR
 
 Rust must enforce this server-side for every dashboard/MCP/Agent Auth/A2A command, with current scoped authority and auditable outcomes. The domain direction is `podster.dev`; the Rust API has no public hostname, route, `workers.dev` endpoint or public health route. Its service binding and signed caller assertions do not replace resource-level authorization.
 
-The schemas below are the old kernel baseline. Add a human owner ID, owner-controlled admin delegation, versioned policy/grants, revocation fencing and protected access audit records before implementation. In particular, the gateway-only global-revocation check described below is insufficient for assertions already minted before disconnect; resolve that in-flight window and prove it with denial tests before claiming enforcement.
+A gateway check alone cannot satisfy global revocation, because assertions minted before a disconnect stay valid for up to 60 seconds. The [revocation fence](#global-disconnect-fence) closes that window and must pass AC-13 and AC-14 before the guarantee is claimed.
 
 ## Decisions
 
@@ -35,14 +29,14 @@ The schemas below are the old kernel baseline. Add a human owner ID, owner-contr
 | Public entry | **`apps/gateway`, TypeScript Worker**: people sign-in, Agent Auth host, hosted MCP (`/mcp`) with OAuth, capability → internal API mapping. Owns *who you are*. |
 | Domain authority | **`apps/api`, Rust `workers-rs` Worker**, private, reached only by service binding. Owns *what you may do* and everything that happens in a workspace. |
 | Workspace state | **One `Workspace` Durable Object per workspace** (SQLite): members, invitations, tasks, threads, events, outbox, idempotency. The single writer for that workspace, **including its membership**. |
-| Agent inbox | **One `Inbox` Durable Object per agent** (SQLite): inbox events, cursor, wake config. |
+| Principal state | **One `Principal` DO per agent or person** (SQLite): inbox events, cursor, wake config, connection generation and room registry. |
 | Directory | **D1**: people, organizations, agents, identity links (gateway-owned); a membership index for `list_workspaces` (api-owned projection, never used to authorize). |
-| Async | Workspace outbox → `Inbox` DO by direct DO call from an alarm. **Queues only for outbound HTTP** (wake). |
+| Async | Workspace outbox → `Principal` DO by direct DO call from an alarm. **Queues only for outbound HTTP** (wake, and provider jobs in the extensions). |
 | People auth | Better Auth in the gateway: GitHub, Google, email magic link; session cookie on the dashboard domain. |
 | Agent auth | `@better-auth/agent-auth` (claimable agents) and `@cloudflare/workers-oauth-provider` for hosted MCP, both mapped to one `agent` record. |
-| Web | **`apps/web`, Next.js on Workers via vinext** (owner's choice; not OpenNext), with shadcn/ui Sidebar and consistent right-side Sheet details. Beta: gated by a staging smoke test. |
+| Web | **`apps/web`, Next.js on Workers via vinext** (owner's choice; not OpenNext), with the [design spec](DESIGN.md)'s shadcn/ui Sidebar and right-side Sheet. Cloudflare still labels vinext beta, and it has no build-time static pre-rendering yet: gated by a staging smoke test. |
 | Contracts | `packages/contracts/openapi.yaml` is the source of truth for gateway ↔ api; capability definitions live beside it. |
-| A2A | Core product interoperability requirement alongside MCP/Agent Auth. All adapters use the same Rust policy and authoritative task/inbox state; protocol profile and conformance tests remain to be designed. |
+| A2A | Core product interoperability requirement alongside MCP/Agent Auth. All adapters use the same Rust policy and authoritative task/inbox state. [Proposed profile](#a2a-adapter) targets A2A 1.0; conformance is not claimed. |
 | Execution | Outside Podster. No agent hosting, prompts, models or sandboxes. |
 
 ## System
@@ -59,7 +53,7 @@ flowchart LR
         D1[("D1<br/>people, orgs, agents,<br/>identity links,<br/>membership index")]
         API["apps/api (Rust)<br/>internal REST · verifies assertions<br/>routes to DOs"]
         WS["Workspace DO (per workspace)<br/>SQLite: members, invitations,<br/>tasks, messages, events, outbox"]
-        IN["Inbox DO (per agent)<br/>SQLite: events, cursor, wake"]
+        IN["Principal DO (per agent or person)<br/>SQLite: events, cursor, wake,<br/>generation, room registry"]
         Q["Queue: wake"]
         C["Wake consumer (Rust, same Worker)"]
     end
@@ -96,7 +90,7 @@ task state or permission logic, and the API never trusts anything a public calle
 
 **`apps/api` (Rust)** — the workspace authority. No public route.
 - Verifies the assertion on every request; routes by `workspace_id` to that `Workspace` DO, or by `agent_id` to that
-  agent's `Inbox` DO.
+  agent's `Principal` DO.
 - Owns the membership index in D1, written from workspace events, read only for `list_workspaces`.
 - Hosts both DO classes and the wake queue consumer.
 
@@ -108,11 +102,11 @@ bindings to D1 or DOs.
 Ed25519-signed, 60-second, audience-bound, sent as a header on the service binding:
 
 ```json
-{ "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…",
+{ "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…", "gen": 3,
   "scopes": ["workspace", "inbox"], "iat": 1730600000, "exp": 1730600060, "jti": "…" }
 ```
 
-It says who the caller is, never what they may do: no workspace, no role. The `Workspace` DO decides that from its own
+It says who the caller is, never what they may do: no workspace, no role. `gen` is the agent's connection generation, so an assertion from before a disconnect and reconnect is refused. The `Workspace` DO decides that from its own
 member table. Key rotation: the API accepts a small set of public keys (`kid`), so the gateway can roll its key
 without downtime.
 
@@ -132,29 +126,39 @@ membership_index(workspace_id, principal_id, org_id, role, workspace_name, updat
 ### `Workspace` DO (SQLite, one per workspace)
 
 ```
-workspace(id, name, owner_org_id, status, created_at)
-member(principal_id, kind, org_id, role, guest_can_create, added_by, added_at, revoked_at?)
+workspace(id, name, owner_org_id, owner_person_id, policy_version, status, created_at)
+member(principal_id, kind, org_id, role: admin|member|guest, guest_can_create, added_by, added_at,
+       revoked_at?, revocation_reason?)      -- role admin allowed only for kind=person
 invitation(id, invited_org_id?, role, guest_can_create, token_hash, expires_at, status, created_by)
 task(id, title, instructions, acceptance_criteria, requester_id, assignee_id?, reviewer_id,
-     status, version, due_at?, created_at, updated_at)
+     status, version, needs_attention?, due_at?, created_at, updated_at)
+submission(task_id, submission_no, task_version, note?, submitted_by, created_at)
 message(id, task_id, sender_id, body, created_at, seq)
 artifact(id, task_id, submission_no, uri, label, media_type?, sha256?, submitted_by, created_at)
 event(seq, id, type, actor_id, task_id?, payload_json, created_at)
 outbox(event_id, recipient_agent_id, attempts, next_attempt_at)
 idempotency(actor_id, key, request_hash, response_json, expires_at)
+audit_event(id, actor_id, actor_kind, action, target_id, outcome, reason_code, prior_json?, new_json?,
+            policy_version, created_at)      -- successful local changes commit with the change
 ```
+
+The owner is a column, not a member role, so a workspace always has exactly one owner and no command can grant ownership by editing a member. Only `crates/policy`, given the current owner, can permit an admin appointment. Denied attempts go to a protected, rate-limited stream, separate from this transactional log.
 
 **Every command is one SQLite transaction**: check the caller is a current member with the right role (`crates/policy`),
 apply the transition (`crates/core`), insert the event with the next `seq`, insert one outbox row per agent that must
 hear about it, store the idempotency result. Either all of it commits or none of it does.
 
-### `Inbox` DO (SQLite, one per agent)
+### `Principal` DO (SQLite, one per agent or person)
 
 ```
 inbox_event(seq, event_id UNIQUE, workspace_id, type, payload_json, created_at)
 cursor(acked_seq)
-wake(url, headers_json, debounce_s, last_sent_at, consecutive_failures)
+wake(url, headers_json, debounce_s, last_sent_at, consecutive_failures)   -- agents only
+connection(generation, status: active|disconnecting|disconnected, participation_policy)
+room_registry(workspace_id, registered_at, revoke_acked_at?)
 ```
+
+**Inbox events are thin.** `payload_json` holds identifiers, type, actor and task title, never message bodies or artifact content. The reader gets content through `get_task` or `list_messages`, which check current authority. This satisfies the access-control rule that delayed delivery rechecks authority before disclosure, and a revocation's cleanup message no longer guards any sensitive content.
 
 `deliver(event)` is idempotent on `event_id`. Read, ack, page size, the full-inbox drop rule and retention follow
 RunLater's inbox exactly; port that code rather than redesigning it.
@@ -172,28 +176,53 @@ What stays outside the DO, and why it's safe:
 
 - `membership_index` in D1 can lag by seconds. It is only used to *list* workspaces; every read of contents goes to the
   DO, which refuses a revoked caller.
-- Disconnecting an agent org-wide sets `agent.revoked_at` in D1; the gateway refuses that agent's next request before
-  minting an assertion. The API then marks it revoked in each workspace from the index (best effort, retried); the
-  gateway check blocks new assertions, but does not by itself cover an assertion minted before revocation. Current revocation checks/fencing and a defined ordering boundary are required by ACCESS-CONTROL.md before launch.
+- Disconnecting an agent org-wide spans many workspaces, so it needs its own ordering. See the
+  [global disconnect fence](#global-disconnect-fence).
 
 ### A command, end to end (`accept_task`)
 
 1. Agent B calls `accept_task` via MCP. Gateway resolves the OAuth grant → `agt_B`, `org_B`; signs an assertion; calls
    `POST /v1/workspaces/{ws}/tasks/{t}/accept` with `Idempotency-Key`.
-2. API verifies the assertion and calls `Workspace(ws).accept(t, caller, key)`.
+2. API verifies the assertion, checks `Principal(agt_B)` for an active connection at the asserted `gen`, and calls `Workspace(ws).accept(t, caller, key)`.
 3. In one transaction the DO checks B is a current member who can see `t` and is its offered assignee, moves
    `offered → accepted`, bumps `version`, writes event `task.accepted`, outbox rows for the requester and reviewer,
    and the idempotency record. It schedules its alarm if not set.
-4. Response returns to B. Later, the alarm drains the outbox: `Inbox(agt_A).deliver(event)`, deleting each row on
+4. Response returns to B. Later, the alarm drains the outbox: `Principal(agt_A).deliver(event)`, deleting each row on
    success and backing off on failure.
-5. `Inbox(agt_A)` stores the event; if A has a wake URL and the debounce window has passed, it enqueues a wake.
+5. `Principal(agt_A)` stores the event; if A has a wake URL and the debounce window has passed, it enqueues a wake.
 
 ### Revocation
 
-`revoke_member` is a workspace command like any other: it sets `revoked_at`, moves the member's `offered`/`accepted`
-tasks back to `open`, writes `member.revoked`, deletes that member's pending outbox rows, and sends one final outbox
-entry telling its `Inbox` DO to drop unacked events from this workspace. Requests after the commit fail with
-`403 not_a_member`; requests before it completed normally.
+`revoke_member` is a workspace command like any other: it sets `revoked_at`, applies the
+[departure rules](PRODUCT.md#when-a-participant-leaves), writes `member.revoked`, deletes that member's pending outbox rows, and sends one final outbox
+entry telling its `Principal` DO to drop unacked events from this workspace. Requests after the commit fail with
+`403 access_revoked`; requests before it completed normally. Withdrawal by an agent's owner and global disconnect use this same transaction with a different actor and reason.
+
+### Global disconnect fence
+
+```mermaid
+sequenceDiagram
+    actor Owner as Agent owner
+    participant G as Gateway and API
+    participant P as Principal DO
+    participant W as Each Workspace DO
+    Owner->>G: Disconnect agent
+    G->>P: begin_disconnect
+    P->>P: Commit disconnecting, generation + 1
+    G-->>Owner: Status: Disconnecting
+    P->>W: revoke(agent), durable retries
+    W->>W: Commit revocation, ordered against commands
+    W-->>P: Acknowledge
+    P->>P: All acknowledged: disconnected
+    P-->>Owner: Status: Disconnected
+```
+
+1. **Registering a room.** A join calls `Principal.register_room` before the workspace transaction commits. A disconnecting agent is refused, and a retained entry after a crash only causes a harmless extra revoke. The registry is therefore a superset of the agent's rooms, unlike the lagging D1 index.
+2. **Checking every command.** The API checks `Principal.active(gen)` before calling a workspace, including for reads and asynchronous disclosure. An assertion minted before the disconnect fails from the moment step 3 commits.
+3. **Linearization.** The disconnect takes effect at the `Principal` commit, and `agent.revoked_at` in D1 then gives the gateway a fast refusal. A command that passed its check before that commit may still land, in which case its room's own transaction orders it before the revocation, and it is recorded. Only when every room acknowledges does the state become **Disconnected**. That is the point at which the product can say no further commit is possible.
+4. **Reconnection.** Only the agent's owner can reconnect, with a new generation. No room access returns automatically.
+
+This costs one extra DO call per command. A Miniflare spike must measure it and exercise AC-13 and AC-14.
 
 ### Invitations across organizations
 
@@ -206,7 +235,7 @@ entry telling its `Inbox` DO to drop unacked events from this workspace. Request
 
 The wake consumer validates the URL with RunLater's destination policy (`https`, public DNS name, no private ranges,
 re-checked before each send; `global_fetch_strictly_public`), signs `{agent_id, unread, at}` with a per-agent secret,
-sends with a 10 s timeout, and reports the result back to the `Inbox` DO, which disables wake after 3 consecutive
+sends with a 10 s timeout, and reports the result back to the `Principal` DO, which disables wake after 3 consecutive
 failures. Queues are never needed for correctness: an agent that is never woken still finds every event in its inbox.
 
 ## Internal API (gateway → api)
@@ -216,14 +245,17 @@ GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
 POST   /v1/workspaces                               person only
 GET    /v1/workspaces/{ws}
-POST   /v1/workspaces/{ws}/members                  add own agents (admin)
-DELETE /v1/workspaces/{ws}/members/{principal}      revoke (admin)
+PUT    /v1/workspaces/{ws}/admins/{person}          appoint (owner) · DELETE removes
+POST   /v1/workspaces/{ws}/members                  add own agents (owner or admin)
+DELETE /v1/workspaces/{ws}/members/{principal}      revoke (owner or admin)
+POST   /v1/workspaces/{ws}/members/{agent}/withdraw agent's owning organization only
+POST   /v1/agents/{agent}/disconnect                person of the owning organization
 POST   /v1/workspaces/{ws}/invitations              (admin)
 POST   /v1/invitations/accept                       token in body; person only
 GET    /v1/workspaces/{ws}/tasks?status=&mine=&cursor=
 POST   /v1/workspaces/{ws}/tasks
 GET    /v1/workspaces/{ws}/tasks/{t}
-POST   /v1/workspaces/{ws}/tasks/{t}/{assign|accept|decline|release|submit|request-changes|verify|cancel}
+POST   /v1/workspaces/{ws}/tasks/{t}/{update|set-reviewer|assign|accept|decline|release|submit|request-changes|verify|cancel}
 GET    /v1/workspaces/{ws}/tasks/{t}/messages?after=
 POST   /v1/workspaces/{ws}/tasks/{t}/messages
 GET    /v1/workspaces/{ws}/events?after=            audit log (admin, people)
@@ -234,15 +266,162 @@ GET    /health                                    private service binding only
 ```
 
 Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with stable codes:
-`not_a_member` (403), `not_allowed` (403, member but wrong role/party), `task_not_found` (404, also for tasks a guest
-can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422).
+`workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
+participant, who already knows the room exists), `not_allowed` (403, participant but wrong role/party), `task_not_found`
+(404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422).
+
+Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Room IDs are random, and non-member responses take the same path whether the room exists or not. Together these prevent private-room existence from leaking (AC-09).
+
+## Proposed workroom extensions
+
+Everything in this section is **proposed**. Each subsection needs an ADR and contracts before implementation. It keeps Workspace-level authority in the `Workspace` DO, adds external effects only after a committed event, and rechecks authority before any delayed effect.
+
+```mermaid
+flowchart LR
+    GW["apps/gateway<br/>adds A2A adapter,<br/>GitHub webhooks"]
+    API["apps/api (Rust)"]
+    WS["Workspace DO<br/>adds roles, claims, grants,<br/>assets, releases"]
+    D1[("D1<br/>adds public_workroom_index")]
+    R2[("R2<br/>asset and artifact objects")]
+    Q["Queue: provider jobs"]
+    GH["GitHub App<br/>managed repositories"]
+    CF["Workers for Platforms<br/>deployed apps on a separate domain"]
+    GW --> API --> WS
+    WS -->|projection| D1
+    API -->|signed, checked transfers| R2
+    WS -->|outbox| Q
+    Q -->|recheck authority first| WS
+    Q --> GH
+    Q --> CF
+    GH -->|signed webhook| GW
+```
+
+### Public surfaces
+
+| Surface | Proposed host | Serves |
+| --- | --- | --- |
+| Landing and docs | `podster.dev` | Marketing and docs; no session cookie |
+| Application | `app.podster.dev` | Dashboard, person sign-in, approval pages |
+| Agent gateway | `gateway.podster.dev` | `/mcp`, Agent Auth, A2A, webhooks |
+
+The MCP consent page needs a signed-in person, so the gateway's consent route must either redirect to the application host or share a deliberately scoped session. Decide this in the Phase 0 spike. Prefer host-only cookies. Rust stays private on every option. No DNS or routes are configured by this document.
+
+### Workroom, roles and discovery (M1, M4)
+
+```
+workspace += goal, context, workflow: general|engineering, visibility: private|public, topic?
+work_role(id, title, responsibilities, capacity, preset, publicly_claimable, is_lead, version)
+role_claim(id, role_id, principal_id, status: active|released|revoked, claimed_at, ended_at?)
+           -- unique (role_id, principal_id) where status='active'
+invitation += work_role_id?
+access_grant(principal_id, tasks, artifacts, conversations, review, granted_by, version, updated_at)
+expected_output(id, title, kind, linked_artifact_version?)
+relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edges only
+```
+
+- **Atomic claims.** `claim_role` runs as one DO transaction: check the agent's current policy and registration, room visibility, `publicly_claimable`, then `count(active) < capacity`. The single writer stops overfilling; the partial unique index and idempotency key stop one agent using two openings. Lowering capacity below the active count blocks further claims and removes nobody.
+- **Scopes come from the server.** A claim copies the role's preset into `access_grant`; the request cannot supply scopes. `crates/policy` checks scopes on every read and write. A preset never contains admin or provider authority.
+- **Discovery.** `public_workroom_index` in D1 holds only public-safe fields, written from workspace events and used only for listing. Going public publishes after the commit. Going private commits first, then removes the index row; a stale row can show public metadata for seconds, but its link goes to the DO, which applies current visibility. Rows are never used to authorize.
+
+### Activity and collaboration (M1)
+
+Activity reads the existing `event` table through a per-viewer visibility filter in the DO. It has no read state and never touches an inbox. **Recorded edges** are a projection maintained with each event commit, per `(from, to, kind)`, for owner and member viewers. For narrower viewers, the DO computes edges from only the tasks they can see, so aggregate counts cannot disclose hidden work. "Last active" is the last authenticated command per principal, written coarsely and not as a presence signal.
+
+### Assets and versioned artifacts (M2)
+
+```
+asset(id, title, visibility: room|public, current_version, created_by, created_at)
+stored_object(id, r2_key, sha256, size, media_type, scan_status: pending|clean|blocked, created_by, created_at)
+artifact_version(id, task_id, submission_no, version_label, object_id?, uri?, preview_url?, created_by, created_at)
+```
+
+- **Storage.** Object bytes live in R2 under immutable keys scoped by workspace. Metadata and authority stay in the `Workspace` DO. Replacing a file creates a new version.
+- **Upload.** A checked command creates a `pending` record and an upload grant that is short-lived and limited by size and type. Completion verifies size and hash and starts scanning. Nothing is downloadable before `clean`.
+- **Download.** Every download first calls the DO to check current authority, then returns a very short-lived link. Serve as an attachment unless on the content origin.
+- **Review binding.** `verify_task` names `submission_no` and writes `approved_artifact_version`. A later submission starts unreviewed, so an approved badge cannot move onto replaced content.
+- **Open for the ADR:** scanning provider, allowed types and size limits, quotas, retention, deletion after revocation, legal takedown and export.
+
+### Content and deployment origins
+
+Deployed apps and previews run code and markup that agents wrote. They must never share a site with the application. Use a **separate registrable domain** (`<content-domain>` until chosen), ideally on the Public Suffix List, with a distinct subdomain per room, so one app cannot set or read Podster cookies or another room's. `*.podster.dev` must not host this content. Mockup addresses such as `workroom.podsters.io` are not decisions. Uploaded HTML and SVG follow the same rule with a restrictive Content Security Policy, or download only.
+
+### A2A adapter
+
+Target [A2A 1.0](https://a2a-protocol.org/latest/specification/). The gateway hosts the adapter and publishes an Agent Card at `/.well-known/agent-card.json`, with authentication declared in `securitySchemes`. The card describes Podster, and never lists private rooms. Every A2A request authenticates to a Podster agent identity, then becomes the same internal command as MCP. MCP-only agents stay fully supported.
+
+**Calling out.** For an agent that registers an A2A endpoint, Podster delivers an offer through an outbox job under the wake egress policy. One Podster task may span several A2A tasks, one per offer attempt, because a declined Podster task can be offered to someone else. The stored mapping and idempotency key prevent duplicate deliveries from creating competing tasks.
+
+| Podster state or action | Remote agent's A2A state | Rule |
+| --- | --- | --- |
+| `offered` | `TASK_STATE_SUBMITTED` | Delivery is not acceptance |
+| `accept_task` | `TASK_STATE_WORKING` | Maps to acceptance only after the profile defines it |
+| `decline_task` | `TASK_STATE_REJECTED` | Podster task returns to `open` |
+| `submit_task` | `TASK_STATE_COMPLETED` | **Remote completion is only a submission.** It never maps to `verify_task` |
+| `release_task` | `TASK_STATE_FAILED` | Podster task returns to `open` |
+| Question needing a reply | `TASK_STATE_INPUT_REQUIRED` | A thread message; state remains `accepted` |
+| Requested credentials | `TASK_STATE_AUTH_REQUIRED` | Never grants Podster authority, as A2A section 7.6.4 also warns |
+| `request_changes` | New message or A2A task | The ADR decides, based on A2A terminal-state rules |
+| `cancel_task` | `TASK_STATE_CANCELED` | Podster state is authoritative |
+
+Podster tasks in `open` have no A2A equivalent. A2A messages attach to a task thread and are stored as untrusted content with `external` marking. This table is a starting profile; positive and negative interoperability tests with at least two independent implementations must pass before any support claim.
+
+### Managed repositories and merge (M5)
+
+```
+repo_link(provider_repo_id, full_name, visibility, default_branch, installation_ref, status, created_by)
+provider_grant(principal_id, provider, resource_ref, actions, delegated_by, expires_at?, revoked_at?)
+task_change(task_id, submission_no, pr_number, head_sha, checks, merge_state, merge_sha?, observed_at)
+```
+
+- **Delegation.** A **GitHub App** on the dedicated organization holds Podster's authority for managed repositories. For this class of resource Podster's platform is the external-resource owner. Creating a linked repository delegates to the room owner only for that repository. Agents and reviewers still need explicit `provider_grant` rows. Existing repositories need their real owner's delegation.
+- **Agent access.** `get_repo_access` checks the grant and returns a short-lived installation token, restricted to that repository and to minimum permissions. Branch rules protect the default branch so that only the Podster merge path can update it. Tokens are never stored in events or logs.
+- **Provider state.** Signed webhooks are verified at the gateway and reach the DO as normalized observations. The DO records them with their observation time. GitHub remains the source of truth for merge and checks; webhooks can be late or lost, so jobs and the UI reconcile by polling when state looks stale.
+- **Merge.** Approval and merge are two events, never one state.
+
+```mermaid
+sequenceDiagram
+    actor R as Reviewer
+    participant W as Workspace DO
+    participant Q as Provider job
+    participant GH as GitHub
+    R->>W: verify_task(submission 2) if not already approved
+    W->>W: Commit task.completed for commit abc
+    R->>W: merge_task(submission 2, commit abc)
+    W->>W: Check review, grant and policy, commit merge.requested
+    W->>Q: Outbox job
+    Q->>W: Recheck current authority
+    Q->>GH: Merge with sha=abc
+    alt head still abc
+        GH-->>Q: Merged
+        Q->>W: Commit merge.succeeded
+    else head changed
+        GH-->>Q: 409
+        Q->>W: Commit merge.failed, commit_changed
+    end
+```
+
+The [GitHub merge API](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request) refuses a merge whose head does not match `sha`, which binds the merge to the reviewed commit. A completed task with a failed merge is an expected, visible state, and retried jobs check whether the merge already happened.
+
+**Open for the ADR:** App permissions, how commits attribute individual agents, ownership and legal terms for the managed organization, deletion, and export or transfer.
+
+### Release and deployment (M6)
+
+```
+release_config(enabled, environments_json, approval_policy, default_host, custom_host?, version, set_by)
+release(id, commit_sha, environment, state, requested_by, requested_at, result_url?, failure_code?, finished_at?)
+```
+
+- **Hosting.** [Workers for Platforms](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/reference/worker-isolation/) fits the proposed Podster-hosted default: each room's app is a user Worker in an **untrusted** dispatch namespace, routed by hostname on the separate content domain, with no bindings to Podster's own data. Bringing a customer's Cloudflare account is a later delegated option.
+- **Trigger.** A merge may start a release only if `release_config` allows it for that environment and the release job's authority recheck passes. Each attempt is its own record, tied to an exact commit. Task completion never implies deployment.
+- **Custom domains.** Proven ownership is required before routing. An M6 spike must validate the Cloudflare custom-hostname flow; it is not yet verified for this design.
+- **Open for the ADR:** where builds run, secrets for deployed apps, rollback, budgets and quotas, abuse takedown, and account limits.
 
 ## Repo layout
 
 ```
 podster/
 ├── apps/
-│   ├── api/                 Rust Worker: routes, Workspace DO, Inbox DO, wake consumer (thin)
+│   ├── api/                 Rust Worker: routes, Workspace DO, Principal DO, wake consumer (thin)
 │   │   ├── src/
 │   │   ├── migrations/      DO SQLite schema, versioned in code
 │   │   └── wrangler.jsonc
@@ -259,7 +438,8 @@ podster/
 │   ├── contracts/           openapi.yaml, capability definitions; generated TS types
 │   └── tsconfig/
 ├── docs/
-│   ├── spec/                PRODUCT.md, ARCHITECTURE.md (this)
+│   ├── spec/                PRODUCT.md, ARCHITECTURE.md (this), DESIGN.md, ACCESS-CONTROL.md
+│   ├── mockups/             Concept images (not implemented screens)
 │   └── adr/
 ├── Cargo.toml               workspace: apps/api, crates/*
 ├── package.json             npm workspaces: apps/gateway, apps/web, packages/*
@@ -274,10 +454,11 @@ secrets and OAuth callbacks.
 | Layer | Tool | Must prove |
 | --- | --- | --- |
 | `crates/core`, `crates/policy` | `cargo test` | Every transition × every role × party; no self-sign-off; guest visibility; idempotency collision and mismatch; version conflict. Table-driven, generated from the matrices in PRODUCT.md. |
-| `apps/api` | `vitest` + `@cloudflare/vitest-pool-workers` (Miniflare) | Command transactions are atomic (event ⇔ mutation); concurrent accepts/submits; outbox drain survives DO restart; inbox dedupe; revocation ordered against in-flight commands. |
+| `apps/api` | `vitest` + `@cloudflare/vitest-pool-workers` (Miniflare) | Command transactions are atomic (event ⇔ mutation); concurrent accepts/submits; outbox drain survives DO restart; inbox dedupe; revocation ordered against in-flight commands; disconnect fence with a pre-minted assertion and an unreachable room; departure rules. |
 | `apps/gateway` | `vitest` | Capability → route mapping; assertion minting; unclaimed/revoked agents refused; MCP and Agent Auth map to the same agent. |
 | End to end | Built gateway + api in Miniflare, driven by the real `@auth/agent` SDK and an MCP client | The eight steps of PRODUCT.md *Success criteria*, with two orgs and separate credentials. |
-| Staging | Deployed smoke test | Same journey against real Cloudflare; vinext dashboard sign-in, invitation and review. |
+| Staging | Deployed smoke test | Same journey against real Cloudflare; vinext dashboard sign-in, invitation and review; AC-19 network probe of the private API. |
+| Interface | Component and browser tests | UI-01 to UI-13 in DESIGN.md, plus AC-20 and AC-21. |
 
 Carry over RunLater's lesson: workerd's SQLite rejects compound `SELECT`s past a few terms, so the native test database
 sets the same limit.
@@ -288,11 +469,11 @@ sets the same limit.
 | --- | --- | --- |
 | **0 — Contracts and spikes** | OpenAPI, capability definitions, ADRs for the decisions above. Spikes: (a) Better Auth people + Agent Auth + MCP OAuth in one gateway mapping to one agent; (b) vinext on Workers with session auth and bindings. | Both spikes deploy to staging. The Rust SQLite DO is already proven by RunLater's `TaskLedger`; no spike needed. |
 | **1 — Workspace kernel** | `crates/core`, `crates/policy`, `Workspace` DO, internal API for tasks and messages, assertion verification. | Unit and Miniflare tests above pass for tasks, threads, idempotency, versions. |
-| **2 — Identity and membership** | Gateway auth, claiming, organizations, invitations, revocation, membership index. | Unrelated, guest and revoked agents are refused on every route, including after reconnect. |
-| **3 — Inbox and the two-agent handoff** | `Inbox` DO, outbox drain, capabilities and `/mcp`. | E2E success criteria 1–8 pass in Miniflare, then on staging. **This is the MVP.** |
-| **4 — Dashboard and wake** | vinext dashboard for people's jobs; wake queue and consumer. | People can do every dashboard job in PRODUCT.md; wake retries and disablement tested. |
+| **2 — Identity and membership** | Gateway auth, claiming, organizations, owner and admin authority, invitations, revocation, `Principal` connection state and disconnect fence, audit log, membership index. | Unrelated, guest and revoked agents are refused on every route, including after reconnect. Kernel-applicable AC tests pass. |
+| **3 — Inbox and the two-agent handoff** | `Principal` inbox, outbox drain, capabilities and `/mcp`. | E2E success criteria 1–8 pass in Miniflare, then on staging. **This is the MVP.** |
+| **4 — Dashboard and wake** | vinext dashboard for the kernel: review, access, agents, person inbox; wake queue and consumer. | People can complete kernel jobs in the dashboard; wake retries and disablement tested. |
 
-A2A is now core product scope, not a later optional adapter: add protocol mapping and positive/negative interoperability tests to the launch plan. Security acceptance in ACCESS-CONTROL.md must also pass before launch. The historical kernel phases above are not the complete release plan. Later enhancements include team templates, Jira sync, workspace channels and real-time updates.
+Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.md#product-direction-and-delivery-scope) M1 to M6 cover the extensions below. A2A is core product scope, not a later optional adapter, and security acceptance in ACCESS-CONTROL.md must pass before launch. Later enhancements include team templates, Jira sync, workspace channels and real-time updates.
 
 ## Operations
 
@@ -314,6 +495,11 @@ A2A is now core product scope, not a later optional adapter: add protocol mappin
 | Prompt injection between organizations | `external: true` on content, tool descriptions, no link following, permissions never derived from content. |
 | A busy workspace DO becomes a hotspot | Single writer is the point; limits (50 members, 1,000 open tasks) keep it far below DO throughput. Split by task later if ever needed. |
 | Sybil agents and spam invitations | Agents need a person-owned org; only person admins invite; rate limits on registration, claims and invitations. |
+| Extra `Principal` check adds latency to every command | Measure in the fence spike. Caching is not acceptable unless the fence guarantee is restated. |
+| Hosted agent-built apps attack Podster sessions or each other | Separate registrable domain, untrusted dispatch namespace, no shared bindings, and budget caps. |
+| Shared repository credentials blur who did what | Short-lived, scoped tokens tied to an agent; record agent, commit and token grant in events. |
+| Uploaded files carry malware or abusive content | Quarantine until scanned, attachment downloads, isolated previews, report and takedown process. |
+| Public workrooms attract spam claims | Default agent policy of invitations only, rate limits, narrow preset, and room owner removal. |
 
 ## Changes from the earlier draft
 
@@ -326,5 +512,12 @@ For reviewers of `docs/CLOUDFLARE-ARCHITECTURE.md` (in git history):
 - **Assertion carries identity only**, not workspace or scopes for a workspace; the DO decides permissions.
 - **Rust DO spike dropped** from Phase 0: RunLater already runs a SQLite-backed Rust DO in production.
 - **People auth specified** (Better Auth sessions), which the draft needed for approvals but didn't define.
+
+For reviewers of the first November 4 version:
+
+- **`Inbox` DO became the `Principal` DO:** it also holds person inboxes, connection generation and an authoritative room registry, closing the disconnect window.
+- **Inbox events are thin,** so delayed delivery cannot disclose content without a current authority check.
+- **Error model changed:** `not_a_member` is replaced so private rooms don't reveal their existence.
+- **Extensions are designed as proposals,** replacing the previous list of missing contracts.
 
 

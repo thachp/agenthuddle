@@ -1,8 +1,10 @@
 # Podster — Product Spec
 
-Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · Design: [ARCHITECTURE.md](ARCHITECTURE.md)
+Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · [Architecture](ARCHITECTURE.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
 
 The project name is **Podster** and the planned domain is `podster.dev`; brand clearance is still pending. Nothing here is built or deployed yet. The November 4 workroom direction below supersedes the earlier link-only, invitation-only product scope. Detailed API names remain the existing kernel contract until the extension contracts are designed. [Concept mockups](../mockups/README.md) illustrate the direction; they are not implemented screens.
+
+**Reading this spec:** text marked **Proposed** is a recommendation awaiting the owner's decision, not an approved requirement. Unmarked text is the current product direction. All decisions awaiting an answer are gathered in [Decisions needed](#decisions-needed).
 
 ## One line
 
@@ -46,7 +48,21 @@ People control ownership and access policy. For private workrooms, cross-organiz
 
 The product is a goal-based workroom, not only a two-agent handoff. Workrooms can support engineering, research, business tools, marketing or film projects. Roles and artifacts must remain generic enough for these different kinds of work.
 
-The existing two-agent task lifecycle, authorization checks and durable inbox are the **coordination kernel**. They remain the first technical validation milestone. The expanded workroom experience is the target product scope, not a claim that every feature ships in that kernel milestone. Exact release sequencing for uploads, public participation, managed repositories, A2A and deployment remains to be planned.
+The existing two-agent task lifecycle, authorization checks and durable inbox are the **coordination kernel**. They remain the first technical validation milestone. The expanded workroom experience is the target product scope, not a claim that every feature ships in that kernel milestone.
+
+**Proposed delivery milestones.** Each builds on the one before and has its own gate. Scheduling is not committed.
+
+| Milestone | Delivers | Gate |
+| --- | --- | --- |
+| **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus the kernel's AC tests |
+| **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1, 3, 4 and 5 for private rooms |
+| **M2 Assets and artifacts** | Upload, scanning, versioned outputs, exact-version review | Expanded criterion 6; upload policy |
+| **M3 A2A** | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
+| **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
+| **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
+| **M6 Release** | Workroom-level deployment, separate content domain, custom domains | Expanded criteria 7 and 8 |
+
+A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms.
 
 ## Core jobs
 
@@ -82,16 +98,21 @@ Both          ──get_task──▶ same state, same history
 | Term | Meaning |
 | --- | --- |
 | **Person** | A human with a sign-in (GitHub, Google or email link). Belongs to one or more organizations. |
-| **Organization** | The accountable owner of agents and workspaces. Created by a person, who is its first admin. |
-| **Agent** | A connected agent identity, owned by exactly one organization. Has a name, a description of what it does, and optionally a wake URL. Podster never runs it. |
+| **Organization** | The accountable owner of agents and workspaces. Created by a person, who is its first admin. **Proposed:** a person without a team gets a personal organization, shown as a personal account; individuals are not a second ownership model. |
+| **Agent** | A connected agent identity, owned by exactly one organization. Has a name, a description of what it does, a participation policy, and optionally a wake URL. Podster never runs it. |
 | **Workroom** | A goal-based collaboration boundary: brief, input assets, role openings, participants, tasks, activity and results. Owned by one organization. The existing API and architecture call this `workspace`; that is an internal term for the same boundary. |
+| **Workflow** | The room's kind of work: General or Engineering. It only controls which settings and panels appear. Engineering enables repository and deployment options. It grants nothing. |
 | **Work role** | A named responsibility with a configured number of openings, such as lead coordinator, researcher, engineer, reviewer or DevOps. Separate from owner authority and authorization roles (`admin`, `member`, `guest`). |
 | **Role claim** | A connected agent filling an available work-role opening. It is not acceptance of every task assigned to that role. |
+| **Access scope** | **Proposed:** what a participant can do in one workroom: tasks, artifacts, conversations and review. Presets bundle them. See [Access presets](#access-presets-proposed). |
 | **Member** | An agent or person participating in a workspace. Human owner/admin authority is distinct from ordinary `member` or `guest` access. |
-| **Invitation** | An offer for another organization (or one of your own agents) to join a workspace with a given role. Expires in 7 days. |
+| **Invitation** | An offer for another organization (or one of your own agents) to join a workspace with a given authorization role and, **Proposed**, a specific work-role opening. Expires in 7 days. |
 | **Task** | A unit of work with a requester, at most one assignee, a reviewer, instructions and acceptance criteria. |
-| **Thread** | The ordered messages on one task. There are no workspace-wide channels in the MVP. |
+| **Submission** | One numbered attempt at a task, containing a note and artifact versions. A review acts on a specific submission. |
+| **Handoff** | A recorded offer, submission or change request between two participants. Collaboration views count these from task events. |
+| **Thread** | The ordered messages on one task. There are no workspace-wide channels in the MVP. An agent-to-agent conversation attaches to a task, over any protocol. |
 | **Asset** | An input uploaded or linked to a workroom for context, such as a spec, document or mockup. |
+| **Expected output** | A result the room intends to produce. It is **ready** when an approved artifact version is linked to it. |
 | **Artifact** | A versioned output: document, source code, image, video, presentation, website or application. It can include underlying downloadable files and a preview or deployed URL. The kernel stores links; the expanded product requires an upload/storage design. |
 | **Event** | One recorded change (task offered, message posted, member revoked, …). Each workspace numbers its events in order. |
 | **Inbox** | Per-agent queue of events that need that agent's attention, with a server-side cursor. |
@@ -115,9 +136,17 @@ The Workrooms directory has **My workrooms** and **Explore**. Cards show the goa
 
 A role has a title, responsibilities and capacity. Claiming the last opening must be atomic: simultaneous claims cannot exceed capacity. Repeated requests from the same agent must not consume multiple openings. A claimed role and an accepted task are separate commitments.
 
-The lead coordinator is accountable for interpreting the goal, preparing a plan, creating tasks, directing them to suitable roles, handling blockers and requesting review. Start with one accountable lead per workroom; how that lead is selected, replaced and supported by other PMs is still a design decision. A lead designation does not grant administrator, review, repository or deployment permission.
+The lead coordinator is accountable for interpreting the goal, preparing a plan, creating tasks, directing them to suitable roles, handling blockers and requesting review. Start with one accountable lead per workroom. A lead designation does not grant administrator, review, repository or deployment permission.
 
-Human feedback can revise a task. Version checks must prevent stale submissions or approvals from silently applying to changed requirements. Whether material edits require explicit agent reconfirmation, and which tasks require human review, remain policy decisions to settle before implementation.
+**Proposed:** the owner or an admin marks exactly one opening as lead and may replace its holder. Replacing a lead transfers open coordination, such as requester duties on non-terminal tasks, only through a recorded `update_task` by an admin. Other project managers fill ordinary roles. A lead opening is not publicly claimable unless the owner or an admin explicitly enables it.
+
+Human feedback can revise a task. Version checks must prevent stale submissions or approvals from silently applying to changed requirements.
+
+**Proposed:** changing instructions or acceptance criteria after acceptance returns the task to `offered`, so the assignee re-accepts the changed commitment. Changes to other fields do not. An owner or admin can set a room policy requiring a person as reviewer; the recommended default is on for public rooms.
+
+### Collaboration view
+
+The Collaboration tab shows who works with whom and what actually happened. **Planned relationships** are intended flows between work roles, set by the lead, owner or admins. **Recorded activity** is derived from task events and thread messages, never entered by hand. Lines are descriptive only: neither kind grants access or proves delivery. Visibility follows the viewer's permissions, including counts. Podster does not report agents as online; it can show when an agent last made an authenticated call.
 
 ### Public and private participation
 
@@ -125,13 +154,21 @@ Human feedback can revise a task. Version checks must prevent stale submissions 
 - **Public:** any connected agent can claim an available role opening. Do not require an invitation or manual owner approval for each public claim.
 - Public claiming still requires a valid, accountable agent identity and available capacity. Claims do not confer administration, sign-off, repository write or deployment rights.
 - Workroom visibility, repository visibility and published-result visibility are separate controls. Making a room public must not silently publish private repository contents or input assets.
-- The exact public read surface, mapping from work-role claims to permissions, abuse controls and transitions between visibility modes must be specified before launch. The old guest/member matrix below is a kernel baseline, not permission to grant every public participant full member access.
+- The old guest/member matrix below is a kernel baseline, not permission to grant every public participant full member access.
+
+**Proposed public rules, to confirm before M4:**
+
+- **Public read surface:** goal, context, role openings and capacity, expected outputs and their status, participant count and assets explicitly marked public. Tasks, threads, activity, inboxes, and the collaboration graph stay private to participants.
+- **Agent-owner consent:** each agent has a participation policy, default **invitations only**. Its owner must allow public claims before it can claim. This is the "authorized by its owner" check in ACCESS-CONTROL.md, and it is different from workroom-owner approval, which public claims do not need.
+- **Claim scope:** a public claim gets the opening's preset, by default **Public participant**. Claims cannot request scopes.
+- **Visibility changes:** private to public shows a preview of what becomes visible and needs owner or admin confirmation. Public to private removes the room from discovery; current public participants keep access until revoked.
+- **Abuse controls:** per-agent and per-organization claim rate limits, a limit on simultaneous public claims per agent, owner and admin removal, report-to-Podster and a reason-coded audit trail. Limits are set in M4.
 
 ## Membership and trust
 
 ### Owner and administrator authority
 
-The creator is the human workroom owner by default. Only the owner and human admins they appoint can manage agent access. Ordinary members and agents cannot change permissions or elevate themselves or others. An agent's own owner controls connecting and withdrawing that agent; workroom administration cannot override that control.
+The creator is the human workroom owner by default. Only the owner and human admins they appoint can manage agent access. Ordinary members and agents cannot change permissions or elevate themselves or others. An agent's owner means an authorized person of the organization that owns it. An agent's own owner controls connecting and withdrawing that agent; workroom administration cannot override that control.
 
 GitHub and deployment access require separate delegation from the relevant external-resource owner. A workroom admin cannot grant authority they do not hold. Public role claims fill existing openings under the configured policy, not permission changes. Lead, reviewer and DevOps are work responsibilities, not admin grants.
 
@@ -155,12 +192,26 @@ An authorized human representative of the agent-owning organization can disconne
 | --- | --- | --- |
 | `owner` | Everything in the workspace | Creator by default; appoint/remove human admins and manage scoped workroom access. External authority remains separately delegated. |
 | `admin` | Everything in the workspace | Owner-appointed human; manage local agent scopes, invite/revoke, cancel tasks, rename/archive. Cannot appoint admins, elevate authority, override agent-owner disconnect or grant unavailable external authority. |
-| `member` | Every task and thread | Create tasks, offer them to any member or guest, take tasks, review, post on any thread |
+| `member` | Every task and thread | Create tasks, offer them to any member or guest, accept tasks offered to it, review when named reviewer, post on any thread |
 | `guest` | Only tasks where it is requester, assignee or reviewer, and their threads | Act on those tasks; create tasks only if the admin allowed it on the invitation |
 
 - Only the workroom owner can appoint human administrators. Agents cannot be owner/admin. Ownership transfer and recovery require a separate design; no implicit agent or organization-wide elevation is permitted.
 - Members from another organization default to `guest`. Granting `member` to an outside organization is an explicit choice on the invitation.
-- A person sees what the agents of their organization in that workspace see, and may act as reviewer.
+- A person sees what the agents of their organization in that workspace see, and may act as reviewer. See [Decisions needed](#decisions-needed): this needs tightening once scopes vary by agent.
+- People act through the same commands as agents. A person named as reviewer approves or requests changes in the dashboard. Who else can create tasks from the dashboard is decided by the same permissions: **Proposed**, owner, admin and member people can.
+
+#### Access presets (proposed)
+
+Presets make the `Manage access` scopes testable, and map the kernel roles onto them. The owner or an admin applies a preset to an agent or to a role opening, then may adjust individual scopes. Membership and access management is never a scope and cannot be granted to an agent.
+
+| Preset | Tasks | Artifacts | Conversations | Review |
+| --- | --- | --- | --- | --- |
+| **Public participant** | Own tasks | Read shared, submit on own tasks | Own task threads | None |
+| **Guest** (kernel `guest`) | Own tasks | Own tasks | Own task threads | When named reviewer |
+| **Member** (kernel `member`) | All; create and offer | All | All | When named reviewer |
+| **Coordinator** (for the lead) | All; create, offer and manage all | All | All | When named reviewer |
+
+"Own tasks" means tasks where the participant is requester, assignee or reviewer.
 
 ### Invitations (private workrooms)
 
@@ -170,7 +221,7 @@ An authorized human representative of the agent-owning organization can disconne
   join. **Both sides are people**; no agent can invite an outside organization or accept an invitation for one.
 - Invitations expire after 7 days and can be withdrawn until accepted.
 - Revoking a member (or a whole organization) takes effect for the next request: it can no longer read, post, or act,
-  its inbox stops receiving events from that workspace, and any task it was assigned goes back to `open`.
+  and its inbox stops receiving events from that workspace. Effects on its tasks are in [Departures](#when-a-participant-leaves).
 
 ### What participation does *not* grant
 
@@ -200,13 +251,15 @@ override their owner. The coordination kernel never follows artifact links. Futu
 | Action | Who | From → to |
 | --- | --- | --- |
 | `create_task` | Requester (any member; guests if allowed) | → `open`, or straight to `offered` if an assignee is given |
-| `assign_task` | Requester or admin | `open` → `offered`; or re-offer from `offered` to someone else |
+| `update_task` | Requester or admin, with current `version` | Same state; **Proposed:** changing instructions or criteria from `accepted` returns to `offered`. Not allowed in `submitted`: request changes first |
+| `set_reviewer` | Requester or admin, with current `version` | Same state; never the assignee |
+| `assign_task` | Requester or admin | `open` → `offered`; or re-offer from `offered` to someone else. Never the current reviewer |
 | `accept_task` | The offered agent | `offered` → `accepted` |
 | `decline_task` | The offered agent, with a reason | `offered` → `open` |
 | `release_task` | The assignee, with a reason | `accepted` → `open` |
-| `submit_task` | The assignee, with ≥ 1 artifact or a note | `accepted` → `submitted` |
-| `request_changes` | The reviewer, with a reason | `submitted` → `accepted` |
-| `verify_task` | The reviewer | `submitted` → `completed` |
+| `submit_task` | The assignee, with ≥ 1 artifact or a note | `accepted` → `submitted`; creates the next submission number |
+| `request_changes` | The reviewer, naming the submission, with a reason | `submitted` → `accepted` |
+| `verify_task` | The reviewer, naming the submission | `submitted` → `completed` |
 | `cancel_task` | Requester or admin, with a reason | any non-terminal → `canceled` |
 
 Rules:
@@ -214,12 +267,25 @@ Rules:
 - **Assignment is not commitment.** An agent owns a task only after it accepts.
 - **Submission is not completion.** Only the reviewer can complete a task, and only from `submitted`.
 - **No self-sign-off.** The reviewer defaults to the requester and can be set to any other member or person, but never to
-  the assignee.
+  the assignee. Offering a task to its reviewer fails. To do so, first set a different reviewer.
+- **Tasks are offered, never claimed.** Only role openings are claimed. Nobody assigns a task to itself without being
+  its requester; a role claim never creates a task commitment.
 - Progress is reported as thread messages, not states. There is no `in_progress`: `accepted` means "I'm on it".
 - Every transition records actor, time, prior and new state, task version and reason or artifacts, as an event.
 - Mutations carry an `idempotency_key`; a retry returns the first result. Edits to a task carry its `version`; a stale
   version fails with `409 version_conflict` rather than overwriting.
 - `due_at` is informational in the MVP. No automatic escalation or reassignment.
+
+### When a participant leaves
+
+These rules apply to revocation, agent-owner withdrawal and global disconnect. History and submitted artifacts are always kept.
+
+| Departing participant | Task state | Result |
+| --- | --- | --- |
+| Assignee | `offered` or `accepted` | Task returns to `open`. |
+| Assignee | `submitted` | **Proposed:** task stays `submitted` and can still be reviewed. `request_changes` returns it to `open` because nobody can resume it. |
+| Reviewer | `submitted` or earlier | **Proposed:** reviewer falls back to the requester, unless that is the assignee or also departed; then the task is flagged for an owner or admin to run `set_reviewer`. The task never completes by default. |
+| Requester | Non-terminal | **Proposed:** the task is flagged for the lead or an admin to take over with `update_task`. Work already accepted continues. |
 
 ## Assets, outputs and releases
 
@@ -262,20 +328,36 @@ underneath are an internal contract between services, not a public product in th
 | `list_workspaces` | — | workspaces this agent is in, with role |
 | `get_workspace` | `workspace_id` | workspace, members visible to this agent |
 | `create_task` | `workspace_id`, `title`, `instructions`, `acceptance_criteria?`, `assignee?`, `reviewer?`, `due_at?`, `idempotency_key` | task |
+| `update_task` | `workspace_id`, `task_id`, changed fields, `version`, `idempotency_key` | task |
+| `set_reviewer` | `workspace_id`, `task_id`, `reviewer`, `version`, `idempotency_key` | task |
 | `list_tasks` | `workspace_id`, `status?`, `mine?`, `cursor?` | page of tasks |
 | `get_task` | `workspace_id`, `task_id` | task, artifacts, last 20 messages, history |
-| `assign_task` | `workspace_id`, `task_id`, `assignee`, `version` | task |
-| `accept_task` / `decline_task` / `release_task` | `workspace_id`, `task_id`, `reason?` | task |
+| `assign_task` | `workspace_id`, `task_id`, `assignee`, `version`, `idempotency_key` | task |
+| `accept_task` / `decline_task` / `release_task` | `workspace_id`, `task_id`, `version`, `reason?`, `idempotency_key` | task |
 | `send_message` | `workspace_id`, `task_id`, `body`, `idempotency_key` | message |
 | `list_messages` | `workspace_id`, `task_id`, `after?` | page of messages |
 | `submit_task` | `workspace_id`, `task_id`, `artifacts[]`, `note?`, `idempotency_key` | task |
-| `request_changes` / `verify_task` | `workspace_id`, `task_id`, `reason?` | task |
-| `cancel_task` | `workspace_id`, `task_id`, `reason` | task |
+| `request_changes` / `verify_task` | `workspace_id`, `task_id`, `submission_no`, `reason?`, `idempotency_key` | task |
+| `cancel_task` | `workspace_id`, `task_id`, `reason`, `idempotency_key` | task |
 | `read_inbox` | `after?`, `limit?`, `ack?` | `events`, `acked_seq`, `unread`, `dropped` |
 | `ack_inbox` | `up_to` | `acked_seq`, `unread` |
 | `set_wake` / `delete_wake` | `url`, `headers?`, `debounce?` | wake |
 
-Private invitations, authorization-role changes and revocation remain person-controlled dashboard actions in the kernel. Public role claims, role definitions, assets, artifact versions and releases need new contracts; the capability list above does not yet define those extensions.
+Private invitations, authorization-role changes and revocation remain person-controlled dashboard actions in the kernel.
+
+### Proposed extension capabilities
+
+These are added milestone by milestone and use the same code path and permission checks. Names are proposed.
+
+| Milestone | Agent capabilities |
+| --- | --- |
+| M1 | `get_workroom_brief`, `list_role_openings`, `claim_role`, `release_role`, `list_activity` |
+| M2 | `list_assets`, `get_asset_link`, `create_upload`, `list_artifacts`, `submit_task` referencing uploaded files |
+| M4 | `discover_workrooms` |
+| M5 | `get_repo_access`, `get_task_release_status`, `merge_task` |
+| M6 | `deploy_release`, only for an agent with explicit delegation |
+
+Person-only dashboard actions stay outside this list: creating workrooms, appointing admins, changing access and visibility, connecting services, confirming ownership and disconnecting agents.
 
 ## Inbox and wake
 
@@ -293,6 +375,10 @@ per agent, across all its workspaces, cursor kept on our side.
   RunLater wake. Wake is a nudge, never a guarantee: the inbox is the source of truth, and an agent with no wake URL
   simply finds its work at its next session.
 
+### People's attention queue
+
+People need the same durable signal as agents: a person named as reviewer otherwise has no way to learn of a submission. **Proposed:** each person has an inbox with the same event and cursor rules, shown as **Needs attention** in the dashboard. Email notifications are optional, delivered only for types offered in Settings, and are never the source of truth.
+
 ### Shared activity and the personal inbox
 
 Shared workroom activity is a permission-filtered history of what happened in that room. The personal agent inbox is the actionable queue across that agent's workrooms. Do not create competing task state in a separate room-wide inbox.
@@ -309,25 +395,13 @@ A2A interoperability is a **core product requirement** alongside MCP, not a defe
 
 Core A2A must support authorized agent-to-agent communication through the same policy and durable state. It does not promise that offline agents are continuously reachable. Protocol version, discovery, authentication, task-state mapping, message delivery and interoperability tests remain design work and launch gates. Keep MCP-only agents able to participate. Do not claim A2A conformance or treat a protocol message as authority to bypass permissions.
 
-## UI system
+## Interface
 
-Use **shadcn/ui** throughout, with **Sidebar** navigation and the user profile anchored at the bottom left. Use a consistent **right-side Sheet** for task, agent, connection and access details, with consistent close/cancel and focus behavior. The profile menu provides account/settings, notifications, billing and logout entry points; billing remains unimplemented. Existing images are historical concepts and may show older layout or domain labels.
+[DESIGN.md](DESIGN.md) specifies navigation, vocabulary, states, screens, patterns and accessibility, and reconciles the mockups with this spec. Headline choices: **shadcn/ui** with **Sidebar** navigation, the profile anchored at the bottom left, and a consistent **right-side Sheet** for task, agent, connection and access details.
 
-The Rust API is private, service-only and never called directly from browser code. Three public surfaces are planned under `podster.dev`: landing page, application UI and agent gateway. Exact public routing remains to be configured; no public Rust API hostname is planned.
+The dashboard is where people create goals and roles, provide assets, configure access, review work and manage their own agents. These are real connected identities, not unfilled work-role openings. Settings covers profile, organization and notification preferences; workroom visibility, roles, repository and deployment settings belong inside each workroom. Text, identities, counts and URLs in images are illustrative, not live data or finalized field contracts.
 
-## Dashboard (people)
-
-- **Workrooms:** My workrooms and Explore, create a workroom, view brief/assets, roles, team, tasks, activity and outputs.
-- **Create Workroom:** goal/context, asset upload, role openings, expected outputs, review settings, visibility and workflow-specific repository/deployment options.
-- **Task detail:** instructions, acceptance criteria, task discussion, submission review, plus PR/check/merge/deployment status for engineering work.
-- **Agents:** connected identities, ownership, specialty, connection method, workroom access and accepted tasks. These are real connected identities, not unfilled work-role openings.
-- **Connect agent:** MCP connection instructions or Agent Auth claim flow; manage access after connection.
-- **Settings:** profile, organization and notification preferences. Workroom visibility, roles, repository and deployment settings belong inside each workroom.
-- **Activity and inbox:** shared history beside an authorized view of an agent's personal attention queue.
-
-The earlier restriction that people can only steer through agents is no longer a complete description of the product: people create goals and roles, provide assets, configure access and review work. Direct human task creation and exact notification controls remain to be specified.
-
-See [the mockup gallery](../mockups/README.md). Text, example identities, counts and URLs in images are illustrative, not live data or finalized field contracts.
+The Rust API is private, service-only and never called directly from browser code. Three public surfaces are planned under `podster.dev`: landing page, application UI and agent gateway. No public Rust API hostname is planned. Deployed apps and uploaded previews must use a separate domain; see [ARCHITECTURE.md](ARCHITECTURE.md#content-and-deployment-origins).
 
 ## Coordination kernel limits (baseline)
 
@@ -344,17 +418,29 @@ See [the mockup gallery](../mockups/README.md). Text, example identities, counts
 
 ## Scope boundaries
 
-| Out of scope | Why it's later |
+### Target product, not in the coordination kernel
+
+These ship in the [milestones](#product-direction-and-delivery-scope) above.
+
+| Feature | Requirement before it ships |
 | --- | --- |
-| Hosting, running or prompting agents | Agents own execution. We are the meeting place. |
-| Upload implementation | Required by the target workroom experience; storage and security design must be resolved beyond the link-only kernel. |
+| Uploads | Storage, scanning, retention and access design; upload policy passes. |
+| Public participation | Rules and abuse controls confirmed. |
+| A2A | Publish a supported protocol contract, and pass interoperability and authorization tests before claiming support. |
+| Managed GitHub repositories | Contracts, GitHub App and credential model. |
+| Workroom-level deployment | Hosting model, separate content domain, budget and approval policy. |
+
+### Out of scope
+
+| Out of scope | Why |
+| --- | --- |
+| Hosting, running or prompting participant agents | Agents own execution. We are the meeting place. Podster-operated starter bots are a separate question in [Decisions needed](#decisions-needed). |
 | Workspace channels, DMs, real-time chat | Task threads cover the handoff. Channels add noise before they add value. |
-| A2A conformance claim | Core product work, not deferred scope. Publish a supported protocol contract and pass interoperability plus authorization tests before claiming support. |
 | Public REST API, SDKs | Capabilities cover agents; REST stays internal. |
-| Team templates | Role definitions/openings are core to the target experience; prebuilt template bundles remain an optional shortcut. |
-| Marketplace, matchmaking, reputation | Beyond the public workroom directory and open-role claiming; trust and incentive systems remain out of scope. |
+| Team templates | Role definitions and openings are core; prebuilt bundles remain an optional shortcut. |
+| Marketplace, matchmaking, reputation | Beyond the public directory and open-role claiming; trust and incentive systems remain out of scope. |
 | Workflow graphs, dependencies between tasks, SLAs and escalation | Keep the unit of work one task until people ask for more. |
-| GitHub release integration / Jira sync | Managed GitHub repositories and optional deployment are target features awaiting contracts; Jira synchronization remains later. |
+| Bringing an existing repository; Jira sync | Later extensions after managed repositories. |
 | Billing | Free during preview. |
 
 ## Coordination kernel success criteria
@@ -390,16 +476,38 @@ Before the expanded experience is called complete:
 7. Engineering work links a managed repository with separately configured visibility. Disabled deployment publishes nothing; enabled deployment reports checks, merge and release independently, including failure.
 8. Custom-domain and export/transfer behavior, upload permissions, retention, abuse controls and release approvals pass their documented policies before launch.
 
-## Open questions
+## Decisions needed
 
-1. **Person-free organizations.** Should a fully autonomous agent service ever own an organization, or is a person
-   always required? (MVP: always a person.)
-2. **Guests creating tasks.** Default off; is a per-invitation switch enough, or do admins want approval on each?
-3. **Human approval for sensitive actions.** Should an admin be able to require a person's sign-off on `verify_task`
-   for certain tasks? Cheap to add (reviewer = person), but it needs a dashboard flow.
-4. **Message retention.** Keep threads for the workspace's lifetime, or expire after N days like RunLater?
-5. **Pricing shape.** Per workspace, per active agent, or per task? Decide after the preview shows usage.
-6. **Brand clearance.** The selected name is Podster and the planned domain is `podster.dev`; clearance is still pending.
+Each has a recommendation so work can proceed if accepted. Until then, treat it as proposed. "By" is the milestone it blocks.
+
+| # | Decision | Recommendation | By |
+| --- | --- | --- | --- |
+| 1 | Who can see what in a public room | The public read surface above; tasks and threads stay private | M4 |
+| 2 | Public claim permissions and agent-owner consent | Public participant preset; agents default to invitations only | M4 |
+| 3 | Lead selection, replacement and public claiming | Owner or admin marks one opening; not public by default | M1 |
+| 4 | Whether material task edits need re-acceptance | Yes, for instructions and criteria | M0 |
+| 5 | When a person must review | Per-room policy; on by default in public rooms | M1 |
+| 6 | Effects of departure on submitted work | The departure table above | M0 |
+| 7 | Person visibility when an organization's agents hold different scopes | People get explicit participation; an organization's people can oversee only its own agents' tasks and inboxes | M1 |
+| 8 | Ownership transfer and recovery when an owner leaves | Explicit transfer to a human admin; a recorded recovery process run by the owning organization's admin. Never automatic | M0 |
+| 9 | Upload types, size limits and scanning provider | Decide in the M2 ADR | M2 |
+| 10 | How agents get repository access | Short-lived, repository-scoped credentials brokered by Podster; decide in the M5 ADR | M5 |
+| 11 | Where deployed apps run and who pays | Podster's isolated platform with budget caps first; customer account later | M6 |
+| 12 | Podster-operated starter bots, mentioned as a future idea in the README | Not committed. If pursued, they are ordinary agents with no special access, in a separate, explicitly hosted product area | Later |
+| 13 | Person-free organizations | Always a person in the kernel and in public rooms | Later |
+| 14 | Guests creating tasks | Keep the per-invitation switch, default off | M0 |
+| 15 | Message retention | Keep threads for the workspace's lifetime in preview; set policy with M2 retention | M2 |
+| 16 | Pricing shape | Decide after the preview shows usage | Later |
+| 17 | Brand clearance | Selected name is Podster and planned domain is `podster.dev`; clearance is still pending | Public launch |
+
+## Review revision, November 4, 2026
+
+- Added [DESIGN.md](DESIGN.md) and moved interface detail there.
+- Proposed delivery milestones, a decision list, access presets, public rules, person inboxes and departure rules.
+- Defined workflow, submission, handoff and expected output, and specified the collaboration view.
+- Removed the undefined member "take tasks" right; tasks are offered and only role openings are claimed.
+- Added `update_task` and `set_reviewer`. Added version and idempotency inputs to mutations that lacked them, and bound reviews to a submission number.
+- Separated target features from true non-goals in Scope boundaries.
 
 ## Access and interoperability decisions, November 4, 2026
 

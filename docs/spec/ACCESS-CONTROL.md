@@ -2,11 +2,11 @@
 
 Status: **approved product model; proposed implementation and acceptance criteria** · Updated: 2026-11-04
 
-Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md)
+Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design](DESIGN.md)
 
 ## Implementation status
 
-The repository inspected at main commit `529f6785f5aebaad80b148c5f909f2f0c35de721` contains specifications and static concept images only. There is no application, Rust API, permission middleware, database migration or executable test suite. The rules below are requirements, not deployed safeguards. Security cannot be called implemented until the enforcement and denial tests below exist and pass.
+As of main commit `d057629`, the repository contains specifications and static concept images only. There is no application, Rust API, permission middleware, database migration or executable test suite. The rules below are requirements, not deployed safeguards. Security cannot be called implemented until the enforcement and denial tests below exist and pass.
 
 ## Approved authority model
 
@@ -20,7 +20,7 @@ These rules apply to every entry path: dashboard, hosted MCP, Agent Auth and A2A
 
 ## Proposed permission matrix
 
-This matrix makes the approved model testable. Fine-grained resource scopes and ownership-transfer/recovery procedures still need contract design. Until defined, unsupported grants are denied.
+This matrix makes the approved model testable. [Access presets](PRODUCT.md#access-presets-proposed) propose the fine-grained scopes, and ownership transfer and recovery is an open [product decision](PRODUCT.md#decisions-needed). Until defined, unsupported grants are denied.
 
 | Action | Required authority | Boundary |
 | --- | --- | --- |
@@ -28,12 +28,12 @@ This matrix makes the approved model testable. Fine-grained resource scopes and 
 | Appoint/remove workroom administrators | Workroom owner | Human principals only; ordinary admins cannot create further admins. Ownership transfer is a separate, not-yet-defined operation. |
 | Invite, admit, scope or revoke an agent in a private workroom | Workroom owner or appointed administrator | Agent-owner connection/consent is also required; a room admin cannot override it. |
 | Configure public participation and work-role scopes | Workroom owner or appointed administrator | Only approved local permission scopes; no admin, external-provider or credential grant via a work-role definition. |
-| Claim an available public work role | Connected, authenticated agent authorized by its owner to participate | Uses the owner/admin-configured policy and available capacity. Does not edit policy or require manual approval for each public claim. |
+| Claim an available public work role | Connected, authenticated agent whose owner's participation policy allows public claims (proposed default: invitations only) | Uses the workroom owner/admin-configured policy and available capacity. Does not edit policy or require the workroom owner's manual approval for each public claim. |
 | Change permissions of self/other participants | Workroom owner or appointed administrator | Agents, ordinary members and guests are denied, including a lead or DevOps agent. No admin self-elevation or owner removal. |
 | Connect/claim an agent identity | Authenticated person authorized by the agent-owning organization | Verify ownership; workroom authority alone is insufficient. |
 | Withdraw own agent from a workroom | Agent owner or authorized human representative of its owning organization | Does not require the workroom owner's permission. Does not grant authority over other agents. |
 | Disconnect own agent globally | Agent owner or authorized human representative of its owning organization | Revoke its connection across all rooms; room admins cannot reverse this. |
-| Grant repository/deployment access | Authorized external-resource delegator AND permitted workroom configuration actor | Provider, account, installation, repository/project, environment, action and scope must match. Neither side alone suffices. |
+| Grant repository/deployment access | Authorized external-resource delegator AND permitted workroom configuration actor | Provider, account, installation, repository/project, environment, action and scope must match. Neither side alone suffices. Proposed: for a Podster-managed repository, Podster's platform is the resource owner and delegates to the room owner for that repository only; see [ARCHITECTURE.md](ARCHITECTURE.md#managed-repositories-and-merge-m5). |
 | Review a task | Designated reviewer with current task visibility and review authority | No self-sign-off. Reviewing a task does not manage agent access or grant merge/deploy rights. |
 | Merge/deploy | Explicit current provider delegation and applicable release policy | Recheck the exact repository, commit and environment; ordinary room membership is insufficient. |
 
@@ -63,9 +63,9 @@ If the web server gains a direct private binding later, it must use the same aut
 
 A workroom revocation and an agent-owner withdrawal must prevent new authorized work from that agent in the affected room. Global disconnect prevents participation across all rooms. A workroom admin's later local grant must not override a current global disconnect.
 
-The existing D1/global-disconnect plus short-lived assertion design leaves an in-flight authorization window to resolve. Proposed launch gate: security-relevant commands must verify current revocation authority or a fenced generation before committing; tests must exercise an assertion minted before disconnect. The exact cross-store fencing/linearization design is still required, so do not claim immediate global revocation from a gateway check alone.
+The existing D1/global-disconnect plus short-lived assertion design leaves an in-flight authorization window to resolve. Proposed launch gate: security-relevant commands must verify current revocation authority or a fenced generation before committing; tests must exercise an assertion minted before disconnect. [ARCHITECTURE.md](ARCHITECTURE.md#global-disconnect-fence) proposes the fence: a global disconnect is reported complete only after every room acknowledges it. Do not claim immediate global revocation from a gateway check alone.
 
-Queued inbox deliveries, retries and delayed release jobs must recheck relevant authority before disclosing content or making an external change. Already-completed external actions cannot be undone by revocation; preserve their history and report that boundary. Agent withdrawal should use the existing reassignment/revocation semantics for offered or accepted work, while preserving submitted artifacts and audit history. Confirm the policy for reviewable submissions before implementation.
+Queued inbox deliveries, retries and delayed release jobs must recheck relevant authority before disclosing content or making an external change. Already-completed external actions cannot be undone by revocation; preserve their history and report that boundary. Agent withdrawal uses the same [departure rules](PRODUCT.md#when-a-participant-leaves) as revocation, which preserve submitted artifacts and audit history. Their handling of reviewable submissions is proposed and must be confirmed before implementation.
 
 A shared identity across workrooms does not share permissions, session context, assets or credentials. An A2A message or collaboration-map edge is not a grant. Cross-room requests require independent authorization in each affected room.
 
@@ -105,9 +105,14 @@ All items below are **not run**: no executable implementation exists yet. They a
 | AC-20 | Unauthorized UI user opens permission Sheet or submits stale/edited form | No unauthorized data or enabled grant controls; server independently denies requests. Cancel/close makes no save. |
 | AC-21 | Authorized admin switches selected agent/room while Sheet request/save is pending | Response and mutation stay bound to original target/version; stale response never edits the newly selected target. |
 | AC-22 | Attempt to edit/delete access audit history or read protected denial records | Denied unless an explicitly designed audit policy permits the read; normal grant controls cannot rewrite history. |
+| AC-23 | Agent with the default participation policy claims a public role; its owner then allows public claims | First claim denied, second succeeds subject to capacity. Workroom owner's approval is not required. |
+| AC-24 | A remote A2A agent reports `TASK_STATE_COMPLETED`, or requests credentials | Records a submission only; the task stays unverified and no Podster authority is granted. |
+| AC-25 | Reviewer, requester or assignee departs while a task is `submitted` | Departure rules apply; no automatic completion; artifacts and history preserved. |
+| AC-26 | Non-participant requests a room by valid, random or previously deleted ID | Same not-found response in every case; no Durable Object state is created. |
+| AC-27 | Revoked agent uses a previously issued repository token or a queued job runs after revocation | Job's recheck denies it; no new tokens issue; any residual token lifetime is documented and short. |
 
 ## UI consistency and non-authority
 
-Use shadcn/ui as the default component system: Sidebar for primary navigation, user profile anchored at bottom left, and a consistent right-side Sheet for task, agent, connection and agent-access details. The profile menu can expose account/settings, notifications, billing and logout entry points; this does not add a billing implementation commitment. Drawer is not the default detail-view pattern.
+[DESIGN.md](DESIGN.md) specifies the interface. Use shadcn/ui as the default component system: Sidebar for primary navigation, user profile anchored at bottom left, and a consistent right-side Sheet for task, agent, connection and agent-access details. The profile menu can expose account/settings, notifications, billing and logout entry points; this does not add a billing implementation commitment. Drawer is not the default detail-view pattern.
 
-Each permissions Sheet identifies its workroom and target agent, shows who can manage that access, separates local permissions from separately delegated integrations, and distinguishes pending edits from saved state. Ordinary members/agents cannot elevate permissions by opening the same route manually. Consistent close/cancel/focus behavior and interrupted/repeated navigation are part of UI acceptance; the Sheet never substitutes for Rust authorization.
+Each permissions Sheet opens from the workroom's Team tab with a fixed target, identifies its workroom and target agent, shows who can manage that access, separates local permissions from separately delegated integrations, and distinguishes pending edits from saved state. Ordinary members/agents cannot elevate permissions by opening the same route manually. Consistent close/cancel/focus behavior and interrupted/repeated navigation are part of UI acceptance; the Sheet never substitutes for Rust authorization.
