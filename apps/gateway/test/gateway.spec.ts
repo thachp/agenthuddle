@@ -1032,7 +1032,8 @@ describe("sign-in and claim pages", () => {
 
   it("won't run without a secret, join accounts by email, or create a user from an unverified email", async () => {
     expect(() => createAuth({ ...e, AUTH_SECRET: "" })).toThrow("AUTH_SECRET");
-    const real = createAuth({ ...e, BASE_URL: "https://gateway.podster.dev", ENABLE_PASSWORD_SIGNIN: undefined }).options as any;
+    // The flag can't switch this off on a real hostname.
+    const real = createAuth({ ...e, BASE_URL: "https://gateway.podster.dev", ENABLE_PASSWORD_SIGNIN: "true" }).options as any;
     expect(real.account.accountLinking.disableImplicitLinking).toBe(true);
     const before = real.databaseHooks.user.create.before;
     expect(await before({ emailVerified: false })).toBe(false);
@@ -1102,7 +1103,10 @@ describe("sign-in and claim pages", () => {
     expect(hostile).not.toContain("<script>");
     const refused = await form({ agent_id: agent.pluginId, user_code: "AAAA-AAAA", org_id: owner.org }, { cookie: owner.cookie }, "/claim");
     expect(refused.status).toBe(403);
-    expect(await refused.text()).toContain("connect this agent");
+    const refusedText = await refused.text();
+    expect(refusedText).toContain("connect this agent");
+    expect(refusedText).toContain("may be wrong or expired");
+    expect(refusedText).not.toContain("at most 200 bytes");
     expect((await form({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org }, { cookie: owner.cookie, origin: "https://evil.test" }, "/claim")).status).toBe(403);
   });
 
@@ -1136,6 +1140,23 @@ describe("sign-in and claim pages", () => {
     expect(html).toContain("&#60;u&#62;org");
     expect(html).toContain("&#60;i&#62;mine");
     expect(html).not.toContain(theirs.id);
+  });
+
+  it("a failure on our side says so, and reloading finishes the claim", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const body = new URLSearchParams({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org, link_agent_id: "" });
+    const headers = { origin: BASE, cookie: owner.cookie, "content-type": "application/x-www-form-urlencoded" };
+    const down = { ...e, API: { fetch: () => Promise.reject(new Error("no such service")) } } as never;
+    const ctx = { waitUntil() {}, passThroughOnException() {} } as never;
+    const failed = await worker.fetch(new Request(`${BASE}/claim`, { method: "POST", headers, body }), down, ctx);
+    expect(failed.status).toBe(502);
+    const text = await failed.text();
+    expect(text).toContain("Reload this page");
+    expect(text).not.toContain("may be wrong or expired");
+    const reloaded = await call("/claim", { method: "POST", headers, body });
+    expect(reloaded.status).toBe(200);
+    expect((await execute(agent, "get_identity")).status).toBe(200);
   });
 
   it("a claim form with a bad name says so", async () => {

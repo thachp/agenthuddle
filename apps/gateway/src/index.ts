@@ -345,7 +345,7 @@ const configuredProviders = (env: Env): SignInProvider[] =>
 function signInPage(env: Env, next: string, failed: boolean) {
   const providers = configuredProviders(env);
   // Fixed text, so a link can't put its own words on our page.
-  const notice = failed ? "<p>That sign-in didn't finish. Please try again, using an account with a verified email.</p>" : "";
+  const notice = failed ? "<p>That sign-in didn't finish. Please try again, using the account you first signed in with, which needs a verified email.</p>" : "";
   const buttons = providers.map((provider) => `<form method="post" action="/sign-in"><input type="hidden" name="provider" value="${provider}"><input type="hidden" name="next" value="${escapeHtml(next)}"><button type="submit">Continue with ${SIGN_IN_PROVIDERS[provider]}</button></form>`).join("");
   return page("Sign in to Podster", notice + (buttons || "<p>Sign-in isn't set up here yet.</p>"), providers.length ? 200 : 503);
 }
@@ -543,6 +543,7 @@ async function handleClaim(request: Request, env: Env, userId: string): Promise<
   if (!isForm) return answer;
   const result = await answer.json<{ agent_id?: string; error?: { code?: string } }>();
   if (answer.ok) return page("Agent connected", `<p>Your agent is connected as <strong>${escapeHtml(result.agent_id ?? "")}</strong>. You can close this page.</p>`);
+  if (answer.status >= 500) return page("Couldn't connect this agent", "<p>Something went wrong on our side. Reload this page to try again.</p>", answer.status);
   const reason = result.error?.code === "invalid_argument" ? "Check the name, which can be at most 200 bytes." : "The code may be wrong or expired, this agent may already be connected, or it may belong to another organization.";
   return page("Couldn't connect this agent", `<p>${reason}</p>`, answer.status);
 }
