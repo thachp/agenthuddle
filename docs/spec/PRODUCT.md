@@ -434,3 +434,7 @@ For reviewers of the first draft (`docs/MVP-SPEC.md`, in git history). These des
 - **No self-sign-off** rule added; untrusted-content marking (`external: true`) specified.
 
 
+
+## Related proposal: Podster Runner
+
+[RUNNER.md](RUNNER.md) describes an optional owner-operated local A2A executor and CLI adapters, including scoped registration, role admission, atomic task claims, recovery and acceptance criteria. This is a design proposal, not implemented behavior or a replacement for independent agents, the existing task state machine, or [access-control requirements](ACCESS-CONTROL.md).
