@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { betterAuth } from "better-auth";
 import { APIError } from "better-auth/api";
-import { decodeJwt } from "jose";
+import { calculateJwkThumbprint, decodeJwt, type JWK } from "jose";
 import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
 
@@ -32,6 +32,12 @@ const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (c) => `&#${c.ch
 const MAX_NAME_BYTES = 200;
 const API_TIMEOUT_MS = 25_000;
 const validName = (name: string) => name.length > 0 && new TextEncoder().encode(name).length <= MAX_NAME_BYTES;
+/** Agents choose their registered name, and its limit is in characters, so it's shortened to fit ours. */
+function fitName(name: string) {
+  const bytes = new TextEncoder().encode(name);
+  if (bytes.length <= MAX_NAME_BYTES) return name;
+  return new TextDecoder().decode(bytes.slice(0, MAX_NAME_BYTES)).replace(/\uFFFD+$/, "");
+}
 
 /**
  * The only plugin and Better Auth routes that are public. Everything else, including `/host/*`, approve, grant and
@@ -51,6 +57,42 @@ const PUBLIC_AUTH_ROUTES = [
   /^\/capability\/(list|describe|execute)$/,
 ];
 export const isPublicAuthRoute = (path: string) => PUBLIC_AUTH_ROUTES.some((route) => route.test(path));
+
+/** A key's `kid` must be its own thumbprint, because the plugin finds hosts by the `kid` a caller supplies. */
+async function honestKey(key: unknown) {
+  if (key === undefined) return true;
+  if (!key || typeof key !== "object") return false;
+  const { kid } = key as JWK;
+  if (kid === undefined) return true;
+  return await calculateJwkThumbprint(key as JWK, "sha256").then((thumbprint) => thumbprint === kid, () => false);
+}
+
+/**
+ * Refuses the registration options that let a caller touch a host it doesn't hold the key for. With a borrowed `kid`,
+ * the plugin puts the agent on the victim's host, and a claim with `force_approval` then revokes the victim's agents
+ * and takes the host. Remote key URLs are refused too, since we'd fetch them and a host could change keys with them.
+ */
+async function refusedRegistration(request: Request, text: string): Promise<Response | null> {
+  let body: { force_approval?: unknown; capabilities?: unknown } | null;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = null;
+  }
+  if (!body || typeof body !== "object") return denied("invalid_argument", 400);
+  if (body.force_approval !== undefined) return denied("force_approval_not_supported", 400);
+  // An agent with no capabilities could never gain one, because requesting more isn't public.
+  if (!Array.isArray(body.capabilities) || body.capabilities.length === 0) return denied("capabilities_required", 400);
+  let claims: ReturnType<typeof decodeJwt>;
+  try {
+    claims = decodeJwt(request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? "");
+  } catch {
+    return denied("invalid_jwt", 401);
+  }
+  if (claims.host_jwks_url !== undefined || claims.agent_jwks_url !== undefined) return denied("jwks_url_not_supported", 400);
+  if (!(await honestKey(claims.host_public_key)) || !(await honestKey(claims.agent_public_key))) return denied("invalid_public_key", 400);
+  return null;
+}
 
 /** Test environments only: password sign-in can't be turned on anywhere with a real hostname. */
 function passwordSignInEnabled(env: Env) {
@@ -74,14 +116,14 @@ export async function resolveAgent(env: Env, provider: "agent_auth" | "mcp_oauth
   return { kind: "agent", id: row.id, org: row.org_id, generation: row.generation };
 }
 
-export async function callApi(env: Pick<Env, "API" | "ASSERTION_SIGNING_JWK">, identity: Identity, call: ApiCall): Promise<Response> {
+export async function callApi(env: Pick<Env, "API" | "ASSERTION_SIGNING_JWK">, identity: Identity, call: ApiCall, timeoutMs = API_TIMEOUT_MS): Promise<Response> {
   const headers: Record<string, string> = { "x-podster-assertion": await mintAssertion(identity, env.ASSERTION_SIGNING_JWK), "content-type": "application/json" };
   if (call.idempotencyKey) headers["idempotency-key"] = call.idempotencyKey;
   try {
-    return await env.API.fetch(new Request(`https://api.internal${call.path}`, { method: call.method, headers, body: call.body, signal: AbortSignal.timeout(API_TIMEOUT_MS) }));
-  } catch {
+    return await env.API.fetch(new Request(`https://api.internal${call.path}`, { method: call.method, headers, body: call.body, signal: AbortSignal.timeout(timeoutMs) }));
+  } catch (error) {
     // A panic in the API hangs its request, so callers get a clear answer instead of hanging too.
-    return denied("upstream_unavailable", 504);
+    return denied("upstream_unavailable", (error as Error)?.name === "TimeoutError" ? 504 : 502);
   }
 }
 
@@ -199,7 +241,7 @@ function allowedPassthrough(path: string) {
 async function registerWithApi(env: Env, identity: Identity, agentId: string, org: string, name: string) {
   const response = await callApi(env, identity, { method: "PUT", path: `/v1/agents/${agentId}`, body: JSON.stringify({ org_id: org, name }) });
   await response.text();
-  return response.status === 200;
+  return response.status;
 }
 
 type LinkProvider = "agent_auth" | "mcp_oauth";
@@ -224,11 +266,29 @@ async function linkableAgent(env: Env, id: string, org: string) {
 const sha256Hex = async (value: string) =>
   [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
 
+/** The API's answer when registering an agent, as this gateway's refusal. It refuses an agent already in another organization. */
+const registrationRefused = (status: number) => (status === 403 || status === 404 || status === 409 ? denied("not_allowed", 403) : denied("upstream_unavailable", 502));
+
+/** A credential's OAuth grants, so one credential can be replaced or ended without touching this person's others. */
+async function grantIds(env: Env, person: string, externalId: string) {
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.OAUTH_PROVIDER.listUserGrants(person, { cursor });
+    for (const grant of page.items) {
+      if ((grant.metadata as { externalId?: string } | undefined)?.externalId === externalId) ids.push(grant.id);
+    }
+    cursor = page.cursor;
+  } while (cursor);
+  return ids;
+}
+
 type ConsentChoices = { clientName: string; redirectHosts: string[]; query: string; orgs: { id: string; name: string }[]; agents: { id: string; org_id: string; name: string }[] };
 
 function consentPage(choices: ConsentChoices) {
   const orgOptions = choices.orgs.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name)}</option>`).join("");
-  const agentOptions = choices.agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join("");
+  const orgName = (id: string) => choices.orgs.find((o) => o.id === id)?.name ?? id;
+  const agentOptions = choices.agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(`${a.name} (${orgName(a.org_id)})`)}</option>`).join("");
   const hosts = choices.redirectHosts.map(escapeHtml).join(", ");
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect an agent to Podster</title></head><body>
 <h1>Connect an agent to Podster</h1>
@@ -238,20 +298,23 @@ function consentPage(choices: ConsentChoices) {
 <form method="post" action="/authorize">
 <input type="hidden" name="oauth_query" value="${escapeHtml(choices.query)}">
 <label>Organization <select name="org_id" required>${orgOptions}</select></label>
-<label>Connect as <select name="link_agent_id"><option value="">A new agent</option>${agentOptions}</select></label>
+<label>Connect as <select name="link_agent_id"><option value="">A new agent, or its existing one</option>${agentOptions}</select></label>
 <label>Name for a new agent <input name="agent_name" maxlength="${MAX_NAME_BYTES}"></label>
+<p>If this app is already connected to the organization, it keeps its agent and name.</p>
 <button type="submit">Connect</button>
 </form></body></html>`;
   // No form-action: Chromium applies it to the redirect after this form, which would block the return to the client.
+  // Referrer policy same-origin: under no-referrer, Chromium sends `Origin: null` on the form's POST, which we refuse.
   return new Response(html, {
-    headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": `default-src 'none'; frame-ancestors 'none'; base-uri 'none'`, "x-frame-options": "DENY", "referrer-policy": "no-referrer" },
+    headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": `default-src 'none'; frame-ancestors 'none'; base-uri 'none'`, "x-frame-options": "DENY", "referrer-policy": "same-origin" },
   });
 }
 
 async function parseOAuth(env: Env, request: Request) {
   try {
     const parsed = await env.OAUTH_PROVIDER.parseAuthRequest(request);
-    if (parsed.scope.length === 0 || parsed.scope.some((scope) => scope !== "mcp")) return null;
+    // MCP clients often send no scope, and refresh tokens are issued anyway, so both of those mean plain `mcp` access.
+    if (parsed.scope.some((scope) => scope !== "mcp" && scope !== "offline_access")) return null;
     return parsed;
   } catch {
     return null;
@@ -297,13 +360,18 @@ async function handleAuthorize(request: Request, env: Env, userId: string): Prom
       await linkStatement(env, "mcp_oauth", externalId, linkAgent, person, Date.now()).run();
     } else {
       const agentId = newId("agt");
-      if (!(await registerWithApi(env, identity, agentId, org, name))) return denied("upstream_unavailable", 502);
+      const status = await registerWithApi(env, identity, agentId, org, name);
+      if (status !== 200) return registrationRefused(status);
       await createAgent(env, org, name, "mcp_oauth", externalId, agentId, person);
     }
   } else if (linkAgent && linkAgent !== existing.agent_id) {
     return denied("already_linked", 409);
   }
-  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: parsed, userId: person, metadata: { org, externalId }, scope: parsed.scope, props: { externalId } });
+  // The provider's own cleanup covers every grant for this person and client, which would end this client's agents in
+  // other organizations. Only the grant being replaced goes.
+  const replaced = await grantIds(env, person, externalId);
+  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: parsed, userId: person, metadata: { org, externalId }, scope: ["mcp"], props: { externalId }, revokeExistingGrants: false });
+  for (const id of replaced) await env.OAUTH_PROVIDER.revokeGrant(id, person);
   return Response.redirect(redirectTo, 302);
 }
 
@@ -313,16 +381,26 @@ async function claimedByThisPerson(env: Env, pluginAgent: string, userId: string
   return row?.status === "active" && row.userId === userId;
 }
 
+/** The plugin's hash of a code, including how it normalizes one. */
+async function userCodeHash(code: string) {
+  const stripped = code.replaceAll(/[^A-Z0-9]/gi, "").toUpperCase();
+  const normalized = stripped.length === 8 ? `${stripped.slice(0, 4)}-${stripped.slice(4)}` : code.toUpperCase();
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalized));
+  return btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 /**
- * Whether this agent has a live code. The plugin refuses every code while an expired one is pending, which would
- * strand an agent that registered again, so expired rows go once a newer one exists. With no live row the claim must
- * stop here: the plugin doesn't check a code when no approval is pending.
+ * Whether this code matches a live approval for this agent. The gateway decides, because the plugin doesn't check a
+ * code when no approval is pending, which includes the moment after someone else's approval resolved it. The plugin
+ * also refuses every code while an expired one is pending, which would strand an agent that registered again, so
+ * expired rows go once a live code has matched.
  */
-async function prepareApprovals(env: Env, pluginAgent: string) {
-  const { results } = await env.DB.prepare(`SELECT id, expiresAt FROM approvalRequest WHERE agentId = ? AND status = 'pending'`).bind(pluginAgent).all<{ id: string; expiresAt: string | number }>();
+export async function codeMatchesLiveApproval(env: Env, pluginAgent: string, code: string) {
+  const { results } = await env.DB.prepare(`SELECT id, expiresAt, userCodeHash FROM approvalRequest WHERE agentId = ? AND status = 'pending'`).bind(pluginAgent).all<{ id: string; expiresAt: string | number; userCodeHash: string | null }>();
   const now = Date.now();
+  const hash = await userCodeHash(code);
   const live = results.filter((row) => new Date(row.expiresAt).getTime() >= now);
-  if (live.length === 0) return false;
+  if (!live.some((row) => row.userCodeHash === hash)) return false;
   for (const row of results) {
     if (!live.includes(row)) await env.DB.prepare(`DELETE FROM approvalRequest WHERE id = ?`).bind(row.id).run();
   }
@@ -338,6 +416,8 @@ async function handleClaim(request: Request, env: Env, userId: string): Promise<
   const person = personId(userId);
   const identity = await personIdentity(env, new Request(request.url, { headers: { "x-podster-org": org } }), userId);
   if (!identity || identity.kind !== "person" || !identity.adminOrgs.includes(org)) return denied("not_allowed", 403);
+  const suppliedName = typeof body.name === "string" ? body.name.trim() : "";
+  if (suppliedName && !validName(suppliedName)) return denied("invalid_argument", 400);
   const linked = typeof body.link_agent_id === "string" && body.link_agent_id ? body.link_agent_id : null;
   if (linked && !(await linkableAgent(env, linked, org))) return denied("not_allowed", 403);
   const alreadyLinked = await env.DB.prepare(`SELECT agent_id FROM identity_link WHERE provider = 'agent_auth' AND external_id = ?`).bind(pluginAgent).first();
@@ -345,42 +425,53 @@ async function handleClaim(request: Request, env: Env, userId: string): Promise<
 
   // Approve first, so nothing is created for a bad code. The agent ID comes from the plugin's, so a retry reuses it.
   if (!(await claimedByThisPerson(env, pluginAgent, userId))) {
-    if (!(await prepareApprovals(env, pluginAgent))) return denied("not_allowed", 403);
+    if (!(await codeMatchesLiveApproval(env, pluginAgent, body.user_code))) return denied("not_allowed", 403);
     const approval = await createAuth(env).api.approveCapability({ headers: request.headers, body: { agent_id: pluginAgent, user_code: body.user_code, action: "approve" }, asResponse: true }).catch(() => null);
     const result = approval?.ok ? await approval.json<{ status?: string }>().catch(() => null) : null;
-    if (result?.status !== "approved") return denied("not_allowed", 403);
+    // If two people raced with the right code, only the one the plugin recorded goes on.
+    if (result?.status !== "approved" || !(await claimedByThisPerson(env, pluginAgent, userId))) return denied("not_allowed", 403);
   }
   const registered = await env.DB.prepare(`SELECT name FROM agent WHERE id = ?`).bind(pluginAgent).first<{ name: string | null }>();
-  const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : (registered?.name ?? "agent");
-  if (!validName(name)) return denied("invalid_argument", 400);
+  const name = suppliedName || fitName(registered?.name ?? "") || "agent";
   if (linked) {
     await linkStatement(env, "agent_auth", pluginAgent, linked, person, Date.now()).run();
     return json({ agent_id: linked, org_id: org });
   }
   const agentId = `agt_${await sha256Hex(pluginAgent)}`;
-  if (!(await registerWithApi(env, identity, agentId, org, name))) return denied("upstream_unavailable", 502);
+  const status = await registerWithApi(env, identity, agentId, org, name);
+  if (status !== 200) return registrationRefused(status);
   await createAgent(env, org, name, "agent_auth", pluginAgent, agentId, person);
   return json({ agent_id: agentId, org_id: org });
 }
 
-/** Ends every credential for an agent, so reconnecting can't bring back a leaked one. Safe to run again. */
+/**
+ * Ends every credential for an agent, so reconnecting can't bring back a leaked one. Links go last, so a failure partway
+ * can be run again. An Agent Auth key ends in the plugin too, or its owner could claim it again without a code.
+ */
 async function revokeCredentials(env: Env, agentId: string) {
   const { results } = await env.DB.prepare(`SELECT provider, external_id, person_id FROM identity_link WHERE agent_id = ?`).bind(agentId).all<{ provider: string; external_id: string; person_id: string }>();
-  for (const link of results.filter((l) => l.provider === "mcp_oauth")) {
-    let cursor: string | undefined;
-    do {
-      const page = await env.OAUTH_PROVIDER.listUserGrants(link.person_id, { cursor });
-      for (const grant of page.items) {
-        if ((grant.metadata as { externalId?: string } | undefined)?.externalId === link.external_id) await env.OAUTH_PROVIDER.revokeGrant(grant.id, link.person_id);
-      }
-      cursor = page.cursor;
-    } while (cursor);
+  for (const link of results) {
+    if (link.provider === "mcp_oauth") {
+      for (const id of await grantIds(env, link.person_id, link.external_id)) await env.OAUTH_PROVIDER.revokeGrant(id, link.person_id);
+    } else {
+      const now = new Date().toISOString();
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE agent SET status = 'revoked', publicKey = '', kid = NULL, updatedAt = ? WHERE id = ?`).bind(now, link.external_id),
+        env.DB.prepare(`UPDATE agentCapabilityGrant SET status = 'revoked', updatedAt = ? WHERE agentId = ?`).bind(now, link.external_id),
+      ]);
+    }
   }
   await env.DB.prepare(`DELETE FROM identity_link WHERE agent_id = ?`).bind(agentId).run();
 }
 
 /** Disconnect and reconnect. The API decides; the directory follows so new assertions carry the right generation. */
 async function handleConnection(request: Request, env: Env, identity: Identity, agentId: string, verb: "disconnect" | "reconnect"): Promise<Response> {
+  if (verb === "reconnect") {
+    // A disconnect can commit in the API and then lose this gateway's request, so its cleanup finishes here if needed.
+    const current = await callApi(env, identity, { method: "GET", path: `/v1/agents/${agentId}` });
+    const agent = await current.json<{ status?: string }>();
+    if (current.status === 200 && agent.status === "disconnected") await revokeCredentials(env, agentId);
+  }
   const response = await callApi(env, identity, { method: "POST", path: `/v1/agents/${agentId}/${verb}`, body: "{}" });
   const body = await response.json<any>();
   if (response.status === 200) {
@@ -408,16 +499,31 @@ async function handleOrganizations(request: Request, env: Env, person: string): 
   return json({ id, name, role: "admin" });
 }
 
+/** Discovery lists only the routes that are public, so clients don't follow one to a 404. */
+function publicConfiguration(configuration: any) {
+  const endpoints = Object.entries((configuration.endpoints ?? {}) as Record<string, string>).filter(([, url]) => isPublicAuthRoute(new URL(url).pathname.replace(/^\/api\/auth/, "")));
+  return { ...configuration, endpoints: Object.fromEntries(endpoints) };
+}
+
 const appHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    const auth = createAuth(env);
-    if (url.pathname === "/.well-known/agent-configuration") return json(await auth.api.getAgentConfiguration({ headers: request.headers }));
+    // Refusals come before the auth instance exists: starting it and walking away leaves its setup running.
+    if (url.pathname === "/.well-known/agent-configuration" || url.pathname === "/api/auth/agent-configuration") return json(publicConfiguration(await createAuth(env).api.getAgentConfiguration({ headers: request.headers })));
     if (url.pathname.startsWith("/api/auth/")) {
-      if (!isPublicAuthRoute(url.pathname.slice("/api/auth".length))) return denied("not_found", 404);
-      return auth.handler(request);
+      const route = url.pathname.slice("/api/auth".length);
+      if (!isPublicAuthRoute(route)) return denied("not_found", 404);
+      if (route === "/agent/register" && request.method === "POST") {
+        // Read once and passed on, so what we checked is what the plugin parses.
+        const text = await request.text();
+        const refused = await refusedRegistration(request, text);
+        if (refused) return refused;
+        return createAuth(env).handler(new Request(request, { body: text }));
+      }
+      return createAuth(env).handler(request);
     }
 
+    const auth = createAuth(env);
     const session = await auth.api.getSession({ headers: request.headers });
     if (url.pathname === "/authorize") {
       if (!session) return denied("sign_in_required", 401);
@@ -503,6 +609,7 @@ export default {
           tokenEndpoint: "/oauth/token",
           clientRegistrationEndpoint: "/oauth/register",
           scopesSupported: ["mcp"],
+          requiredScopes: ["mcp"],
           resourceMetadata: { resource: `${env.BASE_URL}/mcp` },
         }),
       };

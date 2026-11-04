@@ -560,6 +560,10 @@ Passes locally, not deployed. Sign-in through GitHub and Google is untested. `ap
 
 Only an allowlist of Better Auth and plugin routes is public. The plugin's `/host/*`, approve, grant, revoke and rotate routes would let a signed-in stranger replace a pending agent's keys, so they stay private, and keys can't be rotated yet. A disconnect revokes every OAuth grant and credential link, so a reconnect can't bring back a leaked one. The owner approves a new credential, which reattaches to the same agent.
 
+The plugin finds a host by the `kid` a caller supplies, so the gateway checks registrations first. It refuses `force_approval`, which would revoke the host's other agents on claim. It also refuses remote key URLs, a key whose `kid` isn't its own thumbprint, and an agent asking for no capabilities, since requesting more later isn't public. An agent's capabilities are fixed when it registers until that route opens.
+
+OAuth requests with no scope or with `offline_access` are treated as `mcp`, which is the only scope granted. A person connecting a client to a second organization keeps the first organization's token; only a repeat consent for the same organization replaces one.
+
 A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership and invitation acceptance, never for room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
 
 ### Phase 0 status

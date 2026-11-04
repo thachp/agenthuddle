@@ -1,10 +1,13 @@
 import { generateKeypair, signAgentJWT, signHostJWT } from "@auth/agent";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { getMigrations } from "better-auth/db/migration";
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
-import { callApi, createAuth, isPublicAuthRoute, type Env } from "../src/index";
+import { callApi, codeMatchesLiveApproval, createAuth, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string };
@@ -69,8 +72,8 @@ async function authorizeQuery(clientName = "Test client") {
 }
 const approve = (who: Person, query: string, fields: Record<string, string>, origin = BASE) =>
   call("/authorize", { method: "POST", headers: { cookie: who.cookie, origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ oauth_query: query, agent_name: "MCP agent", org_id: who.org, ...fields }) });
-async function mcpAgent(who: Person, fields: Record<string, string> = {}) {
-  const { client_id, query } = await authorizeQuery();
+async function mcpAgent(who: Person, fields: Record<string, string> = {}, client?: { client_id: string; query: string }) {
+  const { client_id, query } = client ?? (await authorizeQuery());
   const res = await approve(who, query, fields);
   expect(res.status).toBe(302);
   const code = new URL(res.headers.get("location")!).searchParams.get("code")!;
@@ -160,6 +163,7 @@ describe("Agent Auth", () => {
     const [a, b] = [await signUp(), await signUp()];
     const agent = await claimedAgent(a);
     expect((await claim(b, agent)).status).toBe(403);
+    expect((await claim(a, agent)).status).toBe(403);
     expect((await execute(agent, "get_identity")).data.org_id).toBe(a.org);
   });
 
@@ -313,7 +317,8 @@ describe("claim flows", () => {
     const agent = await claimedAgent(owner);
     const row = await e.DB.prepare("SELECT expiresAt FROM agent WHERE id = ?").bind(agent.pluginId).first<{ expiresAt: string | null }>();
     expect(row?.expiresAt).toBeNull();
-    await e.DB.prepare("UPDATE agent SET lastUsedAt = ? WHERE id = ?").bind(new Date(Date.now() - 30 * 86_400_000).toISOString(), agent.pluginId).run();
+    const longAgo = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    await e.DB.prepare("UPDATE agent SET lastUsedAt = ?, activatedAt = ?, createdAt = ? WHERE id = ?").bind(longAgo, longAgo, longAgo, agent.pluginId).run();
     expect((await execute(agent, "get_identity")).status).toBe(200);
   });
 
@@ -352,6 +357,8 @@ describe("claim flows", () => {
     expect((await call("/api/v1/me", { headers: { cookie: owner.cookie } })).status).toBe(200);
     const agent = await registerAgent();
     expect((await claim(owner, agent, { name: "名".repeat(150) })).status).toBe(400);
+    // A refused name spends nothing.
+    expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ status: "pending" });
     expect((await claim(owner, agent, { name: "名".repeat(60) })).status).toBe(200);
     expect((await dash(owner, "POST", "/orgs", { name: "名".repeat(150) })).code).toBe("invalid_argument");
   });
@@ -363,11 +370,12 @@ describe("consent", () => {
     const { query } = await authorizeQuery("Podster Official CLI");
     const page = await call(`/authorize${query}`, { headers: { cookie: a.cookie } });
     const csp = page.headers.get("content-security-policy")!;
-    expect(csp).not.toContain("form-action");
-    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toBe("default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    // Chromium sends `Origin: null` on the form's POST under no-referrer, and approval would always be refused.
+    expect(page.headers.get("referrer-policy")).toBe("same-origin");
     expect(page.headers.get("x-frame-options")).toBe("DENY");
     const html = await page.text();
-    expect(html).toContain("client.test");
+    expect(html).toContain("<strong>client.test</strong>");
     expect(html).toContain("hasn't verified this name");
   });
 
@@ -402,11 +410,248 @@ describe("consent", () => {
   });
 });
 
+describe("registration", () => {
+  const b64 = (value: unknown) => btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const fakeJwt = (claims: object) => `${b64({ alg: "EdDSA", typ: "host+jwt" })}.${b64(claims)}.sig`;
+  const register = (jwt: string, body: object = {}) => post("/api/auth/agent/register", { name: "x", mode: "delegated", capabilities: ["get_identity"], preferred_method: "device_authorization", ...body }, { authorization: `Bearer ${jwt}` });
+
+  it("a stranger with a host's key ID can't touch that host or its agents", async () => {
+    const [owner, stranger] = [await signUp(), await signUp()];
+    const victim = await claimedAgent(owner);
+    const hostBefore = await e.DB.prepare("SELECT id, userId, name FROM agentHost WHERE id = ?").bind(victim.registered.host_id).first();
+    const hostile = await generateKeypair();
+    const borrowed = { publicKey: { ...hostile.publicKey, kid: victim.host.publicKey.kid }, privateKey: hostile.privateKey };
+    const agentKey = await generateKeypair();
+    const jwt = await signHostJWT({ hostKeypair: borrowed, audience: BASE, agentPublicKey: agentKey.publicKey, hostName: "taken", issuer: unique("iss") } as never);
+    const res = await register(jwt, { force_approval: true });
+    expect(res.status).toBe(400);
+    const withoutForce = await register(await signHostJWT({ hostKeypair: borrowed, audience: BASE, agentPublicKey: agentKey.publicKey, hostName: "taken", issuer: unique("iss") } as never));
+    expect(withoutForce.status).toBe(400);
+    expect((await withoutForce.json<any>()).error.code).toBe("invalid_public_key");
+    expect(await e.DB.prepare("SELECT id, userId, name FROM agentHost WHERE id = ?").bind(victim.registered.host_id).first()).toEqual(hostBefore);
+    expect((await execute(victim, "get_identity")).status).toBe(200);
+    expect(stranger.org).toBeTruthy();
+  });
+
+  it("the host's real operator can't revoke its agents by forcing approval either", async () => {
+    const owner = await signUp();
+    const victim = await claimedAgent(owner);
+    const next = await generateKeypair();
+    const jwt = await signHostJWT({ hostKeypair: victim.host, audience: BASE, agentPublicKey: next.publicKey, hostName: "test-host" } as never);
+    expect((await register(jwt, { force_approval: true })).status).toBe(400);
+    expect((await execute(victim, "get_identity")).status).toBe(200);
+  });
+
+  it("refuses remote key URLs, agents with no capabilities, and anything it can't read", async () => {
+    const keys = await generateKeypair();
+    for (const claims of [{ host_jwks_url: "https://evil.test/jwks" }, { agent_jwks_url: "https://evil.test/jwks" }]) {
+      const res = await register(fakeJwt({ iss: unique("iss"), ...claims }));
+      expect((await res.json<any>()).error.code).toBe("jwks_url_not_supported");
+    }
+    const agentLie = await register(fakeJwt({ host_public_key: keys.publicKey, agent_public_key: { ...keys.publicKey, kid: "someone-else" } }));
+    expect((await agentLie.json<any>()).error.code).toBe("invalid_public_key");
+    for (const capabilities of [[], undefined]) {
+      const res = await register(fakeJwt({ host_public_key: keys.publicKey }), { capabilities });
+      expect((await res.json<any>()).error.code).toBe("capabilities_required");
+    }
+    expect((await post("/api/auth/agent/register", { capabilities: ["get_identity"] }, { authorization: "Bearer junk" })).status).toBe(401);
+    expect((await call("/api/auth/agent/register", { method: "POST", body: "not json", headers: { "content-type": "application/json", origin: BASE } })).status).toBe(400);
+  });
+
+  it("shortens a long registered name so the agent can still be claimed", async () => {
+    const owner = await signUp();
+    const [host, key] = [await generateKeypair(), await generateKeypair()];
+    const jwt = await signHostJWT({ hostKeypair: host, audience: BASE, agentPublicKey: key.publicKey, hostName: "test-host" } as never);
+    const registered = await (await register(jwt, { name: "名".repeat(100) })).json<any>();
+    const agent = { host, keypair: key, pluginId: registered.agent_id, userCode: registered.approval.user_code, registered };
+    expect((await claim(owner, agent)).status).toBe(200);
+    expect((await execute(agent, "get_identity")).data.name).toBe("名".repeat(66));
+  });
+
+  it("discovery lists only public routes", async () => {
+    for (const path of ["/.well-known/agent-configuration", "/api/auth/agent-configuration"]) {
+      const { endpoints } = await (await call(path)).json<any>();
+      expect(Object.keys(endpoints).sort(), path).toEqual(["capabilities", "describe_capability", "execute", "register", "status"]);
+    }
+  });
+});
+
+describe("codes", () => {
+  it("the gateway itself checks the code against a live approval", async () => {
+    const agent = await registerAgent();
+    const code = agent.userCode;
+    expect(await codeMatchesLiveApproval(e, agent.pluginId, code)).toBe(true);
+    expect(await codeMatchesLiveApproval(e, agent.pluginId, ` ${code.toLowerCase().replace("-", " ")}`)).toBe(true);
+    expect(await codeMatchesLiveApproval(e, agent.pluginId, "AAAA-AAAA")).toBe(false);
+    await e.DB.prepare("UPDATE approvalRequest SET expiresAt = ? WHERE agentId = ?").bind(new Date(Date.now() - 1000).toISOString(), agent.pluginId).run();
+    expect(await codeMatchesLiveApproval(e, agent.pluginId, code)).toBe(false);
+  });
+
+  it("a junk code passes nothing when no approval is pending", async () => {
+    const [owner, stranger] = [await signUp(), await signUp()];
+    const agent = await registerAgent();
+    // The moment after an owner's approval resolved the row, before the plugin activates the agent.
+    await e.DB.prepare("UPDATE approvalRequest SET status = 'approved' WHERE agentId = ?").bind(agent.pluginId).run();
+    expect((await claim(stranger, { ...agent, userCode: "AAAA-AAAA" })).status).toBe(403);
+    expect(await e.DB.prepare("SELECT userId FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ userId: null });
+    expect(owner.org).toBeTruthy();
+  });
+});
+
+describe("after a disconnect", () => {
+  const person = async (who: Person) => (await (await dashboard(who, "GET", "/v1/me")).json<any>()) as { id: string; orgs: string[]; admin_orgs: string[] };
+
+  it("an old key can't be claimed back without a code, or moved to another agent", async () => {
+    const a = await signUp();
+    const old = await claimedAgent(a);
+    const other = await claimedAgent(a);
+    await dash(a, "POST", `/agents/${old.id}/disconnect`);
+    const junk = { ...old, userCode: "JUNK" };
+    expect((await claim(a, junk)).status).toBe(403);
+    expect((await claim(a, junk, { link_agent_id: other.id })).status).toBe(403);
+    expect((await execute(old, "get_identity")).status).toBe(403);
+    await dash(a, "POST", `/agents/${old.id}/reconnect`);
+    expect((await claim(a, junk)).status).toBe(403);
+    expect((await execute(old, "get_identity")).status).toBe(403);
+    expect((await execute(other, "get_identity")).status).toBe(200);
+  });
+
+  it("a disconnect whose response was lost still ends credentials when reconnecting", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const linked = await mcpAgent(a, { link_agent_id: agent.id });
+    const me = await person(a);
+    // The API commits, and the gateway never gets to run its part.
+    const lost = await callApi(e, { kind: "person", id: me.id, org: a.org, orgs: me.orgs, adminOrgs: me.admin_orgs }, { method: "POST", path: `/v1/agents/${agent.id}/disconnect`, body: "{}" });
+    expect(lost.status).toBe(200);
+    expect((await dash(a, "POST", `/agents/${agent.id}/reconnect`)).status).toBe(200);
+    expect((await execute(agent, "get_identity")).status).toBe(403);
+    expect((await call("/mcp", { method: "POST", headers: { authorization: `Bearer ${linked.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" })).status).toBe(401);
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE agent_id = ?").bind(agent.id).first()).toEqual({ n: 0 });
+  });
+
+  it("reconnecting an agent that's still connected keeps its credentials", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    await dash(a, "POST", `/agents/${agent.id}/reconnect`);
+    expect((await execute(agent, "get_identity")).status).toBe(200);
+  });
+
+  it("an older answer can't overwrite the directory's generation", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    await e.DB.prepare("UPDATE podster_agent SET generation = 99 WHERE id = ?").bind(agent.id).run();
+    await dash(a, "POST", `/agents/${agent.id}/disconnect`);
+    expect(await e.DB.prepare("SELECT generation FROM podster_agent WHERE id = ?").bind(agent.id).first()).toEqual({ generation: 99 });
+  });
+});
+
+describe("consent across organizations and clients", () => {
+  it("connecting a client to a second organization leaves the first one's agent working", async () => {
+    const a = await signUp();
+    const second = (await dash(a, "POST", "/orgs", { name: "Second" })).body.id as string;
+    const client = await authorizeQuery();
+    const first = await mcpAgent(a, {}, client);
+    const other = await mcpAgent(a, { org_id: second }, client);
+    expect(other.id).not.toBe(first.id);
+    expect((await first.tool("get_identity")).data).toMatchObject({ id: first.id, org_id: a.org });
+    expect((await other.tool("get_identity")).data).toMatchObject({ id: other.id, org_id: second });
+  });
+
+  it("consenting again in one organization replaces only that token", async () => {
+    const a = await signUp();
+    const client = await authorizeQuery();
+    const first = await mcpAgent(a, {}, client);
+    const again = await mcpAgent(a, {}, client);
+    expect(again.id).toBe(first.id);
+    expect((await again.tool("get_identity")).data.id).toBe(first.id);
+    const old = await call("/mcp", { method: "POST", headers: { authorization: `Bearer ${first.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" });
+    expect(old.status).toBe(401);
+  });
+
+  it("a connected credential can't be pointed at a different agent", async () => {
+    const a = await signUp();
+    const client = await authorizeQuery();
+    await mcpAgent(a, {}, client);
+    const other = await claimedAgent(a);
+    expect((await approve(a, client.query, { link_agent_id: other.id })).status).toBe(409);
+  });
+
+  it("offers only agents from the person's own organizations, labeled by organization", async () => {
+    const [a, b] = [await signUp(), await signUp()];
+    const mine = await claimedAgent(a);
+    const theirs = await claimedAgent(b);
+    const { query } = await authorizeQuery();
+    const html = await (await call(`/authorize${query}`, { headers: { cookie: a.cookie } })).text();
+    expect(html).toContain(mine.id);
+    expect(html).not.toContain(theirs.id);
+    expect(html).toContain("agent (Test person)");
+  });
+
+  it("accepts the scopes real clients send, and only ever grants mcp", async () => {
+    const a = await signUp();
+    const client = await authorizeQuery();
+    const { query } = client;
+    // A token only reaches /mcp if it holds mcp, so using one proves what was granted.
+    for (const scoped of [query.replace("scope=mcp&", ""), query.replace("scope=mcp", "scope=mcp+offline_access")]) {
+      expect((await call(`/authorize${scoped}`, { headers: { cookie: a.cookie } })).status, scoped).toBe(200);
+      const agent = await mcpAgent(a, {}, { ...client, query: scoped });
+      expect((await agent.tool("get_identity")).data.org_id, scoped).toBe(a.org);
+    }
+    expect((await call(`/authorize${query.replace("scope=mcp", "scope=mcp+admin")}`, { headers: { cookie: a.cookie } })).status).toBe(400);
+    const metadata = await (await call("/.well-known/oauth-protected-resource/mcp")).json<any>();
+    expect(metadata.scopes_supported).toEqual(["mcp"]);
+  });
+
+  it("works with the official MCP SDK, from discovery to a tool call", async () => {
+    const a = await signUp();
+    const serverUrl = `${BASE}/mcp`;
+    const sdkFetch = ((url: string | URL, init?: RequestInit) => SELF.fetch(String(url), init)) as typeof fetch;
+    let authorizationUrl: URL | undefined;
+    let verifier = "";
+    let client: any;
+    let tokens: any;
+    const provider = {
+      redirectUrl: "https://client.test/cb",
+      clientMetadata: { client_name: "SDK client", redirect_uris: ["https://client.test/cb"], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] },
+      clientInformation: () => client,
+      saveClientInformation: (info: unknown) => void (client = info),
+      tokens: () => tokens,
+      saveTokens: (value: unknown) => void (tokens = value),
+      redirectToAuthorization: (url: URL) => void (authorizationUrl = url),
+      saveCodeVerifier: (value: string) => void (verifier = value),
+      codeVerifier: () => verifier,
+    } as any;
+    expect(await sdkAuth(provider, { serverUrl, fetchFn: sdkFetch })).toBe("REDIRECT");
+    const approved = await approve(a, authorizationUrl!.search, {});
+    expect(approved.status).toBe(302);
+    const authorizationCode = new URL(approved.headers.get("location")!).searchParams.get("code")!;
+    expect(await sdkAuth(provider, { serverUrl, authorizationCode, fetchFn: sdkFetch })).toBe("AUTHORIZED");
+    const mcp = new Client({ name: "test", version: "0.0.0" });
+    await mcp.connect(new StreamableHTTPClientTransport(new URL(serverUrl), { authProvider: provider, fetch: sdkFetch }));
+    expect((await mcp.listTools()).tools.map((t) => t.name)).toContain("get_identity");
+    const result: any = await mcp.callTool({ name: "get_identity", arguments: {} });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ org_id: a.org, status: "active" });
+    await mcp.close();
+  });
+});
+
 describe("resilience and schema", () => {
-  it("answers when the API doesn't", async () => {
-    const hanging = { ...e, API: { fetch: () => Promise.reject(new DOMException("timed out", "TimeoutError")) } as unknown as Fetcher };
-    const res = await callApi(hanging, { kind: "person", id: "per_x", org: "o", orgs: ["o"], adminOrgs: [] }, { method: "GET", path: "/v1/me" });
-    expect(res.status).toBe(504);
+  const someone = { kind: "person" as const, id: "per_x", org: "o", orgs: ["o"], adminOrgs: [] };
+
+  it("answers when the API hangs, and says so differently when it fails", async () => {
+    const hanging = { ...e, API: { fetch: (request: Request) => new Promise((_, reject) => request.signal.addEventListener("abort", () => reject(request.signal.reason))) } as unknown as Fetcher };
+    expect((await callApi(hanging, someone, { method: "GET", path: "/v1/me" }, 20)).status).toBe(504);
+    const failing = { ...e, API: { fetch: () => Promise.reject(new Error("no such service")) } as unknown as Fetcher };
+    expect((await callApi(failing, someone, { method: "GET", path: "/v1/me" })).status).toBe(502);
+  });
+
+  it("a claim into a second organization gets a refusal, not an outage", async () => {
+    const a = await signUp();
+    const second = (await dash(a, "POST", "/orgs", { name: "Second" })).body.id as string;
+    const agent = await claimedAgent(a);
+    await e.DB.prepare("DELETE FROM identity_link WHERE external_id = ?").bind(agent.pluginId).run();
+    expect((await post("/claim", { agent_id: agent.pluginId, user_code: "x", org_id: second }, { cookie: a.cookie })).status).toBe(403);
   });
 
   it("passes the API's status through to agents", async () => {
@@ -562,7 +807,7 @@ describe("kernel journey across two organizations", () => {
     expect(on.body).toMatchObject({ status: "active", generation: 3 });
     expect((await dash(personB, "GET", `/agents/${architect.id}`)).body.status).toBe("active");
     // The old key and token stay dead, so a leaked one doesn't come back.
-    expect((await execute(architect, "get_identity")).raw.message).toBe("agent_unclaimed");
+    expect((await execute(architect, "get_identity")).status).toBe(403);
     expect((await call("/mcp", { method: "POST", headers: { authorization: `Bearer ${linked.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" })).status).toBe(401);
 
     // The owner approves a new credential, which reattaches to the same agent, with no room access.
