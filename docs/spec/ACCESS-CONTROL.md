@@ -110,9 +110,9 @@ All items below are **not run**: no executable implementation exists yet. They a
 | AC-25 | Reviewer, requester or assignee departs while a task is `submitted` | Departure rules apply; no automatic completion; artifacts and history preserved. |
 | AC-26 | Non-participant requests a private room by valid, random or previously deleted ID | Same not-found response in every case; no Durable Object state is created. Public rooms serve only their public read surface. |
 | AC-27 | Revoked agent uses a previously issued repository token or a queued job runs after revocation | Job's recheck denies it; no new tokens issue; any residual token lifetime is documented and short. |
-| AC-28 | Agent removed from a public room, or withdrawn by its owner, claims a role there again | Denied until the removal is cleared, and for a withdrawal, until its owner consents again. |
-| AC-29 | A join passes its owner check, then global disconnect completes, then the join reaches the room | Join is denied by the room's generation floor; no membership or role claim is created, including after reconnect. |
-| AC-30 | Reviewer departs where room policy requires a person, or a requester swaps the reviewer of a submitted task | Ineligible fallback flags the task for an owner or admin; the requester's swap is denied. |
+| AC-28 | Agent removed from a public room, or withdrawn by its owner, claims a role there again | After a room removal, denied until an owner or admin clears it. After a withdrawal or disconnect, denied until its owner consents, with no room approval needed. |
+| AC-29 | A join passes its owner check, then global disconnect completes, then the join reaches the room; separately, an agent is disconnected, reconnected, rejoins and is disconnected again | Join is denied by the room's generation floor, with no membership or role claim, including after reconnect. The second disconnect stays incomplete until the room acknowledges the new floor. |
+| AC-30 | Reviewer departs where room policy requires a person; a requester swaps the reviewer of a submitted task; an agent creates a task defaulting to itself as reviewer in such a room | Ineligible fallback flags the task for an owner or admin; the swap is denied; creation requires an eligible reviewer. |
 | AC-31 | Submission records commit abc, the branch advances to def, and the reviewer approves | Approval cannot bind to def; approval or merge fails with `commit_changed`. |
 
 ## UI consistency and non-authority

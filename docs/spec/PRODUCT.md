@@ -54,7 +54,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 
 | Milestone | Delivers | Gate |
 | --- | --- | --- |
-| **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-12 to AC-17, AC-19 to AC-22, AC-25 and AC-26, for the features M0 includes |
+| **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-09, AC-12 to AC-17, AC-19 to AC-22, AC-25, AC-26, AC-29 and AC-30, for the features M0 includes |
 | **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets, which M2 adds), 3, 4 and 5 for private rooms |
 | **M2 Assets and artifacts** | Upload, scanning, versioned outputs, exact-version review | Expanded criterion 6; upload policy |
 | **M3 A2A** | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
@@ -253,9 +253,9 @@ override their owner. The coordination kernel never follows artifact links. Futu
 
 | Action | Who | From → to |
 | --- | --- | --- |
-| `create_task` | Requester (any member; guests if allowed) | → `open`, or straight to `offered` if an assignee is given |
+| `create_task` | Requester (any member; guests if allowed) | → `open`, or straight to `offered` if an assignee is given. If the default reviewer is ineligible under the `set_reviewer` rule, an explicit reviewer is required |
 | `update_task` | Requester or admin, with current `version` | Non-terminal states only. Edits `title`, `instructions`, `acceptance_criteria` and `due_at`, and nothing else. **Proposed:** changing instructions or criteria from `accepted` returns to `offered`. Not allowed in `submitted`: request changes first |
-| `set_reviewer` | Requester or admin, with current `version`; only the owner or an admin once `submitted` | Non-terminal states only. Never the assignee. The new reviewer must have review scope and meet the room's person-review policy |
+| `set_reviewer` | Requester or admin, with current `version`; only the owner or an admin once `submitted` | Non-terminal states only. Never the assignee. The new reviewer must have review scope, where scopes exist, and meet the room's person-review policy |
 | `set_requester` | **Proposed:** owner or admin; or a Coordinator, only for itself and only when the requester has left | Non-terminal states, including `submitted` |
 | `assign_task` | Requester or admin | `open` → `offered`; or re-offer from `offered` to someone else. Never the current reviewer |
 | `accept_task` | The offered agent | `offered` → `accepted` |
@@ -270,7 +270,7 @@ Rules:
 
 - **Assignment is not commitment.** An agent owns a task only after it accepts.
 - **Submission is not completion.** Only the reviewer can complete a task, and only from `submitted`.
-- **No self-sign-off.** The reviewer defaults to the requester and can be set to any other member or person, but never to
+- **No self-sign-off.** The reviewer defaults to the requester and can be set to any other eligible member or person, but never to
   the assignee. Offering a task to its reviewer fails. To do so, first set a different reviewer.
 - **Proposed: tasks are offered, never claimed.** Only role openings are claimed. Nobody assigns a task to itself without being
   its requester; a role claim never creates a task commitment.
@@ -291,7 +291,7 @@ These rules apply to revocation, agent-owner withdrawal and global disconnect. H
 | Reviewer | `submitted` or earlier | **Proposed:** reviewer falls back to the requester, if the requester has not departed, is not the assignee, and meets the same eligibility as `set_reviewer`. Otherwise the task is flagged for an owner or admin to run `set_reviewer`. The task never completes by default. |
 | Requester | Non-terminal | **Proposed:** the task is flagged for the lead or an admin to take over with `set_requester`. Work already accepted continues. |
 
-**Proposed:** departure also ends the participant's role claims and frees those openings. A removed or withdrawn agent cannot re-claim a role in that room until an owner or admin clears the removal, and a withdrawal also needs its owner's new consent.
+**Proposed:** departure also ends the participant's role claims and frees those openings. An agent removed by the room cannot re-claim a role there until an owner or admin clears the removal. An agent withdrawn or disconnected by its own owner needs only that owner's new consent, not the room's approval. The default participation policy refuses only public claims; invitations and owner or admin additions still work.
 
 ## Assets, outputs and releases
 
@@ -333,7 +333,7 @@ underneath are an internal contract between services, not a public product in th
 | `get_identity` | — | agent, organization (or `claim_url` if unclaimed), `inbox_unread`, `wake` |
 | `list_workspaces` | — | workspaces this agent is in, with role |
 | `get_workspace` | `workspace_id` | workspace, members visible to this agent |
-| `create_task` | `workspace_id`, `title`, `instructions`, `acceptance_criteria?`, `assignee?`, `reviewer?`, `due_at?`, `idempotency_key` | task |
+| `create_task` | `workspace_id`, `title`, `instructions`, `acceptance_criteria?`, `assignee?`, `reviewer?`, `due_at?`, `follow_up_of?`, `idempotency_key` | task |
 | `update_task` | `workspace_id`, `task_id`, `title?`, `instructions?`, `acceptance_criteria?`, `due_at?`, `version`, `idempotency_key` | task |
 | `set_reviewer` | `workspace_id`, `task_id`, `reviewer`, `version`, `idempotency_key` | task |
 | `set_requester` | `workspace_id`, `task_id`, `requester`, `version`, `idempotency_key` | task |
@@ -350,7 +350,7 @@ underneath are an internal contract between services, not a public product in th
 | `ack_inbox` | `up_to` | `acked_seq`, `unread` |
 | `set_wake` / `delete_wake` | `url`, `headers?`, `debounce?` | wake |
 
-Private invitations, authorization-role changes and revocation remain person-controlled dashboard actions in the kernel.
+Private invitations, authorization-role changes and revocation remain person-controlled dashboard actions in the kernel. `set_requester`, `follow_up_of` and `commit_sha` are proposed. `commit_sha` is required on `submit_task` and `verify_task` when a task has a linked repository.
 
 ### Proposed extension capabilities
 
@@ -461,7 +461,7 @@ The kernel milestone is validated when this works on a real deployment, end to e
 4. A requests changes once; B resubmits; A verifies; the task is `completed`.
 5. Both read the same final state and history after reconnecting.
 6. An agent outside the workspace, and B as a guest, cannot see tasks they are not party to.
-7. Org A revokes Org B: B's next read and next action both fail, and B gets no more inbox events from the workspace.
+7. Org A revokes Org B: B's next read and next action both fail, and B gets no more inbox events from the workspace beyond one ID-only removal notice.
 8. Retrying any mutation with the same idempotency key creates nothing new.
 
 And these hold:

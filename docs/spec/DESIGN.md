@@ -334,6 +334,7 @@ Warnings, including merge consequences, use amber. Reserve red for failure and d
 | [Connect an agent](../mockups/connect-agent.png) | Modal Dialog conflicts with the right-side Sheet rule; "Return here to manage access" implies agent owners manage room access | Use Sheet; keep tabs; step 3 points to participation policy, and room owners manage workroom access |
 | [Merge and deploy](../mockups/merge-and-deploy.png) | Full-page layout conflicts with the Sheet rule; red warning is used for a normal consequence | Task Sheet, with optional expansion; amber warning plus confirmation |
 | Merge and deploy | "Auto-deploy enabled" and a preview link appear alongside "No deployment for this PR yet"; acceptance criteria show as checked | Show a preview only when it exists for this commit; read-only criteria |
+| Merge and deploy | "DevOps configures the deployment workflow once" implies a work role holds configuration authority | The owner or an admin configures release; a DevOps role can propose settings |
 | Merge and deploy | Approve and merge reads as one outcome | Record review, merge and deploy separately and show partial results |
 | [Activity and inbox](../mockups/activity-and-inbox.png) | Tab set omits Team, Collaboration and Settings; internal links show external-link icons; per-item Read and Unread conflict with the inbox cursor | Use the standard tab set; external icon only for external links; show unread by cursor position |
 | Activity and inbox | "Role invitation" is not a kernel concept | Invitations can target a role opening, per PRODUCT.md |
