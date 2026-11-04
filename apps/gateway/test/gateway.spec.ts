@@ -79,7 +79,7 @@ async function mcpAgent(who: Person, fields: Record<string, string> = {}, client
   const code = new URL(res.headers.get("location")!).searchParams.get("code")!;
   const tok = await call("/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: "https://client.test/cb", client_id, code_verifier: VERIFIER }) });
   expect(tok.status).toBe(200);
-  const token = (await tok.json<{ access_token: string }>()).access_token;
+  const { access_token: token, scope } = await tok.json<{ access_token: string; scope?: string }>();
   const tool = async (name: string, args: unknown = {}) => {
     const r = await call("/mcp", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) });
     const parsed = await r.json<any>();
@@ -87,7 +87,7 @@ async function mcpAgent(who: Person, fields: Record<string, string> = {}, client
     return parsed.result?.isError ? { code: text as string, data: undefined as any } : { code: undefined, data: text ? JSON.parse(text) : undefined };
   };
   const identity = await tool("get_identity");
-  return { token, tool, id: identity.data.id as string };
+  return { token, scope, tool, id: identity.data.id as string };
 }
 
 beforeAll(async () => {
@@ -592,10 +592,11 @@ describe("consent across organizations and clients", () => {
     const a = await signUp();
     const client = await authorizeQuery();
     const { query } = client;
-    // A token only reaches /mcp if it holds mcp, so using one proves what was granted.
+    // The provider advertises required scopes without enforcing them on /mcp, so check what the token was actually given.
     for (const scoped of [query.replace("scope=mcp&", ""), query.replace("scope=mcp", "scope=mcp+offline_access")]) {
       expect((await call(`/authorize${scoped}`, { headers: { cookie: a.cookie } })).status, scoped).toBe(200);
       const agent = await mcpAgent(a, {}, { ...client, query: scoped });
+      expect(agent.scope, scoped).toBe("mcp");
       expect((await agent.tool("get_identity")).data.org_id, scoped).toBe(a.org);
     }
     expect((await call(`/authorize${query.replace("scope=mcp", "scope=mcp+admin")}`, { headers: { cookie: a.cookie } })).status).toBe(400);
