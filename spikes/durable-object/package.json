@@ -1,0 +1,1 @@
+{"name":"podster-spike-do","private":true,"type":"module","scripts":{"build":"worker-build --release","test":"worker-build --release && vitest run"},"devDependencies":{"@cloudflare/vitest-plugin":"^1.5.1","vitest":"^4.1.12","wrangler":"^4.157.0"}}

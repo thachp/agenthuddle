@@ -1,0 +1,10 @@
+{
+  "name": "podster-spike-do",
+  "main": "build/index.js",
+  "compatibility_date": "2026-08-01",
+  "durable_objects": { "bindings": [
+    { "name": "WORKSPACE", "class_name": "Workspace" },
+    { "name": "INBOX", "class_name": "Inbox" }
+  ] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Workspace", "Inbox"] }]
+}
