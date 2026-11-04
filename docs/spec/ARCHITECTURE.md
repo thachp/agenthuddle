@@ -34,7 +34,7 @@ A gateway check alone cannot satisfy global revocation, because assertions minte
 | Directory | **D1**: people, organizations, agents, identity links (gateway-owned); a membership index for `list_workspaces` (api-owned projection, never used to authorize). |
 | Async | Workspace outbox → `Principal` DO by direct DO call from an alarm. **Queues only for outbound HTTP** (wake, and provider jobs in the extensions). |
 | People auth | Better Auth in the gateway: GitHub, Google, email magic link; session cookie on the dashboard domain. |
-| Agent auth | `@better-auth/agent-auth` (claimable agents) and `@cloudflare/workers-oauth-provider` for hosted MCP, both mapped to one `agent` record. |
+| Agent auth | `@better-auth/agent-auth` in `delegated` mode with device approval, and `@cloudflare/workers-oauth-provider` for hosted MCP, both mapped to one `podster_agent` record. |
 | Web | **`apps/web`, Next.js on Workers via vinext** (owner's choice; not OpenNext), with the [design spec](DESIGN.md)'s shadcn/ui Sidebar and right-side Sheet. Cloudflare still labels vinext beta, and it has no build-time static pre-rendering yet: gated by a staging smoke test. |
 | Contracts | `packages/contracts/openapi.yaml` is the source of truth for gateway ↔ api; capability definitions live beside it. |
 | A2A | Core product interoperability requirement alongside MCP/Agent Auth. All adapters use the same Rust policy and authoritative task/inbox state. [Proposed profile](#a2a-adapter) targets A2A 1.0; conformance is not claimed. |
@@ -81,8 +81,9 @@ task state or permission logic, and the API never trusts anything a public calle
 - People: Better Auth sessions, organizations and org admins (`person`, `organization`, `org_member` in D1).
 - Agents: Agent Auth host (registration, capability execution with signature binding) and hosted MCP (`/mcp`,
   Streamable HTTP, stateless) behind the OAuth provider. The MCP consent page requires a signed-in person who picks the
-  organization; approving creates the `agent`. An Agent Auth registration creates an unclaimed `agent` with a
-  single-use claim token; `/claim` lets a signed-in org admin take ownership.
+  organization; approving creates the `agent`. An Agent Auth registration creates a `pending` plugin agent and returns a
+  device-approval link; `/claim` lets a signed-in org admin take ownership, which creates the `podster_agent`. Don't use the plugin's `autonomous`
+  mode: claiming one sets it to `claimed`, which refuses all its later requests.
 - `identity_link(provider, external_id) → agent_id` maps either credential to one stable Podster agent ID.
 - Per request: resolve the caller to `{kind: agent|person, id, org_id}`, reject unclaimed or disconnected agents
   (`agent.revoked_at`), mint the assertion, make exactly one internal API call per capability. Never forwards a
@@ -119,7 +120,7 @@ without downtime.
 person(id, email, name, created_at)
 organization(id, name, created_by, created_at)
 org_member(org_id, person_id, role: admin|member)
-agent(id, org_id?, name, description, claim_token_hash?, created_at, revoked_at?)
+podster_agent(id, org_id, name, description, generation, created_at, revoked_at?)   -- the plugin owns the `agent` table
 identity_link(provider: agent_auth|mcp_oauth, external_id, agent_id)
 membership_index(workspace_id, principal_id, org_id, role, workspace_name, updated_seq)   -- api-owned projection
 ```
@@ -148,9 +149,11 @@ audit_event(id, actor_id, actor_kind, action, target_id, outcome, reason_code, p
 
 The owner is a column, not a member role, so a workspace always has exactly one owner and no command can grant ownership by editing a member. Only `crates/policy`, given the current owner, can permit an admin appointment. Denied attempts go to a protected, rate-limited stream, separate from this transactional log.
 
-**Every command is one SQLite transaction**: check the caller is a current member with the right role (`crates/policy`),
+**Every command is one SQLite transaction**, using `storage.transactionSync`: check the caller is a current member with the right role (`crates/policy`),
 apply the transition (`crates/core`), insert the event with the next `seq`, insert one outbox row per principal that must
 hear about it, store the idempotency result. Either all of it commits or none of it does.
+
+Commands return errors rather than panic. A panic inside the `worker` crate's async `transaction` wedged the object until it restarted in local testing, and a panic in any form hangs its own request, so the gateway sets a request timeout.
 
 ### `Principal` DO (SQLite, one per agent or person)
 
@@ -170,6 +173,7 @@ room_registry(workspace_id, registered_at, revoke_acked_floor?)
 - **Page size** is 1 to 50, default 10, because every event lands in the agent's context.
 - **Acking past the newest event** fails with `ack_beyond_inbox`, because it means the agent is acking events it hasn't read.
 - **`read_inbox { ack: true }` with `after` past the cursor** is rejected, because it would ack the unread events skipped over.
+- **Replay protection:** the `Principal` DO consumes each agent JWT's `jti` atomically, because the plugin's default guard is a per-isolate map.
 - **A full inbox** drops the oldest acked event, otherwise the oldest unread event, and counts it in `dropped`. It never refuses delivery or silently loses unread work.
 - **Retention** follows the limits in the product spec.
 
@@ -503,6 +507,14 @@ workerd's SQLite rejects compound `SELECT`s past a few terms, so the native test
 
 Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.md#product-direction-and-delivery-scope) M1 to M7 cover the extensions below. A2A is core product scope, not a later optional adapter, and security acceptance in ACCESS-CONTROL.md must pass before launch. Later enhancements include team templates, Jira sync, workspace channels and real-time updates.
 
+### Phase 0 status
+
+| Spike | Status | Findings |
+| --- | --- | --- |
+| (a) Identity | Passes locally, not deployed | [spikes/auth](../../spikes/auth/README.md) |
+| (b) vinext | Not started; not needed for the POC's minimal dashboard | |
+| (c) Rust Durable Object | Passes locally, not deployed | [spikes/durable-object](../../spikes/durable-object/README.md) |
+
 ## Operations
 
 - **Logs:** request ID, workspace ID, event ID, actor ID. Never message bodies, artifact URIs or tokens.
@@ -518,12 +530,13 @@ Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.m
 
 | Risk | Mitigation |
 | --- | --- |
+| `@better-auth/agent-auth` is pre-1.0 and its semantics differ from the original design | Spike (a) passes locally. Pin the version, and keep Podster's own `podster_agent` and `identity_link` as the source of truth. |
 | vinext is beta | Phase 0 staging spike; dashboard is small and server-rendered; ADR before switching frameworks. |
 | Agent Auth plugin can't represent claiming by an org | Gateway owns the `agent` record and links the plugin's identity to it; the plugin only proves the key. |
 | Prompt injection between organizations | `external: true` on content, tool descriptions, no link following, permissions never derived from content. |
 | A busy workspace DO becomes a hotspot | Single writer is the point; limits (50 members, 1,000 open tasks) keep it far below DO throughput. Split by task later if ever needed. |
 | Sybil agents and spam invitations | Agents need a person-owned org; only person admins invite; rate limits on registration, claims and invitations. |
-| A SQLite-backed Rust Durable Object is unproven for this project | Phase 0 spike (c) before any kernel work depends on it. |
+| A SQLite-backed Rust Durable Object is unproven in production for this project | Spike (c) passes locally. Deploy it to staging before relying on its panic and restart behavior. |
 | Extra `Principal` check adds latency to every command | Measure in the fence spike. Caching is not acceptable unless the fence guarantee is restated. |
 | Hosted agent-built apps attack Podster sessions or each other | Separate registrable domain, untrusted dispatch namespace, no shared bindings, and budget caps. |
 | Shared repository credentials blur who did what | Short-lived, scoped tokens tied to an agent; record agent, commit and token grant in events. |
