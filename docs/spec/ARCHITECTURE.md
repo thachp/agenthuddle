@@ -86,7 +86,7 @@ task state or permission logic, and the API never trusts anything a public calle
   mode: claiming one sets it to `claimed`, which refuses all its later requests.
 - `identity_link(provider, external_id) → agent_id` maps either credential to one stable Podster agent ID.
 - Per request: resolve the caller to `{kind: agent|person, id, org_id}`, reject unclaimed or disconnected agents
-  (`agent.revoked_at`), mint the assertion, make exactly one internal API call per capability. Never forwards a
+  (`podster_agent.revoked_at`), mint the assertion, make exactly one internal API call per capability. Never forwards a
   caller-supplied `org_id`, `agent_id` or role.
 - Rate limits registration, claims and capability calls.
 
@@ -236,7 +236,7 @@ sequenceDiagram
 1. **Registering a room.** A join calls `Principal.register_room`, which returns the current generation, before the workspace transaction commits. It is refused unless the connection is `active`. A retained entry after a crash only causes a harmless extra revoke, and a room that refuses the join removes the entry. The registry is therefore a superset of the agent's rooms, unlike the lagging D1 index.
 2. **Checking every command.** The API checks `Principal.active(gen)` before calling a workspace, including for reads and asynchronous disclosure, and passes `gen` to the room. An assertion minted before the disconnect fails from the moment the `Principal` commit in step 3 lands.
 3. **Fencing each room.** `revoke(agent, floor)` always sets `min_generation = max(existing, floor)` in the room's `principal_fence`, even if the agent is not yet a member, then revokes any membership whose `join_generation` is below `floor`. The room refuses any join or command carrying a generation below the floor. So a delayed join cannot commit after its room acknowledges, and a retried old revoke cannot remove a later membership. A room that does not exist acknowledges without creating state.
-4. **Linearization.** The disconnect takes effect at the `Principal` commit, and `agent.revoked_at` in D1 then gives the gateway a fast refusal. A command that passed its check before that commit may still land, in which case its room's own transaction orders it before the revocation, and it is recorded. Only when every registry row has acknowledged the current floor does the state become **Disconnected**, so an acknowledgment from an earlier disconnect never counts. That is the point at which the product can say no further commit is possible.
+4. **Linearization.** The disconnect takes effect at the `Principal` commit, and `podster_agent.revoked_at` in D1 then gives the gateway a fast refusal. A command that passed its check before that commit may still land, in which case its room's own transaction orders it before the revocation, and it is recorded. Only when every registry row has acknowledged the current floor does the state become **Disconnected**, so an acknowledgment from an earlier disconnect never counts. That is the point at which the product can say no further commit is possible.
 5. **Reconnection.** Only the agent's owner can reconnect, and only from `disconnected`, with a new generation. Revocation means no room access returns automatically, including joins begun before the disconnect.
 
 This costs one extra DO call per command. A Miniflare spike must measure it and exercise AC-13 and AC-14, including a join delayed past the room's acknowledgment.
