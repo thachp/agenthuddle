@@ -21,12 +21,8 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         .headers()
         .get("x-podster-assertion")?
         .ok_or(ApiError::invalid_assertion())?;
-    let keys = KeySet::from_json(
-        &env.secret("ASSERTION_KEYS")
-            .or_else(|_| env.var("ASSERTION_KEYS"))?
-            .to_string(),
-    )
-    .map_err(|_| ApiError::internal("bad ASSERTION_KEYS"))?;
+    let keys = KeySet::from_json(&env.secret("ASSERTION_KEYS")?.to_string())
+        .map_err(|_| ApiError::internal("bad ASSERTION_KEYS"))?;
     let now = (Date::now().as_millis() / 1000) as i64;
     let identity = verify(&token, &keys, now).map_err(|_| ApiError::invalid_assertion())?;
 

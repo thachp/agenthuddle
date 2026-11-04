@@ -3,7 +3,8 @@
 
 use crate::error::ApiError;
 use crate::store::{
-    self, exec, flag, int, load_task, opt, record_drafts, record_event, rows, save_task, text,
+    self, exec, flag, int, load_task, opt, participant, record_decision, record_event, rows,
+    save_task, text, Transition,
 };
 use crate::{CALLER_HEADER, INTERNAL_INIT_PATH};
 use podster_core::{
@@ -25,6 +26,11 @@ type R<T> = std::result::Result<T, ApiError>;
 
 const IDEMPOTENCY_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const PAGE_SIZE: i64 = 50;
+const MAX_MEMBERS: i64 = 50;
+const MAX_OPEN_TASKS: i64 = 1000;
+const MAX_NAME_BYTES: usize = 200;
+const MAX_KEY_BYTES: usize = 255;
+const MAX_ID_BYTES: usize = 128;
 
 #[derive(Clone, Deserialize)]
 struct Identity {
@@ -32,6 +38,12 @@ struct Identity {
     kind: String,
     org: String,
     workspace_id: String,
+}
+
+/// The caller as this room knows them. `org` comes from stored state, not the request.
+struct Participant {
+    caller: Caller,
+    org: String,
 }
 
 /// Calls the runtime's `storage.transactionSync`, which `worker` doesn't expose. Any error or trap rolls back.
@@ -77,6 +89,7 @@ fn parse_kind(kind: &str) -> PrincipalKind {
 
 fn parse_role(role: &str) -> Role {
     match role {
+        "owner" => Role::Owner,
         "admin" => Role::Admin,
         "member" => Role::Member,
         "guest" => Role::Guest,
@@ -85,62 +98,56 @@ fn parse_role(role: &str) -> Role {
 }
 
 /// Reads the caller's current authority. Assertions and read models never supply a role.
-fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Caller> {
-    let room = rows(sql, "SELECT owner_person_id FROM workspace", vec![])?;
-    let owner = room.first().and_then(|r| text(&r["owner_person_id"]));
+fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
+    let room = rows(
+        sql,
+        "SELECT owner_person_id, owner_org_id FROM workspace",
+        vec![],
+    )?;
+    let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
     let kind = parse_kind(&identity.kind);
-    if kind == PrincipalKind::Person && owner.as_deref() == Some(identity.id.as_str()) {
-        return Ok(Caller {
-            id: identity.id.clone(),
-            kind,
-            role: Role::Owner,
-            guest_can_create: false,
+    if kind == PrincipalKind::Person
+        && room["owner_person_id"].as_str() == Some(identity.id.as_str())
+    {
+        return Ok(Participant {
+            caller: Caller {
+                id: identity.id.clone(),
+                kind,
+                role: Role::Owner,
+                guest_can_create: false,
+            },
+            org: text(&room["owner_org_id"]).unwrap_or_default(),
         });
     }
-    let member = rows(
-        sql,
-        "SELECT kind, role, guest_can_create, revoked_at FROM member WHERE principal_id = ?",
-        vec![identity.id.as_str().into()],
-    )?;
+    let member = rows(sql, "SELECT kind, org_id, role, guest_can_create, revoked_at FROM member WHERE principal_id = ?", vec![identity.id.as_str().into()])?;
     let Some(member) = member.first() else {
         return Err(ApiError::workspace_not_found());
     };
+    // An identity that doesn't match the stored one learns nothing, including whether it was revoked.
+    let org = text(&member["org_id"]).unwrap_or_default();
+    if member["kind"].as_str() != Some(identity.kind.as_str())
+        || (kind == PrincipalKind::Agent && org != identity.org)
+    {
+        return Err(ApiError::workspace_not_found());
+    }
     if !member["revoked_at"].is_null() {
         return Err(ApiError::access_revoked());
     }
-    if member["kind"].as_str() != Some(identity.kind.as_str()) {
-        return Err(ApiError::workspace_not_found());
-    }
-    Ok(Caller {
-        id: identity.id.clone(),
-        kind,
-        role: member["role"].as_str().map_or(Role::None, parse_role),
-        guest_can_create: int(&member["guest_can_create"]) != 0,
+    Ok(Participant {
+        caller: Caller {
+            id: identity.id.clone(),
+            kind,
+            role: member["role"].as_str().map_or(Role::None, parse_role),
+            guest_can_create: int(&member["guest_can_create"]) != 0,
+        },
+        org,
     })
-}
-
-fn participant(sql: &SqlStorage, id: &str) -> R<Option<(PrincipalKind, Role)>> {
-    let room = rows(sql, "SELECT owner_person_id FROM workspace", vec![])?;
-    if room.first().and_then(|r| r["owner_person_id"].as_str()) == Some(id) {
-        return Ok(Some((PrincipalKind::Person, Role::Owner)));
-    }
-    let found = rows(
-        sql,
-        "SELECT kind, role FROM member WHERE principal_id = ? AND revoked_at IS NULL",
-        vec![id.into()],
-    )?;
-    Ok(found.first().map(|m| {
-        (
-            parse_kind(m["kind"].as_str().unwrap_or("")),
-            m["role"].as_str().map_or(Role::None, parse_role),
-        )
-    }))
 }
 
 fn require_eligible_reviewer(sql: &SqlStorage, id: &str) -> R<()> {
     match participant(sql, id)? {
         // Room-level person review is an M1 setting, so kernel rooms don't require it.
-        Some((kind, role)) if can_review(kind, role, false) => Ok(()),
+        Some((kind, role)) if can_review(parse_kind(&kind), parse_role(&role), false) => Ok(()),
         _ => Err(ApiError::invalid_argument()),
     }
 }
@@ -163,12 +170,24 @@ fn task_json(t: &Task) -> Value {
     })
 }
 
-fn field(body: &Value, name: &str) -> Option<String> {
-    body.get(name).and_then(Value::as_str).map(str::to_string)
+/// An optional string. A present field of the wrong type is an error, never silently ignored.
+fn field(body: &Value, name: &str) -> R<Option<String>> {
+    match body.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(ApiError::invalid_argument()),
+    }
+}
+
+fn int_field(body: &Value, name: &str) -> R<Option<i64>> {
+    match body.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_i64().map(Some).ok_or_else(ApiError::invalid_argument),
+    }
 }
 
 fn required(body: &Value, name: &str) -> R<String> {
-    field(body, name).ok_or_else(ApiError::invalid_argument)
+    field(body, name)?.ok_or_else(ApiError::invalid_argument)
 }
 
 fn version(body: &Value) -> R<u64> {
@@ -182,6 +201,20 @@ fn submission_no(body: &Value) -> R<u32> {
         .and_then(Value::as_u64)
         .and_then(|n| u32::try_from(n).ok())
         .ok_or_else(ApiError::invalid_argument)
+}
+
+/// IDs are used as URL path segments, so a member can always be addressed and revoked.
+fn require_id(value: &str) -> R<()> {
+    let valid = !value.is_empty()
+        && value.len() <= MAX_ID_BYTES
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(ApiError::invalid_argument())
+    }
 }
 
 fn action_for(path_verb: &str) -> Option<TaskAction> {
@@ -220,10 +253,10 @@ fn parse_command(verb: &str, b: &Value) -> R<Command> {
             Command::Update {
                 version: version(b)?,
                 patch: TaskPatch {
-                    title: field(b, "title"),
-                    instructions: field(b, "instructions"),
-                    acceptance_criteria: field(b, "acceptance_criteria"),
-                    due_at: b.get("due_at").and_then(Value::as_i64),
+                    title: field(b, "title")?,
+                    instructions: field(b, "instructions")?,
+                    acceptance_criteria: field(b, "acceptance_criteria")?,
+                    due_at: int_field(b, "due_at")?,
                 },
             }
         }
@@ -251,25 +284,24 @@ fn parse_command(verb: &str, b: &Value) -> R<Command> {
             reason: required(b, "reason")?,
         },
         "submit" => {
-            let artifacts =
-                b.get("artifacts")
-                    .and_then(Value::as_array)
-                    .map_or(Ok(vec![]), |items| {
-                        items
-                            .iter()
-                            .map(|a| {
-                                Ok(Artifact {
-                                    uri: required(a, "uri")?,
-                                    label: required(a, "label")?,
-                                })
-                            })
-                            .collect::<R<Vec<_>>>()
-                    })?;
+            let artifacts = match b.get("artifacts") {
+                None | Some(Value::Null) => vec![],
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|a| {
+                        Ok(Artifact {
+                            uri: required(a, "uri")?,
+                            label: required(a, "label")?,
+                        })
+                    })
+                    .collect::<R<Vec<_>>>()?,
+                Some(_) => return Err(ApiError::invalid_argument()),
+            };
             Command::Submit {
                 version: version(b)?,
                 artifacts,
-                note: field(b, "note"),
-                commit_sha: field(b, "commit_sha"),
+                note: field(b, "note")?,
+                commit_sha: field(b, "commit_sha")?,
             }
         }
         "request-changes" => Command::RequestChanges {
@@ -278,7 +310,7 @@ fn parse_command(verb: &str, b: &Value) -> R<Command> {
         },
         "verify" => Command::Verify {
             submission_no: submission_no(b)?,
-            commit_sha: field(b, "commit_sha"),
+            commit_sha: field(b, "commit_sha")?,
         },
         "cancel" => Command::Cancel {
             version: version(b)?,
@@ -291,12 +323,13 @@ fn parse_command(verb: &str, b: &Value) -> R<Command> {
 /// The command side: runs against current state inside the caller's transaction.
 fn handle_task_command(
     sql: &SqlStorage,
-    caller: &Caller,
+    who: &Participant,
     task_id: &str,
     verb: &str,
     body: &Value,
     now: i64,
 ) -> R<Value> {
+    let caller = &who.caller;
     let action = action_for(verb).ok_or_else(ApiError::not_found)?;
     let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
     let verdict = if action == TaskAction::SetReviewer {
@@ -331,27 +364,35 @@ fn handle_task_command(
             opt(&decision.task.submission_commit), caller.id.as_str().into(), now.into(),
         ])?;
         for artifact in artifacts {
-            exec(sql, "INSERT INTO artifact (id, task_id, submission_no, uri, label, submitted_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", vec![
+            exec(sql, "INSERT INTO artifact (id, task_id, submission_no, uri, label, submitted_by, submitted_org, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
                 format!("art_{}", uuid::Uuid::new_v4().simple()).into(), task_id.into(), i64::from(decision.task.submission_no).into(),
-                artifact.uri.into(), artifact.label.into(), caller.id.as_str().into(), now.into(),
+                artifact.uri.into(), artifact.label.into(), caller.id.as_str().into(), who.org.as_str().into(), now.into(),
             ])?;
         }
     }
-    record_drafts(sql, &decision.events, &caller.id, task_id, now)?;
+    record_decision(sql, &decision, task.status, &caller.id, now)?;
     Ok(task_json(&decision.task))
 }
 
 fn handle_create_task(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::CreateTask))?;
+    let open = rows(
+        sql,
+        "SELECT count(*) AS n FROM task WHERE status NOT IN ('completed', 'canceled')",
+        vec![],
+    )?;
+    if open.first().map_or(0, |r| int(&r["n"])) >= MAX_OPEN_TASKS {
+        return Err(ApiError::limit_exceeded());
+    }
     let new = NewTask {
         id: format!("tsk_{}", uuid::Uuid::new_v4().simple()),
         title: required(body, "title")?,
         instructions: required(body, "instructions")?,
-        acceptance_criteria: field(body, "acceptance_criteria"),
-        assignee: field(body, "assignee"),
-        reviewer: field(body, "reviewer"),
-        due_at: body.get("due_at").and_then(Value::as_i64),
-        follow_up_of: field(body, "follow_up_of"),
+        acceptance_criteria: field(body, "acceptance_criteria")?,
+        assignee: field(body, "assignee")?,
+        reviewer: field(body, "reviewer")?,
+        due_at: int_field(body, "due_at")?,
+        follow_up_of: field(body, "follow_up_of")?,
         has_linked_repository: false,
     };
     if let Some(assignee) = &new.assignee {
@@ -360,18 +401,18 @@ fn handle_create_task(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64)
     require_eligible_reviewer(sql, new.reviewer.as_deref().unwrap_or(&caller.id))?;
     let decision = decide_create(&caller.id, new).map_err(|e| ApiError::from_core(&e))?;
     store::insert_task(sql, &decision.task, now)?;
-    record_drafts(sql, &decision.events, &caller.id, &decision.task.id, now)?;
+    record_decision(sql, &decision, decision.task.status, &caller.id, now)?;
     Ok(task_json(&decision.task))
 }
 
 fn handle_send_message(
     sql: &SqlStorage,
-    caller: &Caller,
-    identity: &Identity,
+    who: &Participant,
     task_id: &str,
     body: &Value,
     now: i64,
 ) -> R<Value> {
+    let caller = &who.caller;
     let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
     ApiError::from_verdict(authorize_task(caller, &task, TaskAction::PostMessage))?;
     let text_body = required(body, "body")?;
@@ -380,19 +421,33 @@ fn handle_send_message(
     }
     let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
     exec(sql, "INSERT INTO message (id, task_id, sender_id, sender_org, body, created_at) VALUES (?, ?, ?, ?, ?, ?)", vec![
-        id.as_str().into(), task_id.into(), caller.id.as_str().into(), identity.org.as_str().into(), text_body.as_str().into(), now.into(),
+        id.as_str().into(), task_id.into(), caller.id.as_str().into(), who.org.as_str().into(), text_body.as_str().into(), now.into(),
     ])?;
     let mut parties = vec![task.requester.clone(), task.reviewer.clone()];
     parties.extend(task.assignee.clone());
     parties.sort();
     parties.dedup();
-    parties.retain(|p| *p != caller.id);
-    record_event(sql, "task.message", &caller.id, Some(task_id), parties, now)?;
+    let mut recipients = Vec::new();
+    for party in parties {
+        if party != caller.id && participant(sql, &party)?.is_some() {
+            recipients.push(party);
+        }
+    }
+    record_event(
+        sql,
+        "task.message",
+        &caller.id,
+        Some(task_id),
+        &Transition::NONE,
+        recipients,
+        now,
+    )?;
     Ok(
-        json!({ "id": id, "task_id": task_id, "from": { "id": caller.id, "org": identity.org }, "body": text_body, "created_at": now }),
+        json!({ "id": id, "task_id": task_id, "from": { "id": caller.id, "org": who.org }, "body": text_body, "created_at": now }),
     )
 }
 
+/// Records an access change and moves the room's policy version, in the caller's transaction.
 fn audit(
     sql: &SqlStorage,
     caller: &Caller,
@@ -402,6 +457,11 @@ fn audit(
     new: Option<String>,
     now: i64,
 ) -> R<()> {
+    exec(
+        sql,
+        "UPDATE workspace SET policy_version = policy_version + 1",
+        vec![],
+    )?;
     let actor_kind = if caller.kind == PrincipalKind::Person {
         "person"
     } else {
@@ -413,15 +473,24 @@ fn audit(
     ])
 }
 
-/// Adds a participant. Invitations and agent-owner consent arrive with Phase 2, so this is owner and admin only.
+fn is_owner(sql: &SqlStorage, id: &str) -> R<bool> {
+    let room = rows(sql, "SELECT owner_person_id FROM workspace", vec![])?;
+    Ok(room.first().and_then(|r| r["owner_person_id"].as_str()) == Some(id))
+}
+
+/// Adds a participant, or returns a revoked one with the same identity. Changing an active member's role has its
+/// own command. Invitations and agent-owner consent arrive with Phase 2, so this is owner and admin only.
 fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
     let principal = required(body, "principal_id")?;
     let kind = required(body, "kind")?;
     let org = required(body, "org_id")?;
     let role = required(body, "role")?;
+    require_id(&principal)?;
+    require_id(&org)?;
     if !["person", "agent"].contains(&kind.as_str())
         || !["admin", "member", "guest"].contains(&role.as_str())
+        || is_owner(sql, &principal)?
     {
         return Err(ApiError::invalid_argument());
     }
@@ -431,22 +500,47 @@ fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) 
         }
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
     }
-    let guest_can_create = body
-        .get("guest_can_create")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let existing = rows(
+        sql,
+        "SELECT kind, org_id, role, revoked_at FROM member WHERE principal_id = ?",
+        vec![principal.as_str().into()],
+    )?;
+    let prior = existing.first();
+    if let Some(prior) = prior {
+        if prior["revoked_at"].is_null() {
+            return Err(ApiError::already_member());
+        }
+        // A returning participant keeps their identity, so nobody is re-added as someone else.
+        if prior["kind"].as_str() != Some(kind.as_str())
+            || prior["org_id"].as_str() != Some(org.as_str())
+        {
+            return Err(ApiError::invalid_argument());
+        }
+    }
+    let active = rows(
+        sql,
+        "SELECT count(*) AS n FROM member WHERE revoked_at IS NULL",
+        vec![],
+    )?;
+    if active.first().map_or(0, |r| int(&r["n"])) >= MAX_MEMBERS {
+        return Err(ApiError::limit_exceeded());
+    }
+    let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
+        v.as_bool().ok_or_else(ApiError::invalid_argument)
+    })?;
     exec(sql, "INSERT INTO member (principal_id, kind, org_id, role, guest_can_create, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (principal_id) DO UPDATE SET kind = excluded.kind, org_id = excluded.org_id, role = excluded.role, guest_can_create = excluded.guest_can_create,
+      ON CONFLICT (principal_id) DO UPDATE SET role = excluded.role, guest_can_create = excluded.guest_can_create,
         added_by = excluded.added_by, added_at = excluded.added_at, revoked_at = NULL, revocation_reason = NULL", vec![
         principal.as_str().into(), kind.as_str().into(), org.as_str().into(), role.as_str().into(), flag(guest_can_create), caller.id.as_str().into(), now.into(),
     ])?;
+    let prior_json = prior.map(|p| json!({ "role": p["role"], "revoked": true }).to_string());
     audit(
         sql,
         caller,
         "member.added",
         &principal,
-        None,
-        Some(json!({ "role": role }).to_string()),
+        prior_json,
+        Some(json!({ "role": role, "guest_can_create": guest_can_create }).to_string()),
         now,
     )?;
     record_event(
@@ -454,7 +548,63 @@ fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) 
         "member.added",
         &caller.id,
         None,
-        (kind == "agent").then(|| principal.clone()),
+        &Transition::NONE,
+        (principal != caller.id).then(|| principal.clone()),
+        now,
+    )?;
+    Ok(json!({ "principal_id": principal, "role": role }))
+}
+
+/// Changes an active member's role. Any change to or from admin is the owner's alone.
+fn handle_change_role(
+    sql: &SqlStorage,
+    caller: &Caller,
+    principal: &str,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    let role = required(body, "role")?;
+    if !["admin", "member", "guest"].contains(&role.as_str()) {
+        return Err(ApiError::invalid_argument());
+    }
+    let found = rows(sql, "SELECT kind, role, guest_can_create FROM member WHERE principal_id = ? AND revoked_at IS NULL", vec![principal.into()])?;
+    let member = found.first().ok_or_else(ApiError::invalid_argument)?;
+    if role == "admin" && member["kind"].as_str() != Some("person") {
+        return Err(ApiError::invalid_argument());
+    }
+    if role == "admin" || member["role"].as_str() == Some("admin") {
+        ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
+    }
+    let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
+        v.as_bool().ok_or_else(ApiError::invalid_argument)
+    })?;
+    exec(
+        sql,
+        "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
+        vec![
+            role.as_str().into(),
+            flag(guest_can_create),
+            principal.into(),
+        ],
+    )?;
+    let prior = json!({ "role": member["role"], "guest_can_create": int(&member["guest_can_create"]) != 0 }).to_string();
+    audit(
+        sql,
+        caller,
+        "member.role_changed",
+        principal,
+        Some(prior),
+        Some(json!({ "role": role, "guest_can_create": guest_can_create }).to_string()),
+        now,
+    )?;
+    record_event(
+        sql,
+        "member.role_changed",
+        &caller.id,
+        None,
+        &Transition::NONE,
+        (principal != caller.id).then(|| principal.to_string()),
         now,
     )?;
     Ok(json!({ "principal_id": principal, "role": role }))
@@ -480,10 +630,10 @@ fn handle_revoke_member(sql: &SqlStorage, caller: &Caller, principal: &str, now:
     for row in &affected {
         let task = store::task_from_row(row)?;
         let requester_ok = participant(sql, &task.requester)?
-            .is_some_and(|(kind, role)| can_review(kind, role, false));
+            .is_some_and(|(kind, role)| can_review(parse_kind(&kind), parse_role(&role), false));
         if let Some(decision) = apply_departure(&task, principal, requester_ok) {
             save_task(sql, &decision.task, now)?;
-            record_drafts(sql, &decision.events, &caller.id, &task.id, now)?;
+            record_decision(sql, &decision, task.status, &caller.id, now)?;
         }
     }
     exec(
@@ -491,22 +641,36 @@ fn handle_revoke_member(sql: &SqlStorage, caller: &Caller, principal: &str, now:
         "DELETE FROM outbox WHERE recipient_principal_id = ?",
         vec![principal.into()],
     )?;
-    audit(sql, caller, "member.revoked", principal, None, None, now)?;
+    audit(
+        sql,
+        caller,
+        "member.revoked",
+        principal,
+        Some(json!({ "role": member["role"] }).to_string()),
+        None,
+        now,
+    )?;
+    // The removal notice is the one event a revoked principal still receives.
     record_event(
         sql,
         "member.revoked",
         &caller.id,
         None,
+        &Transition::NONE,
         [principal.to_string()],
         now,
     )?;
     Ok(json!({ "principal_id": principal, "status": "revoked" }))
 }
 
-fn query_int(url: &Url, name: &str) -> Option<i64> {
-    url.query_pairs()
-        .find(|(k, _)| k == name)
-        .and_then(|(_, v)| v.parse().ok())
+fn query_int(url: &Url, name: &str) -> R<Option<i64>> {
+    match url.query_pairs().find(|(k, _)| k == name) {
+        None => Ok(None),
+        Some((_, v)) => v
+            .parse()
+            .map(Some)
+            .map_err(|_| ApiError::invalid_argument()),
+    }
 }
 
 fn query_str(url: &Url, name: &str) -> Option<String> {
@@ -537,7 +701,7 @@ mod queries {
     }
 
     pub fn list_tasks(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
-        let cursor = query_int(url, "cursor").unwrap_or(0);
+        let cursor = query_int(url, "cursor")?.unwrap_or(0);
         let mine = query_str(url, "mine").as_deref() == Some("true");
         let status = query_str(url, "status");
         if let Some(s) = &status {
@@ -571,61 +735,54 @@ mod queries {
         })
     }
 
-    pub fn get_task(sql: &SqlStorage, caller: &Caller, identity: &Identity, id: &str) -> R<Value> {
+    pub fn get_task(sql: &SqlStorage, who: &Participant, id: &str) -> R<Value> {
         let task = load_task(sql, id)?.ok_or_else(ApiError::task_not_found)?;
-        ApiError::from_verdict(authorize_task(caller, &task, TaskAction::Read))?;
-        let artifacts = rows(sql, "SELECT a.id, a.submission_no, a.uri, a.label, a.submitted_by, m.org_id, a.created_at FROM artifact a
-            LEFT JOIN member m ON m.principal_id = a.submitted_by WHERE a.task_id = ? ORDER BY a.submission_no, a.id", vec![id.into()])?;
+        ApiError::from_verdict(authorize_task(&who.caller, &task, TaskAction::Read))?;
+        let artifacts = rows(sql, "SELECT id, submission_no, uri, label, submitted_by, submitted_org, created_at FROM artifact WHERE task_id = ? ORDER BY submission_no, id", vec![id.into()])?;
         let artifacts: Vec<Value> = artifacts.iter().map(|a| json!({
             "id": a["id"], "submission_no": a["submission_no"], "uri": a["uri"], "label": a["label"],
-            "from": { "id": a["submitted_by"], "org": a["org_id"] },
-            "external": a["org_id"].as_str() != Some(identity.org.as_str()), "created_at": a["created_at"],
+            "from": { "id": a["submitted_by"], "org": a["submitted_org"] },
+            "external": a["submitted_org"].as_str() != Some(who.org.as_str()), "created_at": a["created_at"],
         })).collect();
+        let submissions = rows(sql, "SELECT submission_no, task_version, note, commit_sha, submitted_by, created_at FROM submission WHERE task_id = ? ORDER BY submission_no", vec![id.into()])?;
         let mut messages = rows(
             sql,
             "SELECT * FROM message WHERE task_id = ? ORDER BY seq DESC LIMIT 20",
             vec![id.into()],
         )?;
         messages.reverse();
-        let messages: Vec<Value> = messages
-            .iter()
-            .map(|m| message_json(m, &identity.org))
-            .collect();
-        let history = rows(
-            sql,
-            "SELECT seq, id, type, actor_id, created_at FROM event WHERE task_id = ? ORDER BY seq",
-            vec![id.into()],
-        )?;
+        let messages: Vec<Value> = messages.iter().map(|m| message_json(m, &who.org)).collect();
+        let history = rows(sql, "SELECT seq, id, type, actor_id, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ? ORDER BY seq", vec![id.into()])?;
         Ok(
-            json!({ "task": task_json(&task), "artifacts": artifacts, "messages": messages, "history": history }),
+            json!({ "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "messages": messages, "history": history }),
         )
     }
 
-    pub fn list_messages(
-        sql: &SqlStorage,
-        caller: &Caller,
-        identity: &Identity,
-        id: &str,
-        url: &Url,
-    ) -> R<Value> {
+    pub fn list_messages(sql: &SqlStorage, who: &Participant, id: &str, url: &Url) -> R<Value> {
         let task = load_task(sql, id)?.ok_or_else(ApiError::task_not_found)?;
-        ApiError::from_verdict(authorize_task(caller, &task, TaskAction::Read))?;
-        let after = query_int(url, "after").unwrap_or(0);
+        ApiError::from_verdict(authorize_task(&who.caller, &task, TaskAction::Read))?;
+        let after = query_int(url, "after")?.unwrap_or(0);
         let found = rows(
             sql,
             "SELECT * FROM message WHERE task_id = ? AND seq > ? ORDER BY seq LIMIT ?",
             vec![id.into(), after.into(), PAGE_SIZE.into()],
         )?;
         Ok(
-            json!({ "messages": found.iter().map(|m| message_json(m, &identity.org)).collect::<Vec<_>>() }),
+            json!({ "messages": found.iter().map(|m| message_json(m, &who.org)).collect::<Vec<_>>() }),
         )
     }
 
     pub fn list_events(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ReadAuditLog))?;
-        let after = query_int(url, "after").unwrap_or(0);
-        let events = rows(sql, "SELECT seq, id, type, actor_id, task_id, created_at FROM event WHERE seq > ? ORDER BY seq LIMIT ?", vec![after.into(), PAGE_SIZE.into()])?;
+        let after = query_int(url, "after")?.unwrap_or(0);
+        let events = rows(sql, "SELECT seq, id, type, actor_id, task_id, reason, prior_status, new_status, task_version, created_at FROM event WHERE seq > ? ORDER BY seq LIMIT ?", vec![after.into(), PAGE_SIZE.into()])?;
         Ok(json!({ "events": events }))
+    }
+
+    pub fn list_audit(sql: &SqlStorage, caller: &Caller) -> R<Value> {
+        ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ReadAuditLog))?;
+        let audit = rows(sql, "SELECT id, actor_id, actor_kind, action, target_id, outcome, reason_code, prior_json, new_json, policy_version, created_at FROM audit_event ORDER BY created_at DESC, policy_version DESC LIMIT ?", vec![PAGE_SIZE.into()])?;
+        Ok(json!({ "audit": audit }))
     }
 }
 
@@ -644,10 +801,10 @@ impl Workspace {
         key: Option<String>,
         hash: String,
         test_fail: bool,
-        handler: impl FnOnce(&SqlStorage, &Caller, i64) -> R<Value> + 'static,
+        handler: impl FnOnce(&SqlStorage, &Participant, i64) -> R<Value> + 'static,
     ) -> R<Value> {
         let key = key
-            .filter(|k| !k.is_empty())
+            .filter(|k| !k.is_empty() && k.len() <= MAX_KEY_BYTES)
             .ok_or_else(ApiError::idempotency_required)?;
         let sql = self.state.storage().sql();
         let identity = identity.clone();
@@ -655,7 +812,7 @@ impl Workspace {
         let slot = out.clone();
         transaction_sync(&self.state, move || {
             // Authority first, so a revoked caller can't replay a stored response.
-            let caller = resolve_caller(&sql, &identity)?;
+            let who = resolve_caller(&sql, &identity)?;
             let now = now_ms();
             let prior = rows(&sql, "SELECT request_hash, response_json FROM idempotency WHERE actor_id = ? AND key = ? AND expires_at > ?",
                 vec![identity.id.as_str().into(), key.as_str().into(), now.into()])?;
@@ -668,7 +825,7 @@ impl Workspace {
                 )?);
                 return Ok(());
             }
-            let value = handler(&sql, &caller, now)?;
+            let value = handler(&sql, &who, now)?;
             exec(&sql, "INSERT OR REPLACE INTO idempotency (actor_id, key, request_hash, response_json, expires_at) VALUES (?, ?, ?, ?, ?)", vec![
                 identity.id.as_str().into(), key.as_str().into(), hash.as_str().into(), value.to_string().into(), (now + IDEMPOTENCY_TTL_MS).into(),
             ])?;
@@ -683,6 +840,49 @@ impl Workspace {
         })?;
         let value = out.borrow_mut().take();
         value.ok_or_else(|| ApiError::internal("command produced no result"))
+    }
+
+    fn init(&self, identity: &Identity, name: String) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if store::is_initialized(&sql)? {
+            return Err(ApiError::not_allowed());
+        }
+        if name.trim().is_empty() || name.len() > MAX_NAME_BYTES {
+            return Err(ApiError::invalid_argument());
+        }
+        let id = identity.clone();
+        transaction_sync(&self.state, move || {
+            let now = now_ms();
+            store::migrate(&sql)?;
+            exec(&sql, "INSERT INTO workspace (id, name, owner_org_id, owner_person_id, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)", vec![
+                id.workspace_id.as_str().into(), name.as_str().into(), id.org.as_str().into(), id.id.as_str().into(), now.into(),
+            ])?;
+            let owner = Caller {
+                id: id.id.clone(),
+                kind: PrincipalKind::Person,
+                role: Role::Owner,
+                guest_can_create: false,
+            };
+            audit(
+                &sql,
+                &owner,
+                "workspace.created",
+                &id.workspace_id,
+                None,
+                Some(json!({ "owner": id.id }).to_string()),
+                now,
+            )?;
+            record_event(
+                &sql,
+                "workspace.created",
+                &id.id,
+                None,
+                &Transition::NONE,
+                None,
+                now,
+            )
+        })?;
+        Ok(json!({ "id": identity.workspace_id, "owner": identity.id }))
     }
 
     async fn dispatch(&self, mut req: Request) -> R<Value> {
@@ -701,24 +901,19 @@ impl Workspace {
         if path == INTERNAL_INIT_PATH {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
-            let name = required(&body, "name")?;
-            let init_sql = sql.clone();
-            let id = identity.clone();
-            let now = now_ms();
-            transaction_sync(&self.state, move || {
-                store::migrate(&init_sql)?;
-                exec(&init_sql, "INSERT INTO workspace (id, name, owner_org_id, owner_person_id, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)", vec![
-                    id.workspace_id.as_str().into(), name.as_str().into(), id.org.as_str().into(), id.id.as_str().into(), now.into(),
-                ])
-            })?;
-            return Ok(json!({ "id": identity.workspace_id, "owner": identity.id }));
+            return self.init(&identity, required(&body, "name")?);
         }
 
         // An unknown room answers from a read, so it stays empty.
         if !store::is_initialized(&sql)? {
             return Err(ApiError::workspace_not_found());
         }
-        store::migrate(&sql)?;
+        if store::needs_migration(&sql)? {
+            let migrating = sql.clone();
+            transaction_sync(&self.state, move || store::migrate(&migrating))?;
+        }
+        // Authority comes before anything about the request, so an outsider gets one answer for every request.
+        let who = resolve_caller(&sql, &identity)?;
 
         let segments: Vec<String> = path
             .trim_start_matches('/')
@@ -729,15 +924,13 @@ impl Workspace {
         let tail = parts.get(3..).unwrap_or(&[]);
 
         if method == Method::Get {
-            let caller = resolve_caller(&sql, &identity)?;
             return match tail {
-                [] => queries::get_workspace(&sql, &caller),
-                ["tasks"] => queries::list_tasks(&sql, &caller, &url),
-                ["tasks", id] => queries::get_task(&sql, &caller, &identity, id),
-                ["tasks", id, "messages"] => {
-                    queries::list_messages(&sql, &caller, &identity, id, &url)
-                }
-                ["events"] => queries::list_events(&sql, &caller, &url),
+                [] => queries::get_workspace(&sql, &who.caller),
+                ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
+                ["tasks", id] => queries::get_task(&sql, &who, id),
+                ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
+                ["events"] => queries::list_events(&sql, &who.caller, &url),
+                ["audit"] => queries::list_audit(&sql, &who.caller),
                 _ => Err(ApiError::not_found()),
             };
         }
@@ -749,40 +942,44 @@ impl Workspace {
         } else {
             serde_json::from_str(&raw).map_err(|_| ApiError::invalid_argument())?
         };
+        // Hashing the parsed body means a retry with reordered keys is still the same request.
         let hash = format!(
             "{:x}",
-            Sha256::digest(format!("{method:?} {path} {raw}").as_bytes())
+            Sha256::digest(format!("{method:?} {path} {body}").as_bytes())
         );
         let test_fail = cfg!(feature = "failpoints") && req.headers().get("x-test-fail")?.is_some();
-        let task_id = parts.get(4).map(|s| (*s).to_string()).unwrap_or_default();
+        let target = parts.get(4).map(|s| (*s).to_string()).unwrap_or_default();
         let verb = parts.get(5).map(|s| (*s).to_string()).unwrap_or_default();
-        let principal = parts.get(4).map(|s| (*s).to_string()).unwrap_or_default();
-        let identity_for_handler = identity.clone();
 
         match (method, tail) {
             (Method::Post, ["tasks"]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, caller, now| {
-                    handle_create_task(sql, caller, &body, now)
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_create_task(sql, &who.caller, &body, now)
                 })
             }
             (Method::Post, ["tasks", _, "messages"]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, caller, now| {
-                    handle_send_message(sql, caller, &identity_for_handler, &task_id, &body, now)
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_send_message(sql, who, &target, &body, now)
                 })
             }
             (Method::Post, ["tasks", _, _]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, caller, now| {
-                    handle_task_command(sql, caller, &task_id, &verb, &body, now)
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_task_command(sql, who, &target, &verb, &body, now)
                 })
             }
             (Method::Post, ["members"]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, caller, now| {
-                    handle_add_member(sql, caller, &body, now)
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_add_member(sql, &who.caller, &body, now)
+                })
+            }
+            (Method::Post, ["members", _, "role"]) => {
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_change_role(sql, &who.caller, &target, &body, now)
                 })
             }
             (Method::Delete, ["members", _]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, caller, now| {
-                    handle_revoke_member(sql, caller, &principal, now)
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_revoke_member(sql, &who.caller, &target, now)
                 })
             }
             _ => Err(ApiError::not_found()),

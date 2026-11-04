@@ -7,6 +7,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 pub const AUDIENCE: &str = "podster-api";
+pub const ISSUER: &str = "podster-gateway";
 pub const MAX_LIFETIME_SECS: i64 = 60;
 pub const CLOCK_SKEW_SECS: i64 = 5;
 
@@ -35,6 +36,7 @@ pub enum AssertionError {
     UnknownKey,
     BadSignature,
     WrongAudience,
+    WrongIssuer,
     Expired,
     NotYetValid,
     LifetimeTooLong,
@@ -44,11 +46,13 @@ pub enum AssertionError {
 struct Header {
     alg: String,
     kid: Option<String>,
+    crit: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct Audience {
     aud: String,
+    iss: Option<String>,
 }
 
 #[derive(Default)]
@@ -90,6 +94,10 @@ pub fn verify(token: &str, keys: &KeySet, now: i64) -> Result<Identity, Assertio
 
     let parsed: Header =
         serde_json::from_slice(&decode(header)?).map_err(|_| AssertionError::Malformed)?;
+    // This verifier understands no critical extensions, so RFC 7515 requires refusing any.
+    if parsed.crit.is_some() {
+        return Err(AssertionError::UnsupportedAlgorithm);
+    }
     if parsed.alg != "EdDSA" {
         return Err(AssertionError::UnsupportedAlgorithm);
     }
@@ -112,9 +120,18 @@ pub fn verify(token: &str, keys: &KeySet, now: i64) -> Result<Identity, Assertio
     if audience.aud != AUDIENCE {
         return Err(AssertionError::WrongAudience);
     }
+    if audience.iss.as_deref() != Some(ISSUER) {
+        return Err(AssertionError::WrongIssuer);
+    }
     let identity: Identity =
         serde_json::from_slice(&claims).map_err(|_| AssertionError::Malformed)?;
     if identity.sub.is_empty() || identity.org.is_empty() || identity.jti.is_empty() {
+        return Err(AssertionError::Malformed);
+    }
+    if identity.kind == Kind::Agent && identity.gen.is_none() {
+        return Err(AssertionError::Malformed);
+    }
+    if identity.exp <= identity.iat {
         return Err(AssertionError::Malformed);
     }
     if identity.exp.saturating_sub(identity.iat) > MAX_LIFETIME_SECS {

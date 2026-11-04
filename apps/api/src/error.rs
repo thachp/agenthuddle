@@ -37,6 +37,12 @@ impl ApiError {
     pub fn invalid_argument() -> ApiError {
         ApiError::api(400, "invalid_argument")
     }
+    pub fn already_member() -> ApiError {
+        ApiError::api(409, "already_member")
+    }
+    pub fn limit_exceeded() -> ApiError {
+        ApiError::api(409, "limit_exceeded")
+    }
     pub fn idempotency_required() -> ApiError {
         ApiError::api(400, "idempotency_key_required")
     }
@@ -54,6 +60,7 @@ impl ApiError {
             | CoreError::CommitChanged
             | CoreError::SubmissionMismatch => 409,
             CoreError::SelfSignOff => 422,
+            CoreError::NotAllowed => 403,
             CoreError::InvalidArgument(_) => 400,
         };
         ApiError::api(status, error.code())

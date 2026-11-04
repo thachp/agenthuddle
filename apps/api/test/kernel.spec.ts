@@ -18,10 +18,10 @@ const OUTSIDER: Who = { id: "agt_out", org: "org_x" };
 let counter = 0;
 const nextKey = () => `key-${++counter}`;
 
-async function assertion(who: Who, opts: { aud?: string; ttl?: number; ago?: number; claims?: object; signer?: any; kid?: string } = {}) {
+async function assertion(who: Who, opts: { iss?: string; aud?: string; ttl?: number; ago?: number; claims?: object; signer?: any; kid?: string } = {}) {
   const now = Math.floor(Date.now() / 1000) - (opts.ago ?? 0);
   return new SignJWT({ kind: who.kind ?? "agent", org: who.org, gen: 1, ...opts.claims })
-    .setProtectedHeader({ alg: "EdDSA", kid: opts.kid ?? "test" }).setSubject(who.id).setAudience(opts.aud ?? "podster-api")
+    .setProtectedHeader({ alg: "EdDSA", kid: opts.kid ?? "test" }).setIssuer(opts.iss ?? "podster-gateway").setSubject(who.id).setAudience(opts.aud ?? "podster-api")
     .setIssuedAt(now).setExpirationTime(now + (opts.ttl ?? 60)).setJti(crypto.randomUUID()).sign(opts.signer ?? key);
 }
 
@@ -65,6 +65,7 @@ describe("assertions", () => {
     const cases = [
       await assertion(OWNER, { signer: other }),
       await assertion(OWNER, { aud: "somebody-else" }),
+      await assertion(OWNER, { iss: "somebody-else" }),
       await assertion(OWNER, { ago: 120 }),
       await assertion(OWNER, { ttl: 3600 }),
       await assertion(OWNER, { kid: "unknown" }),
@@ -78,10 +79,12 @@ describe("assertions", () => {
 
   it("takes authority from stored state, not from claims or request bodies", async () => {
     const { id, tasks } = await room();
-    const token = await assertion(BOB, { claims: { role: "admin", org: "org_a", scopes: ["admin"] } });
+    const token = await assertion(BOB, { claims: { role: "admin", scopes: ["admin"] } });
     const r = await api(BOB, "POST", `/v1/workspaces/${id}/members`, { principal_id: "agt_x", kind: "agent", org_id: "org_b", role: "member" }, { token });
     expect([r.status, r.code]).toEqual([403, "not_allowed"]);
     const t = await offer(tasks);
+    const otherOrg = await api(BOB, "GET", `/v1/workspaces/${id}`, undefined, { token: await assertion({ ...BOB, org: "org_a" }) });
+    expect(otherOrg.code).toBe("workspace_not_found");
     const spoof = await api(CAROL, "POST", `${tasks}/${t.id}/cancel`, { version: 1, reason: "x", role: "owner", actor: LEAD.id });
     expect(spoof.code).toBe("task_not_found");
   });
@@ -106,8 +109,23 @@ describe("rooms", () => {
     const fake = await api(OUTSIDER, "GET", "/v1/workspaces/ws_does_not_exist");
     expect([real.status, real.body]).toEqual([fake.status, fake.body]);
     expect(real.code).toBe("workspace_not_found");
-    const write = await api(OUTSIDER, "POST", "/v1/workspaces/ws_also_fake/tasks", { title: "x", instructions: "y" });
-    expect(write.code).toBe("workspace_not_found");
+    const raw = async (room: string, method: string, tail: string, body?: string, key?: string) => {
+      const headers: Record<string, string> = { "x-podster-assertion": await assertion(OUTSIDER) };
+      if (key) headers["idempotency-key"] = key;
+      const res = await SELF.fetch(`https://api.internal/v1/workspaces/${room}${tail}`, { method, headers, body });
+      return [res.status, await res.text()];
+    };
+    const valid = JSON.stringify({ title: "x", instructions: "y" });
+    const requests: [string, string, string?, string?][] = [
+      ["GET", ""], ["GET", "/tasks"], ["GET", "/tasks/tsk_1"], ["GET", "/bogus"], ["GET", "/events"], ["GET", "/audit"],
+      ["POST", "/tasks", valid], ["POST", "/tasks", valid, "k"], ["POST", "/tasks", "{bad json", "k"], ["POST", "/bogus", valid, "k"],
+      ["PUT", "", valid], ["PUT", "/tasks", valid, "k"], ["DELETE", "/members/x"], ["DELETE", "/members/x", undefined, "k"], ["POST", "/members", "{}", "k"],
+    ];
+    for (const [method, tail, body, key] of requests) {
+      const [onReal, onFake] = [await raw(id, method, tail, body, key), await raw("ws_also_fake", method, tail, body, key)];
+      expect(onReal, `${method} ${tail} key=${key}`).toEqual(onFake);
+      expect(onReal[0]).toBe(404);
+    }
     for (const name of ["ws_does_not_exist", "ws_also_fake"]) {
       const tables = await runInDurableObject(stub(name), (_: any, state: any) =>
         state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_master WHERE name NOT LIKE '_cf%' AND name NOT LIKE 'sqlite%'").one().n);
@@ -203,7 +221,7 @@ describe("visibility", () => {
     expect((await api(CAROL, "POST", tasks, { title: "x", instructions: "y" })).code).toBe("not_allowed");
     const seen = await api(CAROL, "GET", `/v1/workspaces/${id}`);
     expect(seen.body.members.map((m: any) => m.principal_id)).toEqual([CAROL.id]);
-    await add(CAROL, "guest", { guest_can_create: true });
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${CAROL.id}/role`, { role: "guest", guest_can_create: true })).status).toBe(200);
     expect((await api(CAROL, "POST", tasks, { title: "x", instructions: "y" })).status).toBe(200);
   });
 
@@ -238,7 +256,11 @@ describe("access management", () => {
     expect((await api(OWNER, "POST", members, newAdmin)).status).toBe(200);
     expect((await api(ADMIN, "DELETE", `${members}/per_new`)).code).toBe("not_allowed");
     expect((await api(ADMIN, "POST", members, { principal_id: "agt_new", kind: "agent", org_id: "org_b", role: "member" })).status).toBe(200);
-    expect(await count(id, "audit_event")).toBeGreaterThan(5);
+    const audit = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit;
+    const actions = audit.map((a: any) => a.action);
+    expect(actions).toContain("workspace.created");
+    expect(actions.filter((a: string) => a === "member.added")).toHaveLength(7);
+    expect((await api(LEAD, "GET", `/v1/workspaces/${id}/audit`)).code).toBe("not_allowed");
   });
 
   it("revocation takes effect on the next request and reopens active work", async () => {
@@ -334,14 +356,173 @@ describe("transactions and retries", () => {
     const task = await offer(tasks);
     const path = `${tasks}/${task.id}`;
     await api(BOB, "POST", `${path}/accept`, { version: 1 });
-    const writes = Array.from({ length: 10 }, (_, i) => api(BOB, "POST", `${path}/messages`, { body: `m${i}` }));
-    const revoke = api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${BOB.id}`);
-    const results = await Promise.all(writes);
-    expect((await revoke).status).toBe(200);
-    for (const r of results) expect([200, 403]).toContain(r.status);
-    const accepted = results.filter((r) => r.status === 200).map((r) => r.body.created_at as number);
-    expect(await count(id, "message")).toBe(accepted.length);
+    // Assertions are signed first, so the requests land together with the revocation in the middle.
+    const send = (i: number) => assertion(BOB).then((token) => () => api(BOB, "POST", `${path}/messages`, { body: `m${i}` }, { token }));
+    const before = await Promise.all(Array.from({ length: 15 }, (_, i) => send(i)));
+    const after = await Promise.all(Array.from({ length: 15 }, (_, i) => send(i + 15)));
+    const revokeToken = await assertion(OWNER);
+    const pending = [...before.map((f) => f()), api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${BOB.id}`, {}, { token: revokeToken }), ...after.map((f) => f())];
+    const results = await Promise.all(pending);
+    const messages = results.filter((_, i) => i !== 15);
+    expect(results[15].status).toBe(200);
+    for (const r of messages) expect([200, 403]).toContain(r.status);
+    const ok = messages.filter((r) => r.status === 200).length;
+    expect(await count(id, "message")).toBe(ok);
+    const events = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT seq, type FROM event ORDER BY seq").toArray() as { seq: number; type: string }[]);
+    const revokedAt = events.find((e) => e.type === "member.revoked")!.seq;
+    for (const e of events) if (e.type === "task.message") expect(e.seq).toBeLessThan(revokedAt);
+    expect(events.filter((e) => e.type === "task.message")).toHaveLength(ok);
     expect((await api(BOB, "POST", `${path}/messages`, { body: "late" })).code).toBe("access_revoked");
-    expect(await count(id, "message")).toBe(accepted.length);
+    expect(await count(id, "message")).toBe(ok);
+  });
+});
+
+describe("review findings", () => {
+  const members = (id: string) => `/v1/workspaces/${id}/members`;
+
+  it("an admin can't demote, lock out or revoke another admin through any route", async () => {
+    const { id } = await room();
+    const other = { principal_id: "per_admin2", kind: "person", org_id: "org_a", role: "admin" };
+    expect((await api(OWNER, "POST", members(id), other)).status).toBe(200);
+    const victim: Who = { id: "per_admin2", kind: "person", org: "org_a" };
+    expect((await api(ADMIN, "DELETE", `${members(id)}/per_admin2`)).code).toBe("not_allowed");
+    expect((await api(ADMIN, "POST", members(id), { ...other, role: "guest" })).code).toBe("already_member");
+    expect((await api(ADMIN, "POST", members(id), { ...other, kind: "agent", role: "guest" })).code).toBe("already_member");
+    expect((await api(ADMIN, "POST", `${members(id)}/per_admin2/role`, { role: "guest" })).code).toBe("not_allowed");
+    expect((await api(victim, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    expect((await api(ADMIN, "POST", `${members(id)}/${LEAD.id}/role`, { role: "admin" })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "POST", `${members(id)}/${LEAD.id}/role`, { role: "admin" })).code).toBe("invalid_argument");
+    expect((await api(ADMIN, "POST", `${members(id)}/${REVIEWER.id}/role`, { role: "guest" })).status).toBe(200);
+    expect((await api(OWNER, "POST", `${members(id)}/per_admin2/role`, { role: "member" })).status).toBe(200);
+    const change = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.find((a: any) => a.action === "member.role_changed" && a.target_id === "per_admin2");
+    expect(JSON.parse(change.prior_json).role).toBe("admin");
+  });
+
+  it("nobody can add or revoke the owner, or take the owner's tasks through it", async () => {
+    const { id, tasks } = await room();
+    const owned = { principal_id: OWNER.id, kind: "person", org_id: "org_a", role: "guest" };
+    expect((await api(ADMIN, "POST", members(id), owned)).code).toBe("invalid_argument");
+    expect((await api(OWNER, "POST", members(id), owned)).code).toBe("invalid_argument");
+    expect((await api(ADMIN, "DELETE", `${members(id)}/${OWNER.id}`)).code).toBe("invalid_argument");
+    const t = (await api(LEAD, "POST", tasks, { title: "x", instructions: "y", assignee: OWNER.id, reviewer: REVIEWER.id })).body;
+    expect((await api(OWNER, "GET", `${tasks}/${t.id}`)).body.task.assignee).toBe(OWNER.id);
+  });
+
+  it("a revoked participant returns only with the same identity", async () => {
+    const { id } = await room();
+    await api(OWNER, "DELETE", `${members(id)}/${BOB.id}`);
+    expect((await api(OWNER, "POST", members(id), { principal_id: BOB.id, kind: "person", org_id: BOB.org, role: "guest" })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "POST", members(id), { principal_id: BOB.id, kind: "agent", org_id: "org_a", role: "guest" })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "POST", members(id), { principal_id: BOB.id, kind: "agent", org_id: BOB.org, role: "guest" })).status).toBe(200);
+    expect((await api(BOB, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+  });
+
+  it("refuses member IDs that couldn't be addressed later, and enforces the member limit", async () => {
+    const { id } = await room();
+    for (const principal_id of ["agt bob", "a/b", "agt:x?y", "", "x".repeat(129)]) {
+      expect((await api(OWNER, "POST", members(id), { principal_id, kind: "agent", org_id: "org_b", role: "guest" })).code, principal_id).toBe("invalid_argument");
+    }
+    expect((await api(OWNER, "POST", members(id), { principal_id: "agt_ok", kind: "agent", org_id: "", role: "guest" })).code).toBe("invalid_argument");
+    for (let i = 0; i < 45; i++) expect((await api(OWNER, "POST", members(id), { principal_id: `agt_${i}`, kind: "agent", org_id: "org_b", role: "guest" })).status).toBe(200);
+    expect((await api(OWNER, "POST", members(id), { principal_id: "agt_over", kind: "agent", org_id: "org_b", role: "guest" })).code).toBe("limit_exceeded");
+  });
+
+  it("keeps notes, reasons, states and versions readable to the parties", async () => {
+    const { tasks } = await room();
+    const t = await offer(tasks);
+    const path = `${tasks}/${t.id}`;
+    await api(BOB, "POST", `${path}/accept`, { version: 1 });
+    await api(BOB, "POST", `${path}/submit`, { version: 2, note: "SECRET-NOTE" });
+    await api(REVIEWER, "POST", `${path}/request-changes`, { submission_no: 1, reason: "NEEDS-TESTS" });
+    expect((await api(BOB, "GET", path)).body.submissions).toHaveLength(1);
+    await api(BOB, "POST", `${path}/release`, { version: 4, reason: "OUT-OF-TIME" });
+    const seen = (await api(REVIEWER, "GET", path)).body;
+    expect(seen.submissions[0].note).toBe("SECRET-NOTE");
+    const byType = (type: string) => seen.history.find((e: any) => e.type === type);
+    expect(byType("task.changes_requested")).toMatchObject({ reason: "NEEDS-TESTS", prior_status: "submitted", new_status: "accepted", task_version: 4 });
+    expect(byType("task.released")).toMatchObject({ reason: "OUT-OF-TIME", prior_status: "accepted", new_status: "open", task_version: 5 });
+    expect(byType("task.offered")).toMatchObject({ reason: null, new_status: "offered", task_version: 1 });
+    // Releasing ended Bob's part in the task, so a guest can no longer see it.
+    expect((await api(BOB, "GET", path)).code).toBe("task_not_found");
+    expect((await api(CAROL, "GET", path)).code).toBe("task_not_found");
+  });
+
+  it("takes external marks from stored identity, so later changes can't rewrite them", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    const path = `${tasks}/${t.id}`;
+    await api(BOB, "POST", `${path}/accept`, { version: 1 });
+    await api(BOB, "POST", `${path}/submit`, { version: 2, artifacts: [{ uri: "https://example.test/a", label: "A" }] });
+    const lead = (await api(LEAD, "GET", path)).body;
+    expect([lead.artifacts[0].external, lead.artifacts[0].from.org]).toEqual([true, BOB.org]);
+    await api(OWNER, "DELETE", `${members(id)}/${BOB.id}`);
+    expect((await api(OWNER, "POST", members(id), { principal_id: BOB.id, kind: "agent", org_id: "org_a", role: "guest" })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "GET", path)).body.artifacts[0].external).toBe(true);
+    const ownerTask = (await api(OWNER, "POST", tasks, { title: "x", instructions: "y", assignee: LEAD.id, reviewer: REVIEWER.id })).body;
+    await api(LEAD, "POST", `${tasks}/${ownerTask.id}/accept`, { version: 1 });
+    await api(LEAD, "POST", `${tasks}/${ownerTask.id}/submit`, { version: 2, artifacts: [{ uri: "https://example.test/b", label: "B" }] });
+    expect((await api(OWNER, "GET", `${tasks}/${ownerTask.id}`)).body.artifacts[0].external).toBe(false);
+  });
+
+  it("queues nothing for revoked principals except the removal notice, and alerts admins", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    await api(OWNER, "DELETE", `${members(id)}/${LEAD.id}`);
+    expect((await api(OWNER, "GET", `${tasks}/${t.id}`)).body.task.needs_attention).toBe(true);
+    await api(BOB, "POST", `${tasks}/${t.id}/accept`, { version: 2 });
+    await api(BOB, "POST", `${tasks}/${t.id}/messages`, { body: "hello" });
+    const outbox = (who: string) => runInDurableObject(stub(id), (_: any, state: any) =>
+      state.storage.sql.exec("SELECT e.type FROM outbox o JOIN event e ON e.id = o.event_id WHERE o.recipient_principal_id = ?", who).toArray().map((r: any) => r.type) as string[]);
+    expect(await outbox(LEAD.id)).toEqual(["member.revoked"]);
+    // The owner took this action, so only the other admin needs telling.
+    expect(await outbox(OWNER.id)).not.toContain("task.needs_attention");
+    expect(await outbox(ADMIN.id)).toContain("task.needs_attention");
+  });
+
+  it("an admin can't offer someone's task to itself, and re-offers must change the assignee", async () => {
+    const { tasks } = await room();
+    const t = await offer(tasks);
+    const path = `${tasks}/${t.id}`;
+    expect((await api(ADMIN, "POST", `${path}/assign`, { version: 1, assignee: ADMIN.id })).code).toBe("not_allowed");
+    expect((await api(LEAD, "POST", `${path}/assign`, { version: 1, assignee: BOB.id })).code).toBe("invalid_transition");
+    expect((await api(LEAD, "POST", `${path}/assign`, { version: 1, assignee: CAROL.id })).body.assignee).toBe(CAROL.id);
+  });
+
+  it("refuses malformed fields instead of ignoring them", async () => {
+    const { tasks } = await room();
+    expect((await api(LEAD, "POST", tasks, { title: "x", instructions: "y", assignee: 5 })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "POST", tasks, { title: "x", instructions: "y", reviewer: 6 })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "POST", tasks, { title: "x", instructions: "y", due_at: "soon" })).code).toBe("invalid_argument");
+    const t = await offer(tasks);
+    const path = `${tasks}/${t.id}`;
+    expect((await api(LEAD, "POST", `${path}/update`, { version: 1, title: 123 })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "POST", `${path}/update`, { version: 1 })).code).toBe("invalid_argument");
+    await api(BOB, "POST", `${path}/accept`, { version: 1 });
+    expect((await api(BOB, "POST", `${path}/submit`, { version: 2, note: "n", artifacts: "x" })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "GET", `${tasks}?cursor=abc`)).code).toBe("invalid_argument");
+    expect((await api(LEAD, "GET", path)).body.task.version).toBe(2);
+  });
+
+  it("enforces size limits and HTTPS artifact links", async () => {
+    const { tasks } = await room();
+    expect((await api(OWNER, "POST", "/v1/workspaces", { name: "" })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "POST", "/v1/workspaces", { name: "x".repeat(201) })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "POST", tasks, { title: "x".repeat(501), instructions: "y" })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "POST", tasks, { title: "x", instructions: "y".repeat(64 * 1024 + 1) })).code).toBe("invalid_argument");
+    const t = await offer(tasks);
+    const path = `${tasks}/${t.id}`;
+    await api(BOB, "POST", `${path}/accept`, { version: 1 });
+    for (const uri of ["javascript:alert(1)", "http://example.test", "data:text/html,x"]) {
+      expect((await api(BOB, "POST", `${path}/submit`, { version: 2, artifacts: [{ uri, label: "x" }] })).code, uri).toBe("invalid_argument");
+    }
+    expect((await api(LEAD, "POST", `${path}/messages`, { body: "ok" }, { key: "k".repeat(256) })).code).toBe("idempotency_key_required");
+  });
+
+  it("treats a retry with reordered JSON keys as the same request", async () => {
+    const { tasks } = await room();
+    const key = nextKey();
+    const first = await api(LEAD, "POST", tasks, { title: "a", instructions: "b" }, { key });
+    const again = await api(LEAD, "POST", tasks, { instructions: "b", title: "a" }, { key });
+    expect(again.body).toEqual(first.body);
   });
 });

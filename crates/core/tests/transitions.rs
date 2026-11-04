@@ -656,6 +656,26 @@ fn invariants_hold_across_random_command_sequences() {
         let mut current = decide_create(requester, new).unwrap().task;
         for _ in 0..40 {
             let actor = people[rng.next(4)];
+            // Departures run between commands, so the invariants cover those paths too.
+            if rng.next(10) == 0 {
+                let departed = people[rng.next(4)];
+                if let Some(d) = apply_departure(&current, departed, rng.next(2) == 0) {
+                    assert!(
+                        !d.task.status.is_terminal(),
+                        "seed {seed}: departures don't finish tasks"
+                    );
+                    assert_ne!(
+                        d.task.assignee.as_deref(),
+                        Some(d.task.reviewer.as_str()),
+                        "seed {seed}: departure made the assignee review"
+                    );
+                    assert!(
+                        d.task.version > current.version,
+                        "seed {seed}: version must grow"
+                    );
+                    current = d.task;
+                }
+            }
             let other = people[rng.next(4)].to_string();
             let v = current.version;
             let s = current.submission_no;
@@ -709,40 +729,243 @@ fn invariants_hold_across_random_command_sequences() {
             };
             let verifying = matches!(command, Command::Verify { .. });
             let was = current.clone();
-            match decide(&current, actor, command, &Observed::default()) {
-                Ok(decision) => {
-                    let next = decision.task;
-                    assert!(next.version > was.version, "seed {seed}: version must grow");
+            if let Ok(decision) = decide(&current, actor, command, &Observed::default()) {
+                let next = decision.task;
+                assert!(next.version > was.version, "seed {seed}: version must grow");
+                assert_ne!(
+                    next.assignee.as_deref(),
+                    Some(next.reviewer.as_str()),
+                    "seed {seed}: reviewer is the assignee"
+                );
+                assert!(
+                    !was.status.is_terminal(),
+                    "seed {seed}: terminal tasks don't change"
+                );
+                if next.status == Completed {
+                    assert!(
+                        verifying && was.status == Submitted,
+                        "seed {seed}: only review completes"
+                    );
                     assert_ne!(
-                        next.assignee.as_deref(),
-                        Some(next.reviewer.as_str()),
-                        "seed {seed}: reviewer is the assignee"
+                        was.assignee.as_deref(),
+                        Some(actor),
+                        "seed {seed}: self sign-off"
                     );
-                    assert!(
-                        !was.status.is_terminal(),
-                        "seed {seed}: terminal tasks don't change"
-                    );
-                    if next.status == Completed {
-                        assert!(
-                            verifying && was.status == Submitted,
-                            "seed {seed}: only review completes"
-                        );
-                        assert_ne!(
-                            was.assignee.as_deref(),
-                            Some(actor),
-                            "seed {seed}: self sign-off"
-                        );
-                        completions += 1;
-                    }
-                    assert!(
-                        next.submission_no >= was.submission_no,
-                        "seed {seed}: submissions don't rewind"
-                    );
-                    current = next;
+                    completions += 1;
                 }
-                Err(_) => assert_eq!(current, was, "seed {seed}: refusal changes nothing"),
+                assert!(
+                    next.submission_no >= was.submission_no,
+                    "seed {seed}: submissions don't rewind"
+                );
+                current = next;
             }
         }
     }
     assert!(completions > 0, "the walk must actually reach completion");
+}
+
+#[test]
+fn reasons_reach_the_events_that_need_them() {
+    let reason_of = |status, actor: &str, command| {
+        decide(&task(status), actor, command, &Observed::default())
+            .unwrap()
+            .events[0]
+            .reason
+            .clone()
+    };
+    assert_eq!(
+        reason_of(
+            Offered,
+            "asg",
+            Command::Decline {
+                version: 5,
+                reason: "busy".into()
+            }
+        )
+        .as_deref(),
+        Some("busy")
+    );
+    assert_eq!(
+        reason_of(
+            Accepted,
+            "asg",
+            Command::Release {
+                version: 5,
+                reason: "stuck".into()
+            }
+        )
+        .as_deref(),
+        Some("stuck")
+    );
+    assert_eq!(
+        reason_of(
+            Submitted,
+            "rev",
+            Command::RequestChanges {
+                submission_no: 2,
+                reason: "tests".into()
+            }
+        )
+        .as_deref(),
+        Some("tests")
+    );
+    assert_eq!(
+        reason_of(
+            Open,
+            "req",
+            Command::Cancel {
+                version: 5,
+                reason: "moot".into()
+            }
+        )
+        .as_deref(),
+        Some("moot")
+    );
+    assert_eq!(
+        reason_of(Offered, "asg", Command::Accept { version: 5 }),
+        None
+    );
+}
+
+#[test]
+fn assignment_rules_for_self_and_re_offers() {
+    let assign = |assignee: &str| Command::Assign {
+        version: 5,
+        assignee: assignee.into(),
+    };
+    assert_eq!(
+        decide(&task(Open), "admin", assign("admin"), &Observed::default()).unwrap_err(),
+        CoreError::NotAllowed
+    );
+    let own = Task {
+        reviewer: "rev".into(),
+        ..task(Open)
+    };
+    assert_eq!(
+        decide(&own, "req", assign("req"), &Observed::default())
+            .unwrap()
+            .task
+            .assignee
+            .as_deref(),
+        Some("req")
+    );
+    assert_eq!(
+        decide(&task(Offered), "req", assign("asg"), &Observed::default()).unwrap_err(),
+        CoreError::InvalidTransition
+    );
+    assert_eq!(
+        decide(&task(Offered), "req", assign("asg2"), &Observed::default())
+            .unwrap()
+            .task
+            .assignee
+            .as_deref(),
+        Some("asg2")
+    );
+}
+
+#[test]
+fn inputs_have_limits() {
+    let update = |patch| Command::Update { version: 5, patch };
+    let long = |n: usize| "x".repeat(n);
+    assert_eq!(
+        decide(
+            &task(Open),
+            "req",
+            update(TaskPatch::default()),
+            &Observed::default()
+        )
+        .unwrap_err(),
+        CoreError::InvalidArgument("patch")
+    );
+    assert!(decide(
+        &task(Open),
+        "req",
+        update(TaskPatch {
+            title: Some(long(MAX_TITLE_BYTES)),
+            ..Default::default()
+        }),
+        &Observed::default()
+    )
+    .is_ok());
+    assert!(decide(
+        &task(Open),
+        "req",
+        update(TaskPatch {
+            title: Some(long(MAX_TITLE_BYTES + 1)),
+            ..Default::default()
+        }),
+        &Observed::default()
+    )
+    .is_err());
+    assert!(decide(
+        &task(Open),
+        "req",
+        Command::Cancel {
+            version: 5,
+            reason: long(MAX_REASON_BYTES + 1)
+        },
+        &Observed::default()
+    )
+    .is_err());
+    let artifact = |uri: &str| Artifact {
+        uri: uri.into(),
+        label: "x".into(),
+    };
+    let submit = |artifacts| Command::Submit {
+        version: 5,
+        artifacts,
+        note: None,
+        commit_sha: None,
+    };
+    assert!(decide(
+        &task(Accepted),
+        "asg",
+        submit(vec![artifact("https://ok.test")]),
+        &Observed::default()
+    )
+    .is_ok());
+    for bad in ["javascript:alert(1)", "http://x.test", ""] {
+        assert_eq!(
+            decide(
+                &task(Accepted),
+                "asg",
+                submit(vec![artifact(bad)]),
+                &Observed::default()
+            )
+            .unwrap_err(),
+            CoreError::InvalidArgument("uri"),
+            "{bad}"
+        );
+    }
+    let long_note = Command::Submit {
+        version: 5,
+        artifacts: vec![],
+        note: Some(long(MAX_NOTE_BYTES + 1)),
+        commit_sha: None,
+    };
+    assert_eq!(
+        decide(&task(Accepted), "asg", long_note, &Observed::default()).unwrap_err(),
+        CoreError::InvalidArgument("note")
+    );
+}
+
+#[test]
+fn finishing_a_task_clears_its_attention_flags() {
+    let flagged = Task {
+        needs_reviewer: true,
+        needs_requester: true,
+        ..task(Submitted)
+    };
+    let done = decide(
+        &flagged,
+        "admin",
+        Command::Cancel {
+            version: 5,
+            reason: "x".into(),
+        },
+        &Observed::default(),
+    )
+    .unwrap()
+    .task;
+    assert!(!done.needs_attention());
 }

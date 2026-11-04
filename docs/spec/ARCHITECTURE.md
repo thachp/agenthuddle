@@ -104,7 +104,7 @@ bindings to D1 or DOs.
 Ed25519-signed, 60-second, audience-bound, sent as a header on the service binding:
 
 ```json
-{ "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…", "gen": 3,
+{ "iss": "podster-gateway", "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…", "gen": 3,
   "scopes": ["workspace", "inbox"], "iat": 1730600000, "exp": 1730600060, "jti": "…" }
 ```
 
@@ -305,8 +305,8 @@ GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
 POST   /v1/workspaces                               person only
 GET    /v1/workspaces/{ws}
-PUT    /v1/workspaces/{ws}/admins/{person}          appoint (owner) · DELETE removes
-POST   /v1/workspaces/{ws}/members                  add agents (owner or admin), within the agent owner's policy
+POST   /v1/workspaces/{ws}/members                  add a participant (owner or admin); only the owner adds admins
+POST   /v1/workspaces/{ws}/members/{principal}/role change a role; changes to or from admin are the owner's alone
 DELETE /v1/workspaces/{ws}/organizations/{org}      revoke an organization (owner or admin)
 DELETE /v1/workspaces/{ws}/members/{principal}      revoke (owner or admin)
 POST   /v1/workspaces/{ws}/members/{agent}/withdraw authorized person of the owning organization
@@ -324,7 +324,8 @@ GET    /v1/workspaces/{ws}/tasks/{t}
 POST   /v1/workspaces/{ws}/tasks/{t}/{update|set-reviewer|set-requester|assign|accept|decline|release|submit|request-changes|verify|cancel}
 GET    /v1/workspaces/{ws}/tasks/{t}/messages?after=
 POST   /v1/workspaces/{ws}/tasks/{t}/messages
-GET    /v1/workspaces/{ws}/events?after=            audit log (admin, people)
+GET    /v1/workspaces/{ws}/events?after=            room events (admin, people)
+GET    /v1/workspaces/{ws}/audit                    access audit history (admin, people)
 GET    /v1/inbox?after=&limit=&ack=
 POST   /v1/inbox/ack
 PUT    /v1/inbox/wake · DELETE /v1/inbox/wake
@@ -335,9 +336,9 @@ Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with 
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
 participant, who already knows the room exists), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
-`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400), `invalid_assertion` (401), `idempotency_key_required` (400), `not_implemented` (501), `internal_error` (500).
+`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400), `invalid_assertion` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `not_implemented` (501), `internal_error` (500).
 
-Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Migrations therefore run on room creation and on later access, never in the constructor. Room IDs are random, and for private rooms non-member responses take the same path as for a room that does not exist. Together these prevent private-room existence from leaking (AC-09).
+Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Migrations therefore run on room creation and on later access, never in the constructor, each in its own transaction. Authority is resolved before anything else about a request, so an outsider gets one answer for a real room and an unknown one. Room IDs are random, and for private rooms non-member responses take the same path as for a room that does not exist. Together these prevent private-room existence from leaking (AC-09).
 
 ## Proposed workroom extensions
 

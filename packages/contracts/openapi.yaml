@@ -21,8 +21,8 @@ paths:
     post:
       operationId: createWorkspace
       tags: [commands]
-      summary: Create a room. People only, and the caller becomes its owner
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string, minLength: 1 } } } } } }
+      summary: Create a room. People only, and the caller becomes its owner. Not idempotent until the gateway dedupes creation
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string, minLength: 1, description: "At most 200 bytes." } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}:
     parameters: [{ $ref: "#/components/parameters/ws" }]
@@ -56,12 +56,24 @@ paths:
       summary: Revoke a participant and apply the departure rules
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/members/{principal}/role:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: principal, in: path, required: true, schema: { type: string } }]
+    post:
+      operationId: changeMemberRole
+      tags: [commands]
+      summary: Change an active member's role. Changes to or from admin are the owner's alone
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [role], properties: { role: { type: string, enum: [admin, member, guest] }, guest_can_create: { type: boolean } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/audit:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get: { operationId: listAudit, tags: [queries], summary: Access audit history. Human owners and admins only, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/events:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get:
       operationId: listEvents
       tags: [queries]
-      summary: Audit log. Human owners and admins only
+      summary: Room event history. Human owners and admins only
       parameters: [{ name: after, in: query, schema: { type: integer } }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks:
@@ -73,7 +85,7 @@ paths:
       parameters:
         - { name: status, in: query, schema: { $ref: "#/components/schemas/TaskStatus" } }
         - { name: mine, in: query, schema: { type: boolean } }
-        - { name: cursor, in: query, schema: { type: string } }
+        - { name: cursor, in: query, schema: { type: integer } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
     post:
       operationId: createTask
@@ -84,7 +96,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
-    get: { operationId: getTask, tags: [queries], summary: One task, responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getTask, tags: [queries], summary: One task with submissions, artifacts, recent messages and history, responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/tasks/{t}/update:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
     post:
@@ -197,7 +209,7 @@ paths:
       tags: [commands]
       summary: Post to a task thread
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [body], properties: { body: { type: string, maxLength: 16384 } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [body], properties: { body: { type: string, description: "At most 16 KiB of UTF-8." } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/inbox:
     get:
@@ -233,6 +245,19 @@ components:
     idempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1 } }
   responses:
     Json: { description: Success, content: { application/json: { schema: { type: object } } } }
+    TaskDetail:
+      description: A task and what the caller may read about it
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [task, submissions, artifacts, messages, history]
+            properties:
+              task: { $ref: "#/components/schemas/Task" }
+              submissions: { type: array, items: { type: object } }
+              artifacts: { type: array, items: { type: object } }
+              messages: { type: array, items: { type: object } }
+              history: { type: array, items: { type: object } }
     Task: { description: The task after the command, content: { application/json: { schema: { $ref: "#/components/schemas/Task" } } } }
     Error: { description: A stable error code, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   schemas:
@@ -250,15 +275,17 @@ components:
         reviewer: { type: string }
         status: { $ref: "#/components/schemas/TaskStatus" }
         version: { type: integer }
+        due_at: { type: [integer, "null"] }
+        follow_up_of: { type: [string, "null"] }
         submission_no: { type: integer }
         needs_attention: { type: boolean }
     CreateTask:
       type: object
       required: [title, instructions]
       properties:
-        title: { type: string, minLength: 1 }
-        instructions: { type: string, minLength: 1 }
-        acceptance_criteria: { type: string }
+        title: { type: string, minLength: 1, description: "At most 500 bytes." }
+        instructions: { type: string, minLength: 1, description: "At most 64 KiB." }
+        acceptance_criteria: { type: string, description: "At most 16 KiB." }
         assignee: { type: string }
         reviewer: { type: string }
         due_at: { type: integer }
@@ -278,7 +305,7 @@ components:
     AssignTask: { type: object, required: [version, assignee], properties: { version: { type: integer }, assignee: { type: string } } }
     VersionedReason: { type: object, required: [version], properties: { version: { type: integer }, reason: { type: string } } }
     RequiredReason: { type: object, required: [version, reason], properties: { version: { type: integer }, reason: { type: string, minLength: 1 } } }
-    Artifact: { type: object, required: [uri, label], properties: { uri: { type: string }, label: { type: string } } }
+    Artifact: { type: object, required: [uri, label], properties: { uri: { type: string, description: "HTTPS only, at most 2 KiB." }, label: { type: string, minLength: 1, description: "At most 256 bytes." } } }
     SubmitTask:
       type: object
       required: [version]
@@ -299,5 +326,5 @@ components:
           properties:
             code:
               type: string
-              enum: [invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
             message: { type: string }

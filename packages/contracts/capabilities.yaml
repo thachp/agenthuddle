@@ -31,4 +31,6 @@ person_only:
   - createWorkspace
   - addMember
   - revokeMember
+  - changeMemberRole
   - listEvents
+  - listAudit

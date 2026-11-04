@@ -6,7 +6,7 @@ Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design]
 
 ## Implementation status
 
-As of main commit `d057629`, the repository contains specifications and static concept images only. There is no application, Rust API, permission middleware, database migration or executable test suite. The rules below are requirements, not deployed safeguards. Security cannot be called implemented until the enforcement and denial tests below exist and pass.
+The Rust kernel enforces part of this model in `crates/policy` and `apps/api`, tested locally and not deployed. The gateway, agent-owner consent, global disconnect and provider delegation aren't built, so security can't be called implemented until the enforcement and denial tests below exist and pass.
 
 ## Approved authority model
 

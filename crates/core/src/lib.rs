@@ -8,6 +8,13 @@ use std::collections::BTreeSet;
 
 pub const MAX_ARTIFACTS: usize = 10;
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
+pub const MAX_TITLE_BYTES: usize = 500;
+pub const MAX_INSTRUCTIONS_BYTES: usize = 64 * 1024;
+pub const MAX_CRITERIA_BYTES: usize = 16 * 1024;
+pub const MAX_REASON_BYTES: usize = 4 * 1024;
+pub const MAX_NOTE_BYTES: usize = 16 * 1024;
+pub const MAX_URI_BYTES: usize = 2 * 1024;
+pub const MAX_LABEL_BYTES: usize = 256;
 
 pub type PrincipalId = String;
 
@@ -211,6 +218,8 @@ pub struct EventDraft {
     pub kind: EventKind,
     /// Who gets an inbox event, without the actor.
     pub recipients: BTreeSet<PrincipalId>,
+    /// The stated reason, for transitions that require one.
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,6 +240,8 @@ pub enum CoreError {
     SubmissionMismatch,
     /// `self_sign_off`
     SelfSignOff,
+    /// `not_allowed`
+    NotAllowed,
     /// `invalid_argument`
     InvalidArgument(&'static str),
 }
@@ -243,13 +254,14 @@ impl CoreError {
             CoreError::CommitChanged => "commit_changed",
             CoreError::SubmissionMismatch => "submission_mismatch",
             CoreError::SelfSignOff => "self_sign_off",
+            CoreError::NotAllowed => "not_allowed",
             CoreError::InvalidArgument(_) => "invalid_argument",
         }
     }
 }
 
-fn require_text(value: &str, field: &'static str) -> Result<(), CoreError> {
-    if value.trim().is_empty() {
+fn require_text(value: &str, field: &'static str, max_bytes: usize) -> Result<(), CoreError> {
+    if value.trim().is_empty() || value.len() > max_bytes {
         return Err(CoreError::InvalidArgument(field));
     }
     Ok(())
@@ -286,13 +298,36 @@ fn event<'a>(
         .filter(|p| p.as_str() != actor)
         .cloned()
         .collect();
-    EventDraft { kind, recipients }
+    EventDraft {
+        kind,
+        recipients,
+        reason: None,
+    }
+}
+
+fn require_criteria(criteria: &Option<String>) -> Result<(), CoreError> {
+    if criteria
+        .as_ref()
+        .is_some_and(|c| c.len() > MAX_CRITERIA_BYTES)
+    {
+        return Err(CoreError::InvalidArgument("acceptance_criteria"));
+    }
+    Ok(())
+}
+
+/// Artifact links must be HTTPS, because a dashboard will render them.
+fn require_artifact(artifact: &Artifact) -> Result<(), CoreError> {
+    if !artifact.uri.starts_with("https://") || artifact.uri.len() > MAX_URI_BYTES {
+        return Err(CoreError::InvalidArgument("uri"));
+    }
+    require_text(&artifact.label, "label", MAX_LABEL_BYTES)
 }
 
 /// Decides `create_task`. The reviewer defaults to the requester and can never be the assignee.
 pub fn decide_create(actor: &str, new: NewTask) -> Result<Decision, CoreError> {
-    require_text(&new.title, "title")?;
-    require_text(&new.instructions, "instructions")?;
+    require_text(&new.title, "title", MAX_TITLE_BYTES)?;
+    require_text(&new.instructions, "instructions", MAX_INSTRUCTIONS_BYTES)?;
+    require_criteria(&new.acceptance_criteria)?;
     let reviewer = new.reviewer.unwrap_or_else(|| actor.to_string());
     if new.assignee.as_deref() == Some(reviewer.as_str()) {
         return Err(CoreError::SelfSignOff);
@@ -336,7 +371,14 @@ pub fn decide(
     observed: &Observed,
 ) -> Result<Decision, CoreError> {
     let mut next = task.clone();
-    let events = match command {
+    let reason = match &command {
+        Command::Decline { reason, .. }
+        | Command::Release { reason, .. }
+        | Command::RequestChanges { reason, .. }
+        | Command::Cancel { reason, .. } => Some(reason.clone()),
+        _ => None,
+    };
+    let mut events = match command {
         Command::Update { version, patch } => {
             require_version(task, version)?;
             require_non_terminal(task)?;
@@ -344,11 +386,15 @@ pub fn decide(
                 task,
                 &[TaskStatus::Open, TaskStatus::Offered, TaskStatus::Accepted],
             )?;
+            if patch == TaskPatch::default() {
+                return Err(CoreError::InvalidArgument("patch"));
+            }
+            require_criteria(&patch.acceptance_criteria)?;
             if let Some(title) = &patch.title {
-                require_text(title, "title")?;
+                require_text(title, "title", MAX_TITLE_BYTES)?;
             }
             if let Some(instructions) = &patch.instructions {
-                require_text(instructions, "instructions")?;
+                require_text(instructions, "instructions", MAX_INSTRUCTIONS_BYTES)?;
             }
             let material = patch
                 .instructions
@@ -410,6 +456,12 @@ pub fn decide(
             if assignee == task.reviewer {
                 return Err(CoreError::SelfSignOff);
             }
+            if assignee == actor && actor != task.requester {
+                return Err(CoreError::NotAllowed);
+            }
+            if task.assignee.as_deref() == Some(assignee.as_str()) {
+                return Err(CoreError::InvalidTransition);
+            }
             next.status = TaskStatus::Offered;
             next.assignee = Some(assignee);
             vec![event(
@@ -431,7 +483,7 @@ pub fn decide(
         Command::Decline { version, reason } => {
             require_version(task, version)?;
             require_status(task, &[TaskStatus::Offered])?;
-            require_text(&reason, "reason")?;
+            require_text(&reason, "reason", MAX_REASON_BYTES)?;
             next.status = TaskStatus::Open;
             next.assignee = None;
             vec![event(EventKind::TaskDeclined, actor, [&task.requester])]
@@ -439,7 +491,7 @@ pub fn decide(
         Command::Release { version, reason } => {
             require_version(task, version)?;
             require_status(task, &[TaskStatus::Accepted])?;
-            require_text(&reason, "reason")?;
+            require_text(&reason, "reason", MAX_REASON_BYTES)?;
             next.status = TaskStatus::Open;
             next.assignee = None;
             vec![event(EventKind::TaskReleased, actor, [&task.requester])]
@@ -454,6 +506,12 @@ pub fn decide(
             require_status(task, &[TaskStatus::Accepted])?;
             if artifacts.len() > MAX_ARTIFACTS {
                 return Err(CoreError::InvalidArgument("artifacts"));
+            }
+            for artifact in &artifacts {
+                require_artifact(artifact)?;
+            }
+            if note.as_ref().is_some_and(|n| n.len() > MAX_NOTE_BYTES) {
+                return Err(CoreError::InvalidArgument("note"));
             }
             let has_note = note.as_deref().is_some_and(|n| !n.trim().is_empty());
             if artifacts.is_empty() && !has_note {
@@ -480,7 +538,7 @@ pub fn decide(
             if submission_no != task.submission_no {
                 return Err(CoreError::SubmissionMismatch);
             }
-            require_text(&reason, "reason")?;
+            require_text(&reason, "reason", MAX_REASON_BYTES)?;
             if task.assignee_departed {
                 next.status = TaskStatus::Open;
                 next.assignee = None;
@@ -531,7 +589,7 @@ pub fn decide(
         Command::Cancel { version, reason } => {
             require_version(task, version)?;
             require_non_terminal(task)?;
-            require_text(&reason, "reason")?;
+            require_text(&reason, "reason", MAX_REASON_BYTES)?;
             next.status = TaskStatus::Canceled;
             vec![event(
                 EventKind::TaskCanceled,
@@ -542,6 +600,13 @@ pub fn decide(
             )]
         }
     };
+    for draft in &mut events {
+        draft.reason.clone_from(&reason);
+    }
+    if next.status.is_terminal() {
+        next.needs_reviewer = false;
+        next.needs_requester = false;
+    }
     next.version = task.version.saturating_add(1);
     Ok(Decision { task: next, events })
 }

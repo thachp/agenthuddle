@@ -75,18 +75,21 @@ fn every_kind_role_party_and_action_matches_the_matrix() {
         for role in Role::ALL {
             for party in PARTIES {
                 for action in A::ALL {
-                    let got = authorize_task(&caller(party, kind, role), &task(), action);
-                    assert_eq!(
-                        got,
-                        expected(kind, role, party, action),
-                        "{kind:?} {role:?} {party} {action:?}"
-                    );
-                    checked += 1;
+                    for status in TaskStatus::ALL {
+                        let task = Task { status, ..task() };
+                        let got = authorize_task(&caller(party, kind, role), &task, action);
+                        assert_eq!(
+                            got,
+                            expected(kind, role, party, action),
+                            "{kind:?} {role:?} {party} {action:?} {status:?}"
+                        );
+                        checked += 1;
+                    }
                 }
             }
         }
     }
-    assert_eq!(checked, 2 * 5 * 4 * 13);
+    assert_eq!(checked, 2 * 5 * 4 * 13 * 6);
 }
 
 #[test]

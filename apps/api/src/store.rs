@@ -1,6 +1,6 @@
 //! SQLite access for a workspace: schema, row mapping and writes shared by commands.
 use crate::error::ApiError;
-use podster_core::{EventDraft, Task, TaskStatus};
+use podster_core::{Decision, EventKind, Task, TaskStatus};
 use serde_json::Value;
 use worker::{SqlStorage, SqlStorageValue as V};
 
@@ -20,13 +20,13 @@ CREATE INDEX task_status ON task (status);
 CREATE TABLE submission (task_id TEXT NOT NULL, submission_no INTEGER NOT NULL, task_version INTEGER NOT NULL, note TEXT, commit_sha TEXT,
   submitted_by TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (task_id, submission_no));
 CREATE TABLE artifact (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, submission_no INTEGER NOT NULL, uri TEXT NOT NULL, label TEXT NOT NULL,
-  submitted_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+  submitted_by TEXT NOT NULL, submitted_org TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX artifact_task ON artifact (task_id, submission_no);
 CREATE TABLE message (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, task_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_org TEXT NOT NULL,
   body TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX message_task ON message (task_id, seq);
 CREATE TABLE event (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, type TEXT NOT NULL, actor_id TEXT NOT NULL, task_id TEXT,
-  created_at INTEGER NOT NULL);
+  reason TEXT, prior_status TEXT, new_status TEXT, task_version INTEGER, created_at INTEGER NOT NULL);
 CREATE INDEX event_task ON event (task_id, seq);
 CREATE TABLE outbox (event_id TEXT NOT NULL, recipient_principal_id TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL,
   PRIMARY KEY (event_id, recipient_principal_id));
@@ -82,7 +82,13 @@ pub fn is_initialized(sql: &SqlStorage) -> R<bool> {
     Ok(!tables.is_empty())
 }
 
-/// Applies pending migrations. Only room creation and existing rooms reach this.
+/// Whether migrations are pending. This only reads, so queries stay read-only.
+pub fn needs_migration(sql: &SqlStorage) -> R<bool> {
+    let found = rows(sql, "SELECT version FROM schema_version", vec![])?;
+    Ok(found.first().map_or(0, |r| int(&r["version"])) < MIGRATIONS.len() as i64)
+}
+
+/// Applies pending migrations. Callers run this inside a transaction, so a failed migration leaves nothing behind.
 pub fn migrate(sql: &SqlStorage) -> R<()> {
     exec(
         sql,
@@ -106,6 +112,25 @@ pub fn migrate(sql: &SqlStorage) -> R<()> {
         "UPDATE schema_version SET version = ?",
         vec![(MIGRATIONS.len() as i64).into()],
     )
+}
+
+/// A current participant's kind and role, from authoritative state.
+pub fn participant(sql: &SqlStorage, id: &str) -> R<Option<(String, String)>> {
+    let room = rows(sql, "SELECT owner_person_id FROM workspace", vec![])?;
+    if room.first().and_then(|r| r["owner_person_id"].as_str()) == Some(id) {
+        return Ok(Some(("person".to_string(), "owner".to_string())));
+    }
+    let found = rows(
+        sql,
+        "SELECT kind, role FROM member WHERE principal_id = ? AND revoked_at IS NULL",
+        vec![id.into()],
+    )?;
+    Ok(found.first().map(|m| {
+        (
+            text(&m["kind"]).unwrap_or_default(),
+            text(&m["role"]).unwrap_or_default(),
+        )
+    }))
 }
 
 pub fn task_from_row(row: &Value) -> R<Task> {
@@ -159,27 +184,39 @@ pub fn save_task(sql: &SqlStorage, t: &Task, now: i64) -> R<()> {
     ])
 }
 
-/// Records an event and queues its delivery, in the caller's transaction.
+/// Details recorded with a task transition.
+pub struct Transition<'a> {
+    pub reason: Option<&'a str>,
+    pub prior_status: Option<&'a str>,
+    pub new_status: Option<&'a str>,
+    pub task_version: Option<u64>,
+}
+
+impl Transition<'_> {
+    pub const NONE: Transition<'static> = Transition {
+        reason: None,
+        prior_status: None,
+        new_status: None,
+        task_version: None,
+    };
+}
+
+/// Records an event and queues delivery to exactly these recipients, in the caller's transaction.
 pub fn record_event(
     sql: &SqlStorage,
     kind: &str,
     actor: &str,
     task_id: Option<&str>,
+    transition: &Transition,
     recipients: impl IntoIterator<Item = String>,
     now: i64,
 ) -> R<()> {
     let event_id = format!("evt_{}", uuid::Uuid::new_v4().simple());
-    exec(
-        sql,
-        "INSERT INTO event (id, type, actor_id, task_id, created_at) VALUES (?, ?, ?, ?, ?)",
-        vec![
-            event_id.as_str().into(),
-            kind.into(),
-            actor.into(),
-            task_id.map_or(V::Null, V::from),
-            now.into(),
-        ],
-    )?;
+    exec(sql, "INSERT INTO event (id, type, actor_id, task_id, reason, prior_status, new_status, task_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![
+        event_id.as_str().into(), kind.into(), actor.into(), task_id.map_or(V::Null, V::from), transition.reason.map_or(V::Null, V::from),
+        transition.prior_status.map_or(V::Null, V::from), transition.new_status.map_or(V::Null, V::from),
+        transition.task_version.map_or(V::Null, |v| V::from(v as i64)), now.into(),
+    ])?;
     for recipient in recipients {
         exec(sql, "INSERT INTO outbox (event_id, recipient_principal_id, next_attempt_at) VALUES (?, ?, ?)",
             vec![event_id.as_str().into(), recipient.into(), now.into()])?;
@@ -187,20 +224,50 @@ pub fn record_event(
     Ok(())
 }
 
-pub fn record_drafts(
+/// Human owners and admins, who handle tasks a departure left needing attention.
+fn room_admins(sql: &SqlStorage) -> R<Vec<String>> {
+    let mut admins: Vec<String> = rows(sql, "SELECT owner_person_id FROM workspace", vec![])?
+        .iter()
+        .filter_map(|r| text(&r["owner_person_id"]))
+        .collect();
+    admins.extend(rows(sql, "SELECT principal_id FROM member WHERE role = 'admin' AND kind = 'person' AND revoked_at IS NULL", vec![])?.iter().filter_map(|r| text(&r["principal_id"])));
+    Ok(admins)
+}
+
+/// Records a decision's events. Only current participants other than the actor get inbox events.
+pub fn record_decision(
     sql: &SqlStorage,
-    drafts: &[EventDraft],
+    decision: &Decision,
+    prior_status: TaskStatus,
     actor: &str,
-    task_id: &str,
     now: i64,
 ) -> R<()> {
-    for draft in drafts {
+    for draft in &decision.events {
+        let mut recipients: Vec<String> = draft.recipients.iter().cloned().collect();
+        if draft.kind == EventKind::TaskNeedsAttention {
+            recipients.extend(room_admins(sql)?);
+        }
+        recipients.sort();
+        recipients.dedup();
+        let mut current = Vec::new();
+        for recipient in recipients {
+            if recipient != actor && participant(sql, &recipient)?.is_some() {
+                current.push(recipient);
+            }
+        }
+        let transition = Transition {
+            reason: draft.reason.as_deref(),
+            prior_status: Some(prior_status.name()),
+            new_status: Some(decision.task.status.name()),
+            task_version: Some(decision.task.version),
+        };
         record_event(
             sql,
             draft.kind.name(),
             actor,
-            Some(task_id),
-            draft.recipients.iter().cloned(),
+            Some(&decision.task.id),
+            &transition,
+            current,
             now,
         )?;
     }

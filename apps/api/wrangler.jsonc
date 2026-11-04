@@ -2,6 +2,8 @@
   // Private API: reached only by service binding, with no public route or workers.dev URL.
   "name": "podster-api",
   "main": "build/index.js",
+  // Rebuild on deploy, so a test build with failpoints can never ship.
+  "build": { "command": "worker-build --release" },
   "compatibility_date": "2026-08-01",
   "workers_dev": false,
   "preview_urls": false,

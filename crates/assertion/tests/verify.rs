@@ -22,7 +22,7 @@ fn keys() -> KeySet {
 }
 
 fn claims() -> Value {
-    json!({ "aud": AUDIENCE, "sub": "agt_1", "kind": "agent", "org": "org_1", "gen": 3, "jti": "j1", "iat": NOW, "exp": NOW + 60 })
+    json!({ "iss": ISSUER, "aud": AUDIENCE, "sub": "agt_1", "kind": "agent", "org": "org_1", "gen": 3, "jti": "j1", "iat": NOW, "exp": NOW + 60 })
 }
 
 fn sign_raw(header: &Value, claims: &Value, signer: &SigningKey) -> String {
@@ -148,6 +148,38 @@ fn rejects_bad_claims() {
     assert_eq!(
         verify(&sign(&claims()), &keys(), NOW - CLOCK_SKEW_SECS - 1),
         Err(AssertionError::NotYetValid)
+    );
+}
+
+#[test]
+fn rejects_missing_issuer_and_bad_shapes() {
+    assert_eq!(
+        verify(&sign(&with("iss", json!("someone"))), &keys(), NOW),
+        Err(AssertionError::WrongIssuer)
+    );
+    let mut no_iss = claims();
+    no_iss.as_object_mut().unwrap().remove("iss");
+    assert_eq!(
+        verify(&sign(&no_iss), &keys(), NOW),
+        Err(AssertionError::WrongIssuer)
+    );
+    assert_eq!(
+        verify(&sign(&with("exp", json!(NOW))), &keys(), NOW),
+        Err(AssertionError::Malformed)
+    );
+    let mut no_gen = claims();
+    no_gen.as_object_mut().unwrap().remove("gen");
+    assert_eq!(
+        verify(&sign(&no_gen), &keys(), NOW),
+        Err(AssertionError::Malformed)
+    );
+    let mut person = with("kind", json!("person"));
+    person.as_object_mut().unwrap().remove("gen");
+    assert!(verify(&sign(&person), &keys(), NOW).is_ok());
+    let crit = json!({ "alg": "EdDSA", "kid": "k1", "crit": ["x"], "x": 1 });
+    assert_eq!(
+        verify(&sign_raw(&crit, &claims(), &key(1)), &keys(), NOW),
+        Err(AssertionError::UnsupportedAlgorithm)
     );
 }
 
