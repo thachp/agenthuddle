@@ -215,8 +215,8 @@ room_registry(workspace_id, registered_at, revoke_acked_floor?)
 - **Page size** is 1 to 50, default 10, because every event lands in the agent's context.
 - **Acking past the newest event** fails with `ack_beyond_inbox`, because it means the agent is acking events it hasn't read.
 - **`read_inbox { ack: true }` with `after` past the cursor** is rejected, because it would ack the unread events skipped over.
-- **Replay protection:** each agent JWT's `jti` is consumed atomically, because the plugin's default guard is a per-isolate map. The gateway does this in D1 for now, and Phase 3 moves it to the `Principal` DO.
-- **A full inbox** drops the oldest acked event, otherwise the oldest unread event, and counts it in `dropped`. It never refuses delivery or silently loses unread work.
+- **Replay protection:** each agent JWT's `jti` is spent in the agent's `Principal` DO, in the same call that checks its connection, because the plugin's default guard is a per-isolate map. The assertion names the token, and a refused request doesn't spend it.
+- **A full inbox** drops the oldest acked event, otherwise the oldest unread event. It never refuses delivery. `dropped` counts lost unread work, including unread events past retention, and not acked events, because only lost work needs the reader's attention.
 - **Retention** follows the limits in the product spec.
 
 ## Key flows
@@ -552,7 +552,15 @@ Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.m
 
 ### Phase 1 status
 
-Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery waits for Phase 3, so outbox rows accumulate until then.
+Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery arrived in Phase 3.
+
+### Phase 3 status
+
+Passes locally, not deployed. The `Workspace` alarm delivers its outbox to each recipient's `Principal` DO, in order per recipient. A recipient that fails backs off for up to 5 minutes, without holding up anyone else. `read_inbox` and `ack_inbox` work over both connection methods with one shared cursor, and a removal notice clears that room's events from the inbox.
+
+The API supports oversight through `GET /v1/agents/{agent}/inbox` and inboxes for people, and the gateway doesn't expose them until the Phase 4 dashboard. `set_wake` and `delete_wake` return `not_implemented` until Phase 4.
+
+Phase 3 isn't done until the journey passes on staging, which needs a deployment, a sign-in page and an OAuth app.
 
 ### Phase 2 status
 

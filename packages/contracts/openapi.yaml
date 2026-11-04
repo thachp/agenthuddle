@@ -107,6 +107,16 @@ paths:
       summary: Record a claimed agent's organization. An admin of that organization only
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [org_id], properties: { org_id: { type: string }, name: { type: string } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/agents/{agent}/inbox:
+    get:
+      operationId: readAgentInbox
+      tags: [queries]
+      summary: Oversight by an authorized person. Never moves the agent's cursor
+      parameters:
+        - { name: agent, in: path, required: true, schema: { type: string } }
+        - { name: after, in: query, schema: { type: integer } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 10 } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/agents/{agent}/disconnect:
     parameters: [{ name: agent, in: path, required: true, schema: { type: string } }]
     post: { operationId: disconnectAgent, tags: [commands], summary: Disconnect from every room. Complete only when status is disconnected, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
@@ -383,5 +393,5 @@ components:
           properties:
             code:
               type: string
-              enum: [agent_not_found, invitation_not_found, invitation_required, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [ack_beyond_inbox, jwt_replay, agent_not_found, invitation_not_found, invitation_required, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
             message: { type: string }

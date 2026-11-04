@@ -30,6 +30,7 @@ capabilities:
 # agent itself. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
 # registerAgent, disconnectAgent and reconnectAgent.
 person_only:
+  - readAgentInbox
   - createWorkspace
   - addMember
   - revokeMember

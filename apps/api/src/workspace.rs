@@ -1,5 +1,6 @@
 //! The Workspace Durable Object: the single writer and authority for one room.
 //! Commands run in one transaction: policy, then core, then state, events, outbox and idempotency. Queries only read.
+//! The alarm delivers the outbox to each recipient's Principal.
 
 use crate::error::ApiError;
 use crate::principal;
@@ -22,12 +23,14 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
-use worker::*;
+use worker::{SqlStorageValue as V, *};
 
 type R<T> = std::result::Result<T, ApiError>;
 
 const IDEMPOTENCY_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const PAGE_SIZE: i64 = 50;
+const OUTBOX_BATCH: i64 = 50;
+const OUTBOX_MAX_BACKOFF_MS: i64 = 5 * 60 * 1000;
 const MAX_MEMBERS: i64 = 50;
 const MAX_OPEN_TASKS: i64 = 1000;
 const MAX_NAME_BYTES: usize = 200;
@@ -862,6 +865,38 @@ fn handle_change_role(
     Ok(json!({ "principal_id": principal, "role": role }))
 }
 
+/// Tests hold delivery by creating this table, so they can look at what a command queued.
+fn outbox_held(sql: &SqlStorage) -> R<bool> {
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hold_outbox'",
+        vec![],
+    )?
+    .is_empty()
+    {
+        return Ok(true);
+    }
+    let _ = sql;
+    Ok(false)
+}
+
+async fn send_to_inbox(env: &Env, recipient: &str, body: &Value) -> bool {
+    let attempt = async {
+        let stub = env
+            .durable_object("PRINCIPAL")?
+            .id_from_name(recipient)?
+            .get_stub()?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_body(Some(body.to_string().into()));
+        let request = Request::new_with_init("https://principal/internal/deliver", &init)?;
+        stub.fetch_with_request(request).await
+    };
+    let result: Result<Response> = attempt.await;
+    matches!(result.map(|r| r.status_code()), Ok(200))
+}
+
 /// Removes a participant and applies the departure rules, inside the caller's transaction.
 /// Used by room revocation, agent-owner withdrawal and global disconnect, which differ only by actor and reason.
 fn remove_member(
@@ -1542,6 +1577,98 @@ impl Workspace {
         Ok(())
     }
 
+    /// Delivers queued events to each recipient's Principal, in order per recipient. A recipient that fails waits, so
+    /// a later event can't overtake it. Rows go only after delivery, and delivery is idempotent, so a crash at any point
+    /// resends rather than loses.
+    async fn drain_outbox(&self) -> R<()> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? || outbox_held(&sql)? {
+            return Ok(());
+        }
+        let room = rows(&sql, "SELECT id FROM workspace", vec![])?;
+        let Some(workspace_id) = room.first().and_then(|r| text(&r["id"])) else {
+            return Ok(());
+        };
+        let now = Date::now().as_millis() as i64;
+        let pending = rows(&sql, "SELECT o.event_id, o.recipient_principal_id, o.attempts, e.type, e.actor_id, e.task_id, e.created_at
+          FROM outbox o JOIN event e ON e.id = o.event_id
+          WHERE o.recipient_principal_id NOT IN (SELECT recipient_principal_id FROM outbox WHERE next_attempt_at > ?)
+          ORDER BY e.seq LIMIT ?", vec![now.into(), OUTBOX_BATCH.into()])?;
+        let mut waiting: Vec<String> = Vec::new();
+        for row in &pending {
+            let recipient = text(&row["recipient_principal_id"]).unwrap_or_default();
+            if waiting.contains(&recipient) {
+                continue;
+            }
+            let event_id = text(&row["event_id"]).unwrap_or_default();
+            let key = vec![V::from(event_id.as_str()), V::from(recipient.as_str())];
+            // A revocation can commit during an earlier await here, and it deletes this recipient's rows.
+            let still_queued = rows(
+                &sql,
+                "SELECT event_id FROM outbox WHERE event_id = ? AND recipient_principal_id = ?",
+                key.clone(),
+            )?;
+            if still_queued.is_empty() {
+                continue;
+            }
+            let body = json!({ "event_id": event_id, "workspace_id": workspace_id, "type": row["type"], "actor_id": row["actor_id"], "task_id": row["task_id"], "created_at": row["created_at"] });
+            if send_to_inbox(&self.env, &recipient, &body).await {
+                exec(
+                    &sql,
+                    "DELETE FROM outbox WHERE event_id = ? AND recipient_principal_id = ?",
+                    key,
+                )?;
+            } else {
+                let attempts = int(&row["attempts"]) + 1;
+                let delay = (1000_i64 << attempts.min(9)).min(OUTBOX_MAX_BACKOFF_MS);
+                exec(&sql, "UPDATE outbox SET attempts = ?, next_attempt_at = ? WHERE event_id = ? AND recipient_principal_id = ?", vec![
+                    attempts.into(),
+                    (Date::now().as_millis() as i64 + delay).into(),
+                    event_id.as_str().into(),
+                    recipient.as_str().into(),
+                ])?;
+                waiting.push(recipient);
+            }
+        }
+        Ok(())
+    }
+
+    /// Schedules the alarm for whatever is due next, moving it earlier if needed. Never later: a pending alarm that
+    /// finds nothing to do costs nothing, and a missed one would strand events.
+    async fn arm(&self, index_retry: bool) -> R<()> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Ok(());
+        }
+        let now = Date::now().as_millis() as i64;
+        let mut due: Option<i64> = None;
+        if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty() {
+            due = Some(now + if index_retry { 5000 } else { 50 });
+        }
+        if !outbox_held(&sql)? {
+            let next = rows(
+                &sql,
+                "SELECT min(next_attempt_at) AS due FROM outbox",
+                vec![],
+            )?;
+            if let Some(next) = next.first().and_then(|r| r["due"].as_f64()) {
+                let next = (next as i64).max(now + 10);
+                due = Some(due.map_or(next, |d| d.min(next)));
+            }
+        }
+        let Some(due) = due else {
+            return Ok(());
+        };
+        let current = self.state.storage().get_alarm().await?;
+        if current.is_none_or(|at| at > due) {
+            self.state
+                .storage()
+                .set_alarm(std::time::Duration::from_millis((due - now).max(1) as u64))
+                .await?;
+        }
+        Ok(())
+    }
+
     fn init(&self, identity: &Identity, name: String) -> R<Value> {
         let sql = self.state.storage().sql();
         if store::is_initialized(&sql)? {
@@ -1782,31 +1909,26 @@ impl DurableObject for Workspace {
             Err(error) => error.into_response(),
         };
         if is_write {
-            let sql = self.state.storage().sql();
-            let queued = match store::is_initialized(&sql) {
-                Ok(true) => rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])
-                    .map(|r| !r.is_empty())
-                    .unwrap_or(false),
-                _ => false,
-            };
             // The command has already committed, so a scheduling problem can't change its answer. The next write retries.
-            if queued && matches!(self.state.storage().get_alarm().await, Ok(None)) {
-                if let Err(error) = self
-                    .state
-                    .storage()
-                    .set_alarm(std::time::Duration::from_millis(50))
-                    .await
-                {
-                    console_error!("couldn't schedule index projection: {error}");
-                }
+            if let Err(error) = self.arm(false).await {
+                console_error!("couldn't schedule delivery: {:?}", error);
             }
         }
         response
     }
 
     async fn alarm(&self) -> Result<Response> {
-        if let Err(error) = self.drain_index().await {
+        let index = self.drain_index().await;
+        if let Err(error) = &index {
             console_error!("index projection failed: {:?}", error);
+        }
+        // One failing doesn't hold up the other.
+        let outbox = self.drain_outbox().await;
+        if let Err(error) = &outbox {
+            console_error!("outbox drain failed: {:?}", error);
+        }
+        if let Err(error) = self.arm(index.is_err()).await {
+            console_error!("couldn't schedule delivery: {:?}", error);
             self.state
                 .storage()
                 .set_alarm(std::time::Duration::from_secs(5))

@@ -78,6 +78,12 @@ const offer = async (tasks: string, extra: object = {}) => {
   return r.body;
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
+const holdOutbox = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hold_outbox (x)"));
+/** Lets delivery go again, with an alarm far enough off that the test decides when it runs. */
+const releaseOutbox = (id: string) => runInDurableObject(stub(id), async (_: any, state: any) => {
+  state.storage.sql.exec("DROP TABLE test_hold_outbox");
+  await state.storage.setAlarm(Date.now() + 60_000);
+});
 const count = (id: string, table: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec(`SELECT count(*) AS n FROM ${table}`).one().n as number);
 
 describe("assertions", () => {
@@ -201,7 +207,6 @@ describe("kernel journey", () => {
     expect(a.body.history.find((e: any) => e.type === "task.submitted").external).toBe(true);
     expect(b.body.history.find((e: any) => e.type === "task.submitted").external).toBe(false);
     expect(await count(id, "submission")).toBe(2);
-    expect(await count(id, "outbox")).toBeGreaterThan(0);
   });
 
   it("refuses wrong parties, self sign-off, invalid transitions and stale versions", async () => {
@@ -342,6 +347,7 @@ describe("access management", () => {
 describe("transactions and retries", () => {
   it("rolls back task, event, outbox and idempotency when a command fails after writing", async () => {
     const { id, tasks } = await room();
+    await holdOutbox(id);
     const [e0, o0] = [await count(id, "event"), await count(id, "outbox")];
     const key = nextKey();
     const body = { title: "Design", instructions: "Write", assignee: BOB.id };
@@ -501,6 +507,7 @@ describe("review findings", () => {
 
   it("queues nothing for revoked principals except the removal notice, and alerts admins", async () => {
     const { id, tasks } = await room();
+    await holdOutbox(id);
     const t = await offer(tasks);
     await api(OWNER, "DELETE", `${members(id)}/${LEAD.id}`);
     expect((await api(OWNER, "GET", `${tasks}/${t.id}`)).body.task.needs_attention).toBe(true);
@@ -1217,5 +1224,318 @@ describe("workspace listing", () => {
   it("/v1/me returns the caller from verified identity", async () => {
     expect((await api(LEAD, "GET", "/v1/me")).body).toMatchObject({ id: LEAD.id, org_id: "org_a", status: "active" });
     expect((await api(OWNER, "GET", "/v1/me")).body).toMatchObject({ id: OWNER.id, admin_orgs: ["org_a"] });
+  });
+});
+
+describe("inbox", () => {
+  const inboxStub = (who: string) => BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(who));
+  const fresh = async (org = "org_b"): Promise<Who> => {
+    const who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org };
+    await register(who);
+    return who;
+  };
+  /** Runs the alarm until nothing is due, so a test sees what delivery produced. */
+  const drain = async (id: string) => {
+    for (let i = 0; i < 20 && (await count(id, "outbox")) > 0; i++) await runDurableObjectAlarm(stub(id));
+    expect(await count(id, "outbox")).toBe(0);
+  };
+  const inbox = async (who: Who, query = "") => (await api(who, "GET", `/v1/inbox${query}`)).body;
+  /** A room with a new assignee from another organization, whose inbox starts empty apart from joining. */
+  const setup = async () => {
+    const { id, tasks } = await room();
+    const bob = await fresh();
+    expect((await admit(id, bob)).status).toBe(200);
+    await drain(id);
+    const joined = await inbox(bob);
+    if (joined.events.length) await api(bob, "POST", "/v1/inbox/ack", { up_to: joined.events.at(-1).seq });
+    return { id, tasks, bob };
+  };
+  const offerTo = async (tasks: string, bob: Who, title = "Secret plan") => (await api(LEAD, "POST", tasks, { title, instructions: "Hidden instructions", assignee: bob.id, reviewer: REVIEWER.id })).body;
+
+  it("delivers an offer as identifiers only, and a retried delivery stores it once", async () => {
+    const { id, tasks, bob } = await setup();
+    const task = await offerTo(tasks, bob);
+    await api(LEAD, "POST", `${tasks}/${task.id}/messages`, { body: "Hidden message" });
+    await drain(id);
+    const { events, unread, acked_seq } = await inbox(bob);
+    expect(events.map((e: any) => e.type)).toEqual(["task.offered", "task.message"]);
+    expect(Object.keys(events[0]).sort()).toEqual(["actor_id", "created_at", "event_id", "seq", "task_id", "type", "workspace_id"]);
+    expect(events[0]).toMatchObject({ workspace_id: id, task_id: task.id, actor_id: LEAD.id });
+    const raw = JSON.stringify(events);
+    for (const secret of ["Secret plan", "Hidden instructions", "Hidden message"]) expect(raw).not.toContain(secret);
+    expect(unread).toBe(2);
+    const deliver = () => inboxStub(bob.id).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id: events[0].event_id, workspace_id: id, type: "task.offered", actor_id: LEAD.id, task_id: task.id }) });
+    expect(await (await deliver()).json()).toEqual({ delivered: false });
+    expect((await inbox(bob)).events).toHaveLength(2);
+    expect((await inbox(bob)).acked_seq).toBe(acked_seq);
+  });
+
+  it("reading doesn't move the cursor, and only an ack does", async () => {
+    const { id, tasks, bob } = await setup();
+    for (let i = 0; i < 3; i++) await offerTo(tasks, bob, `t${i}`);
+    await drain(id);
+    const first = await inbox(bob);
+    const again = await inbox(bob);
+    expect(again.events).toEqual(first.events);
+    const [a, b, c] = first.events.map((e: any) => e.seq);
+    const acked = await api(bob, "POST", "/v1/inbox/ack", { up_to: a });
+    expect(acked.body).toEqual({ acked_seq: a, unread: 2 });
+    expect((await inbox(bob)).events.map((e: any) => e.seq)).toEqual([b, c]);
+    // An older point is still readable, and going backward changes nothing.
+    expect((await inbox(bob, `?after=${a - 1}`)).events.map((e: any) => e.seq)).toEqual([a, b, c]);
+    expect((await api(bob, "POST", "/v1/inbox/ack", { up_to: a - 1 })).body.acked_seq).toBe(a);
+    expect((await api(bob, "POST", "/v1/inbox/ack", { up_to: c + 1 })).code).toBe("ack_beyond_inbox");
+    expect((await api(bob, "POST", "/v1/inbox/ack", { up_to: c + 1 })).status).toBe(409);
+    for (const up_to of [-1, "1", 1.5, null]) expect((await api(bob, "POST", "/v1/inbox/ack", { up_to })).status).toBe(400);
+    expect((await inbox(bob)).acked_seq).toBe(a);
+  });
+
+  it("reading with ack takes one page, and can't skip unread events", async () => {
+    const { id, tasks, bob } = await setup();
+    for (let i = 0; i < 3; i++) await offerTo(tasks, bob, `t${i}`);
+    await drain(id);
+    const seqs = (await inbox(bob)).events.map((e: any) => e.seq);
+    const page = await inbox(bob, "?limit=2&ack=true");
+    expect(page.events.map((e: any) => e.seq)).toEqual(seqs.slice(0, 2));
+    expect(page).toMatchObject({ acked_seq: seqs[1], unread: 1 });
+    expect((await api(bob, "GET", `/v1/inbox?after=${seqs[2]}&ack=true`)).status).toBe(400);
+    expect((await inbox(bob)).acked_seq).toBe(seqs[1]);
+    // Rereading older events with ack never moves the cursor back.
+    expect((await inbox(bob, `?after=${seqs[0] - 1}&limit=1&ack=true`)).acked_seq).toBe(seqs[1]);
+    const empty = await inbox(bob, "?ack=true");
+    expect(empty.acked_seq).toBe(seqs[2]);
+    expect((await inbox(bob, "?ack=true")).events).toEqual([]);
+  });
+
+  it("limits pages, and refuses bad queries", async () => {
+    const { id, tasks, bob } = await setup();
+    for (let i = 0; i < 12; i++) await offerTo(tasks, bob, `t${i}`);
+    await drain(id);
+    expect((await inbox(bob)).events).toHaveLength(10);
+    expect((await inbox(bob, "?limit=50")).events).toHaveLength(12);
+    for (const query of ["limit=0", "limit=51", "limit=x", "after=-1", "after=x", "ack=maybe"]) expect((await api(bob, "GET", `/v1/inbox?${query}`)).status, query).toBe(400);
+  });
+
+  it("each caller only ever reaches its own inbox", async () => {
+    const { id, tasks, bob } = await setup();
+    await offerTo(tasks, bob);
+    await drain(id);
+    const other = await fresh("org_x");
+    expect((await inbox(other, `?principal=${bob.id}&agent=${bob.id}`)).events).toEqual([]);
+    expect((await api(other, "GET", `/v1/agents/${bob.id}/inbox`)).status).toBe(404);
+    expect((await api(orgAdmin("org_x"), "GET", `/v1/agents/${bob.id}/inbox`)).status).toBe(404);
+  });
+
+  it("an authorized person can look at an agent's inbox without moving its cursor", async () => {
+    const { id, tasks, bob } = await setup();
+    await offerTo(tasks, bob);
+    await drain(id);
+    const before = await inbox(bob);
+    const seen = await api(orgAdmin(bob.org), "GET", `/v1/agents/${bob.id}/inbox`);
+    expect(seen.body.events).toEqual(before.events);
+    expect((await api(orgAdmin(bob.org), "GET", `/v1/agents/${bob.id}/inbox?ack=true`)).status).toBe(400);
+    expect((await inbox(bob)).acked_seq).toBe(before.acked_seq);
+  });
+
+  it("identity and people's inboxes report what's unread", async () => {
+    const { id, tasks, bob } = await setup();
+    await offerTo(tasks, bob);
+    await drain(id);
+    expect((await api(bob, "GET", "/v1/me")).body).toMatchObject({ inbox_unread: 1, wake: null });
+    // A person named as reviewer hears about the submission the same way.
+    const reviewer: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: reviewer.id, kind: "person", org_id: "org_a", role: "admin" })).status).toBe(200);
+    const t = (await api(LEAD, "POST", tasks, { title: "x", instructions: "y", assignee: bob.id, reviewer: reviewer.id })).body;
+    expect((await api(bob, "POST", `${tasks}/${t.id}/accept`, { version: 1 })).status).toBe(200);
+    expect((await api(bob, "POST", `${tasks}/${t.id}/submit`, { version: 2, note: "done" })).status).toBe(200);
+    await drain(id);
+    const { events } = await inbox(reviewer, "?limit=50");
+    expect(events.filter((e: any) => e.task_id === t.id).map((e: any) => e.type)).toContain("task.submitted");
+    expect((await api(reviewer, "GET", "/v1/me")).body.inbox_unread).toBeGreaterThan(0);
+    const nobody = { id: `per_${crypto.randomUUID()}`, kind: "person" as const, org: "org_z" };
+    expect(await inbox(nobody)).toEqual({ events: [], acked_seq: 0, unread: 0, dropped: 0 });
+    expect((await api(nobody, "GET", "/v1/me")).body.inbox_unread).toBe(0);
+    expect((await api(nobody, "POST", "/v1/inbox/ack", { up_to: 0 })).body).toEqual({ acked_seq: 0, unread: 0 });
+    expect((await api(nobody, "POST", "/v1/inbox/ack", { up_to: 1 })).code).toBe("ack_beyond_inbox");
+  });
+
+  it("wake waits for Phase 4", async () => {
+    const bob = await fresh();
+    expect((await api(bob, "PUT", "/v1/inbox/wake", { url: "https://example.test" })).status).toBe(501);
+    expect((await api(bob, "DELETE", "/v1/inbox/wake")).status).toBe(501);
+  });
+
+  it("revocation leaves one removal notice, read or not, and nothing after it", async () => {
+    const { id, tasks, bob } = await setup();
+    const other = await room();
+    expect((await admit(other.id, bob)).status).toBe(200);
+    const kept = await offerTo(other.tasks, bob);
+    await drain(other.id);
+    const a = await offerTo(tasks, bob);
+    await offerTo(tasks, bob, "second");
+    await drain(id);
+    // One already acked, one not. Both go.
+    const before = (await inbox(bob, "?limit=50")).events.filter((e: any) => e.workspace_id === id);
+    await api(bob, "POST", "/v1/inbox/ack", { up_to: before[0].seq });
+    await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${bob.id}`);
+    await api(LEAD, "POST", `${tasks}/${a.id}/messages`, { body: "after removal" });
+    await offerTo(tasks, REVIEWER, "unrelated");
+    await drain(id);
+    const after = (await inbox(bob, `?after=0&limit=50`)).events;
+    const fromRoom = after.filter((e: any) => e.workspace_id === id);
+    expect(fromRoom.map((e: any) => e.type)).toEqual(["member.revoked"]);
+    expect(Object.keys(fromRoom[0]).sort()).toEqual(["actor_id", "created_at", "event_id", "seq", "task_id", "type", "workspace_id"]);
+    expect(fromRoom[0].task_id).toBeNull();
+    // Another room's events are untouched.
+    expect(after.some((e: any) => e.task_id === kept.id)).toBe(true);
+  });
+
+  it("a global disconnect removes the agent's room events too", async () => {
+    const { id, tasks, bob } = await setup();
+    await offerTo(tasks, bob);
+    await drain(id);
+    expect((await api(orgAdmin(bob.org), "POST", `/v1/agents/${bob.id}/disconnect`)).status).toBe(200);
+    await drain(id);
+    const seen = await api(orgAdmin(bob.org), "GET", `/v1/agents/${bob.id}/inbox?limit=50`);
+    expect(seen.body.events.filter((e: any) => e.workspace_id === id).map((e: any) => e.type)).toEqual(["member.revoked"]);
+    expect((await api(bob, "GET", "/v1/inbox")).code).toBe("agent_disconnected");
+  });
+
+  it("a failed delivery retries in order, without holding up anyone else", async () => {
+    const { id, tasks, bob } = await setup();
+    const principalSql = (who: string, statement: string) => runInDurableObject(inboxStub(who), (_: any, state: any) => void state.storage.sql.exec(statement));
+    await holdOutbox(id);
+    const carol = await fresh("org_c");
+    expect((await admit(id, carol)).status).toBe(200);
+    await principalSql(bob.id, "CREATE TABLE test_fail_deliver (x)");
+    const first = await offerTo(tasks, bob, "first");
+    const second = await offerTo(tasks, bob, "second");
+    const toCarol = await offerTo(tasks, carol, "carol");
+    await releaseOutbox(id);
+    await runDurableObjectAlarm(stub(id));
+    expect((await inbox(bob)).events).toEqual([]);
+    expect((await inbox(carol, "?limit=50")).events.some((e: any) => e.task_id === toCarol.id)).toBe(true);
+    const row = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT attempts, next_attempt_at FROM outbox WHERE recipient_principal_id = ? AND attempts > 0", bob.id).toArray() as any[]);
+    expect(row).toHaveLength(1);
+    expect(row[0].next_attempt_at).toBeGreaterThan(Date.now());
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).not.toBeNull();
+    // Still failing: another pass before the wait is over doesn't try again.
+    await runDurableObjectAlarm(stub(id));
+    expect((await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT max(attempts) AS n FROM outbox").one().n))).toBe(1);
+    await principalSql(bob.id, "DROP TABLE test_fail_deliver");
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE outbox SET next_attempt_at = 0"));
+    await drain(id);
+    expect((await inbox(bob)).events.map((e: any) => e.task_id)).toEqual([first.id, second.id]);
+  });
+
+  it("delivery survives the object restarting", async () => {
+    const { id, tasks, bob } = await setup();
+    await holdOutbox(id);
+    const task = await offerTo(tasks, bob);
+    await releaseOutbox(id);
+    expect(await count(id, "outbox")).toBeGreaterThan(0);
+    await runInDurableObject(stub(id), (_: any, state: any) => { try { state.abort("restart"); } catch {} }).catch(() => {});
+    await drain(id);
+    expect((await inbox(bob)).events.map((e: any) => e.task_id)).toEqual([task.id]);
+  });
+
+  describe("limits", () => {
+    const seed = (who: string, count_: number, age: number) => runInDurableObject(inboxStub(who), (_: any, state: any) => {
+      const sql = state.storage.sql;
+      const at = Date.now() - age;
+      sql.exec(`CREATE TABLE IF NOT EXISTS inbox_event (seq INTEGER PRIMARY KEY, event_id TEXT UNIQUE NOT NULL, workspace_id TEXT NOT NULL, type TEXT NOT NULL, task_id TEXT, actor_id TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+      sql.exec(`CREATE TABLE IF NOT EXISTS inbox_state (id INTEGER PRIMARY KEY CHECK (id = 1), acked_seq INTEGER NOT NULL, last_seq INTEGER NOT NULL, dropped INTEGER NOT NULL)`);
+      sql.exec(`INSERT OR IGNORE INTO inbox_state VALUES (1, 0, 0, 0)`);
+      sql.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) INSERT INTO inbox_event SELECT i, 'seed-' || i, 'ws_seed', 'task.offered', NULL, 'agt_x', ? FROM n`, count_, at);
+      sql.exec(`UPDATE inbox_state SET last_seq = ?`, count_);
+    });
+    const deliverOne = (who: string, event_id = crypto.randomUUID()) => inboxStub(who).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id, workspace_id: "ws_seed", type: "task.offered", actor_id: "agt_x" }) });
+    const DAY = 86_400_000;
+
+    it("a full inbox drops the oldest acked event first, uncounted, then the oldest unread, counted", async () => {
+      const bob = await fresh();
+      await seed(bob.id, 10_000, 1000);
+      await api(bob, "POST", "/v1/inbox/ack", { up_to: 1 });
+      expect((await deliverOne(bob.id)).status).toBe(200);
+      let page = await inbox(bob, "?after=0&limit=1");
+      expect(page.events[0].seq).toBe(2);
+      expect(page.dropped).toBe(0);
+      expect(page.unread).toBe(10_000);
+      expect((await deliverOne(bob.id)).status).toBe(200);
+      page = await inbox(bob, "?after=0&limit=1");
+      expect(page.events[0].seq).toBe(3);
+      expect(page.dropped).toBe(1);
+      expect(page.unread).toBe(10_000);
+    });
+
+    it("unread events last 30 days and count as lost, and acked ones last 7", async () => {
+      const bob = await fresh();
+      await seed(bob.id, 3, 8 * DAY);
+      await api(bob, "POST", "/v1/inbox/ack", { up_to: 1 });
+      // Past 7 days and acked: gone, even with an old `after`.
+      expect((await inbox(bob, "?after=0")).events.map((e: any) => e.seq)).toEqual([2, 3]);
+      // Reads hide an expired acked event before anything has cleared it.
+      const idle = await fresh();
+      await seed(idle.id, 2, 1000);
+      await api(idle, "POST", "/v1/inbox/ack", { up_to: 1 });
+      await runInDurableObject(inboxStub(idle.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE inbox_event SET created_at = ?", Date.now() - 8 * DAY));
+      expect((await inbox(idle, "?after=0")).events.map((e: any) => e.seq)).toEqual([2]);
+      const old = await fresh();
+      await seed(old.id, 2, 31 * DAY);
+      expect((await inbox(old)).events).toEqual([]);
+      expect((await inbox(old)).unread).toBe(0);
+      expect((await api(old, "GET", "/v1/me")).body.inbox_unread).toBe(0);
+      expect((await deliverOne(old.id)).status).toBe(200);
+      const after = await inbox(old);
+      expect(after.dropped).toBe(2);
+      expect(after.events).toHaveLength(1);
+    });
+
+    it("keeps numbering after events go, so an ack can't reuse a sequence", async () => {
+      const bob = await fresh();
+      await seed(bob.id, 2, 31 * DAY);
+      expect((await deliverOne(bob.id)).status).toBe(200);
+      expect((await inbox(bob)).events[0].seq).toBe(3);
+      expect((await api(bob, "POST", "/v1/inbox/ack", { up_to: 3 })).status).toBe(200);
+    });
+  });
+});
+
+describe("agent token replay", () => {
+  const spend = async (who: Who, jti: string, exp = Math.floor(Date.now() / 1000) + 60) =>
+    SELF.fetch("https://api.internal/v1/me", { headers: { "x-podster-assertion": await assertion(who, { claims: { agent_jti: jti, agent_jti_exp: exp } }) } });
+  const newAgent = async () => {
+    const who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_b" };
+    await register(who);
+    return who;
+  };
+
+  it("spends each token once, even concurrently, and separately per agent", async () => {
+    const [a, b] = [await newAgent(), await newAgent()];
+    const results = await Promise.all(Array.from({ length: 8 }, () => spend(a, "plugin:one")));
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    expect(results.filter((r) => r.status === 401)).toHaveLength(7);
+    const refused = await (results.find((r) => r.status === 401))!.json<any>();
+    expect(refused.error.code).toBe("jwt_replay");
+    expect((await spend(a, "plugin:two")).status).toBe(200);
+    expect((await spend(b, "plugin:one")).status).toBe(200);
+  });
+
+  it("requests with no token to spend aren't limited", async () => {
+    const a = await newAgent();
+    for (let i = 0; i < 2; i++) expect((await api(a, "GET", "/v1/me")).status).toBe(200);
+  });
+
+  it("a refused agent doesn't spend its token, and old records clear", async () => {
+    const a = await newAgent();
+    const principalOf = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(a.id));
+    const stale = await assertion({ ...a, gen: 99 } as Who, { claims: { agent_jti: "plugin:held", agent_jti_exp: Math.floor(Date.now() / 1000) + 60 } });
+    expect((await SELF.fetch("https://api.internal/v1/me", { headers: { "x-podster-assertion": stale } })).status).toBe(403);
+    expect((await spend(a, "plugin:held")).status).toBe(200);
+    expect((await spend(a, "plugin:gone", Math.floor(Date.now() / 1000) - 10)).status).toBe(200);
+    expect((await spend(a, "plugin:next")).status).toBe(200);
+    const left = await runInDurableObject(principalOf, (_: any, state: any) => state.storage.sql.exec("SELECT key FROM seen_jti ORDER BY key").toArray().map((r: any) => r.key));
+    expect(left).toEqual(["plugin:held", "plugin:next"]);
+    expect((await spend(a, "x".repeat(600))).status).toBe(403);
   });
 });

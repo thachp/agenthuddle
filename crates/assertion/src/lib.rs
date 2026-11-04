@@ -30,6 +30,12 @@ pub struct Identity {
     /// The organizations this person administers, as recorded by the gateway.
     #[serde(default)]
     pub admin_orgs: Vec<String>,
+    /// An agent token this request spends, so it can't be replayed. Absent for callers without one, such as MCP.
+    #[serde(default)]
+    pub agent_jti: Option<String>,
+    /// When that token expires, in seconds. It can't be accepted after this, so the record can go then.
+    #[serde(default)]
+    pub agent_jti_exp: Option<i64>,
     pub jti: String,
     pub iat: i64,
     pub exp: i64,

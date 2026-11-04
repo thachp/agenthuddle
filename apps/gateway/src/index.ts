@@ -132,15 +132,15 @@ async function runCapability(env: Env, identity: Identity, capability: Capabilit
   return { status: response.status, body: (await response.json()) as any };
 }
 
-/** The plugin's default replay guard doesn't span requests here. Each agent token is consumed atomically instead. */
-async function consumeJti(env: Env, agentId: string, authorization: string | null | undefined) {
+/**
+ * The plugin's default replay guard doesn't span requests here, so the agent's Principal spends each token, in the same
+ * call that checks its connection. The token is only named here. Without an ID it can't be tracked, so it's refused.
+ */
+function spentToken(pluginAgent: string, authorization: string | null | undefined) {
   const { jti, exp } = decodeJwt(authorization?.replace(/^Bearer\s+/i, "") ?? "");
-  if (!jti) return false;
-  const now = Math.floor(Date.now() / 1000);
-  const result = await env.DB.prepare(`INSERT OR IGNORE INTO seen_jti (key, expires_at) VALUES (?, ?)`).bind(`${agentId}:${jti}`, (exp ?? now) + 30).run();
-  // Expired entries can't match anything, so about 1 call in 100 clears them.
-  if (Math.random() < 0.01) await env.DB.prepare(`DELETE FROM seen_jti WHERE expires_at < ?`).bind(now).run();
-  return result.meta.changes === 1;
+  if (!jti) return null;
+  // Slightly past expiry, so a token can't be replayed at the edge of the plugin's clock tolerance.
+  return { key: `${pluginAgent}:${jti}`, expiresAt: (exp ?? Math.floor(Date.now() / 1000)) + 30 };
 }
 
 export function createAuth(env: Env) {
@@ -189,10 +189,11 @@ export function createAuth(env: Env) {
         onExecute: async ({ ctx, capability, arguments: args, agentSession }) => {
           const definition = CAPABILITIES.find((c) => c.name === capability);
           if (!definition) throw new APIError("BAD_REQUEST", { message: "unknown_capability" });
-          if (!(await consumeJti(env, agentSession.agent.id, ctx.headers?.get("authorization")))) throw new APIError("UNAUTHORIZED", { message: "jwt_replay" });
+          const spends = spentToken(agentSession.agent.id, ctx.headers?.get("authorization"));
+          if (!spends) throw new APIError("UNAUTHORIZED", { message: "jwt_replay" });
           let identity: Identity;
           try {
-            identity = await resolveAgent(env, "agent_auth", agentSession.agent.id);
+            identity = { ...(await resolveAgent(env, "agent_auth", agentSession.agent.id)), spends } as Identity;
           } catch (error) {
             if (error instanceof AgentRefused) throw new APIError("FORBIDDEN", { message: error.message });
             throw error;
