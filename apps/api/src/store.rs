@@ -18,14 +18,14 @@ CREATE TABLE task (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NUL
   needs_reviewer INTEGER NOT NULL DEFAULT 0, needs_requester INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE INDEX task_status ON task (status);
 CREATE TABLE submission (task_id TEXT NOT NULL, submission_no INTEGER NOT NULL, task_version INTEGER NOT NULL, note TEXT, commit_sha TEXT,
-  submitted_by TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (task_id, submission_no));
+  submitted_by TEXT NOT NULL, submitted_org TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (task_id, submission_no));
 CREATE TABLE artifact (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, submission_no INTEGER NOT NULL, uri TEXT NOT NULL, label TEXT NOT NULL,
   submitted_by TEXT NOT NULL, submitted_org TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX artifact_task ON artifact (task_id, submission_no);
 CREATE TABLE message (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, task_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_org TEXT NOT NULL,
   body TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX message_task ON message (task_id, seq);
-CREATE TABLE event (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, type TEXT NOT NULL, actor_id TEXT NOT NULL, task_id TEXT,
+CREATE TABLE event (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, type TEXT NOT NULL, actor_id TEXT NOT NULL, actor_org TEXT, task_id TEXT,
   reason TEXT, prior_status TEXT, new_status TEXT, task_version INTEGER, created_at INTEGER NOT NULL);
 CREATE INDEX event_task ON event (task_id, seq);
 CREATE TABLE outbox (event_id TEXT NOT NULL, recipient_principal_id TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL,
@@ -212,8 +212,25 @@ pub fn record_event(
     now: i64,
 ) -> R<()> {
     let event_id = format!("evt_{}", uuid::Uuid::new_v4().simple());
-    exec(sql, "INSERT INTO event (id, type, actor_id, task_id, reason, prior_status, new_status, task_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![
-        event_id.as_str().into(), kind.into(), actor.into(), task_id.map_or(V::Null, V::from), transition.reason.map_or(V::Null, V::from),
+    let actor_org = {
+        let room = rows(
+            sql,
+            "SELECT owner_person_id, owner_org_id FROM workspace",
+            vec![],
+        )?;
+        match room.first() {
+            Some(r) if r["owner_person_id"].as_str() == Some(actor) => text(&r["owner_org_id"]),
+            _ => rows(
+                sql,
+                "SELECT org_id FROM member WHERE principal_id = ?",
+                vec![actor.into()],
+            )?
+            .first()
+            .and_then(|m| text(&m["org_id"])),
+        }
+    };
+    exec(sql, "INSERT INTO event (id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, task_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![
+        event_id.as_str().into(), kind.into(), actor.into(), opt(&actor_org), task_id.map_or(V::Null, V::from), transition.reason.map_or(V::Null, V::from),
         transition.prior_status.map_or(V::Null, V::from), transition.new_status.map_or(V::Null, V::from),
         transition.task_version.map_or(V::Null, |v| V::from(v as i64)), now.into(),
     ])?;

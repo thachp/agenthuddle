@@ -969,3 +969,79 @@ fn finishing_a_task_clears_its_attention_flags() {
     .task;
     assert!(!done.needs_attention());
 }
+
+#[test]
+fn references_are_short_and_links_are_clean() {
+    let long = "x".repeat(MAX_REFERENCE_BYTES + 1);
+    let submit = Command::Submit {
+        version: 5,
+        artifacts: vec![],
+        note: Some("n".into()),
+        commit_sha: Some(long.clone()),
+    };
+    assert_eq!(
+        decide(&task(Accepted), "asg", submit, &Observed::default()).unwrap_err(),
+        CoreError::InvalidArgument("commit_sha")
+    );
+    let verify = Command::Verify {
+        submission_no: 2,
+        commit_sha: Some(long.clone()),
+    };
+    assert_eq!(
+        decide(&task(Submitted), "rev", verify, &Observed::default()).unwrap_err(),
+        CoreError::InvalidArgument("commit_sha")
+    );
+    let new = NewTask {
+        id: "t".into(),
+        title: "x".into(),
+        instructions: "y".into(),
+        acceptance_criteria: None,
+        assignee: None,
+        reviewer: None,
+        due_at: None,
+        follow_up_of: Some(long),
+        has_linked_repository: false,
+    };
+    assert_eq!(
+        decide_create("req", new).unwrap_err(),
+        CoreError::InvalidArgument("follow_up_of")
+    );
+    for bad in [
+        "https://",
+        "https://u:p@evil.test/",
+        "https://a b",
+        "https://a\nb",
+        "https:///path",
+    ] {
+        let artifact = Artifact {
+            uri: bad.into(),
+            label: "x".into(),
+        };
+        let cmd = Command::Submit {
+            version: 5,
+            artifacts: vec![artifact],
+            note: None,
+            commit_sha: None,
+        };
+        assert_eq!(
+            decide(&task(Accepted), "asg", cmd, &Observed::default()).unwrap_err(),
+            CoreError::InvalidArgument("uri"),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn a_replaced_assignee_hears_about_it_as_a_reassignment() {
+    let cmd = Command::Assign {
+        version: 5,
+        assignee: "asg2".into(),
+    };
+    let events = decide(&task(Offered), "req", cmd, &Observed::default())
+        .unwrap()
+        .events;
+    assert_eq!(events[0].kind, EventKind::TaskOffered);
+    assert!(events[0].recipients.contains("asg2") && !events[0].recipients.contains("asg"));
+    assert_eq!(events[1].kind, EventKind::TaskReassigned);
+    assert!(events[1].recipients.contains("asg"));
+}

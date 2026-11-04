@@ -176,6 +176,11 @@ fn rejects_missing_issuer_and_bad_shapes() {
     let mut person = with("kind", json!("person"));
     person.as_object_mut().unwrap().remove("gen");
     assert!(verify(&sign(&person), &keys(), NOW).is_ok());
+    let null_crit = json!({ "alg": "EdDSA", "kid": "k1", "crit": null });
+    assert_eq!(
+        verify(&sign_raw(&null_crit, &claims(), &key(1)), &keys(), NOW),
+        Err(AssertionError::UnsupportedAlgorithm)
+    );
     let crit = json!({ "alg": "EdDSA", "kid": "k1", "crit": ["x"], "x": 1 });
     assert_eq!(
         verify(&sign_raw(&crit, &claims(), &key(1)), &keys(), NOW),

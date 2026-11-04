@@ -46,7 +46,6 @@ pub enum AssertionError {
 struct Header {
     alg: String,
     kid: Option<String>,
-    crit: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -92,10 +91,13 @@ pub fn verify(token: &str, keys: &KeySet, now: i64) -> Result<Identity, Assertio
             .map_err(|_| AssertionError::Malformed)
     };
 
+    let raw_header = decode(header)?;
     let parsed: Header =
-        serde_json::from_slice(&decode(header)?).map_err(|_| AssertionError::Malformed)?;
+        serde_json::from_slice(&raw_header).map_err(|_| AssertionError::Malformed)?;
+    let fields: serde_json::Value =
+        serde_json::from_slice(&raw_header).map_err(|_| AssertionError::Malformed)?;
     // This verifier understands no critical extensions, so RFC 7515 requires refusing any.
-    if parsed.crit.is_some() {
+    if fields.get("crit").is_some() {
         return Err(AssertionError::UnsupportedAlgorithm);
     }
     if parsed.alg != "EdDSA" {

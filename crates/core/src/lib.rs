@@ -15,6 +15,7 @@ pub const MAX_REASON_BYTES: usize = 4 * 1024;
 pub const MAX_NOTE_BYTES: usize = 16 * 1024;
 pub const MAX_URI_BYTES: usize = 2 * 1024;
 pub const MAX_LABEL_BYTES: usize = 256;
+pub const MAX_REFERENCE_BYTES: usize = 128;
 
 pub type PrincipalId = String;
 
@@ -177,6 +178,7 @@ pub struct Observed {
 pub enum EventKind {
     TaskCreated,
     TaskOffered,
+    TaskReassigned,
     TaskUpdated,
     TaskReviewerChanged,
     TaskRequesterChanged,
@@ -197,6 +199,7 @@ impl EventKind {
         match self {
             EventKind::TaskCreated => "task.created",
             EventKind::TaskOffered => "task.offered",
+            EventKind::TaskReassigned => "task.reassigned",
             EventKind::TaskUpdated => "task.updated",
             EventKind::TaskReviewerChanged => "task.reviewer_changed",
             EventKind::TaskRequesterChanged => "task.requester_changed",
@@ -305,6 +308,17 @@ fn event<'a>(
     }
 }
 
+/// Short references such as commit hashes and task IDs.
+fn require_reference(value: &Option<String>, field: &'static str) -> Result<(), CoreError> {
+    if value
+        .as_ref()
+        .is_some_and(|v| v.is_empty() || v.len() > MAX_REFERENCE_BYTES)
+    {
+        return Err(CoreError::InvalidArgument(field));
+    }
+    Ok(())
+}
+
 fn require_criteria(criteria: &Option<String>) -> Result<(), CoreError> {
     if criteria
         .as_ref()
@@ -317,7 +331,17 @@ fn require_criteria(criteria: &Option<String>) -> Result<(), CoreError> {
 
 /// Artifact links must be HTTPS, because a dashboard will render them.
 fn require_artifact(artifact: &Artifact) -> Result<(), CoreError> {
-    if !artifact.uri.starts_with("https://") || artifact.uri.len() > MAX_URI_BYTES {
+    let authority = artifact
+        .uri
+        .strip_prefix("https://")
+        .map(|rest| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    let valid = authority.is_some_and(|host| !host.is_empty() && !host.contains('@'))
+        && artifact.uri.len() <= MAX_URI_BYTES
+        && !artifact
+            .uri
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control());
+    if !valid {
         return Err(CoreError::InvalidArgument("uri"));
     }
     require_text(&artifact.label, "label", MAX_LABEL_BYTES)
@@ -328,6 +352,7 @@ pub fn decide_create(actor: &str, new: NewTask) -> Result<Decision, CoreError> {
     require_text(&new.title, "title", MAX_TITLE_BYTES)?;
     require_text(&new.instructions, "instructions", MAX_INSTRUCTIONS_BYTES)?;
     require_criteria(&new.acceptance_criteria)?;
+    require_reference(&new.follow_up_of, "follow_up_of")?;
     let reviewer = new.reviewer.unwrap_or_else(|| actor.to_string());
     if new.assignee.as_deref() == Some(reviewer.as_str()) {
         return Err(CoreError::SelfSignOff);
@@ -464,11 +489,11 @@ pub fn decide(
             }
             next.status = TaskStatus::Offered;
             next.assignee = Some(assignee);
-            vec![event(
-                EventKind::TaskOffered,
-                actor,
-                next.assignee.iter().chain(&task.assignee),
-            )]
+            let mut drafts = vec![event(EventKind::TaskOffered, actor, &next.assignee)];
+            if task.assignee.is_some() {
+                drafts.push(event(EventKind::TaskReassigned, actor, &task.assignee));
+            }
+            drafts
         }
         Command::Accept { version } => {
             require_version(task, version)?;
@@ -517,6 +542,7 @@ pub fn decide(
             if artifacts.is_empty() && !has_note {
                 return Err(CoreError::InvalidArgument("artifacts"));
             }
+            require_reference(&commit_sha, "commit_sha")?;
             if task.has_linked_repository && commit_sha.is_none() {
                 return Err(CoreError::InvalidArgument("commit_sha"));
             }
@@ -561,6 +587,7 @@ pub fn decide(
             submission_no,
             commit_sha,
         } => {
+            require_reference(&commit_sha, "commit_sha")?;
             require_status(task, &[TaskStatus::Submitted])?;
             if task.assignee.as_deref() == Some(actor) {
                 return Err(CoreError::SelfSignOff);

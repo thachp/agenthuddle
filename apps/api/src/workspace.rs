@@ -108,6 +108,7 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
     let kind = parse_kind(&identity.kind);
     if kind == PrincipalKind::Person
         && room["owner_person_id"].as_str() == Some(identity.id.as_str())
+        && room["owner_org_id"].as_str() == Some(identity.org.as_str())
     {
         return Ok(Participant {
             caller: Caller {
@@ -125,9 +126,7 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
     };
     // An identity that doesn't match the stored one learns nothing, including whether it was revoked.
     let org = text(&member["org_id"]).unwrap_or_default();
-    if member["kind"].as_str() != Some(identity.kind.as_str())
-        || (kind == PrincipalKind::Agent && org != identity.org)
-    {
+    if member["kind"].as_str() != Some(identity.kind.as_str()) || org != identity.org {
         return Err(ApiError::workspace_not_found());
     }
     if !member["revoked_at"].is_null() {
@@ -359,9 +358,9 @@ fn handle_task_command(
         .map_err(|e| ApiError::from_core(&e))?;
     save_task(sql, &decision.task, now)?;
     if let Some((artifacts, note)) = submission {
-        exec(sql, "INSERT INTO submission (task_id, submission_no, task_version, note, commit_sha, submitted_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", vec![
+        exec(sql, "INSERT INTO submission (task_id, submission_no, task_version, note, commit_sha, submitted_by, submitted_org, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
             task_id.into(), i64::from(decision.task.submission_no).into(), (decision.task.version as i64).into(), opt(&note),
-            opt(&decision.task.submission_commit), caller.id.as_str().into(), now.into(),
+            opt(&decision.task.submission_commit), caller.id.as_str().into(), who.org.as_str().into(), now.into(),
         ])?;
         for artifact in artifacts {
             exec(sql, "INSERT INTO artifact (id, task_id, submission_no, uri, label, submitted_by, submitted_org, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
@@ -447,6 +446,21 @@ fn handle_send_message(
     )
 }
 
+/// Refuses an access change based on an out-of-date view, so a stale form can't restore revoked access.
+fn require_policy_version(sql: &SqlStorage, body: &Value) -> R<()> {
+    let expected = body
+        .get("policy_version")
+        .and_then(Value::as_i64)
+        .ok_or_else(ApiError::invalid_argument)?;
+    let room = rows(sql, "SELECT policy_version FROM workspace", vec![])?;
+    if room.first().map_or(0, |r| int(&r["policy_version"])) != expected {
+        return Err(ApiError::from_core(
+            &podster_core::CoreError::VersionConflict,
+        ));
+    }
+    Ok(())
+}
+
 /// Records an access change and moves the room's policy version, in the caller's transaction.
 fn audit(
     sql: &SqlStorage,
@@ -482,6 +496,7 @@ fn is_owner(sql: &SqlStorage, id: &str) -> R<bool> {
 /// own command. Invitations and agent-owner consent arrive with Phase 2, so this is owner and admin only.
 fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    require_policy_version(sql, body)?;
     let principal = required(body, "principal_id")?;
     let kind = required(body, "kind")?;
     let org = required(body, "org_id")?;
@@ -510,11 +525,11 @@ fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) 
         if prior["revoked_at"].is_null() {
             return Err(ApiError::already_member());
         }
-        // A returning participant keeps their identity, so nobody is re-added as someone else.
+        // Correcting a revoked participant's identity is the owner's alone, so an admin can't re-add someone as someone else.
         if prior["kind"].as_str() != Some(kind.as_str())
             || prior["org_id"].as_str() != Some(org.as_str())
         {
-            return Err(ApiError::invalid_argument());
+            ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
         }
     }
     let active = rows(
@@ -522,25 +537,29 @@ fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) 
         "SELECT count(*) AS n FROM member WHERE revoked_at IS NULL",
         vec![],
     )?;
-    if active.first().map_or(0, |r| int(&r["n"])) >= MAX_MEMBERS {
+    // The owner counts toward the limit.
+    if active.first().map_or(0, |r| int(&r["n"])) + 1 >= MAX_MEMBERS {
         return Err(ApiError::limit_exceeded());
     }
     let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
         v.as_bool().ok_or_else(ApiError::invalid_argument)
     })?;
     exec(sql, "INSERT INTO member (principal_id, kind, org_id, role, guest_can_create, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (principal_id) DO UPDATE SET role = excluded.role, guest_can_create = excluded.guest_can_create,
+      ON CONFLICT (principal_id) DO UPDATE SET kind = excluded.kind, org_id = excluded.org_id, role = excluded.role, guest_can_create = excluded.guest_can_create,
         added_by = excluded.added_by, added_at = excluded.added_at, revoked_at = NULL, revocation_reason = NULL", vec![
         principal.as_str().into(), kind.as_str().into(), org.as_str().into(), role.as_str().into(), flag(guest_can_create), caller.id.as_str().into(), now.into(),
     ])?;
-    let prior_json = prior.map(|p| json!({ "role": p["role"], "revoked": true }).to_string());
+    let prior_json = prior.map(|p| {
+        json!({ "role": p["role"], "kind": p["kind"], "org_id": p["org_id"], "revoked": true })
+            .to_string()
+    });
     audit(
         sql,
         caller,
         "member.added",
         &principal,
         prior_json,
-        Some(json!({ "role": role, "guest_can_create": guest_can_create }).to_string()),
+        Some(json!({ "role": role, "kind": kind, "org_id": org, "guest_can_create": guest_can_create }).to_string()),
         now,
     )?;
     record_event(
@@ -564,6 +583,7 @@ fn handle_change_role(
     now: i64,
 ) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    require_policy_version(sql, body)?;
     let role = required(body, "role")?;
     if !["admin", "member", "guest"].contains(&role.as_str()) {
         return Err(ApiError::invalid_argument());
@@ -576,9 +596,10 @@ fn handle_change_role(
     if role == "admin" || member["role"].as_str() == Some("admin") {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
     }
-    let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
-        v.as_bool().ok_or_else(ApiError::invalid_argument)
-    })?;
+    let guest_can_create = match body.get("guest_can_create") {
+        None => int(&member["guest_can_create"]) != 0,
+        Some(v) => v.as_bool().ok_or_else(ApiError::invalid_argument)?,
+    };
     exec(
         sql,
         "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
@@ -611,8 +632,15 @@ fn handle_change_role(
 }
 
 /// Revokes a participant. Later requests fail, and the departure rules apply to their tasks.
-fn handle_revoke_member(sql: &SqlStorage, caller: &Caller, principal: &str, now: i64) -> R<Value> {
+fn handle_revoke_member(
+    sql: &SqlStorage,
+    caller: &Caller,
+    principal: &str,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    require_policy_version(sql, body)?;
     let found = rows(
         sql,
         "SELECT role FROM member WHERE principal_id = ? AND revoked_at IS NULL",
@@ -686,7 +714,7 @@ mod queries {
     pub fn get_workspace(sql: &SqlStorage, caller: &Caller) -> R<Value> {
         let room = rows(
             sql,
-            "SELECT id, name, owner_person_id, status FROM workspace",
+            "SELECT id, name, owner_person_id, status, policy_version FROM workspace",
             vec![],
         )?;
         let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
@@ -696,7 +724,7 @@ mod queries {
             rows(sql, "SELECT principal_id, kind, org_id, role FROM member WHERE revoked_at IS NULL ORDER BY added_at", vec![])?
         };
         Ok(
-            json!({ "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"], "members": members }),
+            json!({ "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"], "policy_version": room["policy_version"], "members": members }),
         )
     }
 
@@ -744,7 +772,7 @@ mod queries {
             "from": { "id": a["submitted_by"], "org": a["submitted_org"] },
             "external": a["submitted_org"].as_str() != Some(who.org.as_str()), "created_at": a["created_at"],
         })).collect();
-        let submissions = rows(sql, "SELECT submission_no, task_version, note, commit_sha, submitted_by, created_at FROM submission WHERE task_id = ? ORDER BY submission_no", vec![id.into()])?;
+        let submissions = rows(sql, "SELECT submission_no, task_version, note, commit_sha, submitted_by, submitted_org, created_at FROM submission WHERE task_id = ? ORDER BY submission_no", vec![id.into()])?;
         let mut messages = rows(
             sql,
             "SELECT * FROM message WHERE task_id = ? ORDER BY seq DESC LIMIT 20",
@@ -752,10 +780,28 @@ mod queries {
         )?;
         messages.reverse();
         let messages: Vec<Value> = messages.iter().map(|m| message_json(m, &who.org)).collect();
-        let history = rows(sql, "SELECT seq, id, type, actor_id, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ? ORDER BY seq", vec![id.into()])?;
-        Ok(
-            json!({ "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "messages": messages, "history": history }),
-        )
+        let history = rows(sql, "SELECT seq, id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ? ORDER BY seq", vec![id.into()])?;
+        let marked = |row: &Value, id: &str, org: &str| -> Value {
+            let mut out = row.clone();
+            if let Some(map) = out.as_object_mut() {
+                map.insert("from".into(), json!({ "id": row[id], "org": row[org] }));
+                map.insert(
+                    "external".into(),
+                    json!(row[org].as_str() != Some(who.org.as_str())),
+                );
+            }
+            out
+        };
+        let submissions: Vec<Value> = submissions
+            .iter()
+            .map(|r| marked(r, "submitted_by", "submitted_org"))
+            .collect();
+        let history: Vec<Value> = history
+            .iter()
+            .map(|r| marked(r, "actor_id", "actor_org"))
+            .collect();
+        Ok(json!({
+            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "messages": messages, "history": history }))
     }
 
     pub fn list_messages(sql: &SqlStorage, who: &Participant, id: &str, url: &Url) -> R<Value> {
@@ -775,14 +821,19 @@ mod queries {
     pub fn list_events(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ReadAuditLog))?;
         let after = query_int(url, "after")?.unwrap_or(0);
-        let events = rows(sql, "SELECT seq, id, type, actor_id, task_id, reason, prior_status, new_status, task_version, created_at FROM event WHERE seq > ? ORDER BY seq LIMIT ?", vec![after.into(), PAGE_SIZE.into()])?;
+        let events = rows(sql, "SELECT seq, id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, task_version, created_at FROM event WHERE seq > ? ORDER BY seq LIMIT ?", vec![after.into(), PAGE_SIZE.into()])?;
         Ok(json!({ "events": events }))
     }
 
-    pub fn list_audit(sql: &SqlStorage, caller: &Caller) -> R<Value> {
+    pub fn list_audit(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ReadAuditLog))?;
-        let audit = rows(sql, "SELECT id, actor_id, actor_kind, action, target_id, outcome, reason_code, prior_json, new_json, policy_version, created_at FROM audit_event ORDER BY created_at DESC, policy_version DESC LIMIT ?", vec![PAGE_SIZE.into()])?;
-        Ok(json!({ "audit": audit }))
+        let after = query_int(url, "after")?.unwrap_or(0);
+        let audit = rows(sql, "SELECT id, actor_id, actor_kind, action, target_id, outcome, reason_code, prior_json, new_json, policy_version, created_at
+            FROM audit_event WHERE policy_version > ? ORDER BY policy_version LIMIT ?", vec![after.into(), PAGE_SIZE.into()])?;
+        let next = (audit.len() as i64 == PAGE_SIZE)
+            .then(|| audit.last().map(|r| int(&r["policy_version"])))
+            .flatten();
+        Ok(json!({ "audit": audit, "next_cursor": next }))
     }
 }
 
@@ -930,7 +981,7 @@ impl Workspace {
                 ["tasks", id] => queries::get_task(&sql, &who, id),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
-                ["audit"] => queries::list_audit(&sql, &who.caller),
+                ["audit"] => queries::list_audit(&sql, &who.caller, &url),
                 _ => Err(ApiError::not_found()),
             };
         }
@@ -979,7 +1030,7 @@ impl Workspace {
             }
             (Method::Delete, ["members", _]) => {
                 self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_revoke_member(sql, &who.caller, &target, now)
+                    handle_revoke_member(sql, &who.caller, &target, &body, now)
                 })
             }
             _ => Err(ApiError::not_found()),

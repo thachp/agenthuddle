@@ -40,8 +40,9 @@ paths:
           application/json:
             schema:
               type: object
-              required: [principal_id, kind, org_id, role]
+              required: [policy_version, principal_id, kind, org_id, role]
               properties:
+                policy_version: { type: integer }
                 principal_id: { type: string }
                 kind: { type: string, enum: [person, agent] }
                 org_id: { type: string }
@@ -55,6 +56,7 @@ paths:
       tags: [commands]
       summary: Revoke a participant and apply the departure rules
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/members/{principal}/role:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: principal, in: path, required: true, schema: { type: string } }]
@@ -63,11 +65,11 @@ paths:
       tags: [commands]
       summary: Change an active member's role. Changes to or from admin are the owner's alone
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [role], properties: { role: { type: string, enum: [admin, member, guest] }, guest_can_create: { type: boolean } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, role], properties: { policy_version: { type: integer }, role: { type: string, enum: [admin, member, guest] }, guest_can_create: { type: boolean } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/audit:
     parameters: [{ $ref: "#/components/parameters/ws" }]
-    get: { operationId: listAudit, tags: [queries], summary: Access audit history. Human owners and admins only, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: listAudit, tags: [queries], summary: Access audit history. Human owners and admins only, parameters: [{ name: after, in: query, schema: { type: integer } }], responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/events:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get:

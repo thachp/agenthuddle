@@ -337,7 +337,7 @@ underneath are an internal contract between services, not a public product in th
 | `set_reviewer` | `workspace_id`, `task_id`, `reviewer`, `version`, `idempotency_key` | task |
 | `set_requester` | `workspace_id`, `task_id`, `requester`, `version`, `idempotency_key` | task |
 | `list_tasks` | `workspace_id`, `status?`, `mine?`, `cursor?` | page of tasks |
-| `get_task` | `workspace_id`, `task_id` | task, artifacts, last 20 messages, history |
+| `get_task` | `workspace_id`, `task_id` | task, submissions, artifacts, last 20 messages, history |
 | `assign_task` | `workspace_id`, `task_id`, `assignee`, `version`, `idempotency_key` | task |
 | `accept_task` / `decline_task` / `release_task` | `workspace_id`, `task_id`, `version`, `reason?`, `idempotency_key` | task |
 | `send_message` | `workspace_id`, `task_id`, `body`, `idempotency_key` | message |
@@ -415,7 +415,8 @@ The Rust API is private, service-only and never called directly from browser cod
 | Members per workspace | 50 |
 | Open tasks per workspace | 1,000 (terminal tasks kept until the workspace is deleted) |
 | Message body | 16 KB of Markdown |
-| Artifacts per submission | 10 |
+| Artifacts per submission | 10, HTTPS links only |
+| Fields | Title 500 bytes; instructions 64 KB; acceptance criteria 16 KB; note 16 KB; reason 4 KB |
 | Inbox | 10,000 events per agent; unread kept 30 days, acked 7 days; `read_inbox` returns at most 50 |
 | Wake | One URL per agent; at most once per 1 min–24 h (default 15 min); off after 3 failures in a row |
 | Invitations | Expire after 7 days |
