@@ -2,11 +2,14 @@
 //! Commands run in one transaction: policy, then core, then state, events, outbox and idempotency. Queries only read.
 
 use crate::error::ApiError;
+use crate::principal;
 use crate::store::{
     self, exec, flag, int, load_task, opt, participant, record_decision, record_event, rows,
     save_task, text, Transition,
 };
-use crate::{CALLER_HEADER, INTERNAL_INIT_PATH};
+use crate::{
+    Caller as Verified, AGENT_ID_PREFIX, CALLER_HEADER, INTERNAL_ACCEPT_PATH, INTERNAL_INIT_PATH,
+};
 use podster_core::{
     apply_departure, decide, decide_create, Artifact, Command, NewTask, Observed, Task, TaskPatch,
     TaskStatus, MAX_MESSAGE_BYTES,
@@ -15,7 +18,6 @@ use podster_policy::{
     authorize_reviewer_change, authorize_task, authorize_workroom, can_review, can_see_task,
     Caller, PrincipalKind, Role, TaskAction, Verdict, WorkroomAction,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{cell::RefCell, rc::Rc};
@@ -30,15 +32,10 @@ const MAX_MEMBERS: i64 = 50;
 const MAX_OPEN_TASKS: i64 = 1000;
 const MAX_NAME_BYTES: usize = 200;
 const MAX_KEY_BYTES: usize = 255;
-const MAX_ID_BYTES: usize = 128;
+const MAX_ACCEPT_AGENTS: usize = 20;
+const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-#[derive(Clone, Deserialize)]
-struct Identity {
-    id: String,
-    kind: String,
-    org: String,
-    workspace_id: String,
-}
+type Identity = Verified;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
 struct Participant {
@@ -97,6 +94,11 @@ fn parse_role(role: &str) -> Role {
     }
 }
 
+/// Whether the caller may act in the organization this room recorded for them.
+fn in_org(identity: &Identity, org: &str) -> bool {
+    identity.org == org || (identity.kind == "person" && identity.orgs.iter().any(|o| o == org))
+}
+
 /// Reads the caller's current authority. Assertions and read models never supply a role.
 fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
     let room = rows(
@@ -108,7 +110,9 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
     let kind = parse_kind(&identity.kind);
     if kind == PrincipalKind::Person
         && room["owner_person_id"].as_str() == Some(identity.id.as_str())
-        && room["owner_org_id"].as_str() == Some(identity.org.as_str())
+        && room["owner_org_id"]
+            .as_str()
+            .is_some_and(|org| in_org(identity, org))
     {
         return Ok(Participant {
             caller: Caller {
@@ -126,8 +130,20 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
     };
     // An identity that doesn't match the stored one learns nothing, including whether it was revoked.
     let org = text(&member["org_id"]).unwrap_or_default();
-    if member["kind"].as_str() != Some(identity.kind.as_str()) || org != identity.org {
+    if member["kind"].as_str() != Some(identity.kind.as_str()) || !in_org(identity, &org) {
         return Err(ApiError::workspace_not_found());
+    }
+    // The fence is checked in the room's own transaction, so it orders against every command here.
+    if kind == PrincipalKind::Agent {
+        let fence = rows(
+            sql,
+            "SELECT min_generation FROM principal_fence WHERE principal_id = ?",
+            vec![identity.id.as_str().into()],
+        )?;
+        let floor = fence.first().map_or(0, |f| int(&f["min_generation"]));
+        if identity.gen.is_none_or(|g| (g as i64) < floor) {
+            return Err(ApiError::agent_disconnected());
+        }
     }
     if !member["revoked_at"].is_null() {
         return Err(ApiError::access_revoked());
@@ -202,14 +218,8 @@ fn submission_no(body: &Value) -> R<u32> {
         .ok_or_else(ApiError::invalid_argument)
 }
 
-/// IDs are used as URL path segments, so a member can always be addressed and revoked.
 fn require_id(value: &str) -> R<()> {
-    let valid = !value.is_empty()
-        && value.len() <= MAX_ID_BYTES
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-    if valid {
+    if crate::valid_id(value) {
         Ok(())
     } else {
         Err(ApiError::invalid_argument())
@@ -471,19 +481,37 @@ fn audit(
     new: Option<String>,
     now: i64,
 ) -> R<()> {
+    audit_as(
+        sql,
+        &caller.id,
+        kind_name(caller),
+        action,
+        target,
+        prior,
+        new,
+        now,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_as(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    action: &str,
+    target: &str,
+    prior: Option<String>,
+    new: Option<String>,
+    now: i64,
+) -> R<()> {
     exec(
         sql,
         "UPDATE workspace SET policy_version = policy_version + 1",
         vec![],
     )?;
-    let actor_kind = if caller.kind == PrincipalKind::Person {
-        "person"
-    } else {
-        "agent"
-    };
     exec(sql, "INSERT INTO audit_event (id, actor_id, actor_kind, action, target_id, outcome, prior_json, new_json, policy_version, created_at)
       VALUES (?, ?, ?, ?, ?, 'allowed', ?, ?, (SELECT policy_version FROM workspace), ?)", vec![
-        format!("aud_{}", uuid::Uuid::new_v4().simple()).into(), caller.id.as_str().into(), actor_kind.into(), action.into(), target.into(), opt(&prior), opt(&new), now.into(),
+        format!("aud_{}", uuid::Uuid::new_v4().simple()).into(), actor.into(), actor_kind.into(), action.into(), target.into(), opt(&prior), opt(&new), now.into(),
     ])
 }
 
@@ -492,9 +520,87 @@ fn is_owner(sql: &SqlStorage, id: &str) -> R<bool> {
     Ok(room.first().and_then(|r| r["owner_person_id"].as_str()) == Some(id))
 }
 
-/// Adds a participant, or returns a revoked one with the same identity. Changing an active member's role has its
-/// own command. Invitations and agent-owner consent arrive with Phase 2, so this is owner and admin only.
-fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
+/// Queues a listing update, which the alarm writes to D1 after this transaction commits.
+fn queue_index(
+    sql: &SqlStorage,
+    principal: &str,
+    org: &str,
+    role: Option<&str>,
+    now: i64,
+) -> R<()> {
+    let _ = now;
+    exec(
+        sql,
+        "INSERT INTO index_outbox (principal_id, org_id, role, removed) VALUES (?, ?, ?, ?)",
+        vec![
+            principal.into(),
+            org.into(),
+            role.map_or(worker::SqlStorageValue::Null, Into::into),
+            flag(role.is_none()),
+        ],
+    )
+}
+
+/// Refuses a join whose generation is older than a disconnect this room has already acknowledged.
+fn require_past_fence(sql: &SqlStorage, principal: &str, generation: u64) -> R<()> {
+    let fence = rows(
+        sql,
+        "SELECT min_generation FROM principal_fence WHERE principal_id = ?",
+        vec![principal.into()],
+    )?;
+    if (generation as i64) < fence.first().map_or(0, |f| int(&f["min_generation"])) {
+        return Err(ApiError::agent_disconnected());
+    }
+    Ok(())
+}
+
+fn room_owner_org(sql: &SqlStorage) -> R<String> {
+    rows(sql, "SELECT owner_org_id FROM workspace", vec![])?
+        .first()
+        .and_then(|r| text(&r["owner_org_id"]))
+        .ok_or_else(ApiError::workspace_not_found)
+}
+
+fn active_count(sql: &SqlStorage) -> R<i64> {
+    Ok(rows(
+        sql,
+        "SELECT count(*) AS n FROM member WHERE revoked_at IS NULL",
+        vec![],
+    )?
+    .first()
+    .map_or(0, |r| int(&r["n"])))
+}
+
+/// Inserts or restores a member row with its join generation, inside the caller's transaction.
+#[allow(clippy::too_many_arguments)]
+fn write_member(
+    sql: &SqlStorage,
+    added_by: &str,
+    principal: &str,
+    kind: &str,
+    org: &str,
+    role: &str,
+    guest_can_create: bool,
+    generation: Option<u64>,
+    now: i64,
+) -> R<()> {
+    exec(sql, "INSERT INTO member (principal_id, kind, org_id, role, guest_can_create, join_generation, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (principal_id) DO UPDATE SET kind = excluded.kind, org_id = excluded.org_id, role = excluded.role, guest_can_create = excluded.guest_can_create,
+        join_generation = excluded.join_generation, added_by = excluded.added_by, added_at = excluded.added_at, revoked_at = NULL, revocation_reason = NULL, owner_consented_at = NULL", vec![
+        principal.into(), kind.into(), org.into(), role.into(), flag(guest_can_create), generation.map_or(worker::SqlStorageValue::Null, |g| (g as i64).into()), added_by.into(), now.into(),
+    ])?;
+    queue_index(sql, principal, org, Some(role), now)
+}
+
+/// Adds a participant from the room owner's organization. Other organizations join through an invitation.
+/// For an agent, `registered` holds its generation and organization from its Principal.
+fn handle_add_member(
+    sql: &SqlStorage,
+    caller: &Caller,
+    body: &Value,
+    registered: Option<(u64, String)>,
+    now: i64,
+) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
     require_policy_version(sql, body)?;
     let principal = required(body, "principal_id")?;
@@ -506,8 +612,23 @@ fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) 
     if !["person", "agent"].contains(&kind.as_str())
         || !["admin", "member", "guest"].contains(&role.as_str())
         || is_owner(sql, &principal)?
+        || (kind == "person") == principal.starts_with(AGENT_ID_PREFIX)
     {
         return Err(ApiError::invalid_argument());
+    }
+    // An agent's organization comes from its Principal, never the request.
+    let generation = if kind == "agent" {
+        let (generation, agent_org) = registered.ok_or_else(ApiError::invalid_argument)?;
+        if agent_org != org {
+            return Err(ApiError::invalid_argument());
+        }
+        require_past_fence(sql, &principal, generation)?;
+        Some(generation)
+    } else {
+        None
+    };
+    if org != room_owner_org(sql)? {
+        return Err(ApiError::invitation_required());
     }
     if role == "admin" {
         if kind != "person" {
@@ -515,11 +636,7 @@ fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) 
         }
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
     }
-    let existing = rows(
-        sql,
-        "SELECT kind, org_id, role, revoked_at FROM member WHERE principal_id = ?",
-        vec![principal.as_str().into()],
-    )?;
+    let existing = rows(sql, "SELECT kind, org_id, role, revoked_at, revocation_reason, owner_consented_at FROM member WHERE principal_id = ?", vec![principal.as_str().into()])?;
     let prior = existing.first();
     if let Some(prior) = prior {
         if prior["revoked_at"].is_null() {
@@ -531,37 +648,38 @@ fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) 
         {
             ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
         }
+        // An agent its own owner took out returns only with that owner's consent.
+        let owner_removed = matches!(
+            prior["revocation_reason"].as_str(),
+            Some("owner_withdrawn" | "global_disconnect")
+        );
+        if owner_removed && prior["owner_consented_at"].is_null() {
+            return Err(ApiError::not_allowed());
+        }
     }
-    let active = rows(
-        sql,
-        "SELECT count(*) AS n FROM member WHERE revoked_at IS NULL",
-        vec![],
-    )?;
     // The owner counts toward the limit.
-    if active.first().map_or(0, |r| int(&r["n"])) + 1 >= MAX_MEMBERS {
+    if active_count(sql)? + 1 >= MAX_MEMBERS {
         return Err(ApiError::limit_exceeded());
     }
     let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
         v.as_bool().ok_or_else(ApiError::invalid_argument)
     })?;
-    exec(sql, "INSERT INTO member (principal_id, kind, org_id, role, guest_can_create, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (principal_id) DO UPDATE SET kind = excluded.kind, org_id = excluded.org_id, role = excluded.role, guest_can_create = excluded.guest_can_create,
-        added_by = excluded.added_by, added_at = excluded.added_at, revoked_at = NULL, revocation_reason = NULL", vec![
-        principal.as_str().into(), kind.as_str().into(), org.as_str().into(), role.as_str().into(), flag(guest_can_create), caller.id.as_str().into(), now.into(),
-    ])?;
+    write_member(
+        sql,
+        &caller.id,
+        &principal,
+        &kind,
+        &org,
+        &role,
+        guest_can_create,
+        generation,
+        now,
+    )?;
     let prior_json = prior.map(|p| {
         json!({ "role": p["role"], "kind": p["kind"], "org_id": p["org_id"], "revoked": true })
             .to_string()
     });
-    audit(
-        sql,
-        caller,
-        "member.added",
-        &principal,
-        prior_json,
-        Some(json!({ "role": role, "kind": kind, "org_id": org, "guest_can_create": guest_can_create }).to_string()),
-        now,
-    )?;
+    audit(sql, caller, "member.added", &principal, prior_json, Some(json!({ "role": role, "kind": kind, "org_id": org, "guest_can_create": guest_can_create }).to_string()), now)?;
     record_event(
         sql,
         "member.added",
@@ -572,6 +690,110 @@ fn handle_add_member(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) 
         now,
     )?;
     Ok(json!({ "principal_id": principal, "role": role }))
+}
+
+fn invitation_hash(secret: &str) -> String {
+    format!("{:x}", Sha256::digest(secret.as_bytes()))
+}
+
+/// The room an invitation token belongs to. Tokens look like `inv_<room>.<id>.<secret>`.
+pub fn workspace_of_token(token: &str) -> Option<String> {
+    let room = token.strip_prefix("inv_")?.split('.').next()?;
+    crate::valid_id(room).then(|| room.to_string())
+}
+
+fn parse_token(token: &str) -> Option<(String, String)> {
+    let mut parts = token.strip_prefix("inv_")?.split('.');
+    let (_room, id, secret) = (parts.next()?, parts.next()?, parts.next()?);
+    parts
+        .next()
+        .is_none()
+        .then(|| (id.to_string(), secret.to_string()))
+}
+
+fn handle_create_invitation(
+    sql: &SqlStorage,
+    caller: &Caller,
+    room: &str,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    require_policy_version(sql, body)?;
+    let role = field(body, "role")?.unwrap_or_else(|| "guest".to_string());
+    if !["member", "guest"].contains(&role.as_str()) {
+        return Err(ApiError::invalid_argument());
+    }
+    let invited_org = field(body, "invited_org_id")?;
+    if let Some(org) = &invited_org {
+        require_id(org)?;
+    }
+    let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
+        v.as_bool().ok_or_else(ApiError::invalid_argument)
+    })?;
+    let id = format!("ivt_{}", uuid::Uuid::new_v4().simple());
+    let secret = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let expires_at = now + INVITATION_TTL_MS;
+    exec(sql, "INSERT INTO invitation (id, invited_org_id, role, guest_can_create, token_hash, expires_at, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)", vec![
+        id.as_str().into(), opt(&invited_org), role.as_str().into(), flag(guest_can_create), invitation_hash(&secret).into(), expires_at.into(), caller.id.as_str().into(), now.into(),
+    ])?;
+    audit(
+        sql,
+        caller,
+        "invitation.created",
+        &id,
+        None,
+        Some(json!({ "role": role, "invited_org_id": invited_org }).to_string()),
+        now,
+    )?;
+    // The token is returned once. Only its hash is stored, and `command` removes it from the idempotency record.
+    Ok(
+        json!({ "id": id, "token": format!("inv_{room}.{id}.{secret}"), "role": role, "expires_at": expires_at }),
+    )
+}
+
+fn handle_withdraw_invitation(
+    sql: &SqlStorage,
+    caller: &Caller,
+    id: &str,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    require_policy_version(sql, body)?;
+    let found = rows(
+        sql,
+        "SELECT status FROM invitation WHERE id = ?",
+        vec![id.into()],
+    )?;
+    if found.first().and_then(|r| r["status"].as_str()) != Some("pending") {
+        return Err(ApiError::invitation_not_found());
+    }
+    exec(
+        sql,
+        "UPDATE invitation SET status = 'withdrawn' WHERE id = ?",
+        vec![id.into()],
+    )?;
+    audit(sql, caller, "invitation.withdrawn", id, None, None, now)?;
+    Ok(json!({ "id": id, "status": "withdrawn" }))
+}
+
+/// A valid pending invitation for this token, or nothing. Every failure looks the same.
+fn find_invitation(sql: &SqlStorage, id: &str, secret: &str, now: i64) -> R<Option<Value>> {
+    let found = rows(
+        sql,
+        "SELECT * FROM invitation WHERE id = ?",
+        vec![id.into()],
+    )?;
+    Ok(found.into_iter().next().filter(|row| {
+        row["token_hash"].as_str() == Some(invitation_hash(secret).as_str())
+            && (row["status"].as_str() == Some("accepted")
+                || int(&row["expires_at"]) > now && row["status"].as_str() == Some("pending"))
+    }))
 }
 
 /// Changes an active member's role. Any change to or from admin is the owner's alone.
@@ -609,6 +831,15 @@ fn handle_change_role(
             principal.into(),
         ],
     )?;
+    let org = rows(
+        sql,
+        "SELECT org_id FROM member WHERE principal_id = ?",
+        vec![principal.into()],
+    )?
+    .first()
+    .and_then(|m| text(&m["org_id"]))
+    .unwrap_or_default();
+    queue_index(sql, principal, &org, Some(&role), now)?;
     let prior = json!({ "role": member["role"], "guest_can_create": int(&member["guest_can_create"]) != 0 }).to_string();
     audit(
         sql,
@@ -631,7 +862,71 @@ fn handle_change_role(
     Ok(json!({ "principal_id": principal, "role": role }))
 }
 
+/// Removes a participant and applies the departure rules, inside the caller's transaction.
+/// Used by room revocation, agent-owner withdrawal and global disconnect, which differ only by actor and reason.
+fn remove_member(
+    sql: &SqlStorage,
+    actor: &Caller,
+    actor_kind: &str,
+    principal: &str,
+    reason: &str,
+    now: i64,
+) -> R<()> {
+    let prior = rows(
+        sql,
+        "SELECT role, org_id FROM member WHERE principal_id = ?",
+        vec![principal.into()],
+    )?;
+    let prior_role = prior
+        .first()
+        .map(|m| m["role"].clone())
+        .unwrap_or(Value::Null);
+    let org = prior
+        .first()
+        .and_then(|m| text(&m["org_id"]))
+        .unwrap_or_default();
+    exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
+    let affected = rows(sql, "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled') AND (assignee_id = ? OR reviewer_id = ? OR requester_id = ?)",
+        vec![principal.into(), principal.into(), principal.into()])?;
+    for row in &affected {
+        let task = store::task_from_row(row)?;
+        let requester_ok = participant(sql, &task.requester)?
+            .is_some_and(|(kind, role)| can_review(parse_kind(&kind), parse_role(&role), false));
+        if let Some(decision) = apply_departure(&task, principal, requester_ok) {
+            save_task(sql, &decision.task, now)?;
+            record_decision(sql, &decision, task.status, &actor.id, now)?;
+        }
+    }
+    exec(
+        sql,
+        "DELETE FROM outbox WHERE recipient_principal_id = ?",
+        vec![principal.into()],
+    )?;
+    audit_as(
+        sql,
+        &actor.id,
+        actor_kind,
+        "member.revoked",
+        principal,
+        Some(json!({ "role": prior_role, "reason": reason }).to_string()),
+        None,
+        now,
+    )?;
+    queue_index(sql, principal, &org, None, now)?;
+    // The removal notice is the one event a revoked principal still receives.
+    record_event(
+        sql,
+        "member.revoked",
+        &actor.id,
+        None,
+        &Transition::NONE,
+        [principal.to_string()],
+        now,
+    )
+}
+
 /// Revokes a participant. Later requests fail, and the departure rules apply to their tasks.
+/// An agent that's already out can still be removed, so the room's decision holds if it tries to return.
 fn handle_revoke_member(
     sql: &SqlStorage,
     caller: &Caller,
@@ -643,7 +938,7 @@ fn handle_revoke_member(
     require_policy_version(sql, body)?;
     let found = rows(
         sql,
-        "SELECT role FROM member WHERE principal_id = ? AND revoked_at IS NULL",
+        "SELECT kind, role, revoked_at, revocation_reason FROM member WHERE principal_id = ?",
         vec![principal.into()],
     )?;
     let Some(member) = found.first() else {
@@ -652,43 +947,80 @@ fn handle_revoke_member(
     if member["role"].as_str() == Some("admin") {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
     }
-    exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = 'room_removed' WHERE principal_id = ?", vec![now.into(), principal.into()])?;
-    let affected = rows(sql, "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled') AND (assignee_id = ? OR reviewer_id = ? OR requester_id = ?)",
-        vec![principal.into(), principal.into(), principal.into()])?;
-    for row in &affected {
-        let task = store::task_from_row(row)?;
-        let requester_ok = participant(sql, &task.requester)?
-            .is_some_and(|(kind, role)| can_review(parse_kind(&kind), parse_role(&role), false));
-        if let Some(decision) = apply_departure(&task, principal, requester_ok) {
-            save_task(sql, &decision.task, now)?;
-            record_decision(sql, &decision, task.status, &caller.id, now)?;
+    if !member["revoked_at"].is_null() {
+        if member["kind"].as_str() != Some("agent")
+            || member["revocation_reason"].as_str() == Some("room_removed")
+        {
+            return Err(ApiError::invalid_argument());
         }
+        exec(
+            sql,
+            "UPDATE member SET revocation_reason = 'room_removed' WHERE principal_id = ?",
+            vec![principal.into()],
+        )?;
+        audit(
+            sql,
+            caller,
+            "member.removal_recorded",
+            principal,
+            Some(json!({ "reason": member["revocation_reason"] }).to_string()),
+            None,
+            now,
+        )?;
+        return Ok(json!({ "principal_id": principal, "status": "revoked" }));
+    }
+    remove_member(
+        sql,
+        caller,
+        kind_name(caller),
+        principal,
+        "room_removed",
+        now,
+    )?;
+    Ok(json!({ "principal_id": principal, "status": "revoked" }))
+}
+
+/// Clears a room's removal, so the agent can return through an invitation. It's the room's decision alone.
+fn handle_clear_removal(
+    sql: &SqlStorage,
+    caller: &Caller,
+    principal: &str,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    require_policy_version(sql, body)?;
+    let found = rows(
+        sql,
+        "SELECT revocation_reason FROM member WHERE principal_id = ? AND revoked_at IS NOT NULL",
+        vec![principal.into()],
+    )?;
+    if found.first().and_then(|m| m["revocation_reason"].as_str()) != Some("room_removed") {
+        return Err(ApiError::invalid_argument());
     }
     exec(
         sql,
-        "DELETE FROM outbox WHERE recipient_principal_id = ?",
+        "UPDATE member SET revocation_reason = 'removal_cleared' WHERE principal_id = ?",
         vec![principal.into()],
     )?;
     audit(
         sql,
         caller,
-        "member.revoked",
+        "member.removal_cleared",
         principal,
-        Some(json!({ "role": member["role"] }).to_string()),
+        None,
         None,
         now,
     )?;
-    // The removal notice is the one event a revoked principal still receives.
-    record_event(
-        sql,
-        "member.revoked",
-        &caller.id,
-        None,
-        &Transition::NONE,
-        [principal.to_string()],
-        now,
-    )?;
-    Ok(json!({ "principal_id": principal, "status": "revoked" }))
+    Ok(json!({ "principal_id": principal, "status": "removal_cleared" }))
+}
+
+fn kind_name(caller: &Caller) -> &'static str {
+    if caller.kind == PrincipalKind::Person {
+        "person"
+    } else {
+        "agent"
+    }
 }
 
 fn query_int(url: &Url, name: &str) -> R<Option<i64>> {
@@ -840,8 +1172,9 @@ mod queries {
 #[durable_object]
 pub struct Workspace {
     state: State,
-    #[allow(dead_code)]
     env: Env,
+    /// Test builds only: pretends a join started at an older generation.
+    test_generation: RefCell<Option<u64>>,
 }
 
 impl Workspace {
@@ -877,8 +1210,13 @@ impl Workspace {
                 return Ok(());
             }
             let value = handler(&sql, &who, now)?;
+            // A secret in a response is returned once and never stored, so a replay can't reveal it.
+            let mut stored = value.clone();
+            if let Some(map) = stored.as_object_mut() {
+                map.remove("token");
+            }
             exec(&sql, "INSERT OR REPLACE INTO idempotency (actor_id, key, request_hash, response_json, expires_at) VALUES (?, ?, ?, ?, ?)", vec![
-                identity.id.as_str().into(), key.as_str().into(), hash.as_str().into(), value.to_string().into(), (now + IDEMPOTENCY_TTL_MS).into(),
+                identity.id.as_str().into(), key.as_str().into(), hash.as_str().into(), stored.to_string().into(), (now + IDEMPOTENCY_TTL_MS).into(),
             ])?;
             #[cfg(feature = "failpoints")]
             if test_fail {
@@ -891,6 +1229,317 @@ impl Workspace {
         })?;
         let value = out.borrow_mut().take();
         value.ok_or_else(|| ApiError::internal("command produced no result"))
+    }
+
+    /// Applies a global disconnect in this room, and always leaves the floor behind, even for a non-member,
+    /// so a join begun before the disconnect can't commit after this room acknowledges it.
+    fn fence(&self, principal: String, floor: i64) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Ok(json!({ "acked": true }));
+        }
+        transaction_sync(&self.state, move || {
+            let now = now_ms();
+            let prior = rows(
+                &sql,
+                "SELECT min_generation FROM principal_fence WHERE principal_id = ?",
+                vec![principal.as_str().into()],
+            )?;
+            let raises = prior.first().map_or(0, |f| int(&f["min_generation"])) < floor;
+            exec(&sql, "INSERT INTO principal_fence (principal_id, min_generation) VALUES (?, ?)
+              ON CONFLICT (principal_id) DO UPDATE SET min_generation = max(min_generation, excluded.min_generation)", vec![principal.as_str().into(), floor.into()])?;
+            // A new disconnect cancels earlier consent to return. A delayed retry of an old one doesn't.
+            if raises {
+                exec(&sql, "UPDATE member SET owner_consented_at = NULL WHERE principal_id = ? AND revoked_at IS NOT NULL", vec![principal.as_str().into()])?;
+            }
+            let found = rows(&sql, "SELECT join_generation FROM member WHERE principal_id = ? AND revoked_at IS NULL AND kind = 'agent'", vec![principal.as_str().into()])?;
+            if found
+                .first()
+                .is_some_and(|m| int(&m["join_generation"]) < floor)
+            {
+                let system = Caller {
+                    id: "system".to_string(),
+                    kind: PrincipalKind::Agent,
+                    role: Role::None,
+                    guest_can_create: false,
+                };
+                remove_member(
+                    &sql,
+                    &system,
+                    "system",
+                    &principal,
+                    "global_disconnect",
+                    now,
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(json!({ "acked": true }))
+    }
+
+    /// Lets an agent's own organization withdraw it, or consent to its return, without any room authority.
+    /// Returns `None` when this caller isn't that agent's owner, so the normal authority path answers instead.
+    fn agent_owner_action(&self, identity: &Identity, agent: &str, verb: &str) -> R<Option<Value>> {
+        let sql = self.state.storage().sql();
+        let found = rows(&sql, "SELECT org_id, revoked_at, revocation_reason FROM member WHERE principal_id = ? AND kind = 'agent'", vec![agent.into()])?;
+        let Some(member) = found.first() else {
+            return Ok(None);
+        };
+        let is_owner = identity.kind == "person"
+            && member["org_id"]
+                .as_str()
+                .is_some_and(|org| identity.admin_orgs.iter().any(|o| o == org));
+        if !is_owner {
+            return Ok(None);
+        }
+        let (agent, actor, verb, active) = (
+            agent.to_string(),
+            identity.id.clone(),
+            verb.to_string(),
+            member["revoked_at"].is_null(),
+        );
+        transaction_sync(&self.state, move || {
+            let now = now_ms();
+            let person = Caller {
+                id: actor.clone(),
+                kind: PrincipalKind::Person,
+                role: Role::None,
+                guest_can_create: false,
+            };
+            if verb == "withdraw" && active {
+                remove_member(&sql, &person, "person", &agent, "owner_withdrawn", now)?;
+            } else if verb == "owner-consent" && !active {
+                exec(
+                    &sql,
+                    "UPDATE member SET owner_consented_at = ? WHERE principal_id = ?",
+                    vec![now.into(), agent.as_str().into()],
+                )?;
+                audit_as(
+                    &sql,
+                    &actor,
+                    "person",
+                    "member.owner_consented",
+                    &agent,
+                    None,
+                    None,
+                    now,
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok(Some(json!({ "status": "ok" })))
+    }
+
+    /// Accepts an invitation for agents of the caller's organization. Both sides are people.
+    async fn accept_invitation(&self, identity: &Identity, body: &Value) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if identity.kind != "person" {
+            return Err(ApiError::not_allowed());
+        }
+        if !store::is_initialized(&sql)? {
+            return Err(ApiError::invitation_not_found());
+        }
+        if store::needs_migration(&sql)? {
+            let migrating = sql.clone();
+            transaction_sync(&self.state, move || store::migrate(&migrating))?;
+        }
+        let token = required(body, "token")?;
+        let (id, secret) = parse_token(&token).ok_or_else(ApiError::invitation_not_found)?;
+        let now = now_ms();
+        let invitation =
+            find_invitation(&sql, &id, &secret, now)?.ok_or_else(ApiError::invitation_not_found)?;
+        let org = required(body, "org_id")?;
+        let mut agents: Vec<String> = body
+            .get("agents")
+            .and_then(Value::as_array)
+            .ok_or_else(ApiError::invalid_argument)?
+            .iter()
+            .map(|a| {
+                a.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(ApiError::invalid_argument)
+            })
+            .collect::<R<_>>()?;
+        agents.sort();
+        agents.dedup();
+        let request = json!({ "org_id": org, "agents": agents }).to_string();
+        // A retry of the same request by the same person gets the first answer, so a lost response is safe.
+        let replay = |row: &Value| -> R<Option<Value>> {
+            if row["status"].as_str() != Some("accepted") {
+                return Ok(None);
+            }
+            if row["accepted_by"].as_str() == Some(identity.id.as_str())
+                && row["accepted_request"].as_str() == Some(request.as_str())
+            {
+                return Ok(Some(serde_json::from_str(
+                    row["accepted_response"].as_str().unwrap_or("null"),
+                )?));
+            }
+            Err(ApiError::invitation_not_found())
+        };
+        if let Some(answer) = replay(&invitation)? {
+            return Ok(answer);
+        }
+        if !identity.admin_orgs.contains(&org)
+            || invitation["invited_org_id"]
+                .as_str()
+                .is_some_and(|o| o != org)
+        {
+            return Err(ApiError::not_allowed());
+        }
+        if agents.is_empty() || agents.len() > MAX_ACCEPT_AGENTS {
+            return Err(ApiError::invalid_argument());
+        }
+        let test_generation = if cfg!(feature = "failpoints") {
+            self.test_generation.borrow().to_owned()
+        } else {
+            None
+        };
+        let mut registered = Vec::new();
+        for agent in &agents {
+            require_id(agent)?;
+            // One answer whether the agent is unknown, elsewhere or disconnected, so IDs can't be probed here.
+            let generation =
+                principal::register_room(&self.env, agent, &org, &identity.workspace_id).await?;
+            registered.push((agent.clone(), test_generation.unwrap_or(generation)));
+        }
+        let person = identity.id.clone();
+        let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let slot = out.clone();
+        transaction_sync(&self.state, move || {
+            let now = now_ms();
+            let found = find_invitation(&sql, &id, &secret, now)?
+                .ok_or_else(ApiError::invitation_not_found)?;
+            if found["status"].as_str() == Some("accepted") {
+                if found["accepted_by"].as_str() == Some(person.as_str())
+                    && found["accepted_request"].as_str() == Some(request.as_str())
+                {
+                    *slot.borrow_mut() = Some(serde_json::from_str(
+                        found["accepted_response"].as_str().unwrap_or("null"),
+                    )?);
+                    return Ok(());
+                }
+                return Err(ApiError::invitation_not_found());
+            }
+            let role = text(&found["role"]).unwrap_or_else(|| "guest".to_string());
+            let guest_can_create = int(&found["guest_can_create"]) != 0;
+            let actor = Caller {
+                id: person.clone(),
+                kind: PrincipalKind::Person,
+                role: Role::None,
+                guest_can_create: false,
+            };
+            let mut joined = Vec::new();
+            for (agent, generation) in &registered {
+                if is_owner(&sql, agent)? {
+                    return Err(ApiError::not_allowed());
+                }
+                require_past_fence(&sql, agent, *generation)?;
+                let existing = rows(&sql, "SELECT kind, org_id, revoked_at, revocation_reason FROM member WHERE principal_id = ?", vec![agent.as_str().into()])?;
+                let mut returning = false;
+                if let Some(row) = existing.first() {
+                    if row["revoked_at"].is_null() {
+                        continue;
+                    }
+                    // An invitation can't undo the room's decision or take over another identity.
+                    if row["revocation_reason"].as_str() == Some("room_removed")
+                        || row["kind"].as_str() != Some("agent")
+                        || row["org_id"].as_str() != Some(org.as_str())
+                    {
+                        return Err(ApiError::not_allowed());
+                    }
+                    returning = true;
+                }
+                if active_count(&sql)? + 1 >= MAX_MEMBERS {
+                    return Err(ApiError::limit_exceeded());
+                }
+                write_member(
+                    &sql,
+                    &person,
+                    agent,
+                    "agent",
+                    &org,
+                    &role,
+                    guest_can_create,
+                    Some(*generation),
+                    now,
+                )?;
+                audit(
+                    &sql,
+                    &actor,
+                    "member.added",
+                    agent,
+                    returning.then(|| json!({ "revoked": true }).to_string()),
+                    Some(
+                        json!({ "role": role, "kind": "agent", "org_id": org, "invitation": id })
+                            .to_string(),
+                    ),
+                    now,
+                )?;
+                record_event(
+                    &sql,
+                    "member.added",
+                    &person,
+                    None,
+                    &Transition::NONE,
+                    [agent.clone()],
+                    now,
+                )?;
+                joined.push(agent.clone());
+            }
+            // Accepting for agents already here changes nothing, so it doesn't use up the invitation.
+            if joined.is_empty() {
+                return Err(ApiError::already_member());
+            }
+            let response = json!({ "status": "accepted", "agents": joined });
+            exec(&sql, "UPDATE invitation SET status = 'accepted', accepted_by = ?, accepted_request = ?, accepted_response = ? WHERE id = ?",
+                vec![person.as_str().into(), request.as_str().into(), response.to_string().into(), id.as_str().into()])?;
+            *slot.borrow_mut() = Some(response);
+            Ok(())
+        })?;
+        let response = out.borrow_mut().take();
+        response.ok_or_else(|| ApiError::internal("no result"))
+    }
+
+    /// Writes queued listing updates to D1. They're ordered by `seq`, so a retry can't restore older data.
+    async fn drain_index(&self) -> R<()> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Ok(());
+        }
+        let room = rows(&sql, "SELECT id, name FROM workspace", vec![])?;
+        let Some(room) = room.first() else {
+            return Ok(());
+        };
+        let pending = rows(&sql, "SELECT seq, principal_id, org_id, role, removed FROM index_outbox ORDER BY seq LIMIT 100", vec![])?;
+        let db = self.env.d1("DB")?;
+        for row in &pending {
+            let args: Vec<JsValue> = vec![
+                room["id"].as_str().unwrap_or("").into(),
+                row["principal_id"].as_str().unwrap_or("").into(),
+                row["org_id"].as_str().unwrap_or("").into(),
+                row["role"].as_str().map_or(JsValue::NULL, JsValue::from),
+                room["name"].as_str().unwrap_or("").into(),
+                JsValue::from_f64(int(&row["removed"]) as f64),
+                JsValue::from_f64(int(&row["seq"]) as f64),
+            ];
+            db.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT (workspace_id, principal_id) DO UPDATE SET org_id = excluded.org_id, role = excluded.role, workspace_name = excluded.workspace_name,
+                removed = excluded.removed, updated_seq = excluded.updated_seq WHERE excluded.updated_seq > membership_index.updated_seq")
+                .bind(&args)?.run().await?;
+            exec(
+                &sql,
+                "DELETE FROM index_outbox WHERE seq = ?",
+                vec![int(&row["seq"]).into()],
+            )?;
+        }
+        if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty() {
+            self.state
+                .storage()
+                .set_alarm(std::time::Duration::from_millis(100))
+                .await?;
+        }
+        Ok(())
     }
 
     fn init(&self, identity: &Identity, name: String) -> R<Value> {
@@ -923,6 +1572,7 @@ impl Workspace {
                 Some(json!({ "owner": id.id }).to_string()),
                 now,
             )?;
+            queue_index(&sql, &id.id, &id.org, Some("owner"), now)?;
             record_event(
                 &sql,
                 "workspace.created",
@@ -937,6 +1587,15 @@ impl Workspace {
     }
 
     async fn dispatch(&self, mut req: Request) -> R<Value> {
+        if req.path() == "/internal/revoke" {
+            let body: Value = req.json().await?;
+            return self.fence(
+                required(&body, "principal")?,
+                body["floor"]
+                    .as_i64()
+                    .ok_or_else(ApiError::invalid_argument)?,
+            );
+        }
         let identity: Identity = req
             .headers()
             .get(CALLER_HEADER)?
@@ -949,6 +1608,17 @@ impl Workspace {
         let path = req.path();
         let url = req.url()?;
 
+        if path == INTERNAL_ACCEPT_PATH {
+            if cfg!(feature = "failpoints") {
+                *self.test_generation.borrow_mut() = req
+                    .headers()
+                    .get("x-test-join-generation")?
+                    .and_then(|v| v.parse().ok());
+            }
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return self.accept_invitation(&identity, &body).await;
+        }
         if path == INTERNAL_INIT_PATH {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
@@ -962,6 +1632,25 @@ impl Workspace {
         if store::needs_migration(&sql)? {
             let migrating = sql.clone();
             transaction_sync(&self.state, move || store::migrate(&migrating))?;
+        }
+        let path_parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if cfg!(feature = "failpoints") {
+            let forced = req
+                .headers()
+                .get("x-test-join-generation")?
+                .and_then(|v| v.parse().ok());
+            *self.test_generation.borrow_mut() = forced;
+        }
+        // An agent's owner may have no role in this room.
+
+        if method == Method::Post {
+            if let Some(["members", agent, verb @ ("withdraw" | "owner-consent")]) =
+                path_parts.get(3..)
+            {
+                if let Some(value) = self.agent_owner_action(&identity, agent, verb)? {
+                    return Ok(value);
+                }
+            }
         }
         // Authority comes before anything about the request, so an outsider gets one answer for every request.
         let who = resolve_caller(&sql, &identity)?;
@@ -1019,8 +1708,47 @@ impl Workspace {
                 })
             }
             (Method::Post, ["members"]) => {
+                // A registered agent's generation comes from its Principal before this room commits the join.
+                let mut registered = None;
+                let agent = (field(&body, "kind")?.as_deref() == Some("agent"))
+                    .then(|| field(&body, "principal_id"))
+                    .transpose()?
+                    .flatten();
+                if let Some(agent) = &agent {
+                    ApiError::from_verdict(authorize_workroom(
+                        &who.caller,
+                        WorkroomAction::ManageAccess,
+                    ))?;
+                    require_id(agent)?;
+                    let org = field(&body, "org_id")?.ok_or_else(ApiError::invalid_argument)?;
+                    // Other organizations join by invitation, so this route never touches their agents' Principals.
+                    if org != room_owner_org(&sql)? {
+                        return Err(ApiError::invitation_required());
+                    }
+                    let generation =
+                        principal::register_room(&self.env, agent, &org, &identity.workspace_id)
+                            .await
+                            .map_err(|_| ApiError::invalid_argument())?;
+                    registered = Some((self.test_generation.borrow().unwrap_or(generation), org));
+                }
                 self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_add_member(sql, &who.caller, &body, now)
+                    handle_add_member(sql, &who.caller, &body, registered, now)
+                })
+            }
+            (Method::Post, ["members", _, "clear-removal"]) => {
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_clear_removal(sql, &who.caller, &target, &body, now)
+                })
+            }
+            (Method::Post, ["invitations"]) => {
+                let room = identity.workspace_id.clone();
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_create_invitation(sql, &who.caller, &room, &body, now)
+                })
+            }
+            (Method::Delete, ["invitations", _]) => {
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_withdraw_invitation(sql, &who.caller, &target, &body, now)
                 })
             }
             (Method::Post, ["members", _, "role"]) => {
@@ -1040,13 +1768,50 @@ impl Workspace {
 
 impl DurableObject for Workspace {
     fn new(state: State, env: Env) -> Self {
-        Self { state, env }
+        Self {
+            state,
+            env,
+            test_generation: RefCell::new(None),
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        match self.dispatch(req).await {
+        let is_write = req.method() != Method::Get;
+        let response = match self.dispatch(req).await {
             Ok(value) => Response::from_json(&value),
             Err(error) => error.into_response(),
+        };
+        if is_write {
+            let sql = self.state.storage().sql();
+            let queued = match store::is_initialized(&sql) {
+                Ok(true) => rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])
+                    .map(|r| !r.is_empty())
+                    .unwrap_or(false),
+                _ => false,
+            };
+            // The command has already committed, so a scheduling problem can't change its answer. The next write retries.
+            if queued && matches!(self.state.storage().get_alarm().await, Ok(None)) {
+                if let Err(error) = self
+                    .state
+                    .storage()
+                    .set_alarm(std::time::Duration::from_millis(50))
+                    .await
+                {
+                    console_error!("couldn't schedule index projection: {error}");
+                }
+            }
         }
+        response
+    }
+
+    async fn alarm(&self) -> Result<Response> {
+        if let Err(error) = self.drain_index().await {
+            console_error!("index projection failed: {:?}", error);
+            self.state
+                .storage()
+                .set_alarm(std::time::Duration::from_secs(5))
+                .await?;
+        }
+        Response::ok("ok")
     }
 }

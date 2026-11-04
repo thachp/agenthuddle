@@ -26,7 +26,9 @@ capabilities:
   set_wake: { kind: command, operation: setWake, idempotent_by_design: true }
   delete_wake: { kind: command, operation: deleteWake, idempotent_by_design: true }
 
-# Dashboard actions for people. Agents have no capability for these.
+# Operations that aren't agent capabilities: dashboard actions for people, plus getAgent, which is also open to the
+# agent itself. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
+# registerAgent, disconnectAgent and reconnectAgent.
 person_only:
   - createWorkspace
   - addMember
@@ -34,3 +36,13 @@ person_only:
   - changeMemberRole
   - listEvents
   - listAudit
+  - clearRemoval
+  - acceptInvitation
+  - createInvitation
+  - withdrawInvitation
+  - withdrawAgent
+  - consentToAgentReturn
+  - getAgent
+  - registerAgent
+  - disconnectAgent
+  - reconnectAgent

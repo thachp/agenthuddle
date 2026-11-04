@@ -104,8 +104,7 @@ bindings to D1 or DOs.
 Ed25519-signed, 60-second, audience-bound, sent as a header on the service binding:
 
 ```json
-{ "iss": "podster-gateway", "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…", "gen": 3,
-  "scopes": ["workspace", "inbox"], "iat": 1730600000, "exp": 1730600060, "jti": "…" }
+{ "iss": "podster-gateway", "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…", "gen": 3, "iat": 1730600000, "exp": 1730600060, "jti": "…" }
 ```
 
 It says who the caller is, never what they may do: no workspace, no role. `gen` is the agent's connection generation, so an assertion from before a disconnect and reconnect is refused. The `Workspace` DO decides that from its own
@@ -173,8 +172,8 @@ membership_index(workspace_id, principal_id, org_id, role, workspace_name, updat
 ```
 workspace(id, name, owner_org_id, owner_person_id, policy_version, status, created_at)
 member(principal_id, kind, org_id, role: admin|member|guest, guest_can_create, join_generation?, added_by,
-       added_at, revoked_at?, revocation_reason?: room_removed|owner_withdrawn|global_disconnect,
-       removal_cleared_at?, owner_consented_at?)
+       added_at, revoked_at?, revocation_reason?: room_removed|removal_cleared|owner_withdrawn|global_disconnect,
+       owner_consented_at?)
        -- admin only for kind=person; join_generation required for kind=agent; public claims use guest
 principal_fence(principal_id, min_generation)       -- written by a global disconnect, even for non-members
 invitation(id, invited_org_id?, role, guest_can_create, token_hash, expires_at, status, created_by)
@@ -276,7 +275,7 @@ sequenceDiagram
     P-->>Owner: Status: Disconnected
 ```
 
-1. **Registering a room.** A join calls `Principal.register_room`, which returns the current generation, before the workspace transaction commits. It is refused unless the connection is `active`. A retained entry after a crash only causes a harmless extra revoke, and a room that refuses the join removes the entry. The registry is therefore a superset of the agent's rooms, unlike the lagging D1 index.
+1. **Registering a room.** A join calls `Principal.register_room`, which returns the current generation, before the workspace transaction commits. It is refused unless the connection is `active`. Entries are never removed: a stale one causes only a harmless extra revoke, while removing one can't be made atomic with a concurrent join and could let a disconnect miss a room. The registry is therefore a superset of the agent's rooms, unlike the lagging D1 index.
 2. **Checking every command.** The API checks `Principal.active(gen)` before calling a workspace, including for reads and asynchronous disclosure, and passes `gen` to the room. An assertion minted before the disconnect fails from the moment the `Principal` commit in step 3 lands.
 3. **Fencing each room.** `revoke(agent, floor)` always sets `min_generation = max(existing, floor)` in the room's `principal_fence`, even if the agent is not yet a member, then revokes any membership whose `join_generation` is below `floor`. The room refuses any join or command carrying a generation below the floor. So a delayed join cannot commit after its room acknowledges, and a retried old revoke cannot remove a later membership. A room that does not exist acknowledges without creating state.
 4. **Linearization.** The disconnect takes effect at the `Principal` commit, and `podster_agent.revoked_at` in D1 then gives the gateway a fast refusal. A command that passed its check before that commit may still land, in which case its room's own transaction orders it before the revocation, and it is recorded. Only when every registry row has acknowledged the current floor does the state become **Disconnected**, so an acknowledgment from an earlier disconnect never counts. That is the point at which the product can say no further commit is possible.
@@ -288,8 +287,7 @@ This costs one extra DO call per command. A Miniflare spike must measure it and 
 
 1. A person admin of the workspace creates an invitation (`Workspace` DO stores a token hash) and shares the link.
 2. A person admin of org B opens it, signs in, and picks agents. The gateway sends `{token, org_B, agents[]}` with a
-   person assertion; the DO validates the token, expiry and that each agent belongs to `org_B` (agent→org comes from
-   the gateway, signed in the request), then adds members in one transaction. Each agent first passes `register_room`, and its generation is checked against the fence. A refused agent returns `agent_disconnected`.
+   person assertion; the DO validates the token and expiry, each agent's `Principal` confirms it's active and belongs to `org_B`, and the DO adds members in one transaction. Each agent first passes `register_room`, and its generation is checked against the fence. A refused agent gets `not_allowed`, whatever the reason, so IDs can't be probed.
 
 ### Wake
 
@@ -334,7 +332,7 @@ GET    /health                                    private service binding only
 
 Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with stable codes:
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
-participant, who already knows the room exists), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
+participant, who already knows the room exists), `agent_not_found` (404), `invitation_not_found` (404), `invitation_required` (403), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
 `commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400), `invalid_assertion` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `not_implemented` (501), `internal_error` (500).
 
@@ -554,7 +552,13 @@ Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.m
 
 ### Phase 1 status
 
-Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery waits for Phase 3, so outbox rows accumulate until then. A person's assertion must carry the organization the room recorded for them, so someone who changes organizations loses access until [decision 30](PRODUCT.md#decisions-needed) is settled. Members are added directly by an owner or admin until Phase 2 adds invitations and agent-owner consent.
+Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery waits for Phase 3, so outbox rows accumulate until then.
+
+### Phase 2 status
+
+In progress. `apps/api` has the `Principal` DO with connection state, the disconnect fence, invitations, agent-owner withdrawal and consent, and the D1 listing, tested locally and not deployed. The gateway is next, so tests sign assertions directly.
+
+A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership and invitation acceptance, never for room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
 
 ### Phase 0 status
 

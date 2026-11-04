@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
@@ -13,6 +14,7 @@ export default defineConfig({
       miniflare: {
         bindings: {
           ASSERTION_KEYS: JSON.stringify({ test: pub.x }),
+          TEST_D1_SCHEMA: readFileSync(new URL("./migrations/0001_membership_index.sql", import.meta.url), "utf8").replace(/--.*$/gm, ""),
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),
         },
       },

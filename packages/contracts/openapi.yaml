@@ -58,6 +58,61 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/invitations/accept:
+    post:
+      operationId: acceptInvitation
+      tags: [commands]
+      summary: Accept an invitation for agents of an organization this person administers
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [token, org_id, agents], properties: { token: { type: string }, org_id: { type: string }, agents: { type: array, minItems: 1, maxItems: 20, items: { type: string } } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/invitations:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    post:
+      operationId: createInvitation
+      tags: [commands]
+      summary: Create an invitation. The token is returned once
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer }, role: { type: string, enum: [member, guest] }, invited_org_id: { type: string }, guest_can_create: { type: boolean } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/invitations/{invitation}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: invitation, in: path, required: true, schema: { type: string } }]
+    delete:
+      operationId: withdrawInvitation
+      tags: [commands]
+      summary: Withdraw a pending invitation
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/members/{principal}/clear-removal:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: principal, in: path, required: true, schema: { type: string } }]
+    post:
+      operationId: clearRemoval
+      tags: [commands]
+      summary: Let a removed agent return through an invitation. Owner or admin
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/members/{agent}/withdraw:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: agent, in: path, required: true, schema: { type: string } }]
+    post: { operationId: withdrawAgent, tags: [commands], summary: The agent's organization withdraws it from this room, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}/members/{agent}/owner-consent:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: agent, in: path, required: true, schema: { type: string } }]
+    post: { operationId: consentToAgentReturn, tags: [commands], summary: The agent's organization allows it back, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/agents/{agent}:
+    parameters: [{ name: agent, in: path, required: true, schema: { type: string } }]
+    get: { operationId: getAgent, tags: [queries], summary: An agent's connection. Itself and its organization's admins only, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    put:
+      operationId: registerAgent
+      tags: [commands]
+      summary: Record a claimed agent's organization. An admin of that organization only
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [org_id], properties: { org_id: { type: string }, name: { type: string } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/agents/{agent}/disconnect:
+    parameters: [{ name: agent, in: path, required: true, schema: { type: string } }]
+    post: { operationId: disconnectAgent, tags: [commands], summary: Disconnect from every room. Complete only when status is disconnected, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/agents/{agent}/reconnect:
+    parameters: [{ name: agent, in: path, required: true, schema: { type: string } }]
+    post: { operationId: reconnectAgent, tags: [commands], summary: Reconnect after a completed disconnect. No room access returns, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/members/{principal}/role:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: principal, in: path, required: true, schema: { type: string } }]
     post:
@@ -240,7 +295,7 @@ paths:
     delete: { operationId: deleteWake, tags: [commands], summary: Remove the wake URL, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
 components:
   securitySchemes:
-    assertion: { type: apiKey, in: header, name: X-Podster-Assertion, description: "Ed25519-signed gateway assertion, valid for 60 seconds." }
+    assertion: { type: apiKey, in: header, name: X-Podster-Assertion, description: "Ed25519-signed gateway assertion, valid for 60 seconds. Agents carry their connection generation. People carry orgs and admin_orgs." }
   parameters:
     ws: { name: ws, in: path, required: true, schema: { type: string } }
     t: { name: t, in: path, required: true, schema: { type: string } }
@@ -328,5 +383,5 @@ components:
           properties:
             code:
               type: string
-              enum: [already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [agent_not_found, invitation_not_found, invitation_required, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
             message: { type: string }

@@ -6,7 +6,7 @@ Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design]
 
 ## Implementation status
 
-The Rust kernel enforces part of this model in `crates/policy` and `apps/api`, tested locally and not deployed. The gateway, agent-owner consent, global disconnect and provider delegation aren't built, so security can't be called implemented until the enforcement and denial tests below exist and pass.
+The Rust kernel enforces part of this model in `crates/policy` and `apps/api`, tested locally and not deployed. Agent-owner withdrawal, global disconnect and invitations are also in `apps/api`. The gateway and provider delegation aren't built, so security can't be called implemented until the enforcement and denial tests below exist and pass.
 
 ## Approved authority model
 
@@ -79,7 +79,7 @@ Clients cannot alter or erase access history through permission-management comma
 
 ## Proposed acceptance and denial tests
 
-All items below are **not run**: no executable implementation exists yet. They are release gates to implement in Rust policy unit tests, API/DO integration tests, gateway adapter tests and end-to-end browser/agent tests.
+Some of these now have local tests in `crates/` and `apps/api/test`, and none has run against a deployment, so none counts as passed yet. They are release gates to implement in Rust policy unit tests, API/DO integration tests, gateway adapter tests and end-to-end browser/agent tests.
 
 | ID | Scenario | Expected result |
 | --- | --- | --- |
