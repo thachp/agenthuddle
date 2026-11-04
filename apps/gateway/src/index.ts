@@ -147,6 +147,8 @@ export function spentToken(pluginAgent: string, authorization: string | null | u
 }
 
 export function createAuth(env: Env) {
+  // Better Auth falls back to a public default outside production, and Workers don't set NODE_ENV.
+  if (!env.AUTH_SECRET) throw new Error("AUTH_SECRET is not set");
   const social: Record<string, { clientId: string; clientSecret: string }> = {};
   if (env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) social.github = { clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET };
   if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) social.google = { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET };
@@ -155,13 +157,19 @@ export function createAuth(env: Env) {
     baseURL: env.BASE_URL,
     secret: env.AUTH_SECRET,
     emailAndPassword: { enabled: passwordSignInEnabled(env) },
+    // Never join accounts on a matching email: an address can move to someone else, or be verified somewhere it shouldn't.
+    account: { accountLinking: { disableImplicitLinking: true } },
+    // A failed sign-in comes back to our page, which only offers another try, instead of a page with no way back.
+    onAPIError: { errorURL: "/sign-in" },
     // The schema check would run on every request, because an instance lasts one request. A test checks for drift instead.
     advanced: { database: { validateSchema: false } },
     socialProviders: social,
     databaseHooks: {
       user: {
-        // Everyone starts with a personal organization, so individuals aren't a second ownership model.
         create: {
+          // An unverified email could claim someone else's address and lock out its real owner.
+          before: async (user) => (user.emailVerified || passwordSignInEnabled(env) ? undefined : false),
+          // Everyone starts with a personal organization, so individuals aren't a second ownership model.
           after: async (user) => {
             const org = newId("org");
             const now = Date.now();
@@ -334,19 +342,23 @@ type SignInProvider = keyof typeof SIGN_IN_PROVIDERS;
 const configuredProviders = (env: Env): SignInProvider[] =>
   [env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET ? ("github" as const) : null, env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? ("google" as const) : null].filter((p) => p !== null);
 
-function signInPage(env: Env, next: string) {
+function signInPage(env: Env, next: string, failed: boolean) {
   const providers = configuredProviders(env);
+  // Fixed text, so a link can't put its own words on our page.
+  const notice = failed ? "<p>That sign-in didn't finish. Please try again, using an account with a verified email.</p>" : "";
   const buttons = providers.map((provider) => `<form method="post" action="/sign-in"><input type="hidden" name="provider" value="${provider}"><input type="hidden" name="next" value="${escapeHtml(next)}"><button type="submit">Continue with ${SIGN_IN_PROVIDERS[provider]}</button></form>`).join("");
-  return page("Sign in to Podster", buttons || "<p>Sign-in isn't set up here yet.</p>", providers.length ? 200 : 503);
+  return page("Sign in to Podster", notice + (buttons || "<p>Sign-in isn't set up here yet.</p>"), providers.length ? 200 : 503);
 }
 
 /** Starts a provider's sign-in as a form POST, so it needs no script on our page. */
 async function handleSignIn(request: Request, env: Env): Promise<Response> {
   if (!sameOrigin(request, env)) return denied("not_allowed", 403);
-  const form = await request.formData();
+  const form = await request.formData().catch(() => null);
+  if (!form) return denied("invalid_argument", 400);
   const provider = String(form.get("provider") ?? "");
+  const next = safeNext(String(form.get("next") ?? ""));
   if (!(configuredProviders(env) as string[]).includes(provider)) return denied("invalid_argument", 400);
-  const started = await createAuth(env).api.signInSocial({ headers: request.headers, body: { provider, callbackURL: new URL(safeNext(String(form.get("next") ?? "")), env.BASE_URL).toString() }, asResponse: true });
+  const started = await createAuth(env).api.signInSocial({ headers: request.headers, body: { provider, callbackURL: new URL(next, env.BASE_URL).toString(), errorCallbackURL: new URL(`/sign-in?next=${encodeURIComponent(next)}`, env.BASE_URL).toString() }, asResponse: true });
   const body = await started.json<{ url?: string }>().catch(() => null);
   if (!started.ok || !body?.url) return denied("sign_in_unavailable", 502);
   const headers = new Headers({ location: body.url });
@@ -365,8 +377,9 @@ async function claimPage(request: Request, env: Env, userId: string) {
   const orgs = await env.DB.prepare(`SELECT id, name FROM organization WHERE id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; name: string }>();
   const agents = await env.DB.prepare(`SELECT id, org_id, name FROM podster_agent WHERE revoked_at IS NULL AND org_id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; org_id: string; name: string }>();
   const orgName = (id: string) => orgs.results.find((o) => o.id === id)?.name ?? id;
-  const valid = agentId !== "" && (await codeMatchesLiveApproval(env, agentId, code));
-  const registered = valid ? await env.DB.prepare(`SELECT name FROM agent WHERE id = ?`).bind(agentId).first<{ name: string | null }>() : null;
+  // Nothing from the link appears until its code proves a real request, so a link can't put its own words on our page.
+  if (agentId === "" || !(await codeMatchesLiveApproval(env, agentId, code))) return page("Connect an agent", "<p>This link isn't valid or has expired. Ask the agent for a new one.</p>", 404);
+  const registered = await env.DB.prepare(`SELECT name FROM agent WHERE id = ?`).bind(agentId).first<{ name: string | null }>();
   const who = registered?.name ? `An agent calling itself <strong>${escapeHtml(registered.name)}</strong>` : "An agent";
   return page("Connect an agent", `<p>${who} is asking to join your organization. Podster hasn't verified this name.</p>
 <p>Only continue if you started this, and your agent showed you this code: <strong>${escapeHtml(code)}</strong></p>
@@ -429,7 +442,8 @@ async function handleAuthorize(request: Request, env: Env, userId: string): Prom
 
   // Approving is a POST from our own page, so a link can't connect an agent on someone's behalf.
   if (request.method !== "POST" || !sameOrigin(request, env)) return denied("not_allowed", 403);
-  const form = await request.formData();
+  const form = await request.formData().catch(() => null);
+  if (!form) return denied("invalid_argument", 400);
   const org = String(form.get("org_id") ?? "");
   const linkAgent = String(form.get("link_agent_id") ?? "");
   const name = String(form.get("agent_name") ?? "").trim() || "MCP agent";
@@ -529,7 +543,8 @@ async function handleClaim(request: Request, env: Env, userId: string): Promise<
   if (!isForm) return answer;
   const result = await answer.json<{ agent_id?: string; error?: { code?: string } }>();
   if (answer.ok) return page("Agent connected", `<p>Your agent is connected as <strong>${escapeHtml(result.agent_id ?? "")}</strong>. You can close this page.</p>`);
-  return page("Couldn't connect this agent", `<p>The code may be wrong or expired, or this agent may already belong to someone. Ask the agent for a new code. (${escapeHtml(result.error?.code ?? "error")})</p>`, answer.status);
+  const reason = result.error?.code === "invalid_argument" ? "Check the name, which can be at most 200 bytes." : "The code may be wrong or expired, this agent may already be connected, or it may belong to another organization.";
+  return page("Couldn't connect this agent", `<p>${reason}</p>`, answer.status);
 }
 
 type ClaimBody = { agent_id?: unknown; user_code?: unknown; org_id?: unknown; name?: unknown; link_agent_id?: unknown };
@@ -654,7 +669,7 @@ const appHandler = {
 
     const auth = createAuth(env);
     const session = await auth.api.getSession({ headers: request.headers });
-    if (url.pathname === "/sign-in" && request.method === "GET") return signInPage(env, safeNext(url.searchParams.get("next")));
+    if (url.pathname === "/sign-in" && request.method === "GET") return signInPage(env, safeNext(url.searchParams.get("next")), url.searchParams.has("error"));
     if (url.pathname === "/sign-in" && request.method === "POST") return handleSignIn(request, env);
     if (url.pathname === "/signed-in" && request.method === "GET") return page("You're signed in", "<p>You can close this page.</p>");
     if (url.pathname === "/authorize") {
