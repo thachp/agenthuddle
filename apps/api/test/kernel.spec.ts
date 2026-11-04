@@ -1264,7 +1264,7 @@ describe("inbox", () => {
     const raw = JSON.stringify(events);
     for (const secret of ["Secret plan", "Hidden instructions", "Hidden message"]) expect(raw).not.toContain(secret);
     expect(unread).toBe(2);
-    const deliver = () => inboxStub(bob.id).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id: events[0].event_id, workspace_id: id, type: "task.offered", actor_id: LEAD.id, task_id: task.id }) });
+    const deliver = () => inboxStub(bob.id).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id: events[0].event_id, workspace_id: id, type: "task.offered", actor_id: LEAD.id, task_id: task.id, event_seq: 1 }) });
     expect(await (await deliver()).json()).toEqual({ delivered: false });
     expect((await inbox(bob)).events).toHaveLength(2);
     expect((await inbox(bob)).acked_seq).toBe(acked_seq);
@@ -1432,7 +1432,8 @@ describe("inbox", () => {
     // The alarm waits for the retry. Rows behind the head look overdue, and they must not make it fire in a loop.
     const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
     expect(alarm).toBeGreaterThan(Date.now() + 500);
-    expect(alarm).toBeLessThanOrEqual(row[0].next_attempt_at);
+    // Scheduled relative to the clock, so it can land a moment after the row's time.
+    expect(alarm).toBeLessThanOrEqual(row[0].next_attempt_at + 100);
     // Still failing: another pass before the wait is over doesn't try again.
     await runDurableObjectAlarm(stub(id));
     expect((await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT max(attempts) AS n FROM outbox").one().n))).toBe(1);
@@ -1440,6 +1441,65 @@ describe("inbox", () => {
     await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE outbox SET next_attempt_at = 0"));
     await drain(id);
     expect((await inbox(bob)).events.map((e: any) => e.task_id)).toEqual([first.id, second.id]);
+  });
+
+  it("a send that arrives after the removal notice is refused, and later membership is unaffected", async () => {
+    const bob = await fresh();
+    const room_ = `ws_${crypto.randomUUID().replaceAll("-", "")}`;
+    const send = async (event_id: string, event_seq: number, type = "task.offered", workspace_id = room_) =>
+      (await (await inboxStub(bob.id).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id, event_seq, workspace_id, type, actor_id: "per_x" }) })).json<any>()).delivered;
+    expect(await send("kept", 2)).toBe(true);
+    expect(await send("notice", 5, "member.revoked")).toBe(true);
+    // Timed out earlier, arriving now. The notice cleared it, so only the floor can recognize it.
+    expect(await send("late", 3)).toBe(false);
+    expect(await send("kept", 2)).toBe(false);
+    expect(await send("older-notice", 4, "member.revoked")).toBe(false);
+    // Another room isn't affected.
+    expect(await send("elsewhere", 1, "task.offered", "ws_other")).toBe(true);
+    // Back in the room, new events arrive and a later removal clears them.
+    expect(await send("after-return", 6)).toBe(true);
+    const types = async () => (await inbox(bob, "?after=0")).events.map((e: any) => e.event_id);
+    expect(await types()).toEqual(["notice", "elsewhere", "after-return"]);
+    expect(await send("second-notice", 7, "member.revoked")).toBe(true);
+    expect(await types()).toEqual(["elsewhere", "second-notice"]);
+    expect(await send("notice", 5, "member.revoked")).toBe(false);
+    const missing = await inboxStub(bob.id).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id: "no-seq", workspace_id: room_, type: "task.offered", actor_id: "per_x" }) });
+    expect(missing.status).toBe(400);
+  });
+
+  it("the alarm follows whichever recipient is due first, not the one waiting longest", async () => {
+    const { id, tasks, bob } = await setup();
+    const carol = await fresh("org_c");
+    expect((await admit(id, carol)).status).toBe(200);
+    await drain(id);
+    await holdOutbox(id);
+    await offerTo(tasks, bob);
+    await offerTo(tasks, carol, "carol");
+    await releaseOutbox(id);
+    await runInDurableObject(stub(id), async (_: any, state: any) => {
+      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ? WHERE recipient_principal_id = ?", Date.now() + 300_000, bob.id);
+      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ? WHERE recipient_principal_id = ?", Date.now() + 2000, carol.id);
+      await state.storage.setAlarm(Date.now() + 3_600_000);
+    });
+    // Any write schedules delivery, even one that's refused.
+    expect((await api(OWNER, "POST", tasks, {})).status).toBeGreaterThanOrEqual(400);
+    const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
+    expect(alarm).toBeLessThanOrEqual(Date.now() + 2500);
+  });
+
+  it("if the drain itself fails, it retries after a few seconds rather than in a loop", async () => {
+    const { id, tasks, bob } = await setup();
+    await holdOutbox(id);
+    const task = await offerTo(tasks, bob);
+    await releaseOutbox(id);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("ALTER TABLE event RENAME TO event_away"));
+    await runDurableObjectAlarm(stub(id));
+    const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
+    expect(alarm).toBeGreaterThan(Date.now() + 3000);
+    expect(alarm).toBeLessThanOrEqual(Date.now() + 5100);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("ALTER TABLE event_away RENAME TO event"));
+    await drain(id);
+    expect((await inbox(bob)).events.map((e: any) => e.task_id)).toContain(task.id);
   });
 
   it("backs off longer each time, up to a limit", async () => {
@@ -1539,7 +1599,7 @@ describe("inbox", () => {
       sql.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) INSERT INTO inbox_event SELECT i, 'seed-' || i, 'ws_seed', 'task.offered', NULL, 'agt_x', ? FROM n`, count_, at);
       sql.exec(`UPDATE inbox_state SET last_seq = ?`, count_);
     });
-    const deliverOne = (who: string, event_id = crypto.randomUUID()) => inboxStub(who).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id, workspace_id: "ws_seed", type: "task.offered", actor_id: "agt_x" }) });
+    const deliverOne = (who: string, event_id = crypto.randomUUID()) => inboxStub(who).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id, workspace_id: "ws_seed", type: "task.offered", actor_id: "agt_x", event_seq: 1 }) });
     const DAY = 86_400_000;
 
     it("a full inbox drops the oldest acked event first, uncounted, then the oldest unread, counted", async () => {
@@ -1579,6 +1639,9 @@ describe("inbox", () => {
       const after = await inbox(old);
       expect(after.dropped).toBe(2);
       expect(after.events).toHaveLength(1);
+      // Delivering clears them for real, rather than only hiding them.
+      const held = await runInDurableObject(inboxStub(old.id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM inbox_event").one().n);
+      expect(held).toBe(1);
     });
 
     it("moving the cursor over expired unread events still reports them as lost", async () => {

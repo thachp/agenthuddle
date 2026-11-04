@@ -7,7 +7,7 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
-import { decodeJwt } from "jose";
+import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
 import worker, { allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
@@ -993,6 +993,21 @@ describe("dashboard passthrough", () => {
 });
 
 describe("spending agent tokens", () => {
+  it("refuses a token older than 60 seconds, whatever its `exp` says", async () => {
+    const owner = await signUp();
+    const agent = await claimedAgent(owner);
+    const signed = async (ageSeconds: number) => {
+      const now = Math.floor(Date.now() / 1000);
+      return new SignJWT({ capabilities: ["get_identity"] })
+        .setProtectedHeader({ alg: "EdDSA", typ: "agent+jwt", kid: agent.keypair.publicKey.kid })
+        .setSubject(agent.pluginId).setAudience(BASE).setIssuedAt(now - ageSeconds).setExpirationTime(now + 3600).setJti(crypto.randomUUID())
+        .sign(await importJWK(agent.keypair.privateKey, "EdDSA"));
+    };
+    const send = async (age: number) => (await post("/api/auth/capability/execute", { capability: "get_identity", arguments: {} }, { authorization: `Bearer ${await signed(age)}` })).status;
+    expect(await send(30)).toBe(200);
+    expect(await send(90)).toBe(401);
+  });
+
   const encode = (value: object) => btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   const bearer = (claims: object) => `Bearer ${encode({ alg: "EdDSA" })}.${encode(claims)}.sig`;
   const now = () => Math.floor(Date.now() / 1000);

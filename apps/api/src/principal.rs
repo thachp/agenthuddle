@@ -25,6 +25,7 @@ const INBOX_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS inbox_event (seq INTEGER PRIMARY KEY, event_id TEXT UNIQUE NOT NULL, workspace_id TEXT NOT NULL,
   type TEXT NOT NULL, task_id TEXT, actor_id TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS inbox_event_workspace ON inbox_event (workspace_id);
+CREATE TABLE IF NOT EXISTS inbox_floor (workspace_id TEXT PRIMARY KEY, event_seq INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS inbox_state (id INTEGER PRIMARY KEY CHECK (id = 1), acked_seq INTEGER NOT NULL, last_seq INTEGER NOT NULL, dropped INTEGER NOT NULL);
 INSERT OR IGNORE INTO inbox_state (id, acked_seq, last_seq, dropped) VALUES (1, 0, 0, 0);
 ";
@@ -187,7 +188,8 @@ fn expire_inbox(sql: &SqlStorage, now: i64) -> R<()> {
 }
 
 /// Stores one event, once. No await runs here, so all of it commits together. A removal notice first clears
-/// everything from that room, read or not, so the notice is all that remains.
+/// everything from that room, read or not, so the notice is all that remains. It also sets a floor in the room's own
+/// event order, because a send that timed out can still arrive afterward, and the clearing makes it look new.
 fn deliver(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let field = |name: &str| {
         body[name]
@@ -210,8 +212,27 @@ fn deliver(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     if !seen.is_empty() {
         return Ok(json!({ "delivered": false }));
     }
+    let event_seq = body["event_seq"]
+        .as_i64()
+        .ok_or_else(ApiError::invalid_argument)?;
+    let floor = rows(
+        sql,
+        "SELECT event_seq FROM inbox_floor WHERE workspace_id = ?",
+        vec![workspace_id.as_str().into()],
+    )?;
+    if floor
+        .first()
+        .is_some_and(|f| event_seq < int(&f["event_seq"]))
+    {
+        return Ok(json!({ "delivered": false }));
+    }
     expire_inbox(sql, now)?;
     if kind == REMOVAL_NOTICE {
+        exec(
+            sql,
+            "INSERT OR REPLACE INTO inbox_floor (workspace_id, event_seq) VALUES (?, ?)",
+            vec![workspace_id.as_str().into(), event_seq.into()],
+        )?;
         exec(
             sql,
             "DELETE FROM inbox_event WHERE workspace_id = ?",

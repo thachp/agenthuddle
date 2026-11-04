@@ -906,7 +906,8 @@ async fn send_to_inbox(env: &Env, recipient: &str, body: &Value) -> bool {
             let result: Result<Response> = result;
             matches!(result.map(|r| r.status_code()), Ok(200))
         }
-        // Delivery is idempotent, so a send that finishes late only makes the retry a no-op.
+        // Dropping this doesn't cancel the send, which can still arrive later. Delivery is idempotent, and the room's
+        // removal floor refuses it if the recipient was removed in the meantime.
         futures_util::future::Either::Right(_) => false,
     }
 }
@@ -1604,7 +1605,7 @@ impl Workspace {
             return Ok(());
         };
         let now = Date::now().as_millis() as i64;
-        let pending = rows(&sql, "SELECT o.event_id, o.recipient_principal_id, o.attempts, e.type, e.actor_id, e.task_id, e.created_at
+        let pending = rows(&sql, "SELECT o.event_id, o.recipient_principal_id, o.attempts, e.seq, e.type, e.actor_id, e.task_id, e.created_at
           FROM outbox o JOIN event e ON e.id = o.event_id
           WHERE o.recipient_principal_id NOT IN (SELECT recipient_principal_id FROM outbox WHERE next_attempt_at > ?)
           ORDER BY e.seq LIMIT ?", vec![now.into(), OUTBOX_BATCH.into()])?;
@@ -1625,7 +1626,7 @@ impl Workspace {
             if still_queued.is_empty() {
                 continue;
             }
-            let body = json!({ "event_id": event_id, "workspace_id": workspace_id, "type": row["type"], "actor_id": row["actor_id"], "task_id": row["task_id"], "created_at": row["created_at"] });
+            let body = json!({ "event_id": event_id, "event_seq": row["seq"], "workspace_id": workspace_id, "type": row["type"], "actor_id": row["actor_id"], "task_id": row["task_id"], "created_at": row["created_at"] });
             if send_to_inbox(&self.env, &recipient, &body).await {
                 exec(
                     &sql,

@@ -204,6 +204,7 @@ Commands return errors rather than panic. A panic inside the `worker` crate's as
 ```
 inbox_event(seq, event_id UNIQUE, workspace_id, type, task_id, actor_id, created_at)
 inbox_state(acked_seq, last_seq, dropped)
+inbox_floor(workspace_id, event_seq)
 seen_jti(key, expires_at)   -- agents only
 wake(url, headers_json, debounce_s, last_sent_at, consecutive_failures)   -- agents only
 connection(generation, status: active|disconnecting|disconnected, participation_policy)
@@ -559,7 +560,7 @@ Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` 
 
 ### Phase 3 status
 
-Passes locally, not deployed. The `Workspace` alarm delivers its outbox to each recipient's `Principal` DO, in order per recipient. A recipient that fails or takes over 10 seconds backs off for up to 5 minutes, without holding up anyone else. `read_inbox` and `ack_inbox` work over both connection methods with one shared cursor, and a removal notice clears that room's events from the inbox.
+Passes locally, not deployed. The `Workspace` alarm delivers its outbox to each recipient's `Principal` DO, in order per recipient. A recipient that fails backs off for up to 5 minutes without holding up anyone else. One that hangs delays the room by at most 10 seconds on each attempt, then backs off the same way. A send that times out can still arrive later, so a removal notice sets a floor in the room's event order, and older events from that room are refused. `read_inbox` and `ack_inbox` work over both connection methods with one shared cursor, and a removal notice clears that room's events from the inbox.
 
 The API supports oversight through `GET /v1/agents/{agent}/inbox` and inboxes for people, and the gateway doesn't expose them until the Phase 4 dashboard. `set_wake` and `delete_wake` return `not_implemented` until Phase 4.
 
