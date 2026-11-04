@@ -989,6 +989,44 @@ describe("resilience and schema", () => {
   });
 });
 
+describe("HTTPS only", () => {
+  it("redirects reads to HTTPS, keeping the path, and never serves discovery over HTTP", async () => {
+    for (const path of ["/sign-in?next=%2Fclaim", "/.well-known/oauth-authorization-server", "/.well-known/agent-configuration"]) {
+      const res = await SELF.fetch(`http://gateway.test${path}`, { redirect: "manual" });
+      expect(res.status, path).toBe(301);
+      expect(res.headers.get("location"), path).toBe(`${BASE}${path}`);
+      expect(await res.text(), path).toBe("");
+    }
+  });
+
+  it("refuses anything sent with a body over HTTP, rather than acting on it", async () => {
+    for (const [method, path] of [["POST", "/oauth/token"], ["POST", "/mcp"], ["POST", "/api/auth/capability/execute"], ["PUT", "/api/v1/x"], ["DELETE", "/api/v1/x"]]) {
+      const res = await SELF.fetch(`http://gateway.test${path}`, { method, redirect: "manual", headers: { "content-type": "application/json" }, body: "{}" });
+      expect(res.status, path).toBe(400);
+      expect((await res.json<any>()).error.code, path).toBe("https_required");
+    }
+  });
+
+  it("tells browsers to stay on HTTPS, and keeps every other header", async () => {
+    const page = await call("/sign-in");
+    expect(page.headers.get("strict-transport-security")).toBe("max-age=31536000");
+    expect(page.headers.get("content-security-policy")).toContain("default-src 'none'");
+    const started = await call("/sign-in", { method: "POST", headers: { origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: "provider=github" });
+    expect(started.status).toBe(302);
+    expect(started.headers.get("strict-transport-security")).toBe("max-age=31536000");
+    expect(started.headers.getSetCookie().length).toBeGreaterThan(0);
+    const mcp = await call("/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    expect(mcp.status).toBe(401);
+    expect(mcp.headers.get("www-authenticate")).toContain("resource_metadata");
+  });
+
+  it("leaves a local deployment on HTTP alone", async () => {
+    const local = await worker.fetch(new Request("http://localhost:8787/sign-in"), { ...e, BASE_URL: "http://localhost:8787" } as never, { waitUntil() {}, passThroughOnException() {} } as never);
+    expect(local.status).toBe(200);
+    expect(local.headers.get("strict-transport-security")).toBeNull();
+  });
+});
+
 describe("sign-in and claim pages", () => {
   const form = (fields: Record<string, string>, headers: Record<string, string> = {}, path = "/sign-in") =>
     call(path, { method: "POST", headers: { origin: BASE, "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams(fields) });
