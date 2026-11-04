@@ -540,8 +540,8 @@ describe("hosts with more than one agent", () => {
   });
 
   describe("with one claim held partway", () => {
-    const claimDirect = (who: Person, agent: AgentAuthAgent, db: D1Database) =>
-      worker.fetch(new Request(`${BASE}/claim`, { method: "POST", headers: { "content-type": "application/json", origin: BASE, cookie: who.cookie }, body: JSON.stringify({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: who.org }) }), { ...e, DB: db } as never, { waitUntil() {}, passThroughOnException() {} } as never);
+    const claimDirect = (who: Person, agent: AgentAuthAgent, db: D1Database, extra: object = {}) =>
+      worker.fetch(new Request(`${BASE}/claim`, { method: "POST", headers: { "content-type": "application/json", origin: BASE, cookie: who.cookie }, body: JSON.stringify({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: who.org, ...extra }) }), { ...e, DB: db } as never, { waitUntil() {}, passThroughOnException() {} } as never);
     const gate = () => {
       let open!: () => void;
       let reached!: () => void;
@@ -617,6 +617,82 @@ describe("hosts with more than one agent", () => {
       expect(a.agent_id).toBe(b.agent_id);
       expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE external_id = ?").bind(agent.pluginId).first()).toEqual({ n: 1 });
       expect((await execute(agent, "get_identity")).data.id).toBe(a.agent_id);
+    });
+
+    /** Holds the first claim at the moment it writes its link, whichever way it writes it. */
+    function holdLinkWrite() {
+      const held = gate();
+      let done = false;
+      const hold = async () => {
+        if (!done) {
+          done = true;
+          held.reach();
+          await held.opened;
+        }
+      };
+      const statement = (inner: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(inner, {
+        get(target, key) {
+          if (key === "bind") return (...args: unknown[]) => statement(target.bind(...args), sql);
+          const value = (target as any)[key];
+          if (typeof value !== "function") return value;
+          return async (...args: unknown[]) => {
+            if (/insert into identity_link/i.test(sql)) await hold();
+            return value.apply(target, args);
+          };
+        },
+      });
+      const db = new Proxy(e.DB, {
+        get(target, key) {
+          if (key === "prepare") return (sql: string) => statement(target.prepare(sql), sql);
+          if (key === "batch") return async (statements: D1PreparedStatement[]) => (await hold(), target.batch(statements));
+          const value = (target as any)[key];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      return { db, held };
+    }
+    const linkOf = (agent: AgentAuthAgent) => e.DB.prepare("SELECT agent_id FROM identity_link WHERE provider = 'agent_auth' AND external_id = ?").bind(agent.pluginId).all<{ agent_id: string }>().then((r) => r.results.map((row) => row.agent_id));
+
+    it("linking to the same agent twice gets the same answer both times", async () => {
+      const owner = await signUp();
+      const target = await claimedAgent(owner);
+      const agent = await registerAgent();
+      const { db, held } = holdLinkWrite();
+      const firstClaim = claimDirect(owner, agent, db, { link_agent_id: target.id });
+      await held.arrived;
+      const second = await claimDirect(owner, agent, e.DB, { link_agent_id: target.id });
+      held.open();
+      expect([(await firstClaim).status, second.status]).toEqual([200, 200]);
+      expect(await linkOf(agent)).toEqual([target.id]);
+    });
+
+    it("linking to two different agents refuses the one that lost", async () => {
+      const owner = await signUp();
+      const [loser, winner] = [await claimedAgent(owner), await claimedAgent(owner)];
+      const agent = await registerAgent();
+      const { db, held } = holdLinkWrite();
+      const firstClaim = claimDirect(owner, agent, db, { link_agent_id: loser.id });
+      await held.arrived;
+      const second = await claimDirect(owner, agent, e.DB, { link_agent_id: winner.id });
+      held.open();
+      expect(second.status).toBe(200);
+      expect((await firstClaim).status).toBe(403);
+      expect(await linkOf(agent)).toEqual([winner.id]);
+      expect((await execute(agent, "get_identity")).data.id).toBe(winner.id);
+    });
+
+    it("a plain claim that loses to a link is refused, not told about an agent it didn't get", async () => {
+      const owner = await signUp();
+      const winner = await claimedAgent(owner);
+      const agent = await registerAgent();
+      const { db, held } = holdLinkWrite();
+      const firstClaim = claimDirect(owner, agent, db);
+      await held.arrived;
+      const second = await claimDirect(owner, agent, e.DB, { link_agent_id: winner.id });
+      held.open();
+      expect(second.status).toBe(200);
+      expect((await firstClaim).status).toBe(403);
+      expect(await linkOf(agent)).toEqual([winner.id]);
     });
   });
 
