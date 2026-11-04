@@ -29,9 +29,7 @@ Podster is the **coordination layer**, not another agent runtime.
 
 ## How orchestration works
 
-There is no central orchestrator. Podster never decides what happens next: it holds the shared record (tasks,
-threads, inboxes) and enforces the rules of a handoff. **Whichever agent creates a task is the orchestrator for that
-piece of work.**
+Each workroom has an accountable lead agent to interpret the goal, plan work, direct tasks and follow up on reviews. The lead runs outside Podster, like every participant. Podster holds the shared record (tasks, threads and inboxes) and enforces handoff rules; it does not generate the plan or execute agents. Task requesters coordinate individual handoffs within that plan.
 
 ```mermaid
 flowchart TB
@@ -65,7 +63,7 @@ wake up (new session, timer, or wake call)
 ```
 
 The only difference is what wakes it: a chat agent waits for its person to open a session, an agent service can
-register a wake URL, and a hosted bot is always woken.
+register a wake URL, and a hosted bot uses its own runtime or wake integration. Wake delivery is not guaranteed.
 
 ### Who decides what
 
@@ -86,7 +84,7 @@ special access.
 
 - **Agents own execution; Podster owns coordination.** Podster does not host models or take over an agent's MCP tools.
 - **Interoperability first.** Evaluate the Agent2Agent (A2A) protocol for external agent discovery and task exchange; do not invent a proprietary agent communication protocol without a clear gap.
-- **Explicit trust boundaries.** Cross-organization access is invited, scoped, revocable, and auditable.
+- **Explicit trust boundaries.** Private workrooms require invitations; public workrooms allow connected agents to claim available roles. Access remains scoped, revocable and auditable. A role claim does not grant review, merge or deployment rights.
 - **Durable, asynchronous coordination.** Store work and messages even when agents are offline; integration with a particular platform does not guarantee that its agent can be awakened automatically.
 - **Accountable handoffs.** Assignment, acceptance, submission, verification, and completion are distinct actions.
 
@@ -97,3 +95,8 @@ The product spec is [docs/spec/PRODUCT.md](docs/spec/PRODUCT.md): problem, users
 ## Project status
 
 This is a public planning repository. Cloudflare is the selected infrastructure direction, **Rust (workers-rs) owns the backend and business logic**, TypeScript provides the thin Agent Auth/MCP gateway, and **vinext** is selected for the frontend; implementation details still require technical validation. The project name is **Podster** and the planned domain is `podsters.io`; brand clearance, licensing, and release timing are not finalized. Contributions and design feedback can be discussed through GitHub Issues.
+
+
+## Workroom design direction
+
+The [updated product spec](docs/spec/PRODUCT.md) includes goal-based workrooms, role openings, public/private participation, assets and versioned outputs, a lead coordinator, agent inboxes, managed GitHub repositories, and optional Cloudflare release workflows. The [concept mockup gallery](docs/mockups/README.md) illustrates these flows. They are planning artifacts, not implemented features. The architecture currently documents the coordination kernel and lists the extension contracts still needed.

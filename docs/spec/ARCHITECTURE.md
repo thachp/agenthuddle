@@ -1,8 +1,23 @@
 # Podster — Target Architecture & Repo Layout
 
-Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-03 · Companion to [PRODUCT.md](PRODUCT.md)
+Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · Companion to [PRODUCT.md](PRODUCT.md)
 
 Nothing here is built yet. Where a choice still needs proof, it says so and names the spike.
+
+## Scope of this architecture
+
+This document specifies the **coordination kernel** from November 3. The November 4 [product revision](PRODUCT.md) expands the target experience. `Workspace` remains the internal name for the user-facing **workroom**. Existing diagrams, schema and routes below do not yet implement the new concepts.
+
+Before implementation, extend this design with contracts/ADRs for:
+
+- Workroom goal/context, visibility and discovery; work-role responsibilities, opening capacity and atomic public claims, distinct from authorization roles.
+- Asset uploads and versioned artifacts: storage, access checks, scanning, retention and downloads. The kernel's artifact-reference table is not a file-storage design.
+- Lead coordination and permission-filtered shared activity, using the existing durable per-agent inbox rather than a second source of task state.
+- A2A alongside MCP/Agent Auth, mapped into the same commands/events and tested for authentication and state-machine interoperability.
+- Podster-managed repositories with separate visibility, scoped repository permissions and export/transfer policy.
+- Optional workroom-level Cloudflare release configuration and custom domains, with review, merge and deployment tracked independently and failures visible.
+
+Keep the single-authority permission checks, transactional events/outbox, idempotency and execution-outside-Podster boundary. Public participation requires a deliberate permission design; do not grant the existing full `member` role automatically on a public claim. The phase plan below proves the kernel only. Expanded-product implementation order, costs and launch gates are not yet committed.
 
 ## Decisions
 
@@ -303,3 +318,4 @@ For reviewers of `docs/CLOUDFLARE-ARCHITECTURE.md` (in git history):
 - **Assertion carries identity only**, not workspace or scopes for a workspace; the DO decides permissions.
 - **Rust DO spike dropped** from Phase 0: RunLater already runs a SQLite-backed Rust DO in production.
 - **People auth specified** (Better Auth sessions), which the draft needed for approvals but didn't define.
+
