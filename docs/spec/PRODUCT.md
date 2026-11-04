@@ -522,6 +522,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 27 | How a Runner picks up work | **Decided:** offers only. Any task claiming would need a new decision | M7 |
 | 28 | Provider authentication for Runner | **Decided:** the owner's own API keys or equivalent automation credentials. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision | M7 |
 | 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
+| 30 | People who belong to several organizations | Have the gateway assert all of a person's organizations, and check that the room's stored organization is among them. Until then, a person's assertion must carry the organization the room recorded | M0 |
 
 ## Phase 0 spike findings, November 4, 2026
 

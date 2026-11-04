@@ -554,7 +554,7 @@ Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.m
 
 ### Phase 1 status
 
-Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery waits for Phase 3, so outbox rows accumulate until then. Members are added directly by an owner or admin until Phase 2 adds invitations and agent-owner consent.
+Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery waits for Phase 3, so outbox rows accumulate until then. A person's assertion must carry the organization the room recorded for them, so someone who changes organizations loses access until [decision 30](PRODUCT.md#decisions-needed) is settled. Members are added directly by an owner or admin until Phase 2 adds invitations and agent-owner consent.
 
 ### Phase 0 status
 

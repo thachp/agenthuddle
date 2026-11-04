@@ -13,7 +13,7 @@ use podster_core::{
 };
 use podster_policy::{
     authorize_reviewer_change, authorize_task, authorize_workroom, can_review, can_see_task,
-    Caller, PrincipalKind, Role, TaskAction, WorkroomAction,
+    Caller, PrincipalKind, Role, TaskAction, Verdict, WorkroomAction,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -724,7 +724,7 @@ mod queries {
             rows(sql, "SELECT principal_id, kind, org_id, role FROM member WHERE revoked_at IS NULL ORDER BY added_at", vec![])?
         };
         Ok(
-            json!({ "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"], "policy_version": room["policy_version"], "members": members }),
+            json!({ "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"], "policy_version": (authorize_workroom(caller, WorkroomAction::ManageAccess) == Verdict::Allow).then(|| room["policy_version"].clone()), "members": members }),
         )
     }
 

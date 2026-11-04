@@ -549,6 +549,13 @@ describe("review findings", () => {
     expect(after).toBe(v + 1);
   });
 
+  it("only people who manage access can see the policy version", async () => {
+    const { id } = await room();
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version).toBeGreaterThan(0);
+    expect((await api(ADMIN, "GET", `/v1/workspaces/${id}`)).body.policy_version).toBeGreaterThan(0);
+    for (const who of [LEAD, BOB]) expect((await api(who, "GET", `/v1/workspaces/${id}`)).body.policy_version).toBeNull();
+  });
+
   it("members, guests and agents can't use any access command", async () => {
     const { id } = await room();
     const v = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
