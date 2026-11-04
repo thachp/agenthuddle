@@ -1,0 +1,110 @@
+//! Stable error codes. Internal details are logged, never returned.
+use podster_core::CoreError;
+use podster_policy::Verdict;
+use worker::{console_error, Response, Result};
+
+#[derive(Debug)]
+pub enum ApiError {
+    Api { status: u16, code: &'static str },
+    Internal(String),
+}
+
+impl ApiError {
+    const fn api(status: u16, code: &'static str) -> ApiError {
+        ApiError::Api { status, code }
+    }
+    pub fn invalid_assertion() -> ApiError {
+        ApiError::api(401, "invalid_assertion")
+    }
+    pub fn workspace_not_found() -> ApiError {
+        ApiError::api(404, "workspace_not_found")
+    }
+    pub fn access_revoked() -> ApiError {
+        ApiError::api(403, "access_revoked")
+    }
+    pub fn not_allowed() -> ApiError {
+        ApiError::api(403, "not_allowed")
+    }
+    pub fn task_not_found() -> ApiError {
+        ApiError::api(404, "task_not_found")
+    }
+    pub fn not_found() -> ApiError {
+        ApiError::api(404, "not_found")
+    }
+    pub fn not_implemented() -> ApiError {
+        ApiError::api(501, "not_implemented")
+    }
+    pub fn invalid_argument() -> ApiError {
+        ApiError::api(400, "invalid_argument")
+    }
+    pub fn already_member() -> ApiError {
+        ApiError::api(409, "already_member")
+    }
+    pub fn limit_exceeded() -> ApiError {
+        ApiError::api(409, "limit_exceeded")
+    }
+    pub fn idempotency_required() -> ApiError {
+        ApiError::api(400, "idempotency_key_required")
+    }
+    pub fn idempotency_mismatch() -> ApiError {
+        ApiError::api(422, "idempotency_mismatch")
+    }
+    pub fn internal(detail: &str) -> ApiError {
+        ApiError::Internal(detail.to_string())
+    }
+
+    pub fn from_core(error: &CoreError) -> ApiError {
+        let status = match error {
+            CoreError::InvalidTransition
+            | CoreError::VersionConflict
+            | CoreError::CommitChanged
+            | CoreError::SubmissionMismatch => 409,
+            CoreError::SelfSignOff => 422,
+            CoreError::NotAllowed => 403,
+            CoreError::InvalidArgument(_) => 400,
+        };
+        ApiError::api(status, error.code())
+    }
+
+    pub fn from_verdict(verdict: Verdict) -> std::result::Result<(), ApiError> {
+        match verdict {
+            Verdict::Allow => Ok(()),
+            Verdict::Forbidden => Err(ApiError::not_allowed()),
+            Verdict::Hidden => Err(ApiError::task_not_found()),
+            // Kernel rooms are private, so a non-participant learns nothing about them.
+            Verdict::NotParticipant => Err(ApiError::workspace_not_found()),
+        }
+    }
+
+    pub fn status_and_code(&self) -> (u16, &'static str) {
+        match self {
+            ApiError::Api { status, code } => (*status, code),
+            ApiError::Internal(_) => (500, "internal_error"),
+        }
+    }
+
+    pub fn into_response(self) -> Result<Response> {
+        if let ApiError::Internal(detail) = &self {
+            console_error!("internal error: {detail}");
+        }
+        let (status, code) = self.status_and_code();
+        Ok(
+            Response::from_json(
+                &serde_json::json!({ "error": { "code": code, "message": code } }),
+            )?
+            .with_status(status),
+        )
+    }
+}
+
+impl From<worker::Error> for ApiError {
+    fn from(error: worker::Error) -> ApiError {
+        ApiError::Internal(error.to_string())
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(error: serde_json::Error) -> ApiError {
+        ApiError::Internal(error.to_string())
+    }
+}

@@ -2,7 +2,7 @@
 
 Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · [Architecture](ARCHITECTURE.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
 
-The project name is **Podster** and the planned domain is `podster.dev`; brand clearance is still pending. Nothing here is built or deployed yet. The November 4 workroom direction below supersedes the earlier link-only, invitation-only product scope. Detailed API names remain the existing kernel contract until the extension contracts are designed. [Concept mockups](../mockups/README.md) illustrate the direction; they are not implemented screens.
+The project name is **Podster** and the planned domain is `podster.dev`; brand clearance is still pending. The coordination kernel is partly built and tested locally, and nothing is deployed. The November 4 workroom direction below supersedes the earlier link-only, invitation-only product scope. Detailed API names remain the existing kernel contract until the extension contracts are designed. [Concept mockups](../mockups/README.md) illustrate the direction; they are not implemented screens.
 
 **Reading this spec:** text marked **Proposed** is a recommendation awaiting the owner's decision, not an approved requirement. Unmarked text is the current product direction. All decisions awaiting an answer are gathered in [Decisions needed](#decisions-needed).
 
@@ -337,7 +337,7 @@ underneath are an internal contract between services, not a public product in th
 | `set_reviewer` | `workspace_id`, `task_id`, `reviewer`, `version`, `idempotency_key` | task |
 | `set_requester` | `workspace_id`, `task_id`, `requester`, `version`, `idempotency_key` | task |
 | `list_tasks` | `workspace_id`, `status?`, `mine?`, `cursor?` | page of tasks |
-| `get_task` | `workspace_id`, `task_id` | task, artifacts, last 20 messages, history |
+| `get_task` | `workspace_id`, `task_id` | task, submissions, artifacts, last 20 messages, history |
 | `assign_task` | `workspace_id`, `task_id`, `assignee`, `version`, `idempotency_key` | task |
 | `accept_task` / `decline_task` / `release_task` | `workspace_id`, `task_id`, `version`, `reason?`, `idempotency_key` | task |
 | `send_message` | `workspace_id`, `task_id`, `body`, `idempotency_key` | message |
@@ -415,7 +415,8 @@ The Rust API is private, service-only and never called directly from browser cod
 | Members per workspace | 50 |
 | Open tasks per workspace | 1,000 (terminal tasks kept until the workspace is deleted) |
 | Message body | 16 KB of Markdown |
-| Artifacts per submission | 10 |
+| Artifacts per submission | 10, HTTPS links only |
+| Fields | Title 500 bytes; instructions 64 KB; acceptance criteria 16 KB; note 16 KB; reason 4 KB |
 | Inbox | 10,000 events per agent; unread kept 30 days, acked 7 days; `read_inbox` returns at most 50 |
 | Wake | One URL per agent; at most once per 1 min–24 h (default 15 min); off after 3 failures in a row |
 | Invitations | Expire after 7 days |
@@ -521,6 +522,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 27 | How a Runner picks up work | **Decided:** offers only. Any task claiming would need a new decision | M7 |
 | 28 | Provider authentication for Runner | **Decided:** the owner's own API keys or equivalent automation credentials. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision | M7 |
 | 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
+| 30 | People who belong to several organizations | Have the gateway assert all of a person's organizations, and check that the room's stored organization is among them. Until then, a person's assertion must carry the organization the room recorded | M0 |
 
 ## Phase 0 spike findings, November 4, 2026
 

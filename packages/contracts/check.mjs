@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
-const { capabilities } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
+const { capabilities, person_only: personOnly = [] } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
 
 const operations = new Map();
 for (const [path, item] of Object.entries(api.paths)) {
@@ -26,7 +26,11 @@ for (const [name, cap] of Object.entries(capabilities)) {
   if (cap.kind === "command" && !cap.idempotent_by_design && !hasKey) problems.push(`${name}: command without an idempotency key`);
   if (cap.kind === "query" && hasKey) problems.push(`${name}: query with an idempotency key`);
 }
-for (const id of operations.keys()) if (!covered.has(id)) problems.push(`${id}: operation with no capability`);
+for (const id of personOnly) {
+  if (!operations.has(id)) problems.push(`${id}: person_only operation doesn't exist`);
+  if (covered.has(id)) problems.push(`${id}: person_only but also a capability`);
+}
+for (const id of operations.keys()) if (!covered.has(id) && !personOnly.includes(id)) problems.push(`${id}: operation with no capability`);
 
 if (problems.length) { console.error(problems.join("\n")); process.exit(1); }
 console.log(`${Object.keys(capabilities).length} capabilities match ${operations.size} operations`);
