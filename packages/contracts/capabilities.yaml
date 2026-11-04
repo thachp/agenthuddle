@@ -34,3 +34,12 @@ person_only:
   - changeMemberRole
   - listEvents
   - listAudit
+  - acceptInvitation
+  - createInvitation
+  - withdrawInvitation
+  - withdrawAgent
+  - consentToAgentReturn
+  - getAgent
+  - registerAgent
+  - disconnectAgent
+  - reconnectAgent

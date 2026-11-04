@@ -10,7 +10,12 @@ const MIGRATIONS: &[&str] = &["
 CREATE TABLE workspace (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_org_id TEXT NOT NULL, owner_person_id TEXT NOT NULL,
   policy_version INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE member (principal_id TEXT PRIMARY KEY, kind TEXT NOT NULL, org_id TEXT NOT NULL, role TEXT NOT NULL,
-  guest_can_create INTEGER NOT NULL DEFAULT 0, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, revoked_at INTEGER, revocation_reason TEXT);
+  guest_can_create INTEGER NOT NULL DEFAULT 0, join_generation INTEGER, added_by TEXT NOT NULL, added_at INTEGER NOT NULL,
+  revoked_at INTEGER, revocation_reason TEXT, owner_consented_at INTEGER);
+CREATE TABLE principal_fence (principal_id TEXT PRIMARY KEY, min_generation INTEGER NOT NULL);
+CREATE TABLE invitation (id TEXT PRIMARY KEY, invited_org_id TEXT, role TEXT NOT NULL, guest_can_create INTEGER NOT NULL DEFAULT 0, token_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL, status TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, accepted_by TEXT, accepted_response TEXT);
+CREATE TABLE index_outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, principal_id TEXT NOT NULL, org_id TEXT NOT NULL, role TEXT, removed INTEGER NOT NULL);
 CREATE TABLE task (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, title TEXT NOT NULL, instructions TEXT NOT NULL,
   acceptance_criteria TEXT, requester_id TEXT NOT NULL, assignee_id TEXT, reviewer_id TEXT NOT NULL, status TEXT NOT NULL,
   version INTEGER NOT NULL, due_at INTEGER, follow_up_of TEXT, has_linked_repository INTEGER NOT NULL DEFAULT 0,

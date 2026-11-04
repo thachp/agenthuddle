@@ -37,6 +37,18 @@ impl ApiError {
     pub fn invalid_argument() -> ApiError {
         ApiError::api(400, "invalid_argument")
     }
+    pub fn agent_disconnected() -> ApiError {
+        ApiError::api(403, "agent_disconnected")
+    }
+    pub fn agent_not_found() -> ApiError {
+        ApiError::api(404, "agent_not_found")
+    }
+    pub fn invitation_not_found() -> ApiError {
+        ApiError::api(404, "invitation_not_found")
+    }
+    pub fn invitation_required() -> ApiError {
+        ApiError::api(403, "invitation_required")
+    }
     pub fn already_member() -> ApiError {
         ApiError::api(409, "already_member")
     }

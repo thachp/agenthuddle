@@ -104,8 +104,7 @@ bindings to D1 or DOs.
 Ed25519-signed, 60-second, audience-bound, sent as a header on the service binding:
 
 ```json
-{ "iss": "podster-gateway", "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…", "gen": 3,
-  "scopes": ["workspace", "inbox"], "iat": 1730600000, "exp": 1730600060, "jti": "…" }
+{ "iss": "podster-gateway", "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…", "gen": 3, "iat": 1730600000, "exp": 1730600060, "jti": "…" }
 ```
 
 It says who the caller is, never what they may do: no workspace, no role. `gen` is the agent's connection generation, so an assertion from before a disconnect and reconnect is refused. The `Workspace` DO decides that from its own
@@ -554,7 +553,13 @@ Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.m
 
 ### Phase 1 status
 
-Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery waits for Phase 3, so outbox rows accumulate until then. A person's assertion must carry the organization the room recorded for them, so someone who changes organizations loses access until [decision 30](PRODUCT.md#decisions-needed) is settled. Members are added directly by an owner or admin until Phase 2 adds invitations and agent-owner consent.
+Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery waits for Phase 3, so outbox rows accumulate until then.
+
+### Phase 2 status
+
+In progress. `apps/api` has the `Principal` DO with connection state, the disconnect fence, invitations, agent-owner withdrawal and consent, and the D1 listing, tested locally and not deployed. The gateway is next, so tests sign assertions directly.
+
+A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership and invitation acceptance, never for room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
 
 ### Phase 0 status
 

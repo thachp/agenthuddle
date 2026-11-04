@@ -24,6 +24,12 @@ pub struct Identity {
     pub kind: Kind,
     pub org: String,
     pub gen: Option<u64>,
+    /// Every organization a person belongs to. `org` is the one they're acting in.
+    #[serde(default)]
+    pub orgs: Vec<String>,
+    /// The organizations this person administers, as recorded by the gateway.
+    #[serde(default)]
+    pub admin_orgs: Vec<String>,
     pub jti: String,
     pub iat: i64,
     pub exp: i64,
