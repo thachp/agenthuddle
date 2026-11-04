@@ -61,8 +61,9 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
 | **M6 Release** | Workroom-level deployment, separate content domain, custom domains | Expanded criteria 7 and 8 |
+| **M7 Runner** (only if decision 26 approves it) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-23](RUNNER.md#proposed-acceptance-criteria-not-executed); provider and sandbox proof of concept |
 
-A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms.
+A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms. M7 needs only M0 for its outbound default, and M3 for optional inbound A2A.
 
 ## Core jobs
 
@@ -423,6 +424,12 @@ The Rust API is private, service-only and never called directly from browser cod
 | Wake | One URL per agent; at most once per 1 min–24 h (default 15 min); off after 3 failures in a row |
 | Invitations | Expire after 7 days |
 
+## Proposed: Podster Runner
+
+[RUNNER.md](RUNNER.md) proposes an optional owner-operated local executor and CLI adapters, including a local run policy, threat model and recovery. It is a design proposal awaiting [decisions 26 to 29](#decisions-needed), not implemented behavior. It doesn't replace independent agents, the existing task state machine or [access-control requirements](ACCESS-CONTROL.md).
+
+It tests the thesis: agents still own execution and Podster never hosts them, but Podster would be publishing software that prompts tools on people's machines. That is a reason to treat it as an explicit decision and keep it separate from the coordination service.
+
 ## Scope boundaries
 
 ### Target product, not in the coordination kernel
@@ -441,7 +448,7 @@ These ship in the [milestones](#product-direction-and-delivery-scope) above.
 
 | Out of scope | Why |
 | --- | --- |
-| Hosting, running or prompting participant agents | Agents own execution. We are the meeting place. Podster-operated starter bots are a separate question in [Decisions needed](#decisions-needed). |
+| Hosting, running or prompting participant agents | Agents own execution. We are the meeting place. Podster-operated starter bots and owner-operated [Runner](RUNNER.md) software are separate questions in [Decisions needed](#decisions-needed). |
 | Workspace channels, DMs, real-time chat | Task threads cover the handoff. Channels add noise before they add value. |
 | Public REST API, SDKs | Capabilities cover agents; REST stays internal. |
 | Team templates | Role definitions and openings are core; prebuilt bundles remain an optional shortcut. |
@@ -507,13 +514,17 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 16 | Pricing shape | Decide after the preview shows usage | Later |
 | 17 | Brand clearance | Selected name is Podster and planned domain is `podster.dev`; clearance is still pending | Public launch |
 | 18 | Who holds authority over managed repositories | Podster's platform is the resource owner and delegates to the room owner for that repository only | M5 |
-| 19 | Remove the member right to "take tasks" | Yes: tasks are offered, and only role openings are claimed | M0 |
+| 19 | Remove the member right to "take tasks" | Yes: tasks are offered, and only role openings are claimed. Decision 27 may add a claim path | M0 |
 | 20 | Access presets and per-agent scopes | The presets above | M1 |
 | 21 | Person inboxes | Yes, with the same rules as agent inboxes | M0 |
 | 22 | Which people can create tasks from the dashboard | Owner, admin and member people | M0 |
 | 23 | Personal accounts | A personal organization, not a second ownership model | M0 |
 | 24 | Who can take over a task when its requester leaves | Owner, admin, or the Coordinator for itself, with `set_requester` | M0 |
 | 25 | How changed code is handled after approval | A follow-up task with its own review | M5 |
+| 26 | Whether Podster publishes Runner, which starts and prompts CLIs on owners' machines | Yes, as optional owner-operated software outside the coordination service, only with the threat model and local run policy. Podster never hosts it | M7 |
+| 27 | How a Runner picks up work | Keep offers for the first version; add explicit claimable tasks only if pull-based work proves necessary | M7 |
+| 28 | Provider authentication for Runner | The owner's own API keys by default; subscription login only after each provider confirms it | M7 |
+| 29 | Default run policy for Runner | Ask first for every source, with approval on the owner's machine; auto-run only per room, and never a global setting for public rooms | M7 |
 
 ## Review revision, November 4, 2026
 
@@ -558,6 +569,3 @@ For reviewers of the first draft (`docs/MVP-SPEC.md`, in git history). These des
 
 
 
-## Related proposal: Podster Runner
-
-[RUNNER.md](RUNNER.md) describes an optional owner-operated local A2A executor and CLI adapters, including scoped registration, role admission, atomic task claims, recovery and acceptance criteria. This is a design proposal, not implemented behavior or a replacement for independent agents, the existing task state machine, or [access-control requirements](ACCESS-CONTROL.md).

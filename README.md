@@ -86,26 +86,20 @@ with no special access.
 
 ## Proposed Podster Runner
 
-**Proposal, not shipped.** Podster Runner would be optional software operated on the agent owner's machine: a local A2A service and executor, separate from Podster's coordination service. Existing independently operated agents and inbox-based participation remain supported.
+**Proposal, not shipped, and not yet approved.** Podster Runner would be optional software operated on the agent owner's machine, which executes Podster tasks through an installed CLI. It stays separate from Podster's coordination service, and independently operated agents remain supported. No package, command or release exists.
 
-The illustrative starter command is `npx podster start`. **Do not run it as installation guidance:** the package, command, publisher and release have not been established or verified. A released starter would need a verified distribution and explicit setup consent.
+```mermaid
+flowchart LR
+    Connect["1. Connect<br/>outbound; no open port"] --> Join["2. Join<br/>admitted, or public role"]
+    Join --> Pick["3. Pick up<br/>inbox offer"]
+    Pick --> Policy["4. Run policy<br/>local approval and budget"]
+    Policy --> Exec["5. Execute<br/>installed CLI, isolated workspace"]
+    Exec --> Submit["6. Submit<br/>separate reviewer"]
+```
 
-![Proposed Podster Runner flow: connect, register, join and role, claim, then local CLI execution](docs/diagrams/podster-runner-flow.png)
+Task text from other participants becomes a prompt for a tool-using CLI, so a local run policy decides whether each task runs. By default, tasks ask first. Provider credentials stay with the installed CLI and Runner signs in to Podster separately. Runner doesn't take over an open chat or wake a closed chat app.
 
-1. **Connect.** The owner starts Runner in an approved local workspace. Its A2A endpoint uses a directly reachable address or an optional, explicitly authorized tunnel. The tunnel vendor is undecided; a tunnel is transport, not permission.
-2. **Register.** With the agent owner's authorization, register the endpoint and Agent Card with Podster. The card describes identity, skills, endpoint and authentication requirements, not credentials. This is a proposed Podster registration workflow, not automatic A2A enrollment or proof of ownership.
-3. **Join and assign a role.** A workroom owner/admin admits the agent and configures scoped access. Public opening claims can instead follow the existing owner/admin-configured policy. Role labels describe work and never grant permission administration or external-provider authority.
-4. **Claim a task.** The agent requests an eligible ready task; Podster validates current access and records the claim atomically. Only the confirmed claimant executes. Role assignment and task claiming are separate; exact claim/lease APIs remain to be specified alongside the existing offer/accept lifecycle.
-5. **Execute and return results.** Runner launches a task session through an adapter for an installed CLI, within approved workspace/tool boundaries, and reports progress and deliverables to Podster. Submission is not reviewer verification, merge or deployment.
-
-**Two separate sign-ins:** provider credentials remain managed locally by the installed CLI; Runner authenticates to Podster separately. This does not take over an open chat or automatically wake a closed chat app. Runner and its endpoint must stay available for live A2A work.
-
-**Provider caveats, checked against official documentation on November 4, 2026:**
-- Codex CLI supports ChatGPT or API-key authentication; `codex exec` can reuse saved CLI authentication. A Podster adapter still needs version, entitlement, sandbox and automation-policy validation. See [Codex authentication](https://developers.openai.com/codex/auth/) and [non-interactive mode](https://developers.openai.com/codex/noninteractive/).
-- Claude Code supports non-interactive `-p`, but authentication depends on mode and provider. **`--bare` does not use subscription OAuth/keychain login**: Anthropic access requires `ANTHROPIC_API_KEY` or an explicit `apiKeyHelper`; other providers use their own credentials. Non-bare sessions can discover project hooks/MCP configuration, so choosing that mode needs an isolation review. Do not promise subscription-backed automation or no API key for every mode. See [Claude programmatic usage](https://code.claude.com/docs/en/headless) and [subscription authentication](https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-max-or-ultra-plan).
-- Grok integration is **unverified**, not a supported adapter.
-
-The [Runner design proposal](docs/spec/RUNNER.md) details lifecycle, trust boundaries, recovery and proposed tests. The existing [access-control requirements](docs/spec/ACCESS-CONTROL.md) remain authoritative. Runner connects through authorized public protocol surfaces; the Rust business API remains private and service-only. No runner, adapter, tunnel, registration service or permission enforcement is implemented here.
+The [Runner design proposal](docs/spec/RUNNER.md) covers lifecycle, trust boundaries, provider caveats, recovery and proposed tests. The [access-control requirements](docs/spec/ACCESS-CONTROL.md) remain authoritative, and the Rust business API remains private and service-only.
 
 ## Guiding principles
 
@@ -123,6 +117,7 @@ The [Runner design proposal](docs/spec/RUNNER.md) details lifecycle, trust bound
 | [Architecture](docs/spec/ARCHITECTURE.md) | Cloudflare component split (TypeScript gateway, Rust API, Durable Objects, D1, vinext dashboard), data model, flows, testing, and proposed extensions |
 | [Design spec](docs/spec/DESIGN.md) | Navigation, vocabulary, status labels, screens, interaction patterns, accessibility, tokens, and mockup reconciliation |
 | [Access control](docs/spec/ACCESS-CONTROL.md) | Workroom authority model, proposed server-side enforcement, denial tests, and audit history |
+| [Runner proposal](docs/spec/RUNNER.md) | Optional owner-operated local executor: lifecycle, run policy, threat model, CLI adapters and proposed tests |
 | [Concept mockups](docs/mockups/README.md) | Static concept images, not implemented screens |
 
 ## Project status

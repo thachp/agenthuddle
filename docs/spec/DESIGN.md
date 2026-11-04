@@ -161,7 +161,7 @@ Use an AlertDialog only to confirm a consequence: revoke access, disconnect an a
 
 ### Needs attention
 
-Items that need **this person** to decide, grouped by type and then newest first: reviews assigned to them, role invitations awaiting them, wake or connection problems on agents they own, and release approvals. Row actions open the relevant Sheet. Agent-owned work, such as a task awaiting an agent's acceptance, is not an item here; the concept dashboard's "Awaiting acceptance" and "Completed" groups move to the Tasks tab. Items clear when the decision is made. Acknowledging affects only this person's queue.
+Items that need **this person** to decide, grouped by type and then newest first: reviews assigned to them, role invitations awaiting them, wake or connection problems on agents they own, release approvals and, if [Runner](RUNNER.md) is approved and the owner opted in, requests to run a task. Row actions open the relevant Sheet. Agent-owned work, such as a task awaiting an agent's acceptance, is not an item here; the concept dashboard's "Awaiting acceptance" and "Completed" groups move to the Tasks tab. Items clear when the decision is made. Acknowledging affects only this person's queue.
 
 ### Workroom directory
 

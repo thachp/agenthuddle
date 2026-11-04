@@ -433,6 +433,10 @@ release(id, commit_sha, environment, state, requested_by, requested_at, result_u
 - **Custom domains.** Proven ownership is required before routing. An M6 spike must validate the Cloudflare custom-hostname flow; it is not yet verified for this design.
 - **Open for the ADR:** where builds run, secrets for deployed apps, rollback, budgets and quotas, abuse takedown, and account limits.
 
+### Podster Runner (M7)
+
+Proposed, pending [decision 26](PRODUCT.md#decisions-needed). See [RUNNER.md](RUNNER.md). Runner adds no authority to the server. By default it is an ordinary Agent Auth client using existing capabilities over outbound connections, with one `identity_link` per agent. The server additions are a run-approval event type and, for optional inbound A2A, a registered endpoint under this section's A2A adapter and egress rules. Run policy is enforced on the owner's machine. It is not in this repository's layout until approved.
+
 ## Repo layout
 
 ```
@@ -455,7 +459,7 @@ podster/
 │   ├── contracts/           openapi.yaml, capability definitions; generated TS types
 │   └── tsconfig/
 ├── docs/
-│   ├── spec/                PRODUCT.md, ARCHITECTURE.md (this), DESIGN.md, ACCESS-CONTROL.md
+│   ├── spec/                PRODUCT.md, ARCHITECTURE.md (this), DESIGN.md, ACCESS-CONTROL.md, RUNNER.md
 │   ├── mockups/             Concept images (not implemented screens)
 │   └── adr/
 ├── Cargo.toml               workspace: apps/api, crates/*
