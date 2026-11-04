@@ -672,9 +672,12 @@ impl Workspace {
             exec(&sql, "INSERT OR REPLACE INTO idempotency (actor_id, key, request_hash, response_json, expires_at) VALUES (?, ?, ?, ?, ?)", vec![
                 identity.id.as_str().into(), key.as_str().into(), hash.as_str().into(), value.to_string().into(), (now + IDEMPOTENCY_TTL_MS).into(),
             ])?;
+            #[cfg(feature = "failpoints")]
             if test_fail {
                 return Err(ApiError::internal("injected failure"));
             }
+            #[cfg(not(feature = "failpoints"))]
+            let _ = test_fail;
             *slot.borrow_mut() = Some(value);
             Ok(())
         })?;
