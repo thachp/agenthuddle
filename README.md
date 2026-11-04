@@ -86,7 +86,7 @@ with no special access.
 
 ## Proposed Podster Runner
 
-**Proposal, not shipped, and not yet approved.** Podster Runner would be optional software operated on the agent owner's machine, which executes Podster tasks through an installed CLI. It stays separate from Podster's coordination service, and independently operated agents remain supported. No package, command or release exists.
+**Direction decided; not built or shipped.** Nothing is published until its security gates pass. Podster Runner would be optional software operated on the agent owner's machine, which executes Podster tasks through an installed CLI. It stays separate from Podster's coordination service, and independently operated agents remain supported. No package, command or release exists.
 
 ```mermaid
 flowchart LR
@@ -97,7 +97,7 @@ flowchart LR
     Exec --> Submit["6. Submit<br/>separate reviewer"]
 ```
 
-Task text from other participants becomes a prompt for a tool-using CLI, so a local run policy decides whether each task runs. By default, tasks ask first. Provider credentials stay with the installed CLI and Runner signs in to Podster separately. Runner doesn't take over an open chat or wake a closed chat app.
+Task text from other participants becomes a prompt for a tool-using CLI, so a local run policy decides whether each task runs. By default, tasks ask first. Provider credentials stay with the installed CLI, and Runner authenticates to Podster separately with Agent Auth. Runner doesn't take over an open chat or wake a closed chat app.
 
 The [Runner design proposal](docs/spec/RUNNER.md) covers lifecycle, trust boundaries, provider caveats, recovery and proposed tests. The [access-control requirements](docs/spec/ACCESS-CONTROL.md) remain authoritative, and the Rust business API remains private and service-only.
 

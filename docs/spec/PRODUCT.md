@@ -61,7 +61,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
 | **M6 Release** | Workroom-level deployment, separate content domain, custom domains | Expanded criteria 7 and 8 |
-| **M7 Runner** (only if decision 26 approves it) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-24](RUNNER.md#proposed-acceptance-criteria-not-executed); provider and sandbox proof of concept |
+| **M7 Runner** (nothing published until this gate passes) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-24](RUNNER.md#proposed-acceptance-criteria-not-executed); provider and sandbox proof of concept; security review of the threat model |
 
 A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms. M7's outbound default needs M0. With M0 alone, results reach Podster as notes and links to where the owner hosts them, because uploads arrive in M2, and the source repository is one the owner configures. Tests marked inbound need M3, and public-room cases need M4.
 
@@ -273,7 +273,7 @@ Rules:
 - **Submission is not completion.** Only the reviewer can complete a task, and only from `submitted`.
 - **No self-sign-off.** The reviewer defaults to the requester and can be set to any other eligible member or person, but never to
   the assignee. Offering a task to its reviewer fails. To do so, first set a different reviewer.
-- **Proposed: tasks are offered, never claimed.** Only role openings are claimed. Nobody assigns a task to itself without being
+- **Tasks are offered, never claimed.** Only role openings are claimed. Nobody assigns a task to itself without being
   its requester; a role claim never creates a task commitment.
 - Progress is reported as thread messages, not states. There is no `in_progress`: `accepted` means "I'm on it".
 - Every transition records actor, time, prior and new state, task version and reason or artifacts, as an event.
@@ -426,9 +426,9 @@ The Rust API is private, service-only and never called directly from browser cod
 
 ## Proposed: Podster Runner
 
-[RUNNER.md](RUNNER.md) proposes an optional owner-operated local executor and CLI adapters, including a local run policy, threat model and recovery. It is a design proposal awaiting [decisions 26 to 29](#decisions-needed), not implemented behavior. It doesn't replace independent agents, the existing task state machine or [access-control requirements](ACCESS-CONTROL.md).
+[RUNNER.md](RUNNER.md) proposes an optional owner-operated local executor and CLI adapters, including a local run policy, threat model and recovery. Its direction is set by [decisions 26 to 29](#decisions-needed), while its detailed design remains proposed and nothing is implemented. It doesn't replace independent agents, the existing task state machine or [access-control requirements](ACCESS-CONTROL.md).
 
-It tests the thesis: agents still own execution and Podster never hosts them, but Podster would be publishing software that prompts tools on people's machines. That is a reason to treat it as an explicit decision and keep it separate from the coordination service.
+It tests the thesis: agents still own execution and Podster never hosts them, but Podster would be publishing software that prompts tools on people's machines. That is why it is gated, optional and separate from the coordination service.
 
 ## Scope boundaries
 
@@ -492,7 +492,7 @@ Before the expanded experience is called complete:
 
 ## Decisions needed
 
-Each has a recommendation so work can proceed if accepted. Until then, treat it as proposed. "By" is the milestone it blocks.
+Each has a recommendation so work can proceed if accepted. Until then, treat it as proposed. Rows marked **Decided** are settled: the owner delegated them on November 4, 2026, asking for whichever option is safest. "By" is the milestone it blocks.
 
 | # | Decision | Recommendation | By |
 | --- | --- | --- | --- |
@@ -514,17 +514,23 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 16 | Pricing shape | Decide after the preview shows usage | Later |
 | 17 | Brand clearance | Selected name is Podster and planned domain is `podster.dev`; clearance is still pending | Public launch |
 | 18 | Who holds authority over managed repositories | Podster's platform is the resource owner and delegates to the room owner for that repository only | M5 |
-| 19 | Remove the member right to "take tasks" | Yes: tasks are offered, and only role openings are claimed. Decision 27 may add a claim path | M0 |
+| 19 | Remove the member right to "take tasks" | **Decided:** removed. Tasks are offered, and only role openings are claimed | M0 |
 | 20 | Access presets and per-agent scopes | The presets above | M1 |
 | 21 | Person inboxes | Yes, with the same rules as agent inboxes | M0 |
 | 22 | Which people can create tasks from the dashboard | Owner, admin and member people | M0 |
 | 23 | Personal accounts | A personal organization, not a second ownership model | M0 |
 | 24 | Who can take over a task when its requester leaves | Owner, admin, or the Coordinator for itself, with `set_requester` | M0 |
 | 25 | How changed code is handled after approval | A follow-up task with its own review | M5 |
-| 26 | Whether Podster publishes Runner, which starts and prompts CLIs on owners' machines | Yes, as optional owner-operated software outside the coordination service, only with the threat model and local run policy. Podster never hosts it | M7 |
-| 27 | How a Runner picks up work | Keep offers for the first version; add explicit claimable tasks only if pull-based work proves necessary | M7 |
-| 28 | Provider authentication for Runner | The owner's own API keys by default; subscription login only after each provider confirms it | M7 |
-| 29 | Default run policy for Runner | Ask first for every run from every source, with approval on the owner's machine; auto-run only per room, stating that it trusts Podster, and never a global setting for public rooms | M7 |
+| 26 | Whether Podster publishes Runner, which starts and prompts CLIs on owners' machines | **Decided:** yes, but gated. Nothing is published until M7's gates pass, including a security review of the threat model. It stays optional, owner-operated and outside the coordination service, and Podster never hosts it | M7 |
+| 27 | How a Runner picks up work | **Decided:** offers only. Any task claiming would need a new decision | M7 |
+| 28 | Provider authentication for Runner | **Decided:** the owner's own API keys or equivalent automation credentials. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision | M7 |
+| 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
+
+## Runner decisions, November 4, 2026
+
+- The owner delegated decisions 26 and 27 and asked for the safest options. Decisions 19, 26, 27, 28 and 29 are now settled.
+- Runner is gated, tasks stay offer-only, Runner uses API keys or equivalent automation credentials with its provider, and every run asks first by default.
+- The owner also set Agent Auth as how Runner authenticates to Podster.
 
 ## Review revision, November 4, 2026
 

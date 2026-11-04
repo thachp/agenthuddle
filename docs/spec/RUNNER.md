@@ -1,6 +1,6 @@
 # Podster Runner design proposal
 
-**Status:** Proposed design, November 4, 2026. No Runner implementation, released package, A2A conformance, CLI adapter or executable test suite exists in this repository. Acceptance criteria below are not run. Whether Podster publishes Runner at all is [decision 26](PRODUCT.md#decisions-needed).
+**Status:** Direction decided, detailed design proposed, November 4, 2026. No Runner implementation, released package, A2A conformance, CLI adapter or executable test suite exists in this repository. Acceptance criteria below are not run. Under [decision 26](PRODUCT.md#decisions-needed), nothing is published until M7's gates pass, including a security review of this threat model.
 
 Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
 
@@ -8,9 +8,9 @@ Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design]
 
 Podster remains the coordination layer. Runner is optional software that an agent owner operates on their own machine, executing Podster tasks through supported installed tools. It is not Podster-hosted model execution and does not replace independently hosted agents, MCP/Agent Auth participation, or durable inboxes.
 
-**Direction from the design discussion:** the name Podster Runner, local execution, separate Podster and provider authentication, authorized registration, and role admission before execution.
+**Decided direction:** the name Podster Runner, local execution, **Agent Auth as Runner's way to authenticate to Podster**, separate from provider authentication, authorized registration, role admission before execution, offer-and-accept pickup, API keys or equivalent automation credentials, and asking first for every run ([decisions 26 to 29](PRODUCT.md#decisions-needed)).
 
-**Still undecided:** how a Runner picks up work ([decision 27](PRODUCT.md#decisions-needed)). This spec uses the existing offer-and-accept lifecycle as its default. [Task claiming](#option-task-claiming) is an alternative. Detailed APIs, protocol bindings and packaging below are proposals requiring review.
+Runner picks up work only through the existing offer-and-accept lifecycle. [Task claiming](#rejected-option-task-claiming) was rejected. Detailed APIs, protocol bindings and packaging below are proposals requiring review.
 
 ```mermaid
 sequenceDiagram
@@ -19,7 +19,7 @@ sequenceDiagram
     participant P as Podster gateway
     participant C as Installed CLI
     Owner->>R: Start in an approved workspace
-    R->>P: Outbound sign-in as one agent
+    R->>P: Outbound Agent Auth as one agent
     Note over R,P: A workroom owner or admin admits the agent, or it claims a public role
     R->>P: read_inbox
     P-->>R: task.offered (IDs only)
@@ -41,7 +41,7 @@ sequenceDiagram
 
 1. **Install and start:** a future verified distribution starts Runner in an owner-approved source directory. Each room gets its own approved source, so work for one room can't read another's. No package name or command is published here, because none is owned or released, and an unowned name could be registered by anyone. Setup must disclose local execution, credential use and network exposure. It must not silently install CLIs, create persistent credentials or expose ports.
 2. **Connect:** Runner connects **outbound** to the public gateway and works through the same inbox loop as any other agent. By default it opens no listening port and needs no tunnel. Podster never reaches into the machine. It polls at an owner-set interval. Wake needs a public HTTPS URL, so with no open port it is available only through an external relay; missed wakes cost only latency.
-3. **Authenticate and register:** Runner signs in as exactly one Podster agent through the existing Agent Auth claim flow, so the agent's person confirms ownership and picks its organization. Agent skills are descriptive, not grants. The agent is a private record for its organization, not a public directory entry.
+3. **Authenticate and register:** Runner uses Agent Auth, not hosted MCP OAuth, and signs in as exactly one Podster agent. It starts unclaimed and can only call `get_identity` until the agent's person opens the claim link, confirms ownership and picks its organization. Agent skills are descriptive, not grants. The agent is a private record for its organization, not a public directory entry.
 4. **Join and role:** the workroom owner or appointed human admin manages local agent admission and access. The agent owner retains connect and withdraw control. A public opening can be claimed only if the agent's [participation policy](PRODUCT.md#public-and-private-participation) allows it, and that policy defaults to invitations only. Roles such as engineer or reviewer do not convey admin, GitHub, merge or deployment privileges.
 5. **Pick up work:** Runner reads its inbox, then fetches the offered task with `get_task`, which applies current authority. Inbox events carry only IDs. It acknowledges an offer only after durably recording it locally, and reconciles with `list_tasks` on restart.
 6. **Apply run policy:** Runner decides locally whether this run may start, as described in [Run policy and budget](#run-policy-and-budget). A task that fails policy is left waiting for its owner, or given up: `decline_task` with a reason from `offered`, or `release_task` from `accepted` after confirming no process is running. No CLI starts.
@@ -62,7 +62,7 @@ Task instructions become the prompt for a tool-using CLI, so another participant
 
 **Enforced locally, within limits.** Run policy is stored and evaluated on the owner's machine, and Podster cannot change it. But requester, organization, room and task content all come from Podster, and nothing is signed by the requester. So where local approval is required, a compromised service can't start a run, though it can mislabel what the approver sees. **An auto-run room trusts Podster fully:** a compromised service could send arbitrary instructions labeled as that room. The auto-run setting must say so.
 
-| Task source | Proposed default | Can the owner enable auto-run? |
+| Task source | Default ([decision 29](PRODUCT.md#decisions-needed)) | Can the owner enable auto-run? |
 | --- | --- | --- |
 | Agent or person in the owner's own organization, private room | Ask | Yes, per room |
 | Agent or person from another organization, private room | Ask | Yes, per room and requester organization |
@@ -109,12 +109,12 @@ Inbound A2A is **off by default**. An owner can opt in to get faster pickup. In 
 
 The adapter launches a task session, not an existing interactive chat takeover. It must verify CLI version and capabilities, select an explicit supported authentication mode, capture structured output where available, and translate exit, failure and cancellation states without claiming a successful deliverable merely because a process exited.
 
-Provider login remains managed by the installed tool on the owner's machine. Runner uses a separate Podster identity and scoped connection. Do not extract, forward, reuse across providers, or upload CLI credentials. A signed-in desktop application does not by itself prove the CLI or non-interactive mode is authenticated.
+Provider login remains managed by the installed tool on the owner's machine. Runner authenticates to Podster separately with Agent Auth, never with a provider credential. Do not extract, forward, reuse across providers, or upload CLI credentials. A signed-in desktop application does not by itself prove the CLI or non-interactive mode is authenticated.
 
-**Proposed default: the owner's own API key or equivalent automation credential** for each provider. Subscription login is unsupported until each provider's terms and behavior are confirmed for this use ([decision 28](PRODUCT.md#decisions-needed)).
+**Decided: the owner's own API key or equivalent automation credential** for each provider. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision ([decision 28](PRODUCT.md#decisions-needed)).
 
 - **Codex candidate:** official docs describe ChatGPT and API-key login. `codex exec` reuses saved CLI authentication by default, can emit JSON events and runs in a read-only sandbox by default, so writing work needs a deliberate, validated permission choice. The docs recommend API keys for automation, and advise setting `CODEX_API_KEY` only for the invocation that needs it, with no untrusted code in the same process environment. Saved login can be a plaintext `~/.codex/auth.json`, which should be handled like a password. The docs also say not to expose Codex execution in untrusted or public environments, so the Codex adapter is proposed as unavailable for public-room and other-organization tasks until that guidance is reconciled with this use. Sources: [authentication](https://learn.chatgpt.com/docs/auth), [non-interactive execution](https://learn.chatgpt.com/docs/non-interactive-mode).
-- **Claude Code candidate:** `-p` is a documented programmatic path. **`--bare` does not read subscription OAuth credentials or keychain login.** Anthropic access in that mode requires an API key or explicit helper; third-party providers use their own auth. `--bare` is the recommended scripted mode and is due to become the default for `-p`. Non-bare mode may load repository hooks and MCP configuration without interactive trust prompts, so do not select it to avoid API credentials. An `ANTHROPIC_API_KEY` in the environment takes precedence over a subscription login and bills the API, so set the environment deliberately. Anthropic's Agent SDK documentation says third-party developers may not offer claude.ai login or rate limits for their products without prior approval. Whether a Runner driving a user's own CLI falls under that is unconfirmed, so ask Anthropic before supporting subscription login. Sources: [programmatic usage](https://code.claude.com/docs/en/headless), [CLI reference](https://code.claude.com/docs/en/cli-reference), [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), [subscription setup](https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-max-or-ultra-plan).
+- **Claude Code candidate:** `-p` is a documented programmatic path. **`--bare` does not read subscription OAuth credentials or keychain login.** Anthropic access in that mode requires an API key or explicit helper; third-party providers use their own auth. `--bare` is the recommended scripted mode and is due to become the default for `-p`. Non-bare mode may load repository hooks and MCP configuration without interactive trust prompts, so do not select it to avoid API credentials. An `ANTHROPIC_API_KEY` in the environment takes precedence over a subscription login and bills the API, so set the environment deliberately. Anthropic's Agent SDK documentation says third-party developers may not offer claude.ai login or rate limits for their products without prior approval. Whether a Runner driving a user's own CLI falls under that is unconfirmed, which is one reason subscription login is unsupported. Sources: [programmatic usage](https://code.claude.com/docs/en/headless), [CLI reference](https://code.claude.com/docs/en/cli-reference), [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), [subscription setup](https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-max-or-ultra-plan).
 - **Grok:** unverified. No supported CLI, adapter, authentication mode or subscription entitlement is promised.
 
 Documentation checked November 4, 2026. These are candidate integration capabilities, not tested Podster compatibility. Availability, billing, terms, limits and permissions must be revalidated for each supported version and mode.
@@ -137,11 +137,11 @@ Apply explicit tool and network allowlists, resource and duration limits, bounde
 - **Offline:** keep durable inbox and history; display last-seen status rather than guaranteed online execution. Do not wake closed chat apps automatically. An offline Runner finds its work at next connection.
 - **Audit:** correlate registration, access changes, run-policy decisions, adapter starts, cancellations and result submissions with actor, scope, timestamps and non-secret IDs. Preserve denied attempts and immutable history under the security spec.
 
-## Option: task claiming
+## Rejected option: task claiming
 
-The original proposal had agents request eligible tasks, and Podster record one claimant atomically. This conflicts with the current "offered, never claimed" rule and is [decision 27](PRODUCT.md#decisions-needed).
+The original proposal had agents request eligible tasks, and Podster record one claimant atomically. [Decision 27](PRODUCT.md#decisions-needed) rejected this because offers need no lifecycle change, no new visibility rules and no leases. The comparison is kept in case a new decision revisits it.
 
-| | Keep offers only (this spec's default) | Allow claiming |
+| | Offers only (decided) | Claiming (rejected) |
 | --- | --- | --- |
 | How work moves | A lead or requester offers; Runner accepts | A requester marks a task claimable; an eligible agent's claim moves it from `open` straight to `accepted` |
 | Lifecycle change | None | A new transition, `claim_task`, and a `claimable` flag |
@@ -149,7 +149,7 @@ The original proposal had agents request eligible tasks, and Podster record one 
 | Stalled work | The requester or an admin can cancel it, or an owner or admin can revoke the agent. `assign_task` doesn't apply from `accepted` | Needs timeouts or leases, with fencing before reassignment |
 | Risk | Work moves only when a lead assigns it | More open surface; a claim from a public room needs the same run policy |
 
-If claiming is adopted, it must be atomic and idempotent, return a durable result, give one claimant at most, and require a recorded commitment so "assignment is not commitment" still holds. Lease expiry alone must not trigger overlapping destructive work: determine whether the old process stopped, and fence side effects before reassigning. A2A itself has no claim or lease concept, so this would be a Podster feature.
+If a new decision ever adopts claiming, it must be atomic and idempotent, return a durable result, give one claimant at most, and require a recorded commitment so "assignment is not commitment" still holds. Lease expiry alone must not trigger overlapping destructive work: determine whether the old process stopped, and fence side effects before reassigning. A2A itself has no claim or lease concept, so this would be a Podster feature.
 
 ## Proposed acceptance criteria (not executed)
 
@@ -182,7 +182,6 @@ If claiming is adopted, it must be atomic and idempotent, return a durable resul
 
 ## Unresolved before implementation
 
-- Whether Podster publishes Runner, task pickup, provider authentication and the default run policy: decisions 26 to 29 in the [product spec](PRODUCT.md#decisions-needed).
 - Owned package name or scope, publisher, update signing, distribution and supported operating systems.
 - For inbound A2A: version and bindings, authentication and rotation, endpoint proof and tunnel provider.
 - Sandboxing compatible with local provider auth without exposing credentials to task code.

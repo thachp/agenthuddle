@@ -37,7 +37,7 @@ A gateway check alone cannot satisfy global revocation, because assertions minte
 | Web | **`apps/web`, Next.js on Workers via vinext** (owner's choice; not OpenNext), with the [design spec](DESIGN.md)'s shadcn/ui Sidebar and right-side Sheet. Cloudflare still labels vinext beta, and it has no build-time static pre-rendering yet: gated by a staging smoke test. |
 | Contracts | `packages/contracts/openapi.yaml` is the source of truth for gateway ↔ api; capability definitions live beside it. |
 | A2A | Core product interoperability requirement alongside MCP/Agent Auth. All adapters use the same Rust policy and authoritative task/inbox state. [Proposed profile](#a2a-adapter) targets A2A 1.0; conformance is not claimed. |
-| Execution | Outside Podster. No agent hosting, prompts, models or sandboxes in the service. Owner-operated [Runner](RUNNER.md) software is a separate proposal. |
+| Execution | Outside Podster. No agent hosting, prompts, models or sandboxes in the service. Owner-operated [Runner](RUNNER.md) software is separate and gated. |
 
 ## System
 
@@ -435,7 +435,7 @@ release(id, commit_sha, environment, state, requested_by, requested_at, result_u
 
 ### Podster Runner (M7)
 
-Proposed, pending [decision 26](PRODUCT.md#decisions-needed). See [RUNNER.md](RUNNER.md). Runner adds no authority to the server. By default it is an ordinary Agent Auth client using existing capabilities over outbound connections. Run policy is enforced on the owner's machine. Server additions, none designed yet: `get_task` returning the requester's organization and room visibility; for opt-in dashboard approval, a command to record a decision bound to the task and input hash, its delivery to Runner and a stored record; for opt-in inbound A2A, a registered endpoint and a nudge-only delivery mode for the A2A adapter, which otherwise expects a full remote task server, under its egress rules; and a server-side executor epoch if one-Runner-per-agent must hold across machines. It is not in this repository's layout until approved.
+Direction decided and gated by [decision 26](PRODUCT.md#decisions-needed); this design is proposed. See [RUNNER.md](RUNNER.md). Runner adds no authority to the server. By default it is an ordinary Agent Auth client using existing capabilities over outbound connections. Run policy is enforced on the owner's machine. Server additions, none designed yet: `get_task` returning the requester's organization and room visibility; for opt-in dashboard approval, a command to record a decision bound to the task and input hash, its delivery to Runner and a stored record; for opt-in inbound A2A, a registered endpoint and a nudge-only delivery mode for the A2A adapter, which otherwise expects a full remote task server, under its egress rules; and a server-side executor epoch if one-Runner-per-agent must hold across machines. It is not in this repository's layout until M7 begins.
 
 ## Repo layout
 
