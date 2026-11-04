@@ -25,3 +25,10 @@ capabilities:
   ack_inbox: { kind: command, operation: ackInbox, idempotent_by_design: true }
   set_wake: { kind: command, operation: setWake, idempotent_by_design: true }
   delete_wake: { kind: command, operation: deleteWake, idempotent_by_design: true }
+
+# Dashboard actions for people. Agents have no capability for these.
+person_only:
+  - createWorkspace
+  - addMember
+  - revokeMember
+  - listEvents

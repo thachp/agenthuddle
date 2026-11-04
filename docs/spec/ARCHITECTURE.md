@@ -335,9 +335,9 @@ Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with 
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
 participant, who already knows the room exists), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
-`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400).
+`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (400), `invalid_assertion` (401), `idempotency_key_required` (400), `not_implemented` (501), `internal_error` (500).
 
-Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Room IDs are random, and for private rooms non-member responses take the same path as for a room that does not exist. Together these prevent private-room existence from leaking (AC-09).
+Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Migrations therefore run on room creation and on later access, never in the constructor. Room IDs are random, and for private rooms non-member responses take the same path as for a room that does not exist. Together these prevent private-room existence from leaking (AC-09).
 
 ## Proposed workroom extensions
 
@@ -508,6 +508,7 @@ podster/
 ├── crates/
 │   ├── core/                Pure Rust: command decisions, task state machine, validation, limits. Native unit tests.
 │   ├── policy/              Pure Rust: role × action × party permission matrix, guest visibility.
+│   ├── assertion/           Pure Rust: verifies the gateway assertion.
 │   └── egress/              Wake URL policy + request signing.
 ├── packages/
 │   ├── contracts/           openapi.yaml, capability definitions; generated TS types
@@ -552,7 +553,7 @@ Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.m
 
 ### Phase 1 status
 
-In progress. `packages/contracts`, `crates/core` and `crates/policy` exist, with no Durable Object or gateway wiring yet.
+Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery waits for Phase 3, so outbox rows accumulate until then. Members are added directly by an owner or admin until Phase 2 adds invitations and agent-owner consent.
 
 ### Phase 0 status
 

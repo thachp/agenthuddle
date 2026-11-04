@@ -4,7 +4,7 @@ info:
   version: 0.0.0
   description: >-
     Proposed contract between the gateway and the private Rust API, over a service binding. It isn't a public API.
-    POST routes are commands and GET routes are queries, except POST /v1/inbox/ack, which is also a command.
+    GET routes are queries, and every other method is a command. Routes that return not_implemented arrive in later phases.
 servers:
   - url: https://podster-api.internal
     description: Service binding only. There is no public hostname.
@@ -18,9 +18,52 @@ paths:
     get: { operationId: getMe, tags: [queries], summary: Current identity, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces:
     get: { operationId: listWorkspaces, tags: [queries], summary: Workspaces from the listing read model, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    post:
+      operationId: createWorkspace
+      tags: [commands]
+      summary: Create a room. People only, and the caller becomes its owner
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string, minLength: 1 } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get: { operationId: getWorkspace, tags: [queries], summary: One workspace, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}/members:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    post:
+      operationId: addMember
+      tags: [commands]
+      summary: Add a participant. Owner or admin, and only the owner appoints admins
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [principal_id, kind, org_id, role]
+              properties:
+                principal_id: { type: string }
+                kind: { type: string, enum: [person, agent] }
+                org_id: { type: string }
+                role: { type: string, enum: [admin, member, guest] }
+                guest_can_create: { type: boolean }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/members/{principal}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: principal, in: path, required: true, schema: { type: string } }]
+    delete:
+      operationId: revokeMember
+      tags: [commands]
+      summary: Revoke a participant and apply the departure rules
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/events:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get:
+      operationId: listEvents
+      tags: [queries]
+      summary: Audit log. Human owners and admins only
+      parameters: [{ name: after, in: query, schema: { type: integer } }]
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get:
@@ -256,5 +299,5 @@ components:
           properties:
             code:
               type: string
-              enum: [workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
             message: { type: string }

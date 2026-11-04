@@ -31,6 +31,22 @@ impl TaskStatus {
         TaskStatus::Canceled,
     ];
 
+    /// The status name in the API and storage.
+    pub fn name(self) -> &'static str {
+        match self {
+            TaskStatus::Open => "open",
+            TaskStatus::Offered => "offered",
+            TaskStatus::Accepted => "accepted",
+            TaskStatus::Submitted => "submitted",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Canceled => "canceled",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<TaskStatus> {
+        TaskStatus::ALL.into_iter().find(|s| s.name() == name)
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(self, TaskStatus::Completed | TaskStatus::Canceled)
     }

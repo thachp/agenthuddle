@@ -1,0 +1,161 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+use ed25519_dalek::{Signer, SigningKey};
+use podster_assertion::*;
+use serde_json::{json, Value};
+
+const NOW: i64 = 1_800_000_000;
+
+fn key(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed; 32])
+}
+
+fn keys() -> KeySet {
+    let public = B64.encode(key(1).verifying_key().to_bytes());
+    KeySet::from_json(&json!({ "k1": public }).to_string()).unwrap()
+}
+
+fn claims() -> Value {
+    json!({ "aud": AUDIENCE, "sub": "agt_1", "kind": "agent", "org": "org_1", "gen": 3, "jti": "j1", "iat": NOW, "exp": NOW + 60 })
+}
+
+fn sign_raw(header: &Value, claims: &Value, signer: &SigningKey) -> String {
+    let body = format!(
+        "{}.{}",
+        B64.encode(header.to_string()),
+        B64.encode(claims.to_string())
+    );
+    format!(
+        "{body}.{}",
+        B64.encode(signer.sign(body.as_bytes()).to_bytes())
+    )
+}
+
+fn sign(claims: &Value) -> String {
+    sign_raw(&json!({ "alg": "EdDSA", "kid": "k1" }), claims, &key(1))
+}
+
+fn with(field: &str, value: Value) -> Value {
+    let mut c = claims();
+    c[field] = value;
+    c
+}
+
+#[test]
+fn accepts_a_valid_assertion() {
+    let identity = verify(&sign(&claims()), &keys(), NOW).unwrap();
+    assert_eq!(
+        (
+            identity.sub.as_str(),
+            identity.kind,
+            identity.org.as_str(),
+            identity.gen
+        ),
+        ("agt_1", Kind::Agent, "org_1", Some(3))
+    );
+}
+
+#[test]
+fn rejects_forgeries() {
+    let header = json!({ "alg": "EdDSA", "kid": "k1" });
+    assert_eq!(
+        verify(&sign_raw(&header, &claims(), &key(2)), &keys(), NOW),
+        Err(AssertionError::BadSignature)
+    );
+    assert_eq!(
+        verify(
+            &sign_raw(
+                &json!({ "alg": "EdDSA", "kid": "other" }),
+                &claims(),
+                &key(1)
+            ),
+            &keys(),
+            NOW
+        ),
+        Err(AssertionError::UnknownKey)
+    );
+    assert_eq!(
+        verify(
+            &sign_raw(&json!({ "alg": "EdDSA" }), &claims(), &key(1)),
+            &keys(),
+            NOW
+        ),
+        Err(AssertionError::UnknownKey)
+    );
+    assert_eq!(
+        verify(
+            &sign_raw(&json!({ "alg": "none", "kid": "k1" }), &claims(), &key(1)),
+            &keys(),
+            NOW
+        ),
+        Err(AssertionError::UnsupportedAlgorithm)
+    );
+    assert_eq!(
+        verify(
+            &sign_raw(&json!({ "alg": "HS256", "kid": "k1" }), &claims(), &key(1)),
+            &keys(),
+            NOW
+        ),
+        Err(AssertionError::UnsupportedAlgorithm)
+    );
+}
+
+#[test]
+fn rejects_an_edited_payload() {
+    let token = sign(&claims());
+    let parts: Vec<&str> = token.split('.').collect();
+    let edited = format!(
+        "{}.{}.{}",
+        parts[0],
+        B64.encode(with("sub", json!("agt_admin")).to_string()),
+        parts[2]
+    );
+    assert_eq!(
+        verify(&edited, &keys(), NOW),
+        Err(AssertionError::BadSignature)
+    );
+}
+
+#[test]
+fn rejects_bad_claims() {
+    assert_eq!(
+        verify(&sign(&with("aud", json!("other"))), &keys(), NOW),
+        Err(AssertionError::WrongAudience)
+    );
+    assert_eq!(
+        verify(&sign(&with("exp", json!(NOW + 61))), &keys(), NOW),
+        Err(AssertionError::LifetimeTooLong)
+    );
+    assert_eq!(
+        verify(&sign(&with("kind", json!("admin"))), &keys(), NOW),
+        Err(AssertionError::Malformed)
+    );
+    assert_eq!(
+        verify(&sign(&with("sub", json!(""))), &keys(), NOW),
+        Err(AssertionError::Malformed)
+    );
+    assert_eq!(
+        verify(&sign(&claims()), &keys(), NOW + 60 + CLOCK_SKEW_SECS),
+        Err(AssertionError::Expired)
+    );
+    assert!(verify(&sign(&claims()), &keys(), NOW + 60 + CLOCK_SKEW_SECS - 1).is_ok());
+    assert_eq!(
+        verify(&sign(&claims()), &keys(), NOW - CLOCK_SKEW_SECS - 1),
+        Err(AssertionError::NotYetValid)
+    );
+}
+
+#[test]
+fn rejects_malformed_input() {
+    for token in ["", "a", "a.b", "a.b.c", "a.b.c.d", "!!.!!.!!"] {
+        assert!(verify(token, &keys(), NOW).is_err(), "{token}");
+    }
+    assert!(KeySet::from_json("not json").is_err());
+    assert!(KeySet::from_json(r#"{"k":"short"}"#).is_err());
+}

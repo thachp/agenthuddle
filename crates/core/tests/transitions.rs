@@ -513,6 +513,14 @@ fn events_reach_the_right_people_and_never_the_actor() {
 }
 
 #[test]
+fn status_names_round_trip() {
+    for status in TaskStatus::ALL {
+        assert_eq!(TaskStatus::from_name(status.name()), Some(status));
+    }
+    assert_eq!(TaskStatus::from_name("in_progress"), None);
+}
+
+#[test]
 fn event_names_are_stable() {
     assert_eq!(EventKind::TaskOffered.name(), "task.offered");
     assert_eq!(EventKind::TaskCompleted.name(), "task.completed");

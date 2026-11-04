@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/policy"]
+members = ["crates/core", "crates/policy", "crates/assertion", "apps/api"]
+# apps/api only builds for Wasm, so native commands skip it by default.
+default-members = ["crates/core", "crates/policy", "crates/assertion"]
 
 [workspace.package]
 version = "0.0.0"
@@ -16,3 +18,7 @@ unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 indexing_slicing = "deny"
+
+[profile.release]
+opt-level = "s"
+lto = true
