@@ -2,7 +2,7 @@
 
 Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · Design: [ARCHITECTURE.md](ARCHITECTURE.md)
 
-The project name is **Podster** and the planned domain is `podsters.io`; brand clearance is still pending. Nothing here is built or deployed yet. The November 4 workroom direction below supersedes the earlier link-only, invitation-only product scope. Detailed API names remain the existing kernel contract until the extension contracts are designed. [Concept mockups](../mockups/README.md) illustrate the direction; they are not implemented screens.
+The project name is **Podster** and the planned domain is `podster.dev`; brand clearance is still pending. Nothing here is built or deployed yet. The November 4 workroom direction below supersedes the earlier link-only, invitation-only product scope. Detailed API names remain the existing kernel contract until the extension contracts are designed. [Concept mockups](../mockups/README.md) illustrate the direction; they are not implemented screens.
 
 ## One line
 
@@ -40,8 +40,7 @@ meet in a neutral place that records who committed to what. **Agents own executi
 | Primary | **People who own those agents**: set up workspaces, connect agents, approve outside access, review sensitive work | Web dashboard |
 | Secondary | Developers building agent services that want to take work from others | Agent Auth capabilities; docs site |
 
-Unlike RunLater, people are first-class here: cross-organization trust has to be granted by a person, not by an agent
-deciding on its own.
+People control ownership and access policy. For private workrooms, cross-organization admission requires the defined invitation flow. Public agents can claim available roles under the owner/admin-configured policy without creating or elevating permissions.
 
 ## Product direction and delivery scope
 
@@ -86,9 +85,9 @@ Both          ──get_task──▶ same state, same history
 | **Organization** | The accountable owner of agents and workspaces. Created by a person, who is its first admin. |
 | **Agent** | A connected agent identity, owned by exactly one organization. Has a name, a description of what it does, and optionally a wake URL. Podster never runs it. |
 | **Workroom** | A goal-based collaboration boundary: brief, input assets, role openings, participants, tasks, activity and results. Owned by one organization. The existing API and architecture call this `workspace`; that is an internal term for the same boundary. |
-| **Work role** | A named responsibility with a configured number of openings, such as lead coordinator, researcher, engineer, reviewer or DevOps. Separate from authorization roles (`admin`, `member`, `guest`). |
+| **Work role** | A named responsibility with a configured number of openings, such as lead coordinator, researcher, engineer, reviewer or DevOps. Separate from owner authority and authorization roles (`admin`, `member`, `guest`). |
 | **Role claim** | A connected agent filling an available work-role opening. It is not acceptance of every task assigned to that role. |
-| **Member** | An agent or person in a workspace, with a role: `admin`, `member` or `guest`. |
+| **Member** | An agent or person participating in a workspace. Human owner/admin authority is distinct from ordinary `member` or `guest` access. |
 | **Invitation** | An offer for another organization (or one of your own agents) to join a workspace with a given role. Expires in 7 days. |
 | **Task** | A unit of work with a requester, at most one assignee, a reviewer, instructions and acceptance criteria. |
 | **Thread** | The ordered messages on one task. There are no workspace-wide channels in the MVP. |
@@ -130,6 +129,14 @@ Human feedback can revise a task. Version checks must prevent stale submissions 
 
 ## Membership and trust
 
+### Owner and administrator authority
+
+The creator is the human workroom owner by default. Only the owner and human admins they appoint can manage agent access. Ordinary members and agents cannot change permissions or elevate themselves or others. An agent's own owner controls connecting and withdrawing that agent; workroom administration cannot override that control.
+
+GitHub and deployment access require separate delegation from the relevant external-resource owner. A workroom admin cannot grant authority they do not hold. Public role claims fill existing openings under the configured policy, not permission changes. Lead, reviewer and DevOps are work responsibilities, not admin grants.
+
+See [ACCESS-CONTROL.md](ACCESS-CONTROL.md) for the approved model, proposed server-side enforcement, permission matrix, denial tests and audit requirements. These are unimplemented requirements. The old kernel matrix below must be interpreted under these restrictions.
+
 ### Connecting an agent
 
 An agent must belong to an organization before it can do anything in a workspace. Two ways in:
@@ -140,23 +147,24 @@ An agent must belong to an organization before it can do anything in a workspace
   only call `get_identity`, which returns a `claim_url`. The agent passes that to its person, who signs in and assigns
   the agent to an organization. (Same pattern as RunLater's payment link: an agent cannot vouch for itself.)
 
-An organization admin can disconnect an agent at any time. That revokes it in every workspace at once.
+An authorized human representative of the agent-owning organization can disconnect its agent globally. This must revoke its participation across workrooms; the proposed enforcement and in-flight revocation tests in ACCESS-CONTROL.md must pass before claiming that guarantee.
 
 ### Authorization roles (kernel baseline)
 
 | Role | Sees | Can |
 | --- | --- | --- |
-| `admin` | Everything in the workspace | Everything a member can, plus invite, change roles, revoke, cancel any task, rename/archive the workspace |
+| `owner` | Everything in the workspace | Creator by default; appoint/remove human admins and manage scoped workroom access. External authority remains separately delegated. |
+| `admin` | Everything in the workspace | Owner-appointed human; manage local agent scopes, invite/revoke, cancel tasks, rename/archive. Cannot appoint admins, elevate authority, override agent-owner disconnect or grant unavailable external authority. |
 | `member` | Every task and thread | Create tasks, offer them to any member or guest, take tasks, review, post on any thread |
 | `guest` | Only tasks where it is requester, assignee or reviewer, and their threads | Act on those tasks; create tasks only if the admin allowed it on the invitation |
 
-- Only people from the owning organization can be workspace `admin`s in the MVP.
+- Only the workroom owner can appoint human administrators. Agents cannot be owner/admin. Ownership transfer and recovery require a separate design; no implicit agent or organization-wide elevation is permitted.
 - Members from another organization default to `guest`. Granting `member` to an outside organization is an explicit choice on the invitation.
 - A person sees what the agents of their organization in that workspace see, and may act as reviewer.
 
 ### Invitations (private workrooms)
 
-- **Own agents:** a workspace admin adds them directly. No approval needed; same owner.
+- **Own-organization agents:** the workroom owner/admin may admit an already-connected agent only within the agent owner’s authorized participation policy. Shared organization membership alone does not let a workroom admin connect, claim or override withdrawal of that identity.
 - **Another organization:** an admin of the workspace invites the organization (by an invite link sent out-of-band),
   choosing the role. An admin of the invited organization accepts it in the dashboard and chooses which of its agents
   join. **Both sides are people**; no agent can invite an outside organization or accept an invitation for one.
@@ -297,9 +305,15 @@ People may inspect an agent's inbox only where their ownership/access permits it
 
 Keep hosted MCP and Agent Auth for connecting existing agents. The connection UI uses **MCP client** and **Connect your own agent**, with **Agent Auth** as the subtitle. Connecting establishes identity, not execution or automatic workroom access.
 
-A2A is part of the expanded coordination direction alongside MCP, rather than an excluded product idea. Its adapter must map to the same authoritative tasks, events, permissions and inboxes. The lead agent coordinates; the protocol carries requests and responses; Podster records the shared state. A2A does not determine the plan or keep an agent running.
+A2A interoperability is a **core product requirement** alongside MCP, not a deferred optional adapter. Its adapter must map to the same authoritative tasks, events, permissions and inboxes. The lead agent coordinates; the protocol carries requests and responses; Podster records the shared state. A2A does not determine the plan or keep an agent running.
 
-Protocol version, discovery, authentication, task-state mapping, message delivery and interoperability tests remain design work. Keep MCP-only agents able to participate. Do not claim A2A conformance or treat a protocol message as authority to bypass permissions.
+Core A2A must support authorized agent-to-agent communication through the same policy and durable state. It does not promise that offline agents are continuously reachable. Protocol version, discovery, authentication, task-state mapping, message delivery and interoperability tests remain design work and launch gates. Keep MCP-only agents able to participate. Do not claim A2A conformance or treat a protocol message as authority to bypass permissions.
+
+## UI system
+
+Use **shadcn/ui** throughout, with **Sidebar** navigation and the user profile anchored at the bottom left. Use a consistent **right-side Sheet** for task, agent, connection and access details, with consistent close/cancel and focus behavior. The profile menu provides account/settings, notifications, billing and logout entry points; billing remains unimplemented. Existing images are historical concepts and may show older layout or domain labels.
+
+The Rust API is private, service-only and never called directly from browser code. Three public surfaces are planned under `podster.dev`: landing page, application UI and agent gateway. Exact public routing remains to be configured; no public Rust API hostname is planned.
 
 ## Dashboard (people)
 
@@ -335,7 +349,7 @@ See [the mockup gallery](../mockups/README.md). Text, example identities, counts
 | Hosting, running or prompting agents | Agents own execution. We are the meeting place. |
 | Upload implementation | Required by the target workroom experience; storage and security design must be resolved beyond the link-only kernel. |
 | Workspace channels, DMs, real-time chat | Task threads cover the handoff. Channels add noise before they add value. |
-| A2A implementation | Included in product direction; adapter contract and interoperability tests must precede a conformance claim. |
+| A2A conformance claim | Core product work, not deferred scope. Publish a supported protocol contract and pass interoperability plus authorization tests before claiming support. |
 | Public REST API, SDKs | Capabilities cover agents; REST stays internal. |
 | Team templates | Role definitions/openings are core to the target experience; prebuilt template bundles remain an optional shortcut. |
 | Marketplace, matchmaking, reputation | Beyond the public workroom directory and open-role claiming; trust and incentive systems remain out of scope. |
@@ -385,7 +399,15 @@ Before the expanded experience is called complete:
    for certain tasks? Cheap to add (reviewer = person), but it needs a dashboard flow.
 4. **Message retention.** Keep threads for the workspace's lifetime, or expire after N days like RunLater?
 5. **Pricing shape.** Per workspace, per active agent, or per task? Decide after the preview shows usage.
-6. **Brand clearance.** The selected name is Podster and the planned domain is `podsters.io`; clearance is still pending.
+6. **Brand clearance.** The selected name is Podster and the planned domain is `podster.dev`; clearance is still pending.
+
+## Access and interoperability decisions, November 4, 2026
+
+- Confirmed creator ownership, owner-appointed human admins, no ordinary-member/agent permission elevation, agent-owner connection/withdrawal control and separately delegated GitHub/deploy authority.
+- Added [proposed enforcement and denial-test acceptance criteria](ACCESS-CONTROL.md), explicitly not implemented or run.
+- Updated domain direction to `podster.dev`; Rust API stays private and service-only.
+- Selected shadcn/ui Sidebar and consistent right-side Sheet details.
+- Elevated A2A to a core product requirement with protocol/security interoperability gates.
 
 ## Changes on November 4, 2026
 
@@ -410,4 +432,5 @@ For reviewers of the first draft (`docs/MVP-SPEC.md`, in git history). These des
 - **Offline agents:** added RunLater-style inbox with server-side cursor and an optional wake URL, replacing "poll the
   workspace event feed and keep your own cursor".
 - **No self-sign-off** rule added; untrusted-content marking (`external: true`) specified.
+
 

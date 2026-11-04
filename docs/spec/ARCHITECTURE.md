@@ -19,6 +19,14 @@ Before implementation, extend this design with contracts/ADRs for:
 
 Keep the single-authority permission checks, transactional events/outbox, idempotency and execution-outside-Podster boundary. Public participation requires a deliberate permission design; do not grant the existing full `member` role automatically on a public claim. The phase plan below proves the kernel only. Expanded-product implementation order, costs and launch gates are not yet committed.
 
+## Access-control launch gate
+
+The [approved ownership/access model and proposed acceptance tests](ACCESS-CONTROL.md) are required for implementation. The creator becomes owner; only that owner and appointed human admins manage agent access. Agents and ordinary members cannot elevate permissions. Agent-owner withdrawal and separate provider delegation are independent constraints.
+
+Rust must enforce this server-side for every dashboard/MCP/Agent Auth/A2A command, with current scoped authority and auditable outcomes. The domain direction is `podster.dev`; the Rust API has no public hostname, route, `workers.dev` endpoint or public health route. Its service binding and signed caller assertions do not replace resource-level authorization.
+
+The schemas below are the old kernel baseline. Add a human owner ID, owner-controlled admin delegation, versioned policy/grants, revocation fencing and protected access audit records before implementation. In particular, the gateway-only global-revocation check described below is insufficient for assertions already minted before disconnect; resolve that in-flight window and prove it with denial tests before claiming enforcement.
+
 ## Decisions
 
 | Decision | Choice |
@@ -32,8 +40,9 @@ Keep the single-authority permission checks, transactional events/outbox, idempo
 | Async | Workspace outbox → `Inbox` DO by direct DO call from an alarm. **Queues only for outbound HTTP** (wake). |
 | People auth | Better Auth in the gateway: GitHub, Google, email magic link; session cookie on the dashboard domain. |
 | Agent auth | `@better-auth/agent-auth` (claimable agents) and `@cloudflare/workers-oauth-provider` for hosted MCP, both mapped to one `agent` record. |
-| Web | **`apps/web`, Next.js on Workers via vinext** (owner's choice; not OpenNext). Beta: gated by a staging smoke test. |
+| Web | **`apps/web`, Next.js on Workers via vinext** (owner's choice; not OpenNext), with shadcn/ui Sidebar and consistent right-side Sheet details. Beta: gated by a staging smoke test. |
 | Contracts | `packages/contracts/openapi.yaml` is the source of truth for gateway ↔ api; capability definitions live beside it. |
+| A2A | Core product interoperability requirement alongside MCP/Agent Auth. All adapters use the same Rust policy and authoritative task/inbox state; protocol profile and conformance tests remain to be designed. |
 | Execution | Outside Podster. No agent hosting, prompts, models or sandboxes. |
 
 ## System
@@ -165,7 +174,7 @@ What stays outside the DO, and why it's safe:
   DO, which refuses a revoked caller.
 - Disconnecting an agent org-wide sets `agent.revoked_at` in D1; the gateway refuses that agent's next request before
   minting an assertion. The API then marks it revoked in each workspace from the index (best effort, retried); the
-  gateway check already covers the gap.
+  gateway check blocks new assertions, but does not by itself cover an assertion minted before revocation. Current revocation checks/fencing and a defined ordering boundary are required by ACCESS-CONTROL.md before launch.
 
 ### A command, end to end (`accept_task`)
 
@@ -221,7 +230,7 @@ GET    /v1/workspaces/{ws}/events?after=            audit log (admin, people)
 GET    /v1/inbox?after=&limit=&ack=
 POST   /v1/inbox/ack
 PUT    /v1/inbox/wake · DELETE /v1/inbox/wake
-GET    /health
+GET    /health                                    private service binding only
 ```
 
 Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with stable codes:
@@ -283,8 +292,7 @@ sets the same limit.
 | **3 — Inbox and the two-agent handoff** | `Inbox` DO, outbox drain, capabilities and `/mcp`. | E2E success criteria 1–8 pass in Miniflare, then on staging. **This is the MVP.** |
 | **4 — Dashboard and wake** | vinext dashboard for people's jobs; wake queue and consumer. | People can do every dashboard job in PRODUCT.md; wake retries and disablement tested. |
 
-Later, not MVP: A2A adapter (after interoperability tests), team templates, GitHub/Jira links that update, workspace
-channels, real-time (WebSocket hibernation on the `Workspace` DO is the natural path).
+A2A is now core product scope, not a later optional adapter: add protocol mapping and positive/negative interoperability tests to the launch plan. Security acceptance in ACCESS-CONTROL.md must also pass before launch. The historical kernel phases above are not the complete release plan. Later enhancements include team templates, Jira sync, workspace channels and real-time updates.
 
 ## Operations
 
@@ -318,4 +326,5 @@ For reviewers of `docs/CLOUDFLARE-ARCHITECTURE.md` (in git history):
 - **Assertion carries identity only**, not workspace or scopes for a workspace; the DO decides permissions.
 - **Rust DO spike dropped** from Phase 0: RunLater already runs a SQLite-backed Rust DO in production.
 - **People auth specified** (Better Auth sessions), which the draft needed for approvals but didn't define.
+
 
