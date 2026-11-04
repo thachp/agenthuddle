@@ -383,6 +383,18 @@ async function claimedByThisPerson(env: Env, pluginAgent: string, userId: string
   return row?.status === "active" && row.userId === userId;
 }
 
+/**
+ * Takes the agent's host for this person, unless someone else already holds it. If the plugin saw a different owner
+ * when activating the agent, it would revoke that person's agents on the host, so this has to be one atomic write.
+ */
+export async function claimHost(env: Pick<Env, "DB">, pluginAgent: string, userId: string) {
+  const now = new Date().toISOString();
+  const result = await env.DB.prepare(
+    `UPDATE agentHost SET userId = ?, status = 'active', activatedAt = COALESCE(activatedAt, ?), updatedAt = ? WHERE id = (SELECT hostId FROM agent WHERE id = ?) AND (userId IS NULL OR userId = ?)`,
+  ).bind(userId, now, now, pluginAgent, userId).run();
+  return result.meta.changes === 1;
+}
+
 /** The plugin's hash of a code, including how it normalizes one. */
 async function userCodeHash(code: string) {
   const stripped = code.replaceAll(/[^A-Z0-9]/gi, "").toUpperCase();
@@ -427,10 +439,9 @@ async function handleClaim(request: Request, env: Env, userId: string): Promise<
 
   // Approve first, so nothing is created for a bad code. The agent ID comes from the plugin's, so a retry reuses it.
   if (!(await claimedByThisPerson(env, pluginAgent, userId))) {
-    // Claiming an agent on a host someone else owns makes the plugin revoke that person's agents there.
-    const host = await env.DB.prepare(`SELECT h.userId FROM agent a JOIN agentHost h ON h.id = a.hostId WHERE a.id = ?`).bind(pluginAgent).first<{ userId: string | null }>();
-    if (host?.userId && host.userId !== userId) return denied("not_allowed", 403);
+    // The code comes first, so only someone holding one can learn that a host is taken.
     if (!(await codeMatchesLiveApproval(env, pluginAgent, body.user_code))) return denied("not_allowed", 403);
+    if (!(await claimHost(env, pluginAgent, userId))) return denied("host_owned_by_another_person", 403);
     const approval = await createAuth(env).api.approveCapability({ headers: request.headers, body: { agent_id: pluginAgent, user_code: body.user_code, action: "approve" }, asResponse: true }).catch(() => null);
     const result = approval?.ok ? await approval.json<{ status?: string }>().catch(() => null) : null;
     // If two people raced with the right code, only the one the plugin recorded goes on.

@@ -7,7 +7,7 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
-import { callApi, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import { callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string };
@@ -495,9 +495,58 @@ describe("hosts with more than one agent", () => {
     const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
     expect(two.registered.host_id).toBe(one.registered.host_id);
     expect((await claim(first, one)).status).toBe(200);
-    expect((await claim(second, two)).status).toBe(403);
+    const refused = await claim(second, two);
+    expect(refused.status).toBe(403);
+    expect((await refused.json<any>()).error.code).toBe("host_owned_by_another_person");
+    expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(two.pluginId).first()).toEqual({ status: "pending" });
     expect((await execute(one, "get_identity")).status).toBe(200);
     expect(await e.DB.prepare("SELECT userId FROM agentHost WHERE id = ?").bind(one.registered.host_id).first()).toEqual({ userId: (await e.DB.prepare("SELECT userId FROM agent WHERE id = ?").bind(one.pluginId).first<{ userId: string }>())!.userId });
+  });
+
+  it("a wrong code can't take a host or learn that it's taken", async () => {
+    const [first, second] = [await signUp(), await signUp()];
+    const one = await registerAgent();
+    const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
+    const wrong = await claim(second, { ...one, userCode: "AAAA-AAAA" });
+    expect((await wrong.json<any>()).error.code).toBe("not_allowed");
+    expect(await e.DB.prepare("SELECT userId, status FROM agentHost WHERE id = ?").bind(one.registered.host_id).first()).toEqual({ userId: null, status: "pending" });
+    expect((await claim(first, one)).status).toBe(200);
+    expect((await (await claim(second, { ...two, userCode: "AAAA-AAAA" })).json<any>()).error.code).toBe("not_allowed");
+  });
+
+  it("only one person can take a host, even at the same moment", async () => {
+    const [first, second] = [await signUp(), await signUp()];
+    const agent = await registerAgent();
+    const ids = await Promise.all([first, second].map(async (who) => (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(who.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId));
+    const results = await Promise.all(ids.map((id) => claimHost(e, agent.pluginId, id)));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const winner = ids[results.indexOf(true)];
+    expect(await e.DB.prepare("SELECT userId, status FROM agentHost WHERE id = ?").bind(agent.registered.host_id).first()).toEqual({ userId: winner, status: "active" });
+    // Holding the host already counts, and the plugin then has no owner change to act on.
+    expect(await claimHost(e, agent.pluginId, winner)).toBe(true);
+  });
+
+  it("two simultaneous claims on one host never both succeed", async () => {
+    for (let round = 0; round < 5; round++) {
+      const [first, second] = [await signUp(), await signUp()];
+      const one = await registerAgent();
+      const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
+      const statuses = (await Promise.all([claim(first, one), claim(second, two)])).map((r) => r.status).sort();
+      expect(statuses).toEqual([200, 403]);
+      // Whoever won keeps a working agent, and the loser's is still waiting.
+      const working = [(await execute(one, "get_identity")).status, (await execute(two, "get_identity")).status].sort();
+      expect(working).toEqual([200, 403]);
+    }
+  });
+
+  it("a claim stops if the plugin refuses a live code", async () => {
+    const [owner, other] = [await signUp(), await signUp()];
+    const agent = await registerAgent();
+    const otherUser = (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(other.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId;
+    await e.DB.prepare("UPDATE agent SET userId = ? WHERE id = ?").bind(otherUser, agent.pluginId).run();
+    expect((await claim(owner, agent)).status).toBe(403);
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE external_id = ?").bind(agent.pluginId).first()).toEqual({ n: 0 });
+    expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ status: "pending" });
   });
 
   it("the host's owner can claim its other agents", async () => {
