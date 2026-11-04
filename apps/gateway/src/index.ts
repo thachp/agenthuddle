@@ -29,7 +29,38 @@ const denied = (code: string, status: number) => json({ error: { code, message: 
 const newId = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
 const personId = (userId: string) => `per_${userId}`;
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-const MAX_NAME_LENGTH = 200;
+const MAX_NAME_BYTES = 200;
+const API_TIMEOUT_MS = 25_000;
+const validName = (name: string) => name.length > 0 && new TextEncoder().encode(name).length <= MAX_NAME_BYTES;
+
+/**
+ * The only plugin and Better Auth routes that are public. Everything else, including `/host/*`, approve, grant and
+ * revoke routes, stays private: they would let a signed-in stranger replace a pending agent's keys or decide its fate.
+ */
+const PUBLIC_AUTH_ROUTES = [
+  /^\/sign-in\/(social|email)$/,
+  /^\/sign-up\/email$/,
+  /^\/sign-out$/,
+  /^\/callback\/[\w-]+$/,
+  /^\/get-session$/,
+  /^\/error$/,
+  /^\/ok$/,
+  /^\/agent-configuration$/,
+  /^\/agent\/register$/,
+  /^\/agent\/status$/,
+  /^\/capability\/(list|describe|execute)$/,
+];
+export const isPublicAuthRoute = (path: string) => PUBLIC_AUTH_ROUTES.some((route) => route.test(path));
+
+/** Test environments only: password sign-in can't be turned on anywhere with a real hostname. */
+function passwordSignInEnabled(env: Env) {
+  const host = new URL(env.BASE_URL).hostname;
+  return env.ENABLE_PASSWORD_SIGNIN === "true" && (host === "localhost" || host.endsWith(".test"));
+}
+
+const ERROR_NAMES: Record<number, "BAD_REQUEST" | "UNAUTHORIZED" | "FORBIDDEN" | "NOT_FOUND" | "CONFLICT" | "UNPROCESSABLE_ENTITY" | "INTERNAL_SERVER_ERROR" | "NOT_IMPLEMENTED" | "GATEWAY_TIMEOUT"> = {
+  400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND", 409: "CONFLICT", 422: "UNPROCESSABLE_ENTITY", 500: "INTERNAL_SERVER_ERROR", 501: "NOT_IMPLEMENTED", 504: "GATEWAY_TIMEOUT",
+};
 
 class AgentRefused extends Error {}
 
@@ -43,10 +74,15 @@ export async function resolveAgent(env: Env, provider: "agent_auth" | "mcp_oauth
   return { kind: "agent", id: row.id, org: row.org_id, generation: row.generation };
 }
 
-async function callApi(env: Env, identity: Identity, call: ApiCall): Promise<Response> {
+export async function callApi(env: Pick<Env, "API" | "ASSERTION_SIGNING_JWK">, identity: Identity, call: ApiCall): Promise<Response> {
   const headers: Record<string, string> = { "x-podster-assertion": await mintAssertion(identity, env.ASSERTION_SIGNING_JWK), "content-type": "application/json" };
   if (call.idempotencyKey) headers["idempotency-key"] = call.idempotencyKey;
-  return env.API.fetch(new Request(`https://api.internal${call.path}`, { method: call.method, headers, body: call.body }));
+  try {
+    return await env.API.fetch(new Request(`https://api.internal${call.path}`, { method: call.method, headers, body: call.body, signal: AbortSignal.timeout(API_TIMEOUT_MS) }));
+  } catch {
+    // A panic in the API hangs its request, so callers get a clear answer instead of hanging too.
+    return denied("upstream_unavailable", 504);
+  }
 }
 
 async function runCapability(env: Env, identity: Identity, capability: Capability, args: Record<string, unknown>) {
@@ -54,12 +90,14 @@ async function runCapability(env: Env, identity: Identity, capability: Capabilit
   return { status: response.status, body: (await response.json()) as any };
 }
 
-/** The plugin's default replay guard is per isolate. Each agent token is consumed here, atomically. */
+/** The plugin's default replay guard doesn't span requests here. Each agent token is consumed atomically instead. */
 async function consumeJti(env: Env, agentId: string, authorization: string | null | undefined) {
   const { jti, exp } = decodeJwt(authorization?.replace(/^Bearer\s+/i, "") ?? "");
   if (!jti) return false;
   const now = Math.floor(Date.now() / 1000);
   const result = await env.DB.prepare(`INSERT OR IGNORE INTO seen_jti (key, expires_at) VALUES (?, ?)`).bind(`${agentId}:${jti}`, (exp ?? now) + 30).run();
+  // Expired entries can't match anything, so about 1 call in 100 clears them.
+  if (Math.random() < 0.01) await env.DB.prepare(`DELETE FROM seen_jti WHERE expires_at < ?`).bind(now).run();
   return result.meta.changes === 1;
 }
 
@@ -71,7 +109,7 @@ export function createAuth(env: Env) {
     database: env.DB,
     baseURL: env.BASE_URL,
     secret: env.AUTH_SECRET,
-    emailAndPassword: { enabled: env.ENABLE_PASSWORD_SIGNIN === "true" },
+    emailAndPassword: { enabled: passwordSignInEnabled(env) },
     socialProviders: social,
     databaseHooks: {
       user: {
@@ -97,9 +135,12 @@ export function createAuth(env: Env) {
         approvalMethods: ["device_authorization"],
         allowDynamicHostRegistration: true,
         deviceAuthorizationPage: "/claim",
-        // Long-running agents shouldn't expire. Disconnecting is how access ends.
+        // Long-running agents shouldn't expire or lose their grants when idle. Disconnecting is how access ends.
+        agentSessionTTL: 0,
         agentMaxLifetime: 0,
         absoluteLifetime: 0,
+        // Claiming is an explicit action on a signed-in session, so an older session is fine.
+        freshSessionWindow: 0,
         capabilities: CAPABILITIES.map((c) => ({ name: c.name, description: c.description, input: jsonSchema(c) as any, approvalStrength: "session" as const })),
         onExecute: async ({ ctx, capability, arguments: args, agentSession }) => {
           const definition = CAPABILITIES.find((c) => c.name === capability);
@@ -114,7 +155,7 @@ export function createAuth(env: Env) {
           }
           try {
             const { status, body } = await runCapability(env, identity, definition, args ?? {});
-            if (status >= 400) throw new APIError(status === 404 ? "NOT_FOUND" : status === 409 ? "CONFLICT" : status === 403 ? "FORBIDDEN" : "BAD_REQUEST", { message: body?.error?.code ?? "error", code: body?.error?.code });
+            if (status >= 400) throw new APIError(ERROR_NAMES[status] ?? "INTERNAL_SERVER_ERROR", { message: body?.error?.code ?? "error", code: body?.error?.code });
             return body;
           } catch (error) {
             if (error instanceof InvalidArguments) throw new APIError("BAD_REQUEST", { message: "invalid_argument" });
@@ -151,20 +192,26 @@ const sameOrigin = (request: Request, env: Env) => request.headers.get("origin")
 
 /** Dashboard routes people may reach through the session. Agent registration and connection have their own handlers. */
 function allowedPassthrough(path: string) {
-  if (!path.startsWith("/v1/") || path.includes("..")) return false;
+  if (!path.startsWith("/v1/")) return false;
   return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox");
 }
 
 async function registerWithApi(env: Env, identity: Identity, agentId: string, org: string, name: string) {
   const response = await callApi(env, identity, { method: "PUT", path: `/v1/agents/${agentId}`, body: JSON.stringify({ org_id: org, name }) });
+  await response.text();
   return response.status === 200;
 }
 
-async function createAgent(env: Env, org: string, name: string, provider: "agent_auth" | "mcp_oauth", externalId: string, agentId: string) {
+type LinkProvider = "agent_auth" | "mcp_oauth";
+
+const linkStatement = (env: Env, provider: LinkProvider, externalId: string, agentId: string, person: string, now: number) =>
+  env.DB.prepare(`INSERT INTO identity_link (provider, external_id, agent_id, person_id, created_at) VALUES (?, ?, ?, ?, ?)`).bind(provider, externalId, agentId, person, now);
+
+async function createAgent(env: Env, org: string, name: string, provider: LinkProvider, externalId: string, agentId: string, person: string) {
   const now = Date.now();
   await env.DB.batch([
-    env.DB.prepare(`INSERT INTO podster_agent (id, org_id, name, created_at) VALUES (?, ?, ?, ?)`).bind(agentId, org, name, now),
-    env.DB.prepare(`INSERT INTO identity_link (provider, external_id, agent_id, created_at) VALUES (?, ?, ?, ?)`).bind(provider, externalId, agentId, now),
+    env.DB.prepare(`INSERT OR IGNORE INTO podster_agent (id, org_id, name, created_at) VALUES (?, ?, ?, ?)`).bind(agentId, org, name, now),
+    linkStatement(env, provider, externalId, agentId, person, now),
   ]);
 }
 
@@ -174,20 +221,41 @@ async function linkableAgent(env: Env, id: string, org: string) {
   return row?.org_id === org;
 }
 
-function consentPage(env: Env, clientName: string, query: string, orgs: { id: string; name: string }[]) {
-  const options = orgs.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name)}</option>`).join("");
+const sha256Hex = async (value: string) =>
+  [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
+
+type ConsentChoices = { clientName: string; redirectHosts: string[]; query: string; orgs: { id: string; name: string }[]; agents: { id: string; org_id: string; name: string }[] };
+
+function consentPage(choices: ConsentChoices) {
+  const orgOptions = choices.orgs.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name)}</option>`).join("");
+  const agentOptions = choices.agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join("");
+  const hosts = choices.redirectHosts.map(escapeHtml).join(", ");
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect an agent to Podster</title></head><body>
 <h1>Connect an agent to Podster</h1>
-<p><strong>${escapeHtml(clientName)}</strong> wants to act as an agent in your organization. Connecting doesn't create, run or wake an agent. Workroom access is set separately.</p>
+<p>An app calling itself <strong>${escapeHtml(choices.clientName)}</strong> wants to act as an agent in your organization. Podster hasn't verified this name.</p>
+<p>After you approve, it receives access at <strong>${hosts}</strong>. Only continue if you started this and trust that site.</p>
+<p>It can use the agent's tools in any workroom that agent has joined. Connecting doesn't create, run or wake an agent, and workroom access is set separately.</p>
 <form method="post" action="/authorize">
-<input type="hidden" name="oauth_query" value="${escapeHtml(query)}">
-<label>Organization <select name="org_id" required>${options}</select></label>
-<label>Agent name <input name="agent_name" maxlength="${MAX_NAME_LENGTH}" required></label>
+<input type="hidden" name="oauth_query" value="${escapeHtml(choices.query)}">
+<label>Organization <select name="org_id" required>${orgOptions}</select></label>
+<label>Connect as <select name="link_agent_id"><option value="">A new agent</option>${agentOptions}</select></label>
+<label>Name for a new agent <input name="agent_name" maxlength="${MAX_NAME_BYTES}"></label>
 <button type="submit">Connect</button>
 </form></body></html>`;
+  // No form-action: Chromium applies it to the redirect after this form, which would block the return to the client.
   return new Response(html, {
-    headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": `default-src 'none'; form-action 'self'; frame-ancestors 'none'`, "x-frame-options": "DENY", "referrer-policy": "no-referrer" },
+    headers: { "content-type": "text/html; charset=utf-8", "content-security-policy": `default-src 'none'; frame-ancestors 'none'; base-uri 'none'`, "x-frame-options": "DENY", "referrer-policy": "no-referrer" },
   });
+}
+
+async function parseOAuth(env: Env, request: Request) {
+  try {
+    const parsed = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+    if (parsed.scope.length === 0 || parsed.scope.some((scope) => scope !== "mcp")) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 async function handleAuthorize(request: Request, env: Env, userId: string): Promise<Response> {
@@ -196,73 +264,128 @@ async function handleAuthorize(request: Request, env: Env, userId: string): Prom
 
   if (request.method === "GET") {
     const url = new URL(request.url);
-    const parsed = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+    const parsed = await parseOAuth(env, request);
+    if (!parsed) return denied("invalid_request", 400);
     const client = await env.OAUTH_PROVIDER.lookupClient(parsed.clientId);
     if (!client) return denied("invalid_client", 400);
     if (adminOrgs.length === 0) return denied("not_allowed", 403);
     const placeholders = adminOrgs.map(() => "?").join(",");
-    const { results } = await env.DB.prepare(`SELECT id, name FROM organization WHERE id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; name: string }>();
-    return consentPage(env, client.clientName ?? parsed.clientId, url.search, results);
+    const orgs = await env.DB.prepare(`SELECT id, name FROM organization WHERE id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; name: string }>();
+    const agents = await env.DB.prepare(`SELECT id, org_id, name FROM podster_agent WHERE revoked_at IS NULL AND org_id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; org_id: string; name: string }>();
+    return consentPage({ clientName: client.clientName ?? parsed.clientId, redirectHosts: [new URL(parsed.redirectUri).host], query: url.search, orgs: orgs.results, agents: agents.results });
   }
 
   // Approving is a POST from our own page, so a link can't connect an agent on someone's behalf.
   if (request.method !== "POST" || !sameOrigin(request, env)) return denied("not_allowed", 403);
   const form = await request.formData();
   const org = String(form.get("org_id") ?? "");
-  const name = String(form.get("agent_name") ?? "").trim();
   const linkAgent = String(form.get("link_agent_id") ?? "");
+  const name = String(form.get("agent_name") ?? "").trim() || "MCP agent";
   if (!adminOrgs.includes(org)) return denied("not_allowed", 403);
-  if (!name || name.length > MAX_NAME_LENGTH) return denied("invalid_argument", 400);
-  const parsed = await env.OAUTH_PROVIDER.parseAuthRequest(new Request(`${env.BASE_URL}/authorize${String(form.get("oauth_query") ?? "")}`));
+  if (!validName(name)) return denied("invalid_argument", 400);
+  const parsed = await parseOAuth(env, new Request(`${env.BASE_URL}/authorize${String(form.get("oauth_query") ?? "")}`));
+  if (!parsed) return denied("invalid_request", 400);
 
   const identity = await personIdentity(env, new Request(request.url, { headers: { "x-podster-org": org } }), userId);
   if (!identity) return denied("not_allowed", 403);
-  const externalId = newId("grant");
-  if (linkAgent) {
-    if (!(await linkableAgent(env, linkAgent, org))) return denied("not_allowed", 403);
-    await env.DB.prepare(`INSERT INTO identity_link (provider, external_id, agent_id, created_at) VALUES ('mcp_oauth', ?, ?, ?)`).bind(externalId, linkAgent, Date.now()).run();
-  } else {
-    const agentId = newId("agt");
-    if (!(await registerWithApi(env, identity, agentId, org, name))) return denied("internal_error", 502);
-    await createAgent(env, org, name, "mcp_oauth", externalId, agentId);
+  // One person, client and organization is one credential, so a repeat consent or double submit keeps the same agent.
+  const externalId = `grant_${await sha256Hex(`${person}|${parsed.clientId}|${org}`)}`;
+  const existing = await env.DB.prepare(`SELECT agent_id FROM identity_link WHERE provider = 'mcp_oauth' AND external_id = ?`).bind(externalId).first<{ agent_id: string }>();
+  if (!existing) {
+    if (linkAgent) {
+      if (!(await linkableAgent(env, linkAgent, org))) return denied("not_allowed", 403);
+      await linkStatement(env, "mcp_oauth", externalId, linkAgent, person, Date.now()).run();
+    } else {
+      const agentId = newId("agt");
+      if (!(await registerWithApi(env, identity, agentId, org, name))) return denied("upstream_unavailable", 502);
+      await createAgent(env, org, name, "mcp_oauth", externalId, agentId, person);
+    }
+  } else if (linkAgent && linkAgent !== existing.agent_id) {
+    return denied("already_linked", 409);
   }
-  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: parsed, userId: person, metadata: { org }, scope: parsed.scope, props: { externalId } });
+  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: parsed, userId: person, metadata: { org, externalId }, scope: parsed.scope, props: { externalId } });
   return Response.redirect(redirectTo, 302);
+}
+
+/** A person may only finish a claim they started, so a failure partway can be retried. */
+async function claimedByThisPerson(env: Env, pluginAgent: string, userId: string) {
+  const row = await env.DB.prepare(`SELECT status, userId FROM agent WHERE id = ?`).bind(pluginAgent).first<{ status: string; userId: string | null }>();
+  return row?.status === "active" && row.userId === userId;
+}
+
+/**
+ * Whether this agent has a live code. The plugin refuses every code while an expired one is pending, which would
+ * strand an agent that registered again, so expired rows go once a newer one exists. With no live row the claim must
+ * stop here: the plugin doesn't check a code when no approval is pending.
+ */
+async function prepareApprovals(env: Env, pluginAgent: string) {
+  const { results } = await env.DB.prepare(`SELECT id, expiresAt FROM approvalRequest WHERE agentId = ? AND status = 'pending'`).bind(pluginAgent).all<{ id: string; expiresAt: string | number }>();
+  const now = Date.now();
+  const live = results.filter((row) => new Date(row.expiresAt).getTime() >= now);
+  if (live.length === 0) return false;
+  for (const row of results) {
+    if (!live.includes(row)) await env.DB.prepare(`DELETE FROM approvalRequest WHERE id = ?`).bind(row.id).run();
+  }
+  return true;
 }
 
 async function handleClaim(request: Request, env: Env, userId: string): Promise<Response> {
   if (!sameOrigin(request, env)) return denied("not_allowed", 403);
   const body = await request.json<{ agent_id?: unknown; user_code?: unknown; org_id?: unknown; name?: unknown; link_agent_id?: unknown }>().catch(() => null);
   if (!body || typeof body.agent_id !== "string" || typeof body.user_code !== "string" || typeof body.org_id !== "string") return denied("invalid_argument", 400);
-  const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : "agent";
-  if (name.length > MAX_NAME_LENGTH) return denied("invalid_argument", 400);
+  const pluginAgent = body.agent_id;
   const org = body.org_id;
+  const person = personId(userId);
   const identity = await personIdentity(env, new Request(request.url, { headers: { "x-podster-org": org } }), userId);
   if (!identity || identity.kind !== "person" || !identity.adminOrgs.includes(org)) return denied("not_allowed", 403);
-  const auth = createAuth(env);
-  const linked = typeof body.link_agent_id === "string" ? body.link_agent_id : null;
+  const linked = typeof body.link_agent_id === "string" && body.link_agent_id ? body.link_agent_id : null;
   if (linked && !(await linkableAgent(env, linked, org))) return denied("not_allowed", 403);
-  const agentId = linked ?? newId("agt");
-  if (!linked && !(await registerWithApi(env, identity, agentId, org, name))) return denied("internal_error", 502);
-  try {
-    await auth.api.approveCapability({ headers: request.headers, body: { agent_id: body.agent_id, user_code: body.user_code, action: "approve" } });
-  } catch {
-    return denied("not_allowed", 403);
+  const alreadyLinked = await env.DB.prepare(`SELECT agent_id FROM identity_link WHERE provider = 'agent_auth' AND external_id = ?`).bind(pluginAgent).first();
+  if (alreadyLinked) return denied("not_allowed", 403);
+
+  // Approve first, so nothing is created for a bad code. The agent ID comes from the plugin's, so a retry reuses it.
+  if (!(await claimedByThisPerson(env, pluginAgent, userId))) {
+    if (!(await prepareApprovals(env, pluginAgent))) return denied("not_allowed", 403);
+    const approval = await createAuth(env).api.approveCapability({ headers: request.headers, body: { agent_id: pluginAgent, user_code: body.user_code, action: "approve" }, asResponse: true }).catch(() => null);
+    const result = approval?.ok ? await approval.json<{ status?: string }>().catch(() => null) : null;
+    if (result?.status !== "approved") return denied("not_allowed", 403);
   }
+  const registered = await env.DB.prepare(`SELECT name FROM agent WHERE id = ?`).bind(pluginAgent).first<{ name: string | null }>();
+  const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : (registered?.name ?? "agent");
+  if (!validName(name)) return denied("invalid_argument", 400);
   if (linked) {
-    await env.DB.prepare(`INSERT INTO identity_link (provider, external_id, agent_id, created_at) VALUES ('agent_auth', ?, ?, ?)`).bind(body.agent_id, linked, Date.now()).run();
-  } else {
-    await createAgent(env, org, name, "agent_auth", body.agent_id, agentId);
+    await linkStatement(env, "agent_auth", pluginAgent, linked, person, Date.now()).run();
+    return json({ agent_id: linked, org_id: org });
   }
+  const agentId = `agt_${await sha256Hex(pluginAgent)}`;
+  if (!(await registerWithApi(env, identity, agentId, org, name))) return denied("upstream_unavailable", 502);
+  await createAgent(env, org, name, "agent_auth", pluginAgent, agentId, person);
   return json({ agent_id: agentId, org_id: org });
+}
+
+/** Ends every credential for an agent, so reconnecting can't bring back a leaked one. Safe to run again. */
+async function revokeCredentials(env: Env, agentId: string) {
+  const { results } = await env.DB.prepare(`SELECT provider, external_id, person_id FROM identity_link WHERE agent_id = ?`).bind(agentId).all<{ provider: string; external_id: string; person_id: string }>();
+  for (const link of results.filter((l) => l.provider === "mcp_oauth")) {
+    let cursor: string | undefined;
+    do {
+      const page = await env.OAUTH_PROVIDER.listUserGrants(link.person_id, { cursor });
+      for (const grant of page.items) {
+        if ((grant.metadata as { externalId?: string } | undefined)?.externalId === link.external_id) await env.OAUTH_PROVIDER.revokeGrant(grant.id, link.person_id);
+      }
+      cursor = page.cursor;
+    } while (cursor);
+  }
+  await env.DB.prepare(`DELETE FROM identity_link WHERE agent_id = ?`).bind(agentId).run();
 }
 
 /** Disconnect and reconnect. The API decides; the directory follows so new assertions carry the right generation. */
 async function handleConnection(request: Request, env: Env, identity: Identity, agentId: string, verb: "disconnect" | "reconnect"): Promise<Response> {
-  const response = await callApi(env, identity, { method: "POST", path: `/v1/agents/${encodeURIComponent(agentId)}/${verb}`, body: "{}" });
+  const response = await callApi(env, identity, { method: "POST", path: `/v1/agents/${agentId}/${verb}`, body: "{}" });
   const body = await response.json<any>();
   if (response.status === 200) {
-    await env.DB.prepare(`UPDATE podster_agent SET generation = ?, revoked_at = ? WHERE id = ?`).bind(body.generation, verb === "disconnect" ? Date.now() : null, agentId).run();
+    await env.DB.prepare(`UPDATE podster_agent SET generation = ?, revoked_at = ? WHERE id = ? AND generation <= ?`).bind(body.generation, verb === "disconnect" ? Date.now() : null, agentId, body.generation).run();
+    if (verb === "disconnect") await revokeCredentials(env, agentId);
   }
   return json(body, response.status);
 }
@@ -275,7 +398,7 @@ async function handleOrganizations(request: Request, env: Env, person: string): 
   if (request.method !== "POST" || !sameOrigin(request, env)) return denied("not_allowed", 403);
   const body = await request.json<{ name?: unknown }>().catch(() => null);
   const name = typeof body?.name === "string" ? body.name.trim() : "";
-  if (!name || name.length > MAX_NAME_LENGTH) return denied("invalid_argument", 400);
+  if (!validName(name)) return denied("invalid_argument", 400);
   const id = newId("org");
   const now = Date.now();
   await env.DB.batch([
@@ -290,7 +413,10 @@ const appHandler = {
     const url = new URL(request.url);
     const auth = createAuth(env);
     if (url.pathname === "/.well-known/agent-configuration") return json(await auth.api.getAgentConfiguration({ headers: request.headers }));
-    if (url.pathname.startsWith("/api/auth/")) return auth.handler(request);
+    if (url.pathname.startsWith("/api/auth/")) {
+      if (!isPublicAuthRoute(url.pathname.slice("/api/auth".length))) return denied("not_found", 404);
+      return auth.handler(request);
+    }
 
     const session = await auth.api.getSession({ headers: request.headers });
     if (url.pathname === "/authorize") {
@@ -311,9 +437,9 @@ const appHandler = {
     if (!identity) return denied("not_allowed", 403);
     if (request.method !== "GET" && request.method !== "HEAD" && !sameOrigin(request, env)) return denied("not_allowed", 403);
 
-    const connection = url.pathname.match(/^\/api\/agents\/([^/]+)\/(disconnect|reconnect)$/);
-    if (connection && request.method === "POST") return handleConnection(request, env, identity, decodeURIComponent(connection[1]), connection[2] as "disconnect" | "reconnect");
-    const agent = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
+    const connection = url.pathname.match(/^\/api\/agents\/([\w-]+)\/(disconnect|reconnect)$/);
+    if (connection && request.method === "POST") return handleConnection(request, env, identity, connection[1], connection[2] as "disconnect" | "reconnect");
+    const agent = url.pathname.match(/^\/api\/agents\/([\w-]+)$/);
     if (agent && request.method === "GET") {
       const response = await callApi(env, identity, { method: "GET", path: `/v1/agents/${agent[1]}` });
       return json(await response.json(), response.status);
@@ -336,6 +462,8 @@ const appHandler = {
 /** Stateless MCP: one server per request, one tool per capability, on the same code path as Agent Auth. */
 const mcpHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext & { props?: { externalId?: string } }): Promise<Response> {
+    // Stateless: there's no stream to hold open, and every call is a POST.
+    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
     const externalId = ctx.props?.externalId ?? "";
     const server = new McpServer({ name: "podster", version: "0.0.0" });
     for (const capability of CAPABILITIES) {

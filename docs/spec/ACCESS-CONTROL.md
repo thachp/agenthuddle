@@ -6,7 +6,7 @@ Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design]
 
 ## Implementation status
 
-The Rust kernel enforces part of this model in `crates/policy` and `apps/api`, tested locally and not deployed. Agent-owner withdrawal, global disconnect and invitations are also in `apps/api`. The gateway and provider delegation aren't built, so security can't be called implemented until the enforcement and denial tests below exist and pass.
+The Rust kernel enforces part of this model in `crates/policy` and `apps/api`, tested locally and not deployed. Agent-owner withdrawal, global disconnect and invitations are also in `apps/api`. `apps/gateway` authenticates callers. Provider delegation isn't built, so security can't be called implemented until the enforcement and denial tests below exist and pass.
 
 ## Approved authority model
 

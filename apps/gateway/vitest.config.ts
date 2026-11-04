@@ -19,6 +19,7 @@ export default defineConfig({
           ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid: "test" }),
           ENABLE_PASSWORD_SIGNIN: "true",
           TEST_DIRECTORY_SCHEMA: read("./migrations/0001_directory.sql"),
+          TEST_AUTH_SCHEMA: read("./migrations/0002_auth.sql"),
           TEST_API_SCHEMA: read("../api/migrations/0001_membership_index.sql"),
           TEST_CAPABILITIES: readFileSync(new URL("../../packages/contracts/capabilities.yaml", import.meta.url), "utf8"),
         },
