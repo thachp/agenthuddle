@@ -7,7 +7,7 @@ import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
-import { callApi, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import worker, { linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string };
@@ -495,9 +495,239 @@ describe("hosts with more than one agent", () => {
     const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
     expect(two.registered.host_id).toBe(one.registered.host_id);
     expect((await claim(first, one)).status).toBe(200);
-    expect((await claim(second, two)).status).toBe(403);
+    const refused = await claim(second, two);
+    expect(refused.status).toBe(403);
+    expect((await refused.json<any>()).error.code).toBe("host_owned_by_another_person");
+    expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(two.pluginId).first()).toEqual({ status: "pending" });
     expect((await execute(one, "get_identity")).status).toBe(200);
     expect(await e.DB.prepare("SELECT userId FROM agentHost WHERE id = ?").bind(one.registered.host_id).first()).toEqual({ userId: (await e.DB.prepare("SELECT userId FROM agent WHERE id = ?").bind(one.pluginId).first<{ userId: string }>())!.userId });
+  });
+
+  it("a wrong code can't take a host or learn that it's taken", async () => {
+    const [first, second] = [await signUp(), await signUp()];
+    const one = await registerAgent();
+    const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
+    const wrong = await claim(second, { ...one, userCode: "AAAA-AAAA" });
+    expect((await wrong.json<any>()).error.code).toBe("not_allowed");
+    expect(await e.DB.prepare("SELECT userId, status FROM agentHost WHERE id = ?").bind(one.registered.host_id).first()).toEqual({ userId: null, status: "pending" });
+    expect((await claim(first, one)).status).toBe(200);
+    expect((await (await claim(second, { ...two, userCode: "AAAA-AAAA" })).json<any>()).error.code).toBe("not_allowed");
+  });
+
+  it("only one person can take a host, even at the same moment", async () => {
+    const [first, second] = [await signUp(), await signUp()];
+    const agent = await registerAgent();
+    const ids = await Promise.all([first, second].map(async (who) => (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(who.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId));
+    const results = await Promise.all(ids.map((id) => claimHost(e, agent.pluginId, id)));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const winner = ids[results.indexOf(true)];
+    const hostRow = () => e.DB.prepare("SELECT userId, status, activatedAt, updatedAt FROM agentHost WHERE id = ?").bind(agent.registered.host_id).first<{ userId: string; status: string; activatedAt: string; updatedAt: string }>();
+    const taken = (await hostRow())!;
+    expect(taken).toMatchObject({ userId: winner, status: "active" });
+    // Stored the way the plugin's adapter stores dates, or it would misread them.
+    expect(taken.activatedAt).toBe(new Date(taken.activatedAt).toISOString());
+    expect(taken.updatedAt).toBe(new Date(taken.updatedAt).toISOString());
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // Holding the host already counts, and the plugin then has no owner change to act on.
+    expect(await claimHost(e, agent.pluginId, winner)).toBe(true);
+    const again = (await hostRow())!;
+    expect(again.activatedAt).toBe(taken.activatedAt);
+    expect(again.updatedAt > taken.updatedAt).toBe(true);
+    // Revoking a host is final, even for its owner.
+    await e.DB.prepare("UPDATE agentHost SET status = 'revoked' WHERE id = ?").bind(agent.registered.host_id).run();
+    expect(await claimHost(e, agent.pluginId, winner)).toBe(false);
+    expect((await hostRow())!.status).toBe("revoked");
+  });
+
+  describe("with one claim held partway", () => {
+    const claimDirect = (who: Person, agent: AgentAuthAgent, db: D1Database, extra: object = {}) =>
+      worker.fetch(new Request(`${BASE}/claim`, { method: "POST", headers: { "content-type": "application/json", origin: BASE, cookie: who.cookie }, body: JSON.stringify({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: who.org, ...extra }) }), { ...e, DB: db } as never, { waitUntil() {}, passThroughOnException() {} } as never);
+    const gate = () => {
+      let open!: () => void;
+      let reached!: () => void;
+      return { opened: new Promise<void>((r) => (open = r)), arrived: new Promise<void>((r) => (reached = r)), open: () => open(), reach: () => reached() };
+    };
+
+    it("a second person can't slip past while the first activation is in flight", async () => {
+      const [first, second] = [await signUp(), await signUp()];
+      const one = await registerAgent();
+      const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
+      const held = gate();
+      let done = false;
+      const statement = (inner: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(inner, {
+        get(target, key) {
+          if (key === "bind") return (...args: unknown[]) => statement(target.bind(...args), sql);
+          const value = (target as any)[key];
+          if (typeof value !== "function") return value;
+          return async (...args: unknown[]) => {
+            if (!done && /update\s+"?agent"?\s/i.test(sql)) {
+              done = true;
+              held.reach();
+              await held.opened;
+            }
+            return value.apply(target, args);
+          };
+        },
+      });
+      const slowDb = new Proxy(e.DB, {
+        get(target, key) {
+          if (key === "prepare") return (sql: string) => statement(target.prepare(sql), sql);
+          const value = (target as any)[key];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const firstClaim = claimDirect(first, one, slowDb);
+      await held.arrived;
+      const secondClaim = await claimDirect(second, two, e.DB);
+      held.open();
+      expect((await firstClaim).status).toBe(200);
+      expect(secondClaim.status).toBe(403);
+      expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(one.pluginId).first()).toEqual({ status: "active" });
+      expect((await execute(one, "get_identity")).status).toBe(200);
+    });
+
+    it("the same person submitting twice gets one agent and no error", async () => {
+      const owner = await signUp();
+      const agent = await registerAgent();
+      const held = gate();
+      let done = false;
+      const slowDb = new Proxy(e.DB, {
+        get(target, key) {
+          if (key === "batch") {
+            return async (statements: D1PreparedStatement[]) => {
+              if (!done) {
+                done = true;
+                held.reach();
+                await held.opened;
+              }
+              return target.batch(statements);
+            };
+          }
+          const value = (target as any)[key];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const firstClaim = claimDirect(owner, agent, slowDb);
+      await held.arrived;
+      const second = await claimDirect(owner, agent, e.DB);
+      held.open();
+      const first = await firstClaim;
+      expect([first.status, second.status]).toEqual([200, 200]);
+      const [a, b] = [await first.json<any>(), await second.json<any>()];
+      expect(a.agent_id).toBe(b.agent_id);
+      expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE external_id = ?").bind(agent.pluginId).first()).toEqual({ n: 1 });
+      expect((await execute(agent, "get_identity")).data.id).toBe(a.agent_id);
+    });
+
+    /** Holds the first claim at the moment it writes its link, whichever way it writes it. */
+    function holdLinkWrite() {
+      const held = gate();
+      let done = false;
+      const hold = async () => {
+        if (!done) {
+          done = true;
+          held.reach();
+          await held.opened;
+        }
+      };
+      const statement = (inner: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(inner, {
+        get(target, key) {
+          if (key === "bind") return (...args: unknown[]) => statement(target.bind(...args), sql);
+          const value = (target as any)[key];
+          if (typeof value !== "function") return value;
+          return async (...args: unknown[]) => {
+            if (/insert into identity_link/i.test(sql)) await hold();
+            return value.apply(target, args);
+          };
+        },
+      });
+      const db = new Proxy(e.DB, {
+        get(target, key) {
+          if (key === "prepare") return (sql: string) => statement(target.prepare(sql), sql);
+          if (key === "batch") return async (statements: D1PreparedStatement[]) => (await hold(), target.batch(statements));
+          const value = (target as any)[key];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      return { db, held };
+    }
+    const linkOf = (agent: AgentAuthAgent) => e.DB.prepare("SELECT agent_id FROM identity_link WHERE provider = 'agent_auth' AND external_id = ?").bind(agent.pluginId).all<{ agent_id: string }>().then((r) => r.results.map((row) => row.agent_id));
+
+    it("linking to the same agent twice gets the same answer both times", async () => {
+      const owner = await signUp();
+      const target = await claimedAgent(owner);
+      const agent = await registerAgent();
+      const { db, held } = holdLinkWrite();
+      const firstClaim = claimDirect(owner, agent, db, { link_agent_id: target.id });
+      await held.arrived;
+      const second = await claimDirect(owner, agent, e.DB, { link_agent_id: target.id });
+      held.open();
+      expect([(await firstClaim).status, second.status]).toEqual([200, 200]);
+      expect(await linkOf(agent)).toEqual([target.id]);
+    });
+
+    it("linking to two different agents refuses the one that lost", async () => {
+      const owner = await signUp();
+      const [loser, winner] = [await claimedAgent(owner), await claimedAgent(owner)];
+      const agent = await registerAgent();
+      const { db, held } = holdLinkWrite();
+      const firstClaim = claimDirect(owner, agent, db, { link_agent_id: loser.id });
+      await held.arrived;
+      const second = await claimDirect(owner, agent, e.DB, { link_agent_id: winner.id });
+      held.open();
+      expect(second.status).toBe(200);
+      expect((await firstClaim).status).toBe(403);
+      expect(await linkOf(agent)).toEqual([winner.id]);
+      expect((await execute(agent, "get_identity")).data.id).toBe(winner.id);
+    });
+
+    it("a plain claim that loses to a link is refused, not told about an agent it didn't get", async () => {
+      const owner = await signUp();
+      const winner = await claimedAgent(owner);
+      const agent = await registerAgent();
+      const { db, held } = holdLinkWrite();
+      const firstClaim = claimDirect(owner, agent, db);
+      await held.arrived;
+      const second = await claimDirect(owner, agent, e.DB, { link_agent_id: winner.id });
+      held.open();
+      expect(second.status).toBe(200);
+      expect((await firstClaim).status).toBe(403);
+      expect(await linkOf(agent)).toEqual([winner.id]);
+    });
+  });
+
+  it("a failed link only counts as done if it points at the same agent", async () => {
+    const owner = await signUp();
+    const { pluginId, id } = await claimedAgent(owner);
+    const fail = () => Promise.reject(new Error("UNIQUE constraint failed"));
+    expect(await linkOnce(e, pluginId, id, fail)).toBe(true);
+    expect(await linkOnce(e, pluginId, "agt_other", fail)).toBe(false);
+    await expect(linkOnce(e, "plugin_with_no_link", id, fail)).rejects.toThrow("UNIQUE");
+  });
+
+  it("two simultaneous claims on one host never both succeed", async () => {
+    for (let round = 0; round < 5; round++) {
+      const [first, second] = [await signUp(), await signUp()];
+      const one = await registerAgent();
+      const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
+      const statuses = (await Promise.all([claim(first, one), claim(second, two)])).map((r) => r.status).sort();
+      expect(statuses).toEqual([200, 403]);
+      // Whoever won keeps a working agent, and the loser's is still waiting.
+      const working = [(await execute(one, "get_identity")).status, (await execute(two, "get_identity")).status].sort();
+      expect(working).toEqual([200, 403]);
+    }
+  });
+
+  it("a claim stops if the plugin refuses a live code", async () => {
+    const [owner, other] = [await signUp(), await signUp()];
+    const agent = await registerAgent();
+    const otherUser = (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(other.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId;
+    await e.DB.prepare("UPDATE agent SET userId = ? WHERE id = ?").bind(otherUser, agent.pluginId).run();
+    expect((await claim(owner, agent)).status).toBe(403);
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE external_id = ?").bind(agent.pluginId).first()).toEqual({ n: 0 });
+    expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ status: "pending" });
+    // The person with the valid code keeps the host, as documented.
+    expect(await e.DB.prepare("SELECT status FROM agentHost WHERE id = ?").bind(agent.registered.host_id).first()).toEqual({ status: "active" });
   });
 
   it("the host's owner can claim its other agents", async () => {
