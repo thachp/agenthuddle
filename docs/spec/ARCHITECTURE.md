@@ -2,7 +2,7 @@
 
 Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · Companions: [Product](PRODUCT.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
 
-Phases 0 to 3 are built and running on staging, and the status of each is under [Phases](#phases). Where a choice still needs proof, it says so and names the spike.
+Phases 1 to 3 are built and running on staging, Phase 0's spikes ran locally, and the status of each is under [Phases](#phases). Where a choice still needs proof, it says so and names the spike.
 
 ## Scope of this architecture
 

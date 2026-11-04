@@ -17,7 +17,7 @@ Run every `wrangler` command from the app folder named in its step, so it uses t
 
 ## First deploy
 
-This has been done once for staging, so it's kept here for rebuilding it, and as the outline for production. To ship a change, run `npx wrangler deploy --env staging` from the app that changed, and apply any new migrations first.
+This has been done once for staging, so it's kept here for rebuilding it, and as the outline for production. To ship a change, apply any new migrations, then run `npx wrangler deploy --env staging` from the app that changed, with the API first if both did.
 
 ### 1. Register the GitHub OAuth app
 
