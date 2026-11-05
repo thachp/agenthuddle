@@ -460,7 +460,7 @@ describe("leaving an organization", () => {
   it("gives a room's owner their room back when they rejoin, because rooms have no other owner yet", async () => {
     const admin = await signUp();
     const org = await newOrg(admin);
-    const founder = await joined(admin, org);
+    const founder = await joined(admin, org, "admin");
     const id = await room(founder, org);
     await dash(admin, "DELETE", `/orgs/${org}/members/${founder.id}`);
     expect((await dash(founder, "GET", `/v1/workspaces/${id}`)).code).toBe("workspace_not_found");
@@ -617,6 +617,32 @@ describe("a departure reaching the person's rooms", () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(await inRoom(owner, id, person)).toBe(true);
     expect((await dash(person, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+  });
+});
+
+describe("the owner's rulings on organizations", () => {
+  it("lets only admins create rooms, and everyone is an admin of their personal organization", async () => {
+    const admin = await signUp();
+    const org = await newOrg(admin);
+    const member = await joined(admin, org);
+    const inTeam = { "x-podster-org": org };
+    const refused = await dash(member, "POST", "/v1/workspaces", { name: "Team room" }, inTeam);
+    expect([refused.status, refused.code]).toEqual([403, "not_allowed"]);
+    const personal = await dash(member, "POST", "/v1/workspaces", { name: "My room" });
+    expect(personal.status).toBe(200);
+    expect(personal.body.owner).toBe(member.id);
+    expect((await dash(admin, "POST", "/v1/workspaces", { name: "Team room" }, inTeam)).status).toBe(200);
+    expect((await dash(admin, "PUT", `/orgs/${org}/members/${member.id}`, { role: "admin" })).status).toBe(200);
+    expect((await dash(member, "POST", "/v1/workspaces", { name: "Now an admin" }, inTeam)).status).toBe(200);
+  });
+
+  it("lets any admin remove another, including the organization's creator", async () => {
+    const creator = await signUp();
+    const org = await newOrg(creator);
+    const other = await joined(creator, org, "admin");
+    expect((await dash(other, "DELETE", `/orgs/${org}/members/${creator.id}`)).status).toBe(200);
+    expect(await roleIn(creator, org)).toBeUndefined();
+    expect(await roleIn(other, org)).toBe("admin");
   });
 });
 

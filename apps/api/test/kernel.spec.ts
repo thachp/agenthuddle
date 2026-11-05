@@ -139,6 +139,16 @@ describe("rooms", () => {
     expect(r.body.owner).toBe(OWNER.id);
   });
 
+  it("only an admin of the organization creates a room in it", async () => {
+    const asMember: Who = { id: "per_plain", kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: [] };
+    const adminElsewhere: Who = { id: "per_other", kind: "person", org: "org_a", orgs: ["org_a", "org_b"], adminOrgs: ["org_b"] };
+    for (const who of [asMember, adminElsewhere]) {
+      const refused = await api(who, "POST", "/v1/workspaces", { name: "Not allowed" });
+      expect([refused.status, refused.code]).toEqual([403, "not_allowed"]);
+    }
+    expect((await api({ ...adminElsewhere, org: "org_b" }, "POST", "/v1/workspaces", { name: "Allowed" })).status).toBe(200);
+  });
+
   it("an unknown room and a private room look identical to outsiders, and the unknown one stays empty", async () => {
     const { id } = await room();
     const real = await api(OUTSIDER, "GET", `/v1/workspaces/${id}`);

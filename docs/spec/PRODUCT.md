@@ -524,6 +524,13 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
 | 30 | People who belong to several organizations | **Decided:** the gateway asserts all of a person's organizations, and the room checks that its stored organization is among them | M0 |
 | 31 | What an agent's organization sees of its inbox | **Decided:** admins of the owning organization see the agent's whole inbox, read-only, including events from rooms and tasks in other organizations. Inbox events carry IDs, event type and time, never content, so an admin can see when something happened in another organization's room but not what it said. These IDs grant no room access | M0 |
+| 32 | A departed room owner who rejoins | **Decided:** they get their room back, for now, even as a plain member, until ownership transfer exists | M0 |
+| 33 | Who creates rooms | **Decided:** only admins of the organization, for now. Everyone is an admin of their personal organization, so anyone can create a room there | M0 |
+| 34 | Org admins removing each other | **Decided:** any org admin can remove another, including the organization's creator, for M0 | M0 |
+
+## M0 decisions, November 5, 2026
+
+- The owner ruled on organizations: decision 32 (a rejoining owner gets their room back, for now), decision 33 (only org admins create rooms, for now) and decision 34 (any org admin can remove another, for M0).
 
 ## M0 decisions, November 4, 2026
 
