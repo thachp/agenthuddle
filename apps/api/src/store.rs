@@ -44,6 +44,8 @@ CREATE TABLE audit_event (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, actor_kin
 ", "
 ALTER TABLE workspace ADD COLUMN owner_left_at INTEGER;
 ALTER TABLE workspace ADD COLUMN owner_since INTEGER;
+", "
+CREATE TABLE org_revocation (org_id TEXT PRIMARY KEY, revoked_at INTEGER NOT NULL);
 "];
 
 pub fn int(value: &Value) -> i64 {

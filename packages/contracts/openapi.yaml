@@ -49,6 +49,15 @@ paths:
                 role: { type: string, enum: [admin, member, guest] }
                 guest_can_create: { type: boolean }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/organizations/{org}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: org, in: path, required: true, schema: { type: string } }]
+    delete:
+      operationId: revokeOrganization
+      tags: [commands]
+      summary: Revoke another organization. Owner or admin. Its participants leave under the departure rules, its agents already out can't return on their owner's consent alone, and invitations from before now can't bring it back. A new invitation can. The room's own organization answers 400 `invalid_argument`
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/members/{principal}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: principal, in: path, required: true, schema: { type: string } }]
     delete:

@@ -248,17 +248,16 @@ async function kernel() {
   });
 
   await check("C7", "Org A revokes Org B: B's next read and next action fail, and it gets one ID-only removal notice", async () => {
+    const openLink = await personA.must("POST", `/v1/workspaces/${room}/invitations`, { role: "guest", policy_version: await personA.policyVersion(room) });
     const version = await personA.policyVersion(room);
-    const whole = await personA.dash("DELETE", `/v1/workspaces/${room}/organizations/${personB.org}`, { policy_version: version });
-    ok(whole.ok || whole.status === 404, `revoking the organization answered HTTP ${whole.status} ${whole.code ?? ""}`);
-    if (!whole.ok) {
-      report.gap("C7-org", "revoking a whole organization", `DELETE /v1/workspaces/{ws}/organizations/{org} answers HTTP ${whole.status}: it's in ARCHITECTURE.md's route list but isn't built. This run revokes each of Org B's agents instead.`);
-      // Messages race the revocation, and none may reach B afterward.
-      const racing = Array.from({ length: 5 }, (_, i) => lead.call("send_message", { workspace_id: room, task_id: scoped.id, body: `SECRET-RACE ${i}`, idempotency_key: key() }));
-      const [, ...sent] = await Promise.all([personA.revoke(room, architect.id), ...racing]);
-      eq(sent.filter((r) => r.ok).length, racing.length, "racing messages A sent, which A may still do");
-      await personA.revoke(room, second.id);
-    }
+    // Messages race the revocation, and none may reach B afterward.
+    const racing = Array.from({ length: 5 }, (_, i) => lead.call("send_message", { workspace_id: room, task_id: scoped.id, body: `SECRET-RACE ${i}`, idempotency_key: key() }));
+    const [whole, ...sent] = await Promise.all([personA.dash("DELETE", `/v1/workspaces/${room}/organizations/${personB.org}`, { policy_version: version }), ...racing]);
+    ok(whole.ok, `revoking the organization answered HTTP ${whole.status} ${whole.code ?? ""}`);
+    eq([...whole.body.revoked].sort(), [architect.id, second.id].sort(), "the agents revoked");
+    eq(sent.filter((r) => r.ok).length, racing.length, "racing messages A sent, which A may still do");
+    refused(await personB.accept(openLink.token, personB.org, [second]), "invitation_not_found", "an invitation from before the revocation");
+    refused(await personA.dash("DELETE", `/v1/workspaces/${room}/organizations/${personA.org}`, { policy_version: await personA.policyVersion(room) }), "invalid_argument", "revoking the room's own organization");
     refused(await architect.call("get_task", { workspace_id: room, task_id: scoped.id }), "access_revoked", "B's next read");
     refused(await architect.call("send_message", { workspace_id: room, task_id: scoped.id, body: "still here?", idempotency_key: key() }), "access_revoked", "B's next action");
     await architect.waitFor("member.revoked");
