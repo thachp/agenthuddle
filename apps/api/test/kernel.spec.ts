@@ -2585,7 +2585,8 @@ describe("a person leaving the room's organization", () => {
       state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN owner_left_at");
       state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN owner_since");
       state.storage.sql.exec("DROP TABLE org_revocation");
-      state.storage.sql.exec("UPDATE schema_version SET version = version - 2");
+      state.storage.sql.exec("DROP TABLE denial");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 3");
     });
     await downgrade();
     expect((await depart(OWNER, { person: who, org: "org_a", left_at: Date.now() })).status).toBe(200);
@@ -3080,5 +3081,113 @@ describe("an organization's oversight of its own agent", () => {
     expect((await api(agent, "GET", "/v1/oversight/rooms")).code).toBe("not_allowed");
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${agent.id}`, {})).status).toBe(200);
     await vi.waitFor(async () => expect((await rows(overseer())).map((r: any) => r.agent_id)).not.toContain(agent.id), { timeout: 5000 });
+  });
+});
+
+describe("the record of denied changes", () => {
+  const denials = async (id: string, who: Who = OWNER, query = "") => (await api(who, "GET", `/v1/workspaces/${id}/denials${query}`)).body;
+  const rowsFor = async (id: string, match: object) => (await denials(id)).denials.filter((d: any) => Object.entries(match).every(([k, v]) => d[k] === v));
+
+  it("records a refused change without changing anything else, and holds no content", async () => {
+    const { id, tasks } = await room();
+    const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const refused = await api(LEAD, "POST", `/v1/workspaces/${id}/members/${REVIEWER.id}/role`, { role: "guest", policy_version: version });
+    expect(refused.code).toBe("not_allowed");
+    const [row] = await rowsFor(id, { action: "member.change_role" });
+    expect(row).toMatchObject({ actor_id: LEAD.id, actor_kind: "agent", code: "not_allowed", count: 1, last_actor_id: LEAD.id });
+    expect(row.first_at).toBeGreaterThan(0);
+    expect(row.day_start).toBeLessThanOrEqual(row.first_at);
+    expect(Object.keys(row).sort()).toEqual(["action", "actor_id", "actor_kind", "code", "count", "day_start", "first_at", "last_actor_id", "last_at"]);
+    // A denial is no event and no grant change.
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version).toBe(version);
+    const events = (await api(OWNER, "GET", `/v1/workspaces/${id}/events`)).body.events.map((e: any) => e.type);
+    expect(events.filter((type: string) => /denied|denial/.test(type))).toEqual([]);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.every((e: any) => e.outcome === "allowed")).toBe(true);
+    // Whatever someone sends stays out of it.
+    const task = await offer(tasks);
+    await api(CAROL, "POST", `${tasks}/${task.id}/messages`, { body: "SECRET-BODY" });
+    await api(CAROL, "POST", `${tasks}/SECRET-PATH/accept`, { version: 1 });
+    expect(JSON.stringify(await denials(id))).not.toMatch(/SECRET/);
+    expect((await rowsFor(id, { actor_id: CAROL.id, action: "task.message" }))[0].code).toBe("task_not_found");
+  });
+
+  it("counts repeats in one row, so a person can't flood it", async () => {
+    const { id } = await room();
+    for (let i = 0; i < 40; i++) expect((await api(LEAD, "PUT", `/v1/workspaces/${id}/name`, { name: "Mine", policy_version: 1 })).code).toBe("not_allowed");
+    expect(await rowsFor(id, { actor_id: LEAD.id, action: "room.rename" })).toEqual([expect.objectContaining({ count: 40 })]);
+    expect((await denials(id)).denials).toHaveLength(1);
+  });
+
+  it("gives everyone outside the room one row, and answers them as if nothing was written", async () => {
+    const { id, tasks } = await room();
+    const outsiders = Array.from({ length: 8 }, (_, i) => orgAdmin(`org_stranger_${i}`, `per_stranger_${i}`));
+    for (const who of outsiders) {
+      const [real, fake] = [await api(who, "POST", tasks, { title: "x", instructions: "y" }), await api(who, "POST", "/v1/workspaces/ws_fake_denials/tasks", { title: "x", instructions: "y" })];
+      expect([real.status, real.body]).toEqual([fake.status, fake.body]);
+    }
+    expect(await rowsFor(id, { action: "task.create" })).toEqual([expect.objectContaining({ actor_id: "outsider", code: "workspace_not_found", count: 8, last_actor_id: outsiders[7].id })]);
+    // Someone the room removed is still named.
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${BOB.id}`, {})).status).toBe(200);
+    expect((await api(BOB, "POST", tasks, { title: "x", instructions: "y" })).code).toBe("access_revoked");
+    expect(await rowsFor(id, { actor_id: BOB.id, code: "access_revoked" })).toHaveLength(1);
+    // A room that doesn't exist stays empty, whatever was tried.
+    const tables = await runInDurableObject(stub("ws_fake_denials"), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_master WHERE name NOT LIKE '_cf%' AND name NOT LIKE 'sqlite%'").one().n);
+    expect(tables).toBe(0);
+  });
+
+  it("leaves out malformed requests, stale forms, reads and what succeeded", async () => {
+    const { id, tasks } = await room();
+    const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/name`, { name: "", policy_version: version })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/name`, { name: "x", policy_version: version - 1 })).code).toBe("version_conflict");
+    expect((await api(OUTSIDER, "GET", `/v1/workspaces/${id}`)).code).toBe("workspace_not_found");
+    expect((await api(LEAD, "GET", `/v1/workspaces/${id}/events`)).code).toBe("not_allowed");
+    expect((await api(LEAD, "POST", tasks, { title: "fine", instructions: "x" })).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/nothing`, {})).code).not.toBe(undefined);
+    expect((await denials(id)).denials).toEqual([]);
+  });
+
+  it("records a refused invitation accept", async () => {
+    const { id } = await room();
+    const link = await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", invited_org_id: CAROL.org });
+    const accepted = await api(orgAdmin(BOB.org), "POST", "/v1/invitations/accept", { token: link.body.token, org_id: BOB.org, agents: [BOB.id] });
+    expect(accepted.status).toBe(403);
+    expect(await rowsFor(id, { action: "invitation.accept" })).toEqual([expect.objectContaining({ actor_id: "outsider", code: "not_allowed", count: 1 })]);
+  });
+
+  it("is for the owner and admins to read, and nobody can change it", async () => {
+    const { id } = await room();
+    await api(LEAD, "PUT", `/v1/workspaces/${id}/name`, { name: "Mine", policy_version: 1 });
+    expect((await denials(id, ADMIN)).denials).toHaveLength(1);
+    for (const who of [LEAD, BOB]) expect((await api(who, "GET", `/v1/workspaces/${id}/denials`)).code).toBe("not_allowed");
+    expect((await api(OUTSIDER, "GET", `/v1/workspaces/${id}/denials`)).code).toBe("workspace_not_found");
+    expect((await api(orgAdmin(BOB.org), "GET", `/v1/workspaces/${id}/denials`)).code).toBe("workspace_not_found");
+    for (const method of ["POST", "PUT", "DELETE"]) expect((await api(OWNER, method, `/v1/workspaces/${id}/denials`, {})).status, method).toBe(404);
+    expect((await denials(id)).denials).toHaveLength(1);
+  });
+
+  it("stays within its cap, dropping the oldest, and pages through what's left", async () => {
+    const { id } = await room();
+    await runInDurableObject(stub(id), (_: any, state: any) => {
+      state.storage.sql.exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5000) INSERT INTO denial SELECT i, 'agt_old', 'agent', 'room.rename', 'not_allowed', 1, i, i, 'agt_old' FROM n");
+    });
+    expect((await api(LEAD, "PUT", `/v1/workspaces/${id}/name`, { name: "Mine", policy_version: 1 })).code).toBe("not_allowed");
+    const stored = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n, min(last_at) AS oldest FROM denial").one()) as { n: number; oldest: number };
+    expect(stored).toEqual({ n: 5000, oldest: 2 });
+    const first = await denials(id);
+    expect(first.denials[0].actor_id).toBe(LEAD.id);
+    expect(first.denials).toHaveLength(100);
+    expect(first.next_offset).toBe(100);
+    const second = await denials(id, OWNER, "?offset=100");
+    expect(second.denials[0].last_at).toBe(4901);
+    expect((await denials(id, OWNER, "?offset=4950")).next_offset).toBeNull();
+  });
+
+  it("doesn't change the answer when it can't write", async () => {
+    const { id } = await room();
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("ALTER TABLE denial RENAME TO denial_away"));
+    const answer = await api(LEAD, "PUT", `/v1/workspaces/${id}/name`, { name: "Mine", policy_version: 1 });
+    expect([answer.status, answer.code]).toEqual([403, "not_allowed"]);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("ALTER TABLE denial_away RENAME TO denial"));
   });
 });

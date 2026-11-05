@@ -19,7 +19,8 @@ use podster_core::{
 };
 use podster_policy::{
     authorize_reviewer_change, authorize_task, authorize_workroom, can_review, can_see_task,
-    org_departure_ends, Caller, PrincipalKind, Role, TaskAction, Verdict, WorkroomAction,
+    denied_change_name, is_authority_refusal, org_departure_ends, Caller, PrincipalKind, Role,
+    TaskAction, Verdict, WorkroomAction,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -41,6 +42,11 @@ const DELIVERY_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
     10_000
 };
 const INVITATIONS_LISTED: i64 = 200;
+const DENIAL_ROWS: i64 = 5000;
+const DENIALS_PAGE: i64 = 100;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// Everyone who isn't and never was in the room shares one row, so new identities can't make new rows.
+const OUTSIDER: &str = "outsider";
 const REMOVED_LISTED: i64 = 200;
 const ARCHIVED: &str = "archived";
 const ACTIVE_ROOM: &str = "active";
@@ -1465,6 +1471,20 @@ mod queries {
         Ok(answer)
     }
 
+    /// Changes that were refused for lack of authority, newest first, for those who may read the audit log.
+    pub fn list_denials(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
+        ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ReadAuditLog))?;
+        let offset = query_int(url, "offset")?.unwrap_or(0).max(0);
+        let found = rows(sql, "SELECT day, actor_id, actor_kind, action, code, count, first_at, last_at, last_actor_id FROM denial ORDER BY last_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            vec![(DENIALS_PAGE + 1).into(), offset.into()])?;
+        let more = found.len() as i64 > DENIALS_PAGE;
+        let denials: Vec<Value> = found.into_iter().take(DENIALS_PAGE as usize).map(|row| json!({
+            "day_start": int(&row["day"]) * DAY_MS, "actor_id": row["actor_id"], "actor_kind": row["actor_kind"], "action": row["action"], "code": row["code"],
+            "count": row["count"], "first_at": row["first_at"], "last_at": row["last_at"], "last_actor_id": row["last_actor_id"],
+        })).collect();
+        Ok(json!({ "denials": denials, "next_offset": more.then_some(offset + DENIALS_PAGE) }))
+    }
+
     /// Invitations still usable, for those who manage access. The token was shown once and isn't kept.
     pub fn list_invitations(sql: &SqlStorage, caller: &Caller, now: i64) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
@@ -2168,6 +2188,72 @@ impl Workspace {
         Ok(())
     }
 
+    /// What to record if this request is refused: who tried, and a name for the change from a fixed list. Nothing here is
+    /// the request's content, and an internal route with no caller or no name has nothing to record.
+    fn denial_context(req: &Request) -> Option<(Identity, &'static str)> {
+        let identity: Identity = req
+            .headers()
+            .get(CALLER_HEADER)
+            .ok()?
+            .as_deref()
+            .and_then(|caller| serde_json::from_str(caller).ok())?;
+        let path = req.path();
+        let name = if path == INTERNAL_ACCEPT_PATH {
+            "invitation.accept"
+        } else {
+            let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+            let method = req.method().to_string();
+            denied_change_name(&method, parts.get(3..)?)?
+        };
+        Some((identity, name))
+    }
+
+    /// Writes one refusal in its own transaction, because the refused command rolled its own back. One row counts each
+    /// person's refusals of one kind in one day, so repeating a request only raises a number, and everyone who was
+    /// never in the room shares a row. Past the cap the oldest rows go. It can't change the answer: a failure is logged.
+    fn record_denial(&self, identity: &Identity, action: &'static str, code: &'static str) {
+        let sql = self.state.storage().sql();
+        let outcome = (|| -> R<()> {
+            // An unknown room stays empty, whoever asks.
+            if !store::is_initialized(&sql)? {
+                return Ok(());
+            }
+            self.migrate_if_needed()?;
+            let actor = identity.id.clone();
+            let kind = identity.kind.clone();
+            let inner = sql.clone();
+            transaction_sync(&self.state, move || {
+                let now = now_ms();
+                let day = now / DAY_MS;
+                let known = is_owner(&inner, &actor)?
+                    || !rows(
+                        &inner,
+                        "SELECT principal_id FROM member WHERE principal_id = ?",
+                        vec![actor.as_str().into()],
+                    )?
+                    .is_empty();
+                let who = if known { actor.as_str() } else { OUTSIDER };
+                let key = || -> Vec<V> { vec![day.into(), who.into(), action.into(), code.into()] };
+                let existing = rows(&inner, "SELECT count FROM denial WHERE day = ? AND actor_id = ? AND action = ? AND code = ?", key())?;
+                if existing.is_empty() {
+                    exec(&inner, "INSERT INTO denial (day, actor_id, actor_kind, action, code, count, first_at, last_at, last_actor_id) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)", vec![
+                        day.into(), who.into(), kind.as_str().into(), action.into(), code.into(), now.into(), now.into(), actor.as_str().into(),
+                    ])?;
+                    exec(&inner, "DELETE FROM denial WHERE rowid IN (SELECT rowid FROM denial ORDER BY last_at DESC, rowid DESC LIMIT -1 OFFSET ?)", vec![DENIAL_ROWS.into()])?;
+                } else {
+                    let mut args: Vec<V> = vec![now.into(), actor.as_str().into()];
+                    args.extend(key());
+                    exec(&inner, "UPDATE denial SET count = count + 1, last_at = ?, last_actor_id = ? WHERE day = ? AND actor_id = ? AND action = ? AND code = ?", args)?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            console_error!("couldn't record a denial: {:?}", error.code());
+        }
+    }
+
     /// Keeps the start of the owner's latest membership, so a departure delayed past a rejoin can't take them out again,
     /// and records that an owner who left is back and acting here. It's separate from the command it comes before, so a
     /// refused command can't leave them out of the room's work.
@@ -2425,6 +2511,7 @@ impl Workspace {
             return match tail {
                 [] => queries::get_workspace(&sql, &who.caller),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
+                ["denials"] => queries::list_denials(&sql, &who.caller, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
@@ -2615,9 +2702,21 @@ impl DurableObject for Workspace {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let is_write = req.method() != Method::Get;
+        let denial = if is_write {
+            Self::denial_context(&req)
+        } else {
+            None
+        };
         let response = match self.dispatch(req).await {
             Ok(value) => Response::from_json(&value),
-            Err(error) => error.into_response(),
+            Err(error) => {
+                if let (Some((identity, action)), Some(code)) = (&denial, error.code()) {
+                    if is_authority_refusal(code) {
+                        self.record_denial(identity, action, code);
+                    }
+                }
+                error.into_response()
+            }
         };
         if is_write {
             // The command has already committed, so a scheduling problem can't change its answer. The next write retries.

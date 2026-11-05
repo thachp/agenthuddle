@@ -76,6 +76,8 @@ Maintain access-controlled audit events for creation/owner assignment, admin app
 
 Record denied sensitive mutations with correlation IDs and stable reason codes in a protected security stream, without exposing secrets, message bodies or private-resource existence to the requester. Rate-limit abuse safely without allowing log floods to prevent enforcement. Retention and access to the security stream remain policy decisions.
 
+M0 builds this as each room's denial record, read by its owner and admins. A refused change writes one count, in its own transaction, because the refused command rolled back its own. A row counts one actor's refusals of one kind in a day, so repeating a request only raises a number. Everyone who was never in the room shares one row, so new identities can't make new rows. It holds fixed names and reason codes, with no content. At most 5,000 rows are kept, dropping the oldest. A failure to write doesn't change the answer. Counting replaces per-request correlation IDs, and refusals that end before a room is reached aren't in it: an invalid assertion, an agent's disconnect check, and organization routes in the gateway.
+
 Clients cannot alter or erase access history through permission-management commands. Successful local changes and their audit events commit atomically. Denials must never produce a success event or update versioned grants. Provider failures/partial outcomes must be recorded accurately rather than shown as a completed grant.
 
 ## Proposed acceptance and denial tests

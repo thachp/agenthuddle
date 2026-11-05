@@ -196,6 +196,14 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, role], properties: { policy_version: { type: integer }, role: { type: string, enum: [admin, member, guest] }, guest_can_create: { type: boolean } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/denials:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get:
+      operationId: listDenials
+      tags: [queries]
+      summary: "Changes refused for lack of authority, newest first, for the owner and admins. One row counts one actor's refusals of one kind in a day, and everyone never in the room shares the actor `outsider`. Names and codes come from fixed lists, with no request content. It can't be edited. At most 5,000 rows, dropping the oldest"
+      parameters: [{ name: offset, in: query, schema: { type: integer } }]
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/audit:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get: { operationId: listAudit, tags: [queries], summary: Access audit history. Human owners and admins only, parameters: [{ name: after, in: query, schema: { type: integer } }], responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
