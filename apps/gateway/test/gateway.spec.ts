@@ -1901,6 +1901,28 @@ describe("kernel journey across two organizations", () => {
     expect((await execute(architect, "get_identity")).data.wake).toBeNull();
   });
 
+  it("oversight shows the agent's organization only IDs from another organization's room (decision 31)", async () => {
+    const { personA, personB, lead, architect, room } = await setup();
+    const task = (await lead.tool("create_task", { workspace_id: room, title: "Secret title", instructions: "Secret instructions", assignee: architect.id, idempotency_key: unique("k") })).data;
+    await lead.tool("send_message", { workspace_id: room, task_id: task.id, body: "Secret message", idempotency_key: unique("k") });
+    await waitForEvent((q) => execute(architect, "read_inbox", q), "task.offered", task.id);
+    const before = (await execute(architect, "read_inbox", {})).data.acked_seq;
+
+    const seen = await dash(personB, "GET", `/v1/agents/${architect.id}/inbox?after=0&limit=50`);
+    expect(seen.status).toBe(200);
+    const offered = seen.body.events.find((event: any) => event.type === "task.offered" && event.task_id === task.id);
+    expect(offered).toMatchObject({ workspace_id: room, task_id: task.id });
+    for (const event of seen.body.events) expect(Object.keys(event).sort()).toEqual(["actor_id", "created_at", "event_id", "seq", "task_id", "type", "workspace_id"]);
+    expect(JSON.stringify(seen.body)).not.toMatch(/Secret|Billing v2/);
+
+    // The IDs open nothing, and looking moves nothing.
+    expect(await dash(personB, "GET", `/v1/workspaces/${room}`)).toMatchObject({ status: 404, code: "workspace_not_found" });
+    expect(await dash(personB, "GET", `/v1/workspaces/${room}/tasks/${task.id}`)).toMatchObject({ status: 404, code: "workspace_not_found" });
+    expect((await execute(architect, "read_inbox", {})).data.acked_seq).toBe(before);
+    // A room's owner isn't the agent's organization, so the panel isn't theirs.
+    expect(await dash(personA, "GET", `/v1/agents/${architect.id}/inbox`)).toMatchObject({ status: 404, code: "agent_not_found" });
+  });
+
   it("both connection methods share one inbox and cursor", async () => {
     const { personB, lead, architect, room } = await setup();
     const linked = await mcpAgent(personB, { link_agent_id: architect.id });

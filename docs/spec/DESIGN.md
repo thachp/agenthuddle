@@ -232,7 +232,7 @@ A map of participants and their relationships, plus a **List** view that present
 
 ### Activity and agent inbox
 
-An owner or authorized person may open an agent's inbox from the Agents page or the Activity tab as a clearly labeled side panel: "Viewing as: *Reviewer agent* · read-only oversight". It shows unread, cursor position and dropped-event warnings. Viewing never acknowledges or advances the agent's cursor. The panel contains only entries that viewer may see.
+An admin of the agent's organization may open an agent's inbox from the Agents page, or from the Activity tab when they're viewing a room that agent is in, as a clearly labeled side panel: "Viewing as: *Reviewer agent* · read-only oversight". It shows unread, cursor position and dropped-event warnings. Viewing never acknowledges or advances the agent's cursor. Being a room's owner or admin doesn't offer this panel, because only the agent's own organization may open it. The panel shows the agent's whole inbox, including IDs from rooms the viewer can't open ([decision 31](PRODUCT.md#decisions-needed)). Those IDs link to nothing the viewer couldn't already reach, and show the same not-found page as any other room.
 
 ### Settings
 
