@@ -127,7 +127,7 @@ describe("people and organizations", () => {
 
   it("the dashboard can't reach agent registration, connection state or inboxes through the API path", async () => {
     const a = await signUp();
-    for (const [method, path] of [["PUT", "/v1/agents/agt_x"], ["POST", "/v1/agents/agt_x/disconnect"], ["GET", "/v1/inbox"], ["GET", "/v1//inbox"], ["PUT", "/v1//agents/agt_abcdefabcdef"], ["POST", "/internal/init"], ["GET", "/v1/../internal/init"]]) {
+    for (const [method, path] of [["PUT", "/v1/agents/agt_x"], ["POST", "/v1/agents/agt_x/disconnect"], ["GET", "/v1//inbox"], ["PUT", "/v1//agents/agt_abcdefabcdef"], ["POST", "/internal/init"], ["GET", "/v1/../internal/init"]]) {
       const res = await dashboard(a, method, path, method === "GET" ? undefined : { org_id: a.org });
       expect(res.status, `${method} ${path}`).toBe(404);
     }
@@ -1654,6 +1654,70 @@ describe("sign-in and claim pages", () => {
     const res = await form({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org, name: "x".repeat(201) }, { cookie: owner.cookie }, "/claim");
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("at most 200 bytes");
+  });
+});
+
+describe("the application host", () => {
+  const APP = "https://app.test";
+  const onApp = (path: string, init: RequestInit = {}) => SELF.fetch(APP + path, { redirect: "manual", ...init });
+  const appPost = (path: string, body: unknown, headers: Record<string, string> = {}) => onApp(path, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", origin: APP, ...headers } });
+
+  it("keeps the session on that host alone, and checks origin against it", async () => {
+    const res = await appPost("/api/auth/sign-up/email", { email: `${unique("p")}@example.test`, password: "local-test-password-123", name: "Test person" });
+    expect(res.status).toBe(200);
+    const set = res.headers.get("set-cookie") ?? "";
+    expect(set.toLowerCase()).not.toContain("domain=");
+    expect(set.toLowerCase()).toContain("httponly");
+    const cookie = set.split(";")[0];
+    expect((await (await onApp("/api/v1/me", { headers: { cookie } })).json<any>()).kind).toBe("person");
+
+    const body = JSON.stringify({ name: "x" });
+    const headers = { cookie, "content-type": "application/json" };
+    expect((await onApp("/api/orgs", { method: "POST", headers: { ...headers, origin: APP }, body })).status).toBe(200);
+    // Each host trusts only itself.
+    expect((await onApp("/api/orgs", { method: "POST", headers: { ...headers, origin: BASE }, body })).status).toBe(403);
+    expect((await call("/api/orgs", { method: "POST", headers: { ...headers, origin: APP }, body })).status).toBe(403);
+  });
+
+  it("brings a provider's sign-in back to that host, and leaves agents on the gateway's", async () => {
+    const res = await appPost("/api/auth/sign-in/social", { provider: "github", callbackURL: "/attention" });
+    const { url } = await res.json<{ url: string }>();
+    expect(new URL(url).searchParams.get("redirect_uri")).toBe(`${APP}/api/auth/callback/github`);
+    const direct = await post("/api/auth/sign-in/social", { provider: "github", callbackURL: "/signed-in" });
+    expect(new URL((await direct.json<{ url: string }>()).url).searchParams.get("redirect_uri")).toBe(`${BASE}/api/auth/callback/github`);
+    const discovery = await (await call("/.well-known/agent-configuration")).json<any>();
+    expect(JSON.stringify(discovery)).not.toContain(APP);
+  });
+});
+
+describe("dashboard inbox and agents", () => {
+  it("reads a person's own inbox, but only the POST acknowledges", async () => {
+    const a = await signUp();
+    expect((await dash(a, "GET", "/v1/inbox")).status).toBe(200);
+    expect((await dashboard(a, "GET", "/v1/inbox?ack=true")).status).toBe(404);
+    expect((await dash(a, "POST", "/v1/inbox/ack", { cursor: 0 })).status).not.toBe(404);
+    expect((await dashboard(a, "POST", "/v1/inbox/ack", { cursor: 0 }, { origin: "https://evil.test" })).status).toBe(403);
+    expect((await dashboard(a, "PUT", "/v1/inbox/wake", { url: "https://x.test" })).status).toBe(404);
+  });
+
+  it("lets the owning organization oversee an agent's inbox, and nobody else", async () => {
+    const [a, b] = [await signUp(), await signUp()];
+    const agent = await claimedAgent(a);
+    expect((await dash(a, "GET", `/v1/agents/${agent.id}/inbox`)).status).toBe(200);
+    expect((await dash(b, "GET", `/v1/agents/${agent.id}/inbox`)).status).toBeGreaterThanOrEqual(403);
+    expect((await dashboard(a, "GET", `/v1/agents/${agent.id}/inbox?ack=true`)).status).toBe(404);
+    expect((await dashboard(a, "POST", `/v1/agents/${agent.id}/inbox`, {})).status).toBe(404);
+  });
+
+  it("lists only the agents of the person's own organizations", async () => {
+    const [a, b] = [await signUp(), await signUp()];
+    const mine = await claimedAgent(a);
+    const theirs = await claimedAgent(b);
+    const res = await call("/api/agents", { headers: { cookie: a.cookie } });
+    const ids = (await res.json<any>()).agents.map((row: { id: string }) => row.id);
+    expect(ids).toContain(mine.id);
+    expect(ids).not.toContain(theirs.id);
+    expect((await call("/api/agents")).status).toBe(401);
   });
 });
 
