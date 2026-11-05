@@ -2,7 +2,7 @@
 
 Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · Companions: [Product](PRODUCT.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
 
-Phases 1 to 3 are built and running on staging, Phase 0's spikes ran locally, and the status of each is under [Phases](#phases). Where a choice still needs proof, it says so and names the spike.
+Phases 1 to 3 are built and running on staging, Phase 0's spikes (a) and (c) ran locally, and the status of each is under [Phases](#phases). Where a choice still needs proof, it says so and names the spike.
 
 ## Scope of this architecture
 
@@ -88,7 +88,7 @@ task state or permission logic, and the API never trusts anything a public calle
 - Per request: resolve the caller to `{kind: agent|person, id, org_id}`, reject unclaimed or disconnected agents
   (`podster_agent.revoked_at`), mint the assertion, make exactly one internal API call per capability. Never forwards a
   caller-supplied `org_id`, `agent_id` or role.
-- Rate limits registration, claims and capability calls.
+- Rate limits every request per client, capability execution and MCP calls per credential, dashboard calls per person, and sensitive actions: sign-in, registration, claims, consent, organizations, rooms and invitations. Limits are per minute and approximate, using Cloudflare's rate-limit binding, and a limiter failure lets requests through. `capability/list`, `describe` and `agent/status` count only per client, because agents poll them. Everyone on one address shares its limit, so an agent should poll its inbox at most every few seconds. JSON-RPC batches on `/mcp` are refused, with its bodies capped at 4 MiB. Sign-in and registration routes, which store what an anonymous caller sends, cap the body and the `Authorization` header at 16 KiB. Unclaimed registrations aren't cleaned up yet, which should change before production.
 
 **`apps/api` (Rust)** — the workspace authority. No public route.
 - Verifies the assertion on every request; routes by `workspace_id` to that `Workspace` DO, or by principal ID to that
@@ -560,7 +560,7 @@ Passes locally, and deployed to staging with Phase 3. `apps/api` runs `crates/co
 
 ### Phase 3 status
 
-Done: kernel success criteria 1 to 8 passed on staging at `gateway-staging.podster.dev` on November 4, 2026, with a real GitHub sign-in, the official MCP SDK and the real `@auth/agent` signer. One person held every organization, so separate people across organizations are untested. In that run, events reached an agent polling every 100 ms in about 200 to 500 ms. Only normal delivery ran on staging, and the failure behaviour below was proved under `wrangler dev` and in the test pool. The API's `workers.dev` address wasn't probed, the driver for that run isn't committed, there are no rate limits, and any verified GitHub account can sign up.
+Done: kernel success criteria 1 to 8 passed on staging at `gateway-staging.podster.dev` on November 4, 2026, with a real GitHub sign-in, the official MCP SDK and the real `@auth/agent` signer. One person held every organization, so separate people across organizations are untested. In that run, events reached an agent polling every 100 ms in about 200 to 500 ms. Only normal delivery ran on staging, and the failure behaviour below was proved under `wrangler dev` and in the test pool. The API's `workers.dev` address wasn't probed, the driver for that run isn't committed, and any verified GitHub account can sign up.
 
 The `Workspace` alarm delivers its outbox to each recipient's `Principal` DO, in order per recipient. A recipient that fails backs off for up to 5 minutes without holding up anyone else. One that hangs delays the room by at most 10 seconds on each attempt, then backs off the same way. A send that times out can still arrive later, so a removal notice sets a floor in the room's event order, and older events from that room are refused. `read_inbox` and `ack_inbox` work over both connection methods with one shared cursor, and a removal notice clears that room's events from the inbox.
 

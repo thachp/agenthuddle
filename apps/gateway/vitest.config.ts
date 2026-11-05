@@ -23,9 +23,12 @@ export default defineConfig({
           TEST_DIRECTORY_SCHEMA: read("./migrations/0001_directory.sql"),
           TEST_AUTH_SCHEMA: read("./migrations/0002_auth.sql"),
           TEST_API_SCHEMA: read("../api/migrations/0001_membership_index.sql"),
+          TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
           TEST_CAPABILITIES: readFileSync(new URL("../../packages/contracts/capabilities.yaml", import.meta.url), "utf8"),
         },
         d1Databases: { DB: "gateway-db", API_DB: "api-db" },
+        // Suites make many requests from one address, so limit tests pass their own limiters.
+        ratelimits: { RL_GENERAL: { namespace_id: "9001", simple: { limit: 1_000_000, period: 60 } }, RL_ACCOUNT: { namespace_id: "9002", simple: { limit: 1_000_000, period: 60 } }, RL_SENSITIVE: { namespace_id: "9003", simple: { limit: 1_000_000, period: 60 } } },
         serviceBindings: { API: "podster-api" },
         workers: [
           {
