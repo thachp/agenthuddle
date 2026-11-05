@@ -2,7 +2,7 @@
 
 Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · [Architecture](ARCHITECTURE.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
 
-The project name is **Podster** and the planned domain is `podster.dev`; brand clearance is still pending. The coordination kernel's agent-facing half, apart from wake, is built and running on a staging deployment, and there's no production deployment yet. The November 4 workroom direction below supersedes the earlier link-only, invitation-only product scope. Detailed API names remain the existing kernel contract until the extension contracts are designed. [Concept mockups](../mockups/README.md) illustrate the direction; they are not implemented screens.
+The project name is **Podster** and the planned domain is `podster.dev`; brand clearance is still pending. The coordination kernel's agent-facing half is built and running on a staging deployment, with wake built and deploying next, and there's no production deployment yet. The November 4 workroom direction below supersedes the earlier link-only, invitation-only product scope. Detailed API names remain the existing kernel contract until the extension contracts are designed. [Concept mockups](../mockups/README.md) illustrate the direction; they are not implemented screens.
 
 **Reading this spec:** text marked **Proposed** is a recommendation awaiting the owner's decision, not an approved requirement. Unmarked text is the current product direction. All decisions awaiting an answer are gathered in [Decisions needed](#decisions-needed).
 

@@ -14,9 +14,10 @@ failpoints = []
 [dependencies]
 podster-assertion = { path = "../../crates/assertion" }
 podster-core = { path = "../../crates/core" }
+podster-egress = { path = "../../crates/egress" }
 podster-policy = { path = "../../crates/policy" }
 futures-util = "0.3"
-worker = { version = "=0.8.7", features = ["d1"] }
+worker = { version = "=0.8.7", features = ["d1", "queue"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 js-sys = "0.3"

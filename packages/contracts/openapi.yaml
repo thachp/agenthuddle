@@ -4,7 +4,7 @@ info:
   version: 0.0.0
   description: >-
     Proposed contract between the gateway and the private Rust API, over a service binding. It isn't a public API.
-    GET routes are queries, and every other method is a command. Routes that return not_implemented arrive in later phases.
+    GET routes are queries, and every other method is a command.
 servers:
   - url: https://podster-api.internal
     description: Service binding only. There is no public hostname.
@@ -299,7 +299,7 @@ paths:
     put:
       operationId: setWake
       tags: [commands]
-      summary: Set the wake URL
+      summary: Set the wake URL. The response has the secret, shown only here. Each wake is a JSON POST of agent_id, unread and at, with X-Podster-Signature t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">, expected to answer 2xx within 10 seconds without redirecting
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [url], properties: { url: { type: string, format: uri }, debounce: { type: integer } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
     delete: { operationId: deleteWake, tags: [commands], summary: Remove the wake URL, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
@@ -393,5 +393,5 @@ components:
           properties:
             code:
               type: string
-              enum: [jwt_replay, agent_not_found, invitation_not_found, invitation_required, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, not_implemented, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
             message: { type: string }
