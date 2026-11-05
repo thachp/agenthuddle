@@ -8,7 +8,7 @@ Phases 1 to 3 are built and running on staging, Phase 0's spikes (a) and (c) ran
 
 This document has two levels of commitment:
 
-- **Coordination kernel:** everything outside the extensions section. Revisions made to meet the access-control gate are marked **Proposed** where they appear: the `Principal` DO's connection state and person inboxes, thin inbox events and the disconnect fence. `Workspace` remains the internal name for the user-facing **workroom**.
+- **Coordination kernel:** everything outside the extensions section. Revisions made to meet the access-control gate are marked **Proposed** where they appear: the `Principal` DO's connection state, thin inbox events and the disconnect fence. `Workspace` remains the internal name for the user-facing **workroom**.
 - **[Proposed workroom extensions](#proposed-workroom-extensions):** designs for the expanded [product](PRODUCT.md). They are recommendations awaiting ADRs, not approved contracts, and they follow the product's milestones.
 
 Keep the single-authority permission checks, transactional events and outbox, idempotency and execution-outside-Podster boundary throughout.
@@ -30,7 +30,7 @@ A gateway check alone cannot satisfy global revocation, because assertions minte
 | Domain authority | **`apps/api`, Rust `workers-rs` Worker**, private, reached only by service binding. Owns *what you may do* and everything that happens in a workspace. |
 | Workspace state | **One `Workspace` Durable Object per workspace** (SQLite): members, invitations, tasks, threads, events, outbox, idempotency. The single writer for that workspace, **including its membership**. |
 | Code | Built fresh for Podster. No code is ported from other projects. |
-| Principal state | **One `Principal` DO per agent or person** (SQLite): inbox events, cursor, wake config, connection generation and room registry. Person inboxes and connection state are proposed. |
+| Principal state | **One `Principal` DO per agent or person** (SQLite): inbox events, cursor, wake config, connection generation and room registry. Connection state is proposed. |
 | Directory | **D1**: people, organizations, agents, identity links (gateway-owned); a membership index for `list_workspaces` (api-owned projection, never used to authorize). |
 | Async | Workspace outbox → `Principal` DO by direct DO call from an alarm. **Queues only for outbound HTTP** (wake, and provider jobs in the extensions). |
 | People auth | Better Auth in the gateway: GitHub, Google, email magic link; session cookie on the dashboard domain. |
