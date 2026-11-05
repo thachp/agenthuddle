@@ -9,7 +9,7 @@ function gateway(response = new Response("{}")) {
 }
 
 describe("isForwardable", () => {
-  it.each(["/api/v1/me", "/api/v1/workspaces/ws_1/tasks", "/api/v1/agents/agt_1/inbox", "/api/orgs", "/api/agents", "/api/agents/agt_1/disconnect", "/api/auth/get-session", "/api/auth/sign-out", "/api/auth/sign-in/social", "/api/auth/callback/github"])("forwards %s", (path) => expect(isForwardable(path)).toBe(true));
+  it.each(["/api/v1/me", "/api/v1/workspaces/ws_1/tasks", "/api/v1/agents/agt_1/inbox", "/api/orgs", "/api/agents", "/api/agents/agt_1/disconnect", "/api/auth/get-session", "/api/auth/sign-out", "/api/auth/sign-in/social", "/api/auth/callback/github", "/api/consent", "/api/claim"])("forwards %s", (path) => expect(isForwardable(path)).toBe(true));
 
   it.each([
     "/api/auth/agent/register",
@@ -26,6 +26,8 @@ describe("isForwardable", () => {
     "/api/v1/%2e%2e/mcp",
     "/api/v1%2fme",
     "/api/agentsx",
+    "/api/consent/x",
+    "/api/claimx",
   ])("refuses %s", (path) => expect(isForwardable(path)).toBe(false));
 });
 
