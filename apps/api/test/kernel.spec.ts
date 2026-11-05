@@ -2741,3 +2741,199 @@ describe("revoking a whole organization", () => {
     expect(await memberIds(id)).toContain(agent.id);
   });
 });
+
+describe("managing a room and reading its details", () => {
+  const roomPath = (id: string) => `/v1/workspaces/${id}`;
+  const version = async (id: string) => (await api(OWNER, "GET", roomPath(id))).body.policy_version as number;
+  const newAgent = async (org = BOB.org) => {
+    const agent = { id: `agt_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`, org };
+    await register(agent);
+    return agent;
+  };
+  const listed = async (who: Who, id: string) => (await api(who, "GET", "/v1/workspaces")).body.workspaces.find((w: any) => w.workspace_id === id);
+
+  it("lets the owner and admins rename a room, everywhere it's listed", async () => {
+    const { id } = await room();
+    await vi.waitFor(async () => expect((await listed(LEAD, id))?.workspace_name).toBe("Billing v2"), { timeout: 5000 });
+    const renamed = await api(ADMIN, "PUT", `${roomPath(id)}/name`, { name: "Billing v3", policy_version: await version(id) });
+    expect(renamed.body).toEqual({ name: "Billing v3" });
+    expect((await api(LEAD, "GET", roomPath(id))).body.name).toBe("Billing v3");
+    await vi.waitFor(async () => expect((await listed(LEAD, id))?.workspace_name).toBe("Billing v3"), { timeout: 5000 });
+    expect((await listed(OWNER, id)).workspace_name).toBe("Billing v3");
+    const log = (await api(OWNER, "GET", `${roomPath(id)}/audit`)).body.audit.filter((e: any) => e.action === "workspace.renamed");
+    expect(log.map((e: any) => [e.actor_id, JSON.parse(e.prior_json).name, JSON.parse(e.new_json).name])).toEqual([[ADMIN.id, "Billing v2", "Billing v3"]]);
+  });
+
+  it("refuses renaming or archiving by anyone else, a bad name and a stale form", async () => {
+    const { id, add } = await room();
+    const plain: Who = { id: "per_plain", kind: "person", org: "org_a" };
+    expect((await add(plain, "member")).status).toBe(200);
+    const v = await version(id);
+    for (const who of [plain, LEAD, BOB]) {
+      expect((await api(who, "PUT", `${roomPath(id)}/name`, { name: "Mine", policy_version: v })).code).toBe("not_allowed");
+      expect((await api(who, "POST", `${roomPath(id)}/archive`, { policy_version: v })).code).toBe("not_allowed");
+    }
+    for (const name of ["", "   ", "x".repeat(201)]) expect((await api(OWNER, "PUT", `${roomPath(id)}/name`, { name, policy_version: v })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "PUT", `${roomPath(id)}/name`, { policy_version: v })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "PUT", `${roomPath(id)}/name`, { name: "Stale", policy_version: v - 1 })).code).toBe("version_conflict");
+    expect((await api(OWNER, "POST", `${roomPath(id)}/archive`, { policy_version: v - 1 })).code).toBe("version_conflict");
+    const outsider = await api(OUTSIDER, "POST", `${roomPath(id)}/archive`, { policy_version: v });
+    const unknown = await api(OUTSIDER, "POST", `${roomPath("ws_no_such_room")}/archive`, { policy_version: v });
+    expect([outsider.status, outsider.code]).toEqual([unknown.status, unknown.code]);
+    const seen = (await api(OWNER, "GET", roomPath(id))).body;
+    expect([seen.name, seen.status]).toEqual(["Billing v2", "active"]);
+  });
+
+  it("stops new work in an archived room, keeps reads and leaving, and can bring it back", async () => {
+    const { id, tasks } = await room();
+    const task = await offer(tasks);
+    const path = `${tasks}/${task.id}`;
+    const link = await api(OWNER, "POST", `${roomPath(id)}/invitations`, { role: "guest" });
+    const leaving = await newAgent();
+    expect((await admit(id, leaving)).status).toBe(200);
+    const going = await newAgent();
+    expect((await admit(id, going)).status).toBe(200);
+    const replayKey = `create-${crypto.randomUUID()}`;
+    const replayed = await api(LEAD, "POST", tasks, { title: "Before archiving", instructions: "x" }, { key: replayKey });
+    expect(replayed.status).toBe(200);
+    const versionBefore = await version(id);
+    expect((await api(OWNER, "POST", `${roomPath(id)}/archive`, { policy_version: versionBefore }, { key: "archive-retry" })).body).toEqual({ status: "archived" });
+    // Retrying what committed gets its answer, even though the room is archived now.
+    expect((await api(OWNER, "POST", `${roomPath(id)}/archive`, { policy_version: versionBefore }, { key: "archive-retry" })).body).toEqual({ status: "archived" });
+    expect((await api(LEAD, "POST", tasks, { title: "Before archiving", instructions: "x" }, { key: replayKey })).body.id).toBe(replayed.body.id);
+    expect((await api(OWNER, "POST", `${roomPath(id)}/archive`, { policy_version: await version(id) })).code).toBe("workspace_archived");
+    const refused = "workspace_archived";
+    const v = await version(id);
+    for (const [who, method, route, body] of [
+      [LEAD, "POST", tasks, { title: "New", instructions: "x" }],
+      [BOB, "POST", `${path}/accept`, { version: 1 }],
+      [LEAD, "POST", `${path}/messages`, { body: "still working" }],
+      [OWNER, "POST", `${roomPath(id)}/members`, { principal_id: "per_x", kind: "person", org_id: "org_a", role: "member", policy_version: v }],
+      [OWNER, "POST", `${roomPath(id)}/members/${LEAD.id}/role`, { role: "guest", policy_version: v }],
+      [OWNER, "POST", `${roomPath(id)}/invitations`, { role: "guest", policy_version: v }],
+      [OWNER, "PUT", `${roomPath(id)}/name`, { name: "Renamed", policy_version: v }],
+    ] as const) {
+      const answer = await api(who, method, route, body);
+      expect([route, answer.status, answer.code]).toEqual([route, 409, refused]);
+    }
+    expect((await api(orgAdmin(BOB.org), "POST", "/v1/invitations/accept", { token: link.body.token, org_id: BOB.org, agents: [(await newAgent()).id] })).code).toBe("invitation_not_found");
+    expect((await api(orgAdmin(BOB.org), "POST", "/v1/invitations/preview", { token: link.body.token })).code).toBe("invitation_not_found");
+    // Reads still work, and people can still be taken out.
+    expect((await api(LEAD, "GET", roomPath(id))).body.status).toBe("archived");
+    expect((await api(LEAD, "GET", path)).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `${roomPath(id)}/members/${going.id}`, {})).status).toBe(200);
+    expect((await api(orgAdmin(BOB.org), "POST", `${roomPath(id)}/members/${leaving.id}/withdraw`, {})).status).toBe(200);
+    await vi.waitFor(async () => expect((await listed(LEAD, id))?.status).toBe("archived"), { timeout: 5000 });
+    expect((await api(LEAD, "POST", `${roomPath(id)}/unarchive`, { policy_version: await version(id) })).code).toBe("not_allowed");
+    expect((await api(ADMIN, "POST", `${roomPath(id)}/unarchive`, { policy_version: await version(id) })).body).toEqual({ status: "active" });
+    expect((await api(ADMIN, "POST", `${roomPath(id)}/unarchive`, { policy_version: await version(id) })).code).toBe("invalid_transition");
+    expect((await api(LEAD, "POST", `${path}/messages`, { body: "back" })).status).toBe(200);
+    await vi.waitFor(async () => expect((await listed(LEAD, id))?.status).toBe("active"), { timeout: 5000 });
+  });
+
+  it("tells a room's participants when it's archived", async () => {
+    const { id } = await room();
+    const agent = await newAgent();
+    expect((await admit(id, agent)).status).toBe(200);
+    expect((await api(OWNER, "POST", `${roomPath(id)}/archive`, { policy_version: await version(id) })).status).toBe(200);
+    await vi.waitFor(async () => {
+      const { events } = (await api(agent, "GET", "/v1/inbox?limit=50")).body;
+      expect(events.filter((e: any) => e.workspace_id === id).map((e: any) => e.type)).toContain("workspace.archived");
+    }, { timeout: 5000 });
+  });
+
+  it("lists pending invitations for those who manage access, with no token", async () => {
+    const { id } = await room();
+    const [kept, used, withdrawn, expired] = [
+      await api(OWNER, "POST", `${roomPath(id)}/invitations`, { role: "member", invited_org_id: CAROL.org, guest_can_create: false }),
+      await api(OWNER, "POST", `${roomPath(id)}/invitations`, { role: "guest" }),
+      await api(OWNER, "POST", `${roomPath(id)}/invitations`, { role: "guest" }),
+      await api(ADMIN, "POST", `${roomPath(id)}/invitations`, { role: "guest" }),
+    ];
+    expect((await api(orgAdmin(BOB.org), "POST", "/v1/invitations/accept", { token: used.body.token, org_id: BOB.org, agents: [(await newAgent()).id] })).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `${roomPath(id)}/invitations/${withdrawn.body.id}`, {})).status).toBe(200);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE invitation SET expires_at = 1 WHERE id = ?", expired.body.id));
+    const read = await api(ADMIN, "GET", `${roomPath(id)}/invitations`);
+    expect(read.status).toBe(200);
+    expect(read.body.truncated).toBe(false);
+    expect(read.body.invitations).toEqual([expect.objectContaining({ id: kept.body.id, role: "member", invited_org_id: CAROL.org, created_by: OWNER.id, guest_can_create: false })]);
+    const text = JSON.stringify(read.body);
+    expect(text).not.toContain("token");
+    expect(text).not.toContain(kept.body.token.split(".").at(-1));
+    for (const who of [LEAD, BOB]) expect((await api(who, "GET", `${roomPath(id)}/invitations`)).code).toBe("not_allowed");
+    expect((await api(OUTSIDER, "GET", `${roomPath(id)}/invitations`)).code).toBe("workspace_not_found");
+  });
+
+  it("previews a link for a person holding it, and says nothing about any other", async () => {
+    const { id } = await room();
+    const link = await api(ADMIN, "POST", `${roomPath(id)}/invitations`, { role: "guest", invited_org_id: BOB.org, guest_can_create: true });
+    const preview = (who: Who, token: unknown) => api(who, "POST", "/v1/invitations/preview", { token }, { key: null });
+    const read = await preview(orgAdmin(BOB.org), link.body.token);
+    expect(read.body).toEqual(expect.objectContaining({ workspace_id: id, workspace_name: "Billing v2", role: "guest", guest_can_create: true, invited_org_id: BOB.org, invited_by: ADMIN.id }));
+    expect(read.body.owner_org).toBeUndefined();
+    // A link naming an organization says nothing to anyone outside it, even an admin elsewhere.
+    expect((await preview(orgAdmin(CAROL.org), link.body.token)).code).toBe("invitation_not_found");
+    const open = await api(ADMIN, "POST", `${roomPath(id)}/invitations`, { role: "guest" });
+    expect((await preview(orgAdmin(CAROL.org), open.body.token)).status).toBe(200);
+    // Once an organization is revoked it learns nothing from an older link, whichever organization it acts in.
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/organizations/${CAROL.org}`, {})).status).toBe(200);
+    expect((await preview(orgAdmin(CAROL.org), open.body.token)).code).toBe("invitation_not_found");
+    const inBoth: Who = { id: "per_both", kind: "person", org: "org_personal", orgs: ["org_personal", CAROL.org], adminOrgs: ["org_personal"] };
+    expect((await preview(inBoth, open.body.token)).code).toBe("invitation_not_found");
+    expect((await preview({ ...inBoth, orgs: ["org_personal"] }, open.body.token)).status).toBe(200);
+    expect(JSON.stringify(read.body)).not.toContain(link.body.token.split(".").at(-1));
+    // An agent can't, even holding it.
+    expect((await preview(LEAD, link.body.token)).code).toBe("not_allowed");
+    for (const bad of [`${link.body.token}x`, `inv_${id}.nope.nope`, "inv_ws_none.a.b", "", 5, undefined]) {
+      expect((await preview(orgAdmin(BOB.org), bad)).code, String(bad)).toBe("invitation_not_found");
+    }
+    // Preview doesn't use it up, and a used one is gone.
+    expect((await api(orgAdmin(BOB.org), "POST", "/v1/invitations/accept", { token: link.body.token, org_id: BOB.org, agents: [(await newAgent()).id] })).status).toBe(200);
+    expect((await preview(orgAdmin(BOB.org), link.body.token)).code).toBe("invitation_not_found");
+  });
+
+  it("shows the owner's organization, guest settings and removed members in the room read", async () => {
+    const { id } = await room();
+    const allowed = await newAgent();
+    expect((await admit(id, allowed, { guest_can_create: true })).status).toBe(200);
+    const out = await newAgent();
+    expect((await admit(id, out)).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `${roomPath(id)}/members/${out.id}`, {})).status).toBe(200);
+    const read = (await api(ADMIN, "GET", roomPath(id))).body;
+    expect(read.owner_org).toBe("org_a");
+    expect(read.members.find((m: any) => m.principal_id === allowed.id).guest_can_create).toBe(true);
+    expect(read.members.find((m: any) => m.principal_id === LEAD.id).guest_can_create).toBe(false);
+    expect(read.removed.map((m: any) => [m.principal_id, m.revocation_reason])).toEqual([[out.id, "room_removed"]]);
+    for (const who of [LEAD, BOB]) {
+      const seen = (await api(who, "GET", roomPath(id))).body;
+      expect([seen.removed, seen.owner_org]).toEqual([undefined, undefined]);
+    }
+    const guest = (await api(allowed, "GET", roomPath(id))).body;
+    expect(guest.members).toEqual([expect.objectContaining({ principal_id: allowed.id, guest_can_create: true })]);
+  });
+
+  it("lists an agent's rooms for its own organization's admins and itself", async () => {
+    const [first, second] = [await room(), await room()];
+    const agent = await newAgent();
+    for (const { id } of [first, second]) expect((await admit(id, agent)).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `${roomPath(second.id)}/members/${agent.id}`, {})).status).toBe(200);
+    const rooms = (who: Who) => api(who, "GET", `/v1/agents/${agent.id}/rooms`);
+    await vi.waitFor(async () => {
+      const read = (await rooms(orgAdmin(BOB.org))).body;
+      expect(read.rooms.map((r: any) => [r.workspace_id, r.left]).sort()).toEqual([[first.id, false], [second.id, true]].sort());
+    }, { timeout: 5000 });
+    expect((await rooms(orgAdmin(BOB.org))).body.truncated).toBe(false);
+    // What happens to a room after the agent left doesn't reach its organization.
+    const before = (await rooms(orgAdmin(BOB.org))).body.rooms.find((r: any) => r.workspace_id === second.id);
+    expect([before.workspace_name, before.status]).toEqual(["Billing v2", null]);
+    expect((await api(OWNER, "PUT", `${roomPath(second.id)}/name`, { name: "Replacing Org B", policy_version: await version(second.id) })).status).toBe(200);
+    expect((await api(OWNER, "POST", `${roomPath(second.id)}/archive`, { policy_version: await version(second.id) })).status).toBe(200);
+    await vi.waitFor(async () => expect((await listed(LEAD, second.id))?.status).toBe("archived"), { timeout: 5000 });
+    const after = (await rooms(orgAdmin(BOB.org))).body.rooms.find((r: any) => r.workspace_id === second.id);
+    expect([after.workspace_name, after.status, after.left]).toEqual(["Billing v2", null, true]);
+    const row = await (env as any).DB.prepare("SELECT workspace_name, workspace_status FROM membership_index WHERE workspace_id = ? AND principal_id = ?").bind(second.id, agent.id).first();
+    expect([row.workspace_name, row.workspace_status]).toEqual(["Billing v2", "active"]);
+    expect((await rooms(agent)).status).toBe(200);
+    for (const who of [orgAdmin("org_a"), OWNER, BOB, OUTSIDER]) expect((await rooms(who)).code).toBe("agent_not_found");
+  });
+});

@@ -169,7 +169,7 @@ org_audit(id, org_id, actor_id, action, target_id, role?, created_at)
 org_departure_outbox(id, person_id, org_id, left_at, actor_id)
 podster_agent(id, org_id, name, description, generation, created_at, revoked_at?)   -- the plugin owns the `agent` table
 identity_link(provider: agent_auth|mcp_oauth, external_id, agent_id)
-membership_index(workspace_id, principal_id, org_id, role, workspace_name, updated_seq)   -- api-owned projection
+membership_index(workspace_id, principal_id, org_id, role, workspace_name, workspace_status, updated_seq)   -- api-owned projection
 ```
 
 ### `Workspace` DO (SQLite, one per workspace)
@@ -309,6 +309,11 @@ GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
 POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33)
 GET    /v1/workspaces/{ws}
+PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
+POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access
+GET    /v1/workspaces/{ws}/invitations              pending, without tokens (owner or admin)
+POST   /v1/invitations/preview                      token in body; person only
+GET    /v1/agents/{agent}/rooms                     from membership_index, for showing only (its org's admins, or itself)
 POST   /v1/workspaces/{ws}/members                  add a participant (owner or admin); only the owner adds admins
 POST   /v1/workspaces/{ws}/members/{principal}/role change a role; changes to or from admin are the owner's alone
 POST   /v1/org-departures                           the gateway's removal only, by its `departure` claim. See ADR 0003
@@ -339,7 +344,7 @@ GET    /health                                    private service binding only
 
 Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with stable codes:
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
-participant, who already knows the room exists), `agent_not_found` (404), `invitation_not_found` (404), `invitation_required` (403), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
+participant, who already knows the room exists), `agent_not_found` (404), `invitation_not_found` (404), `invitation_required` (403), `workspace_archived` (409), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
 `commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (409), `invalid_wake_url` (400), `invalid_assertion` (401), `jwt_replay` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `internal_error` (500).
 

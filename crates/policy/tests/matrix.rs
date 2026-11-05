@@ -101,6 +101,7 @@ fn agents_never_hold_admin_authority_even_with_a_stored_role() {
             WorkroomAction::ManageAccess,
             WorkroomAction::AppointAdmin,
             WorkroomAction::ReadAuditLog,
+            WorkroomAction::ManageRoom,
             WorkroomAction::CreateTask,
         ] {
             assert_eq!(
@@ -252,4 +253,21 @@ fn leaving_an_organization_ends_only_what_began_by_then_in_that_organization() {
     assert!(org_departure_ends("org_a", "org_a", 10, 10));
     assert!(!org_departure_ends("org_a", "org_a", 11, 10));
     assert!(!org_departure_ends("org_b", "org_a", 5, 10));
+}
+
+#[test]
+fn only_human_owners_and_admins_rename_or_archive_a_room() {
+    for (role, verdict) in [
+        (Role::Owner, Verdict::Allow),
+        (Role::Admin, Verdict::Allow),
+        (Role::Member, Verdict::Forbidden),
+        (Role::Guest, Verdict::Forbidden),
+        (Role::None, Verdict::NotParticipant),
+    ] {
+        assert_eq!(
+            authorize_workroom(&caller("x", Person, role), WorkroomAction::ManageRoom),
+            verdict,
+            "{role:?}"
+        );
+    }
 }

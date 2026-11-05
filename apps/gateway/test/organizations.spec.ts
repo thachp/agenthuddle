@@ -649,6 +649,28 @@ describe("the owner's rulings on organizations", () => {
   });
 });
 
+describe("managing a room through the dashboard", () => {
+  it("reaches rename, archive, invitations, a preview and an agent's rooms", async () => {
+    const owner = await signUp();
+    const id = (await dash(owner, "POST", "/v1/workspaces", { name: "Room" })).body.id as string;
+    const version = async () => (await dash(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
+    expect((await dash(owner, "PUT", `/v1/workspaces/${id}/name`, { name: "Renamed", policy_version: await version() })).body.name).toBe("Renamed");
+    const link = await dash(owner, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: await version() });
+    expect((await dash(owner, "GET", `/v1/workspaces/${id}/invitations`)).body.invitations).toHaveLength(1);
+    const stranger = await signUp();
+    expect((await dash(stranger, "GET", `/v1/workspaces/${id}/invitations`)).code).toBe("workspace_not_found");
+    expect((await dash(stranger, "POST", "/v1/invitations/preview", { token: link.body.token })).body.workspace_name).toBe("Renamed");
+    expect((await dash(owner, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version() })).body.status).toBe("archived");
+    expect((await dash(owner, "PUT", `/v1/workspaces/${id}/name`, { name: "No", policy_version: await version() })).code).toBe("workspace_archived");
+    expect((await dash(owner, "POST", `/v1/workspaces/${id}/unarchive`, { policy_version: await version() })).body.status).toBe("active");
+    // An agent's room list goes through the same narrow gate as its inbox.
+    // The API's own answer, so this fails if the gateway stops forwarding the route.
+    expect((await dash(owner, "GET", "/v1/agents/agt_nobody/rooms")).code).toBe("agent_not_found");
+    expect((await dash(owner, "POST", "/v1/agents/agt_nobody/rooms", {})).code).toBe("not_found");
+    expect((await dash(owner, "GET", "/v1/agents/agt_nobody/other")).code).toBe("not_found");
+  });
+});
+
 describe("a person's own personal organization", () => {
   it("isn't re-added once they've been taken out of it", async () => {
     const person = await signUp();

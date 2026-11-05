@@ -58,6 +58,9 @@ impl ApiError {
     pub fn not_in_organization() -> ApiError {
         ApiError::api(400, "not_in_organization")
     }
+    pub fn workspace_archived() -> ApiError {
+        ApiError::api(409, "workspace_archived")
+    }
     pub fn already_member() -> ApiError {
         ApiError::api(409, "already_member")
     }
