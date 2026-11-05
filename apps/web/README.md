@@ -46,7 +46,7 @@ Nothing shared needs editing. In particular, there's no route table, no API clie
 6. **Links in lists get `prefetch={false}`.** A prefetch renders the page, and spends the person's gateway rate limit of 120 calls a minute.
 7. **A failed read shows `ReadFailure`,** never an empty list.
 
-`app/(shell)/w/[id]/tasks/task-sheet.tsx` is a working example. The Review screen should replace it.
+`app/(shell)/w/[id]/tasks/task-sheet.tsx` is a working example, including a Sheet opened from another screen (`/attention`).
 
 | Later work | Owns |
 | --- | --- |
@@ -112,7 +112,8 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Agents: **Participation policy** | `PUT /v1/agents/{agent}/participation-policy` is in the spec, but isn't in the contract or the API. |
 | Agents: **Rename**, last active, workroom count | No route. `GET /api/agents` returns only the gateway's directory fields, so connection state takes a `getAgent` per row. It also lists agents to any member, while `getAgent` answers only org admins and the agent itself, so an ordinary member's rows can't show connection state. |
 | Any screen showing a name | Tasks and members carry principal IDs. Nothing turns them into names and organizations, which attribution needs (UI-07). Messages do carry `external`. |
-| Needs attention | No query across rooms for reviews assigned to me. The person inbox has events only, so reviews must be derived from them or a new read model. |
+| Needs attention | No query across rooms for reviews assigned to me, so the screen asks up to 20 rooms per render. Nothing lists a person's role invitations or their agents' wake and connection problems. |
+| Tasks | Tasks have no creation or update time, so rows can't show age. A task read returns only the latest 20 messages. |
 | Settings: Organization | No route adds a person to an organization. |
 | Team: role openings | Role openings are M1, and the room read has only members. |
 | Approval pages | Redirects and a data route for consent and claim, which follow [ADR 0001](../../docs/adr/0001-application-host-and-session-cookie.md). |
