@@ -10,7 +10,7 @@ A status is one of these, and an item only moves when the run has actually happe
 - **Local only:** a test passes under Miniflare or `wrangler dev`.
 - **Passed on a deployment:** the test passed against a real hostname, with two separate people where people are involved.
 
-Last updated from commit `c30f51a` plus this change, on 2026-11-05 UTC. `journey` means [e2e/journey.mjs](../e2e/journey.mjs), and the ID after it is the check's ID in its output. "Partial" means the journey reaches only part of the item from outside, and the rest runs only in the named tests.
+Last updated from commit `b892d31` plus this change, on 2026-11-05 UTC. `journey` means [e2e/journey.mjs](../e2e/journey.mjs), and the ID after it is the check's ID in its output. "Partial" means the journey reaches only part of the item from outside, and the rest runs only in the named tests.
 
 ## Kernel success criteria
 
@@ -157,7 +157,7 @@ This needs two people with different GitHub accounts, about five minutes, and th
 
 ## Decision audit
 
-Each was checked against the code on commit `c30f51a`, by a test that ran or by reading.
+Each was checked against the code by a test that ran or by reading, and the line references hold on commit `b892d31`.
 
 | Decision | Result | Evidence |
 | --- | --- | --- |
