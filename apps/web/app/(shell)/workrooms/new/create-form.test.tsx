@@ -1,0 +1,38 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { currentUrl, setUrl } from "@/test/next-navigation";
+import { CreateWorkroomForm } from "./create-form";
+
+const answer = (status: number, body: unknown) => vi.stubGlobal("fetch", async () => new Response(JSON.stringify(body), { status }));
+
+async function submit() {
+  render(<CreateWorkroomForm organization="Org A" />);
+  await userEvent.type(screen.getByLabelText("Name"), "Launch room");
+  await userEvent.click(screen.getByRole("button", { name: "Create workroom" }));
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("creating a workroom", () => {
+  it("goes to the new room", async () => {
+    setUrl("/workrooms/new");
+    answer(200, { id: "ws_1" });
+    await submit();
+    await vi.waitFor(() => expect(currentUrl()).toBe("/w/ws_1/overview"));
+  });
+
+  it("says a refusal created nothing", async () => {
+    answer(403, { error: { code: "not_allowed" } });
+    await submit();
+    expect(await screen.findByRole("alert")).toHaveTextContent("no workroom was created");
+  });
+
+  it("can't say a server error created nothing, because it may have come after the commit", async () => {
+    answer(502, { error: { code: "bad_gateway" } });
+    await submit();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Check My workrooms");
+    expect(alert).not.toHaveTextContent("no workroom was created");
+  });
+});

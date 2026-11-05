@@ -4,7 +4,7 @@ import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { getMigrations } from "better-auth/db/migration";
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
@@ -99,6 +99,112 @@ beforeAll(async () => {
 });
 
 describe("people and organizations", () => {
+  describe("when the sign-up hook can't write the personal organization", () => {
+    const failPersonalOrgWrites = () => e.DB.prepare("CREATE TRIGGER fail_personal_org BEFORE INSERT ON organization WHEN NEW.personal = 1 BEGIN SELECT RAISE(ABORT, 'failed for this test'); END").run();
+    const allowPersonalOrgWrites = () => e.DB.prepare("DROP TRIGGER IF EXISTS fail_personal_org").run();
+    const signUpDuringFailure = async () => {
+      await failPersonalOrgWrites();
+      const res = await post("/api/auth/sign-up/email", { email: `${unique("p")}@example.test`, password: "local-test-password-123", name: "Hook failure" });
+      expect(res.status).toBe(200);
+      return { cookie: (res.headers.get("set-cookie") ?? "").split(";")[0], org: "" } as Person;
+    };
+    const personalOrgs = async (id: string) => (await e.DB.prepare("SELECT id, name FROM organization WHERE personal = 1 AND created_by = ?").bind(id).all<{ id: string; name: string }>()).results;
+
+    it("refuses the person while the write keeps failing, then restores it on their next request", async () => {
+      try {
+        const person = await signUpDuringFailure();
+        expect((await dash(person, "GET", "/orgs")).body.organizations).toEqual([]);
+        expect((await dash(person, "GET", "/v1/me")).status).toBe(403);
+        await allowPersonalOrgWrites();
+        const me = await dash(person, "GET", "/v1/me");
+        expect(me.status).toBe(200);
+        const orgs = (await dash(person, "GET", "/orgs")).body.organizations;
+        expect(orgs).toEqual([expect.objectContaining({ id: me.body.org_id, name: "Hook failure", personal: 1, role: "admin" })]);
+      } finally {
+        await allowPersonalOrgWrites();
+      }
+    });
+
+    it("restores it from the organization list, the agent list and the claim page", async () => {
+      for (const path of ["/orgs", "/agents"]) {
+        try {
+          const person = await signUpDuringFailure();
+          await allowPersonalOrgWrites();
+          expect((await dash(person, "GET", path)).status).toBe(200);
+          expect((await dash(person, "GET", "/orgs")).body.organizations).toHaveLength(1);
+        } finally {
+          await allowPersonalOrgWrites();
+        }
+      }
+      try {
+        const person = await signUpDuringFailure();
+        await allowPersonalOrgWrites();
+        // 403 would be "you need to be an admin". 404 is the bad link, so the page found the organization it restored.
+        expect((await call("/claim?agent_id=x&code=y", { headers: { cookie: person.cookie } })).status).toBe(404);
+      } finally {
+        await allowPersonalOrgWrites();
+      }
+    });
+
+    it("keeps the default on a team organization created before the repair", async () => {
+      try {
+        const person = await signUpDuringFailure();
+        const team = await dash(person, "POST", "/orgs", { name: "Team first" });
+        expect(team.status).toBe(200);
+        expect((await dash(person, "GET", "/v1/me")).body.org_id).toBe(team.body.id);
+        await allowPersonalOrgWrites();
+        const me = await dash(person, "GET", "/v1/me");
+        expect(me.body.org_id).toBe(team.body.id);
+        expect((await dash(person, "GET", "/v1/me")).body.org_id).toBe(team.body.id);
+        expect(await personalOrgs(me.body.id)).toHaveLength(1);
+        expect((await dash(person, "GET", "/orgs")).body.organizations).toHaveLength(2);
+      } finally {
+        await allowPersonalOrgWrites();
+      }
+    });
+
+    it("logs why the write failed, with no name or email", async () => {
+      const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const person = await signUpDuringFailure();
+        await dash(person, "GET", "/orgs");
+        const lines = log.mock.calls.filter(([first]) => first === "personal organization not written");
+        expect(lines.length).toBeGreaterThan(0);
+        for (const line of lines) {
+          expect(line[2]).toContain("failed for this test");
+          expect(JSON.stringify(line)).not.toMatch(/Hook failure|@example\.test/);
+        }
+      } finally {
+        log.mockRestore();
+        await allowPersonalOrgWrites();
+      }
+    });
+
+    it("leaves one organization when requests restore it at once, and gives no access to anyone else's", async () => {
+      const other = await signUp();
+      let person: Person;
+      try {
+        person = await signUpDuringFailure();
+      } finally {
+        await allowPersonalOrgWrites();
+      }
+      const answers = await Promise.all(Array.from({ length: 6 }, () => dash(person, "GET", "/v1/me")));
+      expect(answers.map((a) => a.status)).toEqual(Array(6).fill(200));
+      expect(new Set(answers.map((a) => a.body.org_id)).size).toBe(1);
+      expect(await personalOrgs(answers[0].body.id)).toHaveLength(1);
+      expect(answers[0].body.org_id).not.toBe(other.org);
+      expect((await dashboard(person, "GET", "/v1/me", undefined, { "x-podster-org": other.org })).status).toBe(403);
+    });
+
+    it("keeps someone's working organization, and the database refuses a second personal one", async () => {
+      const person = await signUp();
+      const id = (await dash(person, "GET", "/v1/me")).body.id as string;
+      await dash(person, "GET", "/orgs");
+      await expect(e.DB.prepare("INSERT INTO organization (id, name, personal, created_by, created_at) VALUES (?, 'Second', 1, ?, 0)").bind(unique("org"), id).run()).rejects.toThrow(/UNIQUE/);
+      expect((await personalOrgs(id)).map((o) => o.id)).toEqual([person.org]);
+    });
+  });
+
   it("gives everyone a personal organization, and they can only act in their own", async () => {
     const [a, b] = [await signUp(), await signUp()];
     expect((await dash(a, "POST", "/orgs", { name: "Acme" })).body.role).toBe("admin");
@@ -221,7 +327,7 @@ describe("hosted MCP", () => {
 });
 
 describe("gateway refusals that don't rely on the API", () => {
-  const addMember = (org: string, who: Person) => whoAmI(who).then((id) => e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', 0)").bind(org, id).run());
+  const addMember = (org: string, who: Person) => whoAmI(who).then((id) => e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', ?)").bind(org, id, Date.now()).run());
   const whoAmI = async (who: Person) => (await (await dashboard(who, "GET", "/v1/me")).json<any>()).id as string;
 
   it("refuses a disconnected or unlinked agent before minting anything", async () => {
@@ -1602,7 +1708,7 @@ describe("sign-in and claim pages", () => {
   it("only offers organizations the person administers", async () => {
     const [a, member] = [await signUp(), await signUp()];
     const me = await (await dashboard(member, "GET", "/v1/me")).json<any>();
-    await e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', 0)").bind(a.org, me.id).run();
+    await e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', ?)").bind(a.org, me.id, Date.now()).run();
     const agent = await registerAgent();
     const page = () => call(`/claim?agent_id=${agent.pluginId}&code=${agent.userCode}`, { headers: { cookie: member.cookie } });
     const html = await (await page()).text();

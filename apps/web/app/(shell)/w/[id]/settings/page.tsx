@@ -1,9 +1,107 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ScreenPlaceholder } from "@/components/shell/screen-placeholder";
+import { AuthorLine } from "@/components/agent-content/agent-content";
+import { ReadFailure } from "@/components/shell/read-failure";
+import { Badge } from "@/components/ui/badge";
+import { gatewayQuery, getIdentity } from "@/lib/gateway/server";
 import { canManageWorkroom, loadWorkroom } from "@/lib/workroom";
+import { auditAction, pageAfter } from "../activity/model";
+import { Time } from "../activity/time";
+import { membersOf, type AuditRow } from "../team/model";
 
-export default async function WorkroomSettings({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  if (!canManageWorkroom(await loadWorkroom(id))) notFound();
-  return <ScreenPlaceholder title="Workroom settings" purpose="Visibility, roles, administrators, repository and release. Owner and admins only." />;
+const Section = ({ id, title, children }: { id: string; title: string; children: React.ReactNode }) => (
+  <section aria-labelledby={id} className="space-y-2">
+    <h2 id={id} className="text-lg font-medium">
+      {title}
+    </h2>
+    {children}
+  </section>
+);
+
+export default async function Settings({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  const [{ id }, query] = await Promise.all([params, searchParams]);
+  const room = await loadWorkroom(id);
+  // Owner and admins only. For anyone else this page isn't there; the API refuses the writes either way.
+  if (!canManageWorkroom(room)) notFound();
+  const after = pageAfter(query.after);
+  const [identity, audit] = await Promise.all([getIdentity(), gatewayQuery<{ audit: AuditRow[]; next_cursor: number | null }>(`/api/v1/workspaces/${id}/audit?after=${after}`)]);
+  const admins = membersOf(room).filter((member) => member.role === "admin");
+  const isOwner = identity.ok && identity.data.id === room.owner;
+  const now = Date.now();
+  return (
+    <section className="max-w-3xl space-y-6">
+      <h1 className="text-2xl font-semibold">Settings</h1>
+
+      <Section id="settings-general" title="General">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2">
+          <dt className="text-muted-foreground">Name</dt>
+          <dd className="break-words">{room.name}</dd>
+          <dt className="text-muted-foreground">Visibility</dt>
+          <dd>Private. Only people and agents added or invited here can open it.</dd>
+        </dl>
+        <p className="text-sm text-muted-foreground">Workrooms can't be renamed or archived yet.</p>
+      </Section>
+
+      <Section id="settings-admins" title="Administrators">
+        <p className="text-sm text-muted-foreground">Admins manage agents' access in this workroom. Only the owner appoints or removes them.</p>
+        {admins.length === 0 ? <p>This workroom has no admins besides its owner.</p> : null}
+        {admins.length > 0 ? (
+          <ul className="divide-y rounded-lg border">
+            {admins.map((admin) => (
+              <li key={admin.principal_id} className="p-3">
+                <AuthorLine author={{ name: identity.ok && admin.principal_id === identity.data.id ? "You" : admin.principal_id, kind: "person" }} />
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {identity.ok ? null : <ReadFailure />}
+        {isOwner ? (
+          <Link href={`/w/${id}/team`} prefetch={false} className="text-primary underline">
+            Appoint or remove admins on Team
+          </Link>
+        ) : null}
+      </Section>
+
+      <Section id="settings-services" title="Repository and release">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">Not connected</Badge>
+          <span className="text-sm text-muted-foreground">Podster doesn't connect repositories or deployments yet, so nothing in this workroom grants them.</span>
+        </div>
+      </Section>
+
+      <Section id="settings-history" title="Access history">
+        <p className="text-sm text-muted-foreground">Every change to who's here and what they can do. Nobody can edit it.</p>
+        {audit.ok ? (
+          <>
+            <ol className="divide-y rounded-lg border empty:hidden">
+              {audit.data.audit.map((row) => (
+                <li key={row.id} className="space-y-0.5 p-3 text-sm">
+                  <p className="break-words">
+                    <span className="break-all font-medium">{row.actor_id}</span> · {auditAction(row.action)} <span className="break-all">{row.target_id}</span>
+                  </p>
+                  <p className="text-muted-foreground">
+                    <Time at={row.created_at} now={now} />
+                  </p>
+                </li>
+              ))}
+            </ol>
+            <div className="flex flex-wrap gap-4">
+              {after > 0 ? (
+                <Link href={`/w/${id}/settings`} prefetch={false} className="text-primary underline">
+                  Back to the start
+                </Link>
+              ) : null}
+              {audit.data.next_cursor !== null ? (
+                <Link href={`/w/${id}/settings?after=${audit.data.next_cursor}`} prefetch={false} className="text-primary underline">
+                  Later changes
+                </Link>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <ReadFailure />
+        )}
+      </Section>
+    </section>
+  );
 }
