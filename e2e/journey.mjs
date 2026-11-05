@@ -427,7 +427,8 @@ async function acceptance() {
     refused(await personB.dash("GET", `${tasksOf}/${others.id}`), "task_not_found", "a task the agent isn't party to");
     refused(await personB.dash("GET", `/v1/workspaces/${room}`), "workspace_not_found", "reading the room itself");
     refused(await personB.dash("POST", `${tasksOf}/${theirs.id}/messages`, { body: "no" }), "workspace_not_found", "writing through oversight");
-    refused(await personA.dash("GET", `/v1/workspaces/${bRoom}/agents/${guest.id}/tasks`), "workspace_not_found", "someone outside that room");
+    refused(await personA.dash("GET", tasksOf), "not_allowed", "the room's owner, who has their own routes");
+    refused(await personB.dash("GET", `/v1/workspaces/${room}/agents/${lead.id}/tasks`), "workspace_not_found", "another organization's agent");
     let inList = false;
     for (let tries = 0; tries < 20 && !inList; tries++) {
       inList = (await personB.must("GET", "/v1/oversight/rooms")).rooms.some((r) => r.workspace_id === room && r.agent_id === guest.id);

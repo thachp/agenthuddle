@@ -82,8 +82,10 @@ fn in_org(identity: &Identity, org: &str) -> bool {
     identity.org == org || (identity.kind == "person" && identity.orgs.iter().any(|o| o == org))
 }
 
-/// What an admin of an agent's organization sees of that agent here: what a guest in its place would, which is only the
-/// tasks it's party to. It gives them no role in the room, and it ends when the agent is no longer in the room.
+/// What an admin of an invited organization sees of its agent here: what a guest in its place would, which is only the
+/// tasks it's party to. It gives them no role in the room, and it ends when the agent is no longer in the room. It's not
+/// for the room's own organization, whose people are in the room or were left out of it by its owner, and it's not for
+/// someone this room revoked.
 fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Option<Participant>> {
     if identity.kind != "person" {
         return Ok(None);
@@ -96,7 +98,15 @@ fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Optio
     let Some(org) = found.first().and_then(|member| text(&member["org_id"])) else {
         return Ok(None);
     };
-    if !identity.admin_orgs.contains(&org) {
+    if !identity.admin_orgs.contains(&org) || org == room_owner_org(sql)? {
+        return Ok(None);
+    }
+    let revoked = rows(
+        sql,
+        "SELECT principal_id FROM member WHERE principal_id = ? AND revoked_at IS NOT NULL",
+        vec![identity.id.as_str().into()],
+    )?;
+    if !revoked.is_empty() {
         return Ok(None);
     }
     Ok(Some(Participant {

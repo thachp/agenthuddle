@@ -2996,8 +2996,63 @@ describe("an organization's oversight of its own agent", () => {
     // It looks the same as a room that doesn't exist, and the unknown room stays empty.
     const unknown = await seen(overseer(), "ws_no_such_room", agent);
     expect(unknown.code).toBe("workspace_not_found");
+    const tables = await runInDurableObject(stub("ws_no_such_room"), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_master WHERE name NOT LIKE '_cf%' AND name NOT LIKE 'sqlite%'").one().n);
+    expect(tables).toBe(0);
     expect((await seen(overseer(), id, { id: "agt_not_here", org: BOB.org })).code).toBe("workspace_not_found");
     expect((await seen(overseer(), id, LEAD)).code).toBe("workspace_not_found");
+  });
+
+  it("isn't for the room's own organization, or someone the room revoked", async () => {
+    const { id, tasks } = await room();
+    const task = await offer(tasks, { assignee: LEAD.id, reviewer: REVIEWER.id });
+    // An admin of the room's organization the owner never added sees nothing of its agent.
+    const notAdded: Who = { id: "per_never_added", kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
+    expect((await seen(notAdded, id, LEAD)).code).toBe("workspace_not_found");
+    expect((await seen(notAdded, id, LEAD, `/${task.id}`)).code).toBe("workspace_not_found");
+    // One the owner removed is told they were removed.
+    const removed: Who = { id: "per_was_admin", kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: removed.id, kind: "person", org_id: "org_a", role: "admin" })).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${removed.id}`, {})).status).toBe(200);
+    expect((await seen(removed, id, LEAD)).code).toBe("access_revoked");
+    // A person the room revoked can't oversee an invited organization's agent either, even as its admin.
+    const agent = await newAgent();
+    expect((await admit(id, agent)).status).toBe(200);
+    const both: Who = { ...removed, orgs: ["org_a", BOB.org], adminOrgs: ["org_a", BOB.org] };
+    expect((await seen(both, id, agent)).code).toBe("access_revoked");
+    expect((await seen(overseer(), id, agent)).status).toBe(200);
+    // The owner has their own routes, and it isn't one of them.
+    expect((await seen(OWNER, id, LEAD)).code).toBe("not_allowed");
+  });
+
+  it("ends when the organization is revoked from the room", async () => {
+    const { id, agent, theirs } = await scene();
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/organizations/${BOB.org}`, {})).status).toBe(200);
+    for (const rest of ["", `/${theirs.id}`, `/${theirs.id}/messages`]) expect((await seen(overseer(), id, agent, rest)).code).toBe("workspace_not_found");
+  });
+
+  it("refuses task reads even while a stale listing still names the room", async () => {
+    const { id, agent } = await scene();
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${agent.id}`, {})).status).toBe(200);
+    await vi.waitFor(async () => expect(await (env as any).DB.prepare("SELECT 1 FROM membership_index WHERE workspace_id = ? AND principal_id = ? AND removed = 1").bind(id, agent.id).first()).toBeTruthy(), { timeout: 5000 });
+    // As if the room's write to the listing hadn't landed yet.
+    await (env as any).DB.prepare("UPDATE membership_index SET removed = 0 WHERE workspace_id = ? AND principal_id = ?").bind(id, agent.id).run();
+    const listed = (await api(overseer(), "GET", "/v1/oversight/rooms")).body.rooms.map((r: any) => r.agent_id);
+    expect(listed).toContain(agent.id);
+    expect((await seen(overseer(), id, agent)).code).toBe("workspace_not_found");
+  });
+
+  it("says when the list was cut", async () => {
+    const org = `org_${crypto.randomUUID().replaceAll("-", "").slice(0, 10)}`;
+    const insert = (n: number, from = 0) => (env as any).DB.batch(Array.from({ length: n }, (_, i) => (env as any).DB.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'guest', 'Room', 0, 1)").bind(`ws_${org}_${from + i}`, `agt_${org}`, org)));
+    await insert(200);
+    const read = () => api(orgAdmin(org), "GET", "/v1/oversight/rooms");
+    expect((await read()).body.truncated).toBe(false);
+    expect((await read()).body.rooms).toHaveLength(200);
+    await insert(1, 200);
+    expect((await read()).body.truncated).toBe(true);
+    expect((await read()).body.rooms).toHaveLength(200);
+    const many = Array.from({ length: 51 }, (_, i) => `org_many_${i}`);
+    expect((await api({ id: "per_many", kind: "person", org: many[0], orgs: many, adminOrgs: many }, "GET", "/v1/oversight/rooms")).body.truncated).toBe(true);
   });
 
   it("ends when the agent leaves the room", async () => {

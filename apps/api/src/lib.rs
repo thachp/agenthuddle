@@ -108,19 +108,21 @@ async fn list_oversight_rooms(
 ) -> std::result::Result<Response, ApiError> {
     let db = env.d1("DB")?;
     let mut rooms = Vec::new();
+    let mut truncated = caller.admin_orgs.len() > OVERSIGHT_ORGS;
     for org in caller.admin_orgs.iter().take(OVERSIGHT_ORGS) {
         let found = db
             .prepare("SELECT workspace_id, workspace_name, workspace_status, principal_id, org_id FROM membership_index WHERE org_id = ? AND removed = 0 AND principal_id LIKE 'agt\\_%' ESCAPE '\\' ORDER BY workspace_name LIMIT ?")
-            .bind(&[org.as_str().into(), OVERSIGHT_ROOMS.into()])?
+            .bind(&[org.as_str().into(), (OVERSIGHT_ROOMS + 1).into()])?
             .all()
             .await?
             .results::<Value>()?;
-        rooms.extend(found.into_iter().map(|row| json!({
+        truncated |= found.len() > OVERSIGHT_ROOMS as usize;
+        rooms.extend(found.into_iter().take(OVERSIGHT_ROOMS as usize).map(|row| json!({
             "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "status": row["workspace_status"],
             "agent_id": row["principal_id"], "org_id": row["org_id"],
         })));
     }
-    Ok(Response::from_json(&json!({ "rooms": rooms }))?)
+    Ok(Response::from_json(&json!({ "rooms": rooms, "truncated": truncated }))?)
 }
 
 async fn me(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiError> {
