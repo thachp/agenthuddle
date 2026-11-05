@@ -3,7 +3,7 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ed25519_dalek::{Signature, VerifyingKey};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const AUDIENCE: &str = "podster-api";
@@ -18,6 +18,13 @@ pub enum Kind {
     Person,
 }
 
+/// A fact from the gateway's directory: this person belongs to this organization.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct TargetMember {
+    pub person: String,
+    pub org: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Identity {
     pub sub: String,
@@ -30,6 +37,10 @@ pub struct Identity {
     /// The organizations this person administers, as recorded by the gateway.
     #[serde(default)]
     pub admin_orgs: Vec<String>,
+    /// Present when a person adds another person to a room and the directory confirms that person's membership.
+    /// The API can't read the directory, and this grants nothing by itself.
+    #[serde(default)]
+    pub target_member: Option<TargetMember>,
     /// An agent token this request spends, so it can't be replayed. Absent for callers without one, such as MCP.
     #[serde(default)]
     pub agent_jti: Option<String>,

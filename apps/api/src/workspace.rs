@@ -11,6 +11,7 @@ use crate::store::{
 use crate::{
     Caller as Verified, AGENT_ID_PREFIX, CALLER_HEADER, INTERNAL_ACCEPT_PATH, INTERNAL_INIT_PATH,
 };
+use podster_assertion::TargetMember;
 use podster_core::{
     apply_departure, decide, decide_create, Artifact, Command, NewTask, Observed, Task, TaskPatch,
     TaskStatus, MAX_MESSAGE_BYTES,
@@ -570,12 +571,14 @@ fn write_member(
 }
 
 /// Adds a participant from the room owner's organization. Other organizations join through an invitation.
-/// For an agent, `registered` holds its generation and organization from its Principal.
+/// For an agent, `registered` holds its generation and organization from its Principal. For a person, `target_member`
+/// is what the gateway's directory says about them, because someone outside the organization couldn't act on the role.
 fn handle_add_member(
     sql: &SqlStorage,
     caller: &Caller,
     body: &Value,
     registered: Option<(u64, String)>,
+    target_member: Option<TargetMember>,
     now: i64,
 ) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
@@ -612,6 +615,11 @@ fn handle_add_member(
             return Err(ApiError::invalid_argument());
         }
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
+    }
+    if kind == "person"
+        && !target_member.is_some_and(|target| target.person == principal && target.org == org)
+    {
+        return Err(ApiError::not_in_organization());
     }
     let existing = rows(sql, "SELECT kind, org_id, role, revoked_at, revocation_reason, owner_consented_at FROM member WHERE principal_id = ?", vec![principal.as_str().into()])?;
     let prior = existing.first();
@@ -1843,8 +1851,9 @@ impl Workspace {
                             .map_err(|_| ApiError::invalid_argument())?;
                     registered = Some((self.test_generation.borrow().unwrap_or(generation), org));
                 }
+                let target_member = identity.target_member.clone();
                 self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_add_member(sql, &who.caller, &body, registered, now)
+                    handle_add_member(sql, &who.caller, &body, registered, target_member, now)
                 })
             }
             (Method::Post, ["members", _, "clear-removal"]) => {

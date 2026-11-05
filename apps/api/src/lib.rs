@@ -31,6 +31,8 @@ pub struct Caller {
     pub orgs: Vec<String>,
     #[serde(default)]
     pub admin_orgs: Vec<String>,
+    #[serde(default)]
+    pub target_member: Option<podster_assertion::TargetMember>,
     pub gen: Option<u64>,
     #[serde(default)]
     pub workspace_id: String,
@@ -135,6 +137,7 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         org: identity.org,
         orgs: identity.orgs,
         admin_orgs: identity.admin_orgs,
+        target_member: identity.target_member,
         gen: identity.gen,
         workspace_id: String::new(),
     };

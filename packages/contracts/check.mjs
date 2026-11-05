@@ -32,5 +32,15 @@ for (const id of personOnly) {
 }
 for (const id of operations.keys()) if (!covered.has(id) && !personOnly.includes(id)) problems.push(`${id}: operation with no capability`);
 
+// The gateway's own dashboard routes for an organization's people. They never reach the API, so they aren't capabilities.
+const organizations = parse(readFileSync(new URL("organizations.yaml", import.meta.url), "utf8"));
+for (const [path, item] of Object.entries(organizations.paths)) {
+  if (!path.startsWith("/api/")) problems.push(`organizations.yaml: ${path} isn't a dashboard route`);
+  for (const method of ["get", "post", "put", "delete"]) {
+    const id = item[method]?.operationId;
+    if (id && operations.has(id)) problems.push(`organizations.yaml: ${id} is also an API operation`);
+  }
+}
+
 if (problems.length) { console.error(problems.join("\n")); process.exit(1); }
 console.log(`${Object.keys(capabilities).length} capabilities match ${operations.size} operations`);

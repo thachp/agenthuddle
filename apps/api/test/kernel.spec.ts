@@ -35,10 +35,13 @@ async function assertion(who: Who, opts: { iss?: string; aud?: string; ttl?: num
     .setIssuedAt(now).setExpirationTime(now + (opts.ttl ?? 60)).setJti(crypto.randomUUID()).sign(opts.signer ?? key);
 }
 
-async function api(who: Who, method: string, path: string, body?: unknown, opts: { key?: string | null; fail?: boolean; token?: string; rawAccess?: boolean } = {}) {
-  const headers: Record<string, string> = { "x-podster-assertion": opts.token ?? (await assertion(who)), "content-type": "application/json" };
-  const isCommand = method !== "GET";
+async function api(who: Who, method: string, path: string, body?: unknown, opts: { key?: string | null; fail?: boolean; token?: string; rawAccess?: boolean; notInDirectory?: boolean } = {}) {
   const b = body as any;
+  // The gateway states this when its directory says the person being added belongs to the organization.
+  const inDirectory = method === "POST" && /\/members$/.test(path) && b?.kind === "person" && !opts.notInDirectory;
+  const claims = inDirectory ? { target_member: { person: b.principal_id, org: b.org_id } } : {};
+  const headers: Record<string, string> = { "x-podster-assertion": opts.token ?? (await assertion(who, { claims })), "content-type": "application/json" };
+  const isCommand = method !== "GET";
   if (method === "POST" && /\/members$/.test(path) && b?.kind === "agent" && !opts.rawAccess && b.principal_id?.startsWith("agt_") && b.org_id === "org_a") await register({ id: b.principal_id, org: b.org_id }).catch(() => {});
   const access = isCommand && /^\/v1\/workspaces\/[^/]+\/(members|invitations)/.test(path) && !/\/(withdraw|owner-consent)$/.test(path);
   if (access && !(body && typeof body === "object" && "policy_version" in (body as object)) && !opts.rawAccess) {
@@ -283,6 +286,23 @@ describe("visibility", () => {
 });
 
 describe("access management", () => {
+  it("refuses to add a person the directory doesn't place in the organization", async () => {
+    const { id } = await room();
+    const person = { principal_id: "per_new", kind: "person", org_id: OWNER.org, role: "admin" };
+    const refused = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, person, { notInDirectory: true });
+    expect([refused.status, refused.code]).toEqual([400, "not_in_organization"]);
+    // A statement about someone else, or another organization, doesn't count.
+    for (const target_member of [{ person: "per_other", org: OWNER.org }, { person: "per_new", org: "org_other" }]) {
+      const token = await assertion(OWNER, { claims: { target_member } });
+      const wrong = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, person, { token });
+      expect([wrong.status, wrong.code]).toEqual([400, "not_in_organization"]);
+    }
+    const seen = await api(OWNER, "GET", `/v1/workspaces/${id}`);
+    expect(seen.body.members.map((m: any) => m.principal_id)).not.toContain("per_new");
+    const added = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, person);
+    expect(added.status).toBe(200);
+  });
+
   it("only the owner appoints admins, and agents can't be admins", async () => {
     const { id } = await room();
     const members = `/v1/workspaces/${id}/members`;

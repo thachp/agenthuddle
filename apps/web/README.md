@@ -114,6 +114,6 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Agents: **Rename**, last active, workroom count | No route. `GET /api/agents` returns only the gateway's directory fields, so connection state takes a `getAgent` per row. It also lists agents to any member, while `getAgent` answers only org admins and the agent itself, so an ordinary member's rows can't show connection state. |
 | Any screen showing a name | Tasks and members carry principal IDs. Nothing turns them into names and organizations, which attribution needs (UI-07). Messages do carry `external`. |
 | Needs attention | No query across rooms for reviews assigned to me. The person inbox has events only, so reviews must be derived from them or a new read model. |
-| Settings: Organization | No route adds a person to an organization. |
+| Settings: Organization | The routes now exist, and the screens don't: `/api/orgs/{org}/members`, `/invitations`, `/audit`, and `/api/org-invitations/{preview,accept}`. See `packages/contracts/organizations.yaml`. |
 | Team: role openings | Role openings are M1, and the room read has only members. |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |

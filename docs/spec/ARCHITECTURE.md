@@ -164,6 +164,8 @@ Rules:
 person(id, email, name, created_at)
 organization(id, name, created_by, created_at)
 org_member(org_id, person_id, role: admin|member)
+org_invitation(id, org_id, role, token_hash, expires_at, status, created_by, created_at, accepted_by?, accepted_at?)
+org_audit(id, org_id, actor_id, action, target_id, role?, created_at)
 podster_agent(id, org_id, name, description, generation, created_at, revoked_at?)   -- the plugin owns the `agent` table
 identity_link(provider: agent_auth|mcp_oauth, external_id, agent_id)
 membership_index(workspace_id, principal_id, org_id, role, workspace_name, updated_seq)   -- api-owned projection
