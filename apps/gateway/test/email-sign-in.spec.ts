@@ -31,7 +31,9 @@ function stack(overrides: object = {}) {
     await Promise.all(pending);
     return res;
   };
-  return { sent, fetch, ask };
+  /** What a browser sends for the landing page's form. */
+  const use = (path: string, host = APP) => fetch(host + path, { headers: { "sec-fetch-site": "same-origin" } });
+  return { sent, fetch, ask, use };
 }
 const answer = async (res: Response) => [res.status, await res.text()];
 const tokenIn = (mail: Sent) => {
@@ -58,7 +60,7 @@ async function githubPerson(email: string) {
 async function signIn(s: ReturnType<typeof stack>, email: string) {
   expect((await s.ask(email)).status).toBe(200);
   const { token } = tokenIn(s.sent.at(-1)!);
-  return s.fetch(APP + verifyPath(token));
+  return s.use(verifyPath(token));
 }
 
 describe("email sign-in", () => {
@@ -74,7 +76,7 @@ describe("email sign-in", () => {
         const s = stack(overrides);
         const before = await pendingLinks();
         expect((await s.ask(unique("off"))).status).toBe(404);
-        expect((await s.fetch(APP + verifyPath("anything"))).status).toBe(404);
+        expect((await s.use(verifyPath("anything"))).status).toBe(404);
         expect(s.sent).toEqual([]);
         expect(await pendingLinks()).toBe(before);
       });
@@ -92,9 +94,9 @@ describe("email sign-in", () => {
       expect(s.sent).toEqual([]);
       await s.ask(unique("gw"));
       const { token } = tokenIn(s.sent[0]);
-      expect((await s.fetch(GATEWAY + verifyPath(token))).status).toBe(404);
+      expect((await s.use(verifyPath(token), GATEWAY)).status).toBe(404);
       // That refusal didn't spend it.
-      expect((await s.fetch(APP + verifyPath(token))).status).toBe(302);
+      expect((await s.use(verifyPath(token))).status).toBe(302);
     });
 
     it("has its binding and switch only in env.staging", () => {
@@ -187,7 +189,7 @@ describe("email sign-in", () => {
       expect(link.searchParams.get("next")).toBe("/w/ws_1?tab=team");
       expect(mail.html).toContain(link.search.replace(/&/g, "&amp;"));
 
-      const res = await s.fetch(APP + verifyPath(token, "/w/ws_1?tab=team"));
+      const res = await s.use(verifyPath(token, "/w/ws_1?tab=team"));
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toBe(`${APP}/w/ws_1?tab=team`);
       const [cookie] = sessionCookies(res);
@@ -211,7 +213,7 @@ describe("email sign-in", () => {
       const first = await signIn(s, email);
       expect(sessionCookies(first)).toHaveLength(1);
       const { token } = tokenIn(s.sent.at(-1)!);
-      const again = await s.fetch(APP + verifyPath(token));
+      const again = await s.use(verifyPath(token));
       expect(again.status).toBe(302);
       expect(again.headers.get("location")).toContain("/sign-in?error=");
       expect(sessionCookies(again)).toEqual([]);
@@ -227,7 +229,7 @@ describe("email sign-in", () => {
       const row = await e.DB.prepare(`SELECT id, expiresAt FROM verification WHERE identifier LIKE 'magic-link:%' ORDER BY createdAt DESC LIMIT 1`).first<{ id: string; expiresAt: string }>();
       expect(new Date(row!.expiresAt).getTime() - started).toBeLessThanOrEqual(5 * 60 * 1000 + 2000);
       await e.DB.prepare(`UPDATE verification SET expiresAt = ? WHERE id = ?`).bind(new Date(Date.now() - 1000).toISOString(), row!.id).run();
-      const res = await s.fetch(APP + verifyPath(token));
+      const res = await s.use(verifyPath(token));
       expect(res.headers.get("location")).toContain("/sign-in?error=");
       expect(sessionCookies(res)).toEqual([]);
       expect(await userCalled(email)).toBeNull();
@@ -235,14 +237,14 @@ describe("email sign-in", () => {
 
     it("refuses a made-up token, and a request with no callback, which would answer with the session's token", async () => {
       const s = stack();
-      const made = await s.fetch(APP + verifyPath("made-up"));
+      const made = await s.use(verifyPath("made-up"));
       expect(made.headers.get("location")).toContain("/sign-in?error=");
       await s.ask(unique("nocb"));
       const { token } = tokenIn(s.sent[0]);
-      const bare = await s.fetch(`${APP}/api/auth/magic-link/verify?token=${token}`);
+      const bare = await s.fetch(`${APP}/api/auth/magic-link/verify?token=${token}`, { headers: { "sec-fetch-site": "same-origin" } });
       expect(bare.status).toBe(404);
       expect(await bare.text()).not.toContain("session");
-      expect((await s.fetch(APP + verifyPath(token))).status).toBe(302);
+      expect((await s.use(verifyPath(token))).status).toBe(302);
     });
 
     it("can't be sent to another site, by asking or by editing the link", async () => {
@@ -252,7 +254,7 @@ describe("email sign-in", () => {
         expect(tokenIn(s.sent.at(-1)!).link.searchParams.get("next"), String(next)).toBe("/");
       }
       const { token } = tokenIn(s.sent.at(-1)!);
-      const edited = await s.fetch(APP + verifyPath(token, "https://evil.test/"));
+      const edited = await s.use(verifyPath(token, "https://evil.test/"));
       expect(edited.status).toBe(403);
       expect(sessionCookies(edited)).toEqual([]);
     });
@@ -264,9 +266,120 @@ describe("email sign-in", () => {
       await vi.waitFor(() => expect(s.sent).toHaveLength(1));
       expect(s.sent[0].text).not.toContain("chosen");
       const { token } = tokenIn(s.sent[0]);
-      await s.fetch(APP + verifyPath(token));
+      await s.use(verifyPath(token));
       expect((await userCalled(email))!.name).toBe("");
     });
+  });
+
+  describe("a link used from outside the landing page", () => {
+    const fromBrowser: [string, Record<string, string>][] = [
+      ["another site", { "sec-fetch-site": "cross-site" }],
+      ["a sibling host", { "sec-fetch-site": "same-site" }],
+      ["a typed or pasted address", { "sec-fetch-site": "none" }],
+      ["a client that says nothing", {}],
+    ];
+    for (const [name, headers] of fromBrowser) {
+      it(`starts no session and stays unspent, from ${name}`, async () => {
+        const s = stack();
+        const email = unique("csrf");
+        await s.ask(email);
+        const { token } = tokenIn(s.sent[0]);
+        const res = await s.fetch(APP + verifyPath(token), { headers });
+        expect(res.status).toBe(302);
+        expect(res.headers.get("location")).toBe(`${APP}/sign-in?error=1`);
+        expect(res.headers.getSetCookie()).toEqual([]);
+        expect(await userCalled(email)).toBeNull();
+        expect(sessionCookies(await s.use(verifyPath(token)))).toHaveLength(1);
+      });
+    }
+  });
+
+  it("makes one session from one link, even from requests at the same moment", async () => {
+    const s = stack();
+    const email = unique("race");
+    await s.ask(email);
+    const { token } = tokenIn(s.sent[0]);
+    const results = await Promise.all(Array.from({ length: 8 }, () => s.use(verifyPath(token))));
+    expect(results.filter((res) => sessionCookies(res).length > 0)).toHaveLength(1);
+    const user = await userCalled(email);
+    expect((await e.DB.prepare(`SELECT COUNT(*) AS n FROM session WHERE userId = ?`).bind(user!.id).first<{ n: number }>())!.n).toBe(1);
+  });
+
+  it("answers before the send finishes, so its timing says nothing about the address", async () => {
+    let release = () => {};
+    const held = new Promise<void>((done) => (release = done));
+    const sent: string[] = [];
+    const s = stack({ EMAIL: { send: async (message: Sent) => { sent.push(message.to); await held; } } });
+    const email = unique("slow");
+    const res = await s.fetch(`${APP}/api/auth/sign-in/magic-link`, { method: "POST", headers: { origin: APP, "content-type": "application/json" }, body: JSON.stringify({ email }) });
+    expect(res.status).toBe(200);
+    release();
+  });
+
+  it("links with a real anchor, escaped", async () => {
+    const s = stack();
+    await s.ask(unique("anchor"), { next: '/w?a=1&b="><script>' });
+    const { link } = tokenIn(s.sent[0]);
+    const escaped = link.toString().replace(/&/g, "&amp;");
+    expect(s.sent[0].html).toContain(`<a href="${escaped}">`);
+    expect(s.sent[0].html).not.toContain("<script>");
+  });
+
+  describe("a person whose email was never proven", () => {
+    /** Only password sign-up, on a local host, can leave such a row. The plugin would strip it before any session starts. */
+    async function unverified(email: string) {
+      const id = crypto.randomUUID().replaceAll("-", "");
+      const now = new Date().toISOString();
+      await e.DB.batch([
+        e.DB.prepare(`INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt) VALUES (?, 'Unverified', ?, 0, ?, ?)`).bind(id, email, now, now),
+        e.DB.prepare(`INSERT INTO account (id, accountId, providerId, userId, password, createdAt, updatedAt) VALUES (?, ?, 'credential', ?, 'hash', ?, ?)`).bind(crypto.randomUUID(), id, id, now, now),
+        e.DB.prepare(`INSERT INTO session (id, expiresAt, token, createdAt, updatedAt, userId) VALUES (?, ?, ?, ?, ?, ?)`).bind(crypto.randomUUID(), new Date(Date.now() + 60_000).toISOString(), crypto.randomUUID(), now, now, id),
+      ]);
+      return id;
+    }
+    const untouched = async (id: string) => {
+      expect((await e.DB.prepare(`SELECT COUNT(*) AS n FROM account WHERE userId = ?`).bind(id).first<{ n: number }>())!.n).toBe(1);
+      expect((await e.DB.prepare(`SELECT COUNT(*) AS n FROM session WHERE userId = ?`).bind(id).first<{ n: number }>())!.n).toBe(1);
+      expect((await e.DB.prepare(`SELECT emailVerified FROM "user" WHERE id = ?`).bind(id).first<{ emailVerified: number }>())!.emailVerified).toBeFalsy();
+    };
+
+    it("gets the notice with no account row too", async () => {
+      const s = stack();
+      const email = unique("unverified-bare");
+      const now = new Date().toISOString();
+      await e.DB.prepare(`INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt) VALUES (?, 'Bare', ?, 0, ?, ?)`).bind(crypto.randomUUID().replaceAll("-", ""), email, now, now).run();
+      await s.ask(email);
+      expect(s.sent[0].text).not.toContain("token=");
+    });
+
+    it("gets the notice, with no link", async () => {
+      const s = stack();
+      const email = unique("unverified");
+      const id = await unverified(email);
+      await s.ask(email);
+      expect(s.sent[0].text).not.toContain("token=");
+      await untouched(id);
+    });
+
+    it("loses nothing to a link asked for before the row appeared", async () => {
+      const s = stack();
+      const email = unique("unverified-race");
+      await s.ask(email);
+      const { token } = tokenIn(s.sent[0]);
+      const id = await unverified(email);
+      const res = await s.use(verifyPath(token));
+      expect(res.headers.get("location")).toContain("/sign-in?error=");
+      expect(sessionCookies(res)).toEqual([]);
+      await untouched(id);
+    });
+  });
+
+  it("keeps the last check at the session itself, for any person who signs in another way", async () => {
+    const { createAuth } = await import("../src/index");
+    const id = await githubPerson(unique("hook"));
+    const before = (createAuth(e).options as any).databaseHooks.session.create.before;
+    expect(await before({ userId: id }, { path: "/magic-link/verify" })).toBe(false);
+    expect(await before({ userId: id }, { path: "/callback/github" })).toBeUndefined();
   });
 
   describe("a new person", () => {
@@ -314,7 +427,7 @@ describe("email sign-in", () => {
       await s.ask(email);
       const { token } = tokenIn(s.sent[0]);
       const id = await githubPerson(email);
-      const res = await s.fetch(APP + verifyPath(token));
+      const res = await s.use(verifyPath(token));
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toContain("/sign-in?error=");
       expect(sessionCookies(res)).toEqual([]);
@@ -345,15 +458,43 @@ describe("email sign-in", () => {
       expect(s.sent).toHaveLength(1);
     });
 
-    it("sends five a day per address", async () => {
-      const email = unique("addr-day");
-      const name = `email-link-address:${await hash(email)}`;
-      for (const [day, sends] of [[4, 1], [5, 0]] as const) {
-        const s = live();
-        await seed(name, 0, day);
-        expect((await s.ask(email, { ip: "198.51.100.3" })).status).toBe(200);
-        expect(s.sent, `after ${day}`).toHaveLength(sends);
+    it("sends five an hour per address, so using that up shuts nobody out for longer", async () => {
+      const email = unique("addr-hour");
+      const hourStart = Math.floor(Date.now() / 3_600_000) * 3_600_000 + 1000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(hourStart);
+      try {
+        const inHour = `email-link-address:${await hash(email)}:${Math.floor(hourStart / 3_600_000)}`;
+        for (const [count, sends] of [[5, 0], [4, 1]] as const) {
+          const s = live();
+          await seed(inHour, 0, count);
+          expect((await s.ask(email, { ip: "198.51.100.3" })).status).toBe(200);
+          expect(s.sent, `after ${count}`).toHaveLength(sends);
+        }
+        clock.mockReturnValue(hourStart + 3_600_000);
+        const later = live();
+        await later.ask(email, { ip: "198.51.100.3" });
+        expect(later.sent).toHaveLength(1);
+      } finally {
+        clock.mockRestore();
       }
+    });
+
+    it("counts one mailbox once, however its address is written, and mails what was typed", async () => {
+      const id = `dots${crypto.randomUUID().slice(0, 8)}`;
+      for (const [first, second] of [[`${id}+a@example.com`, `${id}+b@example.com`], [`${id}.x@gmail.com`, `${id}x+tag@googlemail.com`]]) {
+        const s = live();
+        await s.ask(first, { ip: "198.51.100.8" });
+        await s.ask(second, { ip: "198.51.100.8" });
+        expect(s.sent.map((mail) => mail.to)).toEqual([first]);
+      }
+      await clear("email-link-client:198.51.100.8");
+    });
+
+    it("counts an IPv6 client by its /48, not its /64", async () => {
+      const s = live();
+      const statuses = [];
+      for (let i = 0; i < 6; i++) statuses.push((await s.ask(unique("v6"), { ip: `2001:db8:a:${i}::1` })).status);
+      expect(statuses).toEqual([200, 200, 200, 200, 200, 429]);
     });
 
     it("takes five a minute per client, whatever the address", async () => {

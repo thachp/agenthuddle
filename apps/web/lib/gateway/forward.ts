@@ -23,7 +23,7 @@ export const readCookie = (header: string | null, name: string) =>
  */
 export function forwardedHeaders(incoming: Headers) {
   const headers = new Headers();
-  for (const name of ["cookie", "content-type", "accept", "idempotency-key", "origin", "cf-connecting-ip", "user-agent"]) {
+  for (const name of ["cookie", "content-type", "accept", "idempotency-key", "origin", "sec-fetch-site", "cf-connecting-ip", "user-agent"]) {
     const value = incoming.get(name);
     if (value) headers.set(name, value);
   }

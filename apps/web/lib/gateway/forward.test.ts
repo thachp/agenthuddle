@@ -38,6 +38,10 @@ describe("isForwardable", () => {
 });
 
 describe("forwardedHeaders", () => {
+  it("passes on where a request came from, which using a sign-in link depends on", () => {
+    expect(forwardedHeaders(new Headers({ "sec-fetch-site": "cross-site" })).get("sec-fetch-site")).toBe("cross-site");
+  });
+
   const incoming = new Headers({ cookie: "better-auth.session_token=s; podster-org=org_1", origin: APP, "content-type": "application/json", "idempotency-key": "k", "cf-connecting-ip": "203.0.113.9", "x-podster-org": "org_chosen_by_client", "x-podster-assertion": "forged", "x-podster-caller": "{}", authorization: "Bearer x", "x-forwarded-for": "1.1.1.1" });
   const headers = forwardedHeaders(incoming);
 

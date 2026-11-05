@@ -145,6 +145,12 @@ Before the first deploy, check these in the Cloudflare dashboard, under Compute,
 - `podster.dev` is onboarded on this account. Until a domain is onboarded, mail only reaches verified addresses.
 - Whether Email preview is on. It's on by default for new sending domains, and keeps messages about seven days, including sign-in links that will have expired.
 
+And check that nobody has an unproven email. A link refuses such a row, so that person would only get the notice. From `apps/gateway`, this should say 0:
+
+```bash
+npx wrangler d1 execute podster-gateway-staging --remote --env staging --command "SELECT COUNT(*) AS unproven FROM \"user\" WHERE emailVerified = 0"
+```
+
 Deploy the gateway before the web Worker, because the web Worker's `SIGN_IN_PROVIDERS` is what shows the option, and asking answers 404 until the gateway has it. Then check on staging, with a mailbox you own:
 
 1. A link arrives, from `sign-in@podster.dev`, and doesn't land in spam.
@@ -152,6 +158,9 @@ Deploy the gateway before the web Worker, because the web Worker's `SIGN_IN_PROV
 3. The same link used again goes back to the sign-in page with an error.
 4. An address that signs in with GitHub gets the notice, and no link.
 5. `POST https://gateway-staging.podster.dev/api/auth/sign-in/magic-link` answers 404.
+6. Pasting `https://app-staging.podster.dev/api/auth/magic-link/verify?token=<a fresh token>&callbackURL=%2Fattention` into the address bar goes to the sign-in page with an error and starts no session. The same token then still works from its emailed link's button. This also shows a real browser sends `same-origin` from that form, so try Safari too.
+7. Asking twice from one browser and then from another network shows the per-client limit counts real addresses, which means `cf-connecting-ip` survived the service binding. If every client shares one count, it didn't.
+8. Clicking one link's button in several tabs at once starts one session, which shows a token stays single-use on real D1.
 
 To turn it off, remove `email` from the web Worker's `SIGN_IN_PROVIDERS` and `ENABLE_EMAIL_SIGNIN` from the gateway's vars, then deploy both.
 

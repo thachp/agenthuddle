@@ -10,7 +10,7 @@ import { calculateJwkThumbprint, decodeJwt, type JWK } from "jose";
 import { handleOrgPeople, retryDepartures } from "./organizations";
 import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
-import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, sendSignInLink, signsInOtherwise, type EmailBinding } from "./email-sign-in";
+import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, handleEmailVerify, linkMustNotReach, linkTokenHash, sendSignInLink, type EmailBinding } from "./email-sign-in";
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
 
 export interface Env {
@@ -320,7 +320,7 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
         create: {
           // Checked here as well as before sending, because someone can sign up with GitHub while a link is on its way.
           // A link never signs in to a person who has another way in: see docs/adr/0004-email-sign-in.md.
-          before: async (session, ctx) => (ctx?.path === EMAIL_VERIFY_ROUTE && (await signsInOtherwise(env, "u.id", session.userId)) ? false : undefined),
+          before: async (session, ctx) => (ctx?.path === EMAIL_VERIFY_ROUTE && (await linkMustNotReach(env, "u.id", session.userId)) ? false : undefined),
         },
         update: {
           // Refreshing moves a session's expiry a full term out, and any route that reads a session can do it. A test
@@ -344,7 +344,7 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
     },
     plugins: [
       // Always loaded, because no route reaches it until appHandler's checks pass.
-      magicLink({ expiresIn: EMAIL_LINK_SECONDS, storeToken: "hashed", sendMagicLink: ({ email, url, token }) => sendSignInLink(env, email, token, new URL(url).searchParams.get("callbackURL")) as Promise<void> }),
+      magicLink({ expiresIn: EMAIL_LINK_SECONDS, storeToken: { type: "custom-hasher", hash: linkTokenHash }, sendMagicLink: ({ email, url, token }) => sendSignInLink(env, email, token, new URL(url).searchParams.get("callbackURL")) as Promise<void> }),
       agentAuth({
         providerName: "podster",
         providerDescription: "Podster coordinates work between independently run agents.",
@@ -1027,8 +1027,7 @@ const appHandler = {
       if (route === EMAIL_LINK_ROUTE || route === EMAIL_VERIFY_ROUTE) {
         if (!onApplicationHost || !emailSignInEnabled(publicEnv)) return denied("not_found", 404);
         if (route === EMAIL_LINK_ROUTE) return request.method === "POST" ? handleEmailLink(request, env, ctx) : denied("not_found", 404);
-        // Without a callback, the plugin would answer with the session's token in its body.
-        return request.method === "GET" && url.searchParams.get("callbackURL") ? createAuth(env).handler(request) : denied("not_found", 404);
+        return handleEmailVerify(request, env);
       }
       if (!isPublicAuthRoute(route)) return denied("not_found", 404);
       if (publicEnv.APP_URL && !onApplicationHost && STARTS_SESSION.test(route)) return denied("not_found", 404);

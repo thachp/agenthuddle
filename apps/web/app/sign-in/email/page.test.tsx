@@ -15,6 +15,7 @@ describe("the page an emailed link lands on", () => {
     expect(field(container, "callbackURL")).toBe("/w/ws_1");
     expect(field(container, "errorCallbackURL")).toBe("/sign-in?next=%2Fw%2Fws_1&error=1");
     expect(screen.getByRole("button", { name: "Continue to Podster" })).toBeTruthy();
+    expect(screen.getByText(/whoever asked for it/)).toBeTruthy();
   });
 
   it("won't carry a link to another site", async () => {
