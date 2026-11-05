@@ -27,48 +27,40 @@ export function wakeHost(wake: Wake) {
   }
 }
 
-/** The event an agent's inbox keeps when it leaves a room. Everything else from that room has been cleared by then. */
-const REMOVAL_NOTICE = "member.revoked";
-
-/**
- * Where the newest events should start. A read returns the oldest after a point, and has no way to ask for the newest, so
- * this works back from the cursor and the unread count. Expiry can leave it short, so its caller keeps reading.
- */
-export const newestAfter = (page: Pick<InboxPage, "acked_seq" | "unread" | "events">, pageSize: number) => Math.max(page.events.at(-1)?.seq ?? 0, page.acked_seq + page.unread - pageSize);
-
+/** A row of `GET /v1/agents/{agent}/rooms`, from the listing read model. It shows rooms, and decides nothing. */
 export type AgentRoom = {
-  id: string;
-  /** Absent when the viewer can't read this room, which an agent's owner needn't be able to. */
-  name: string | null;
-  /** Absent unless the room itself said. Managed by the room, so it's never editable here. */
-  role: string | null;
-  /** `listed`: the room's own member list has it. `inbox`: known only from inbox events, so it may have gone since. */
-  source: "listed" | "inbox";
+  workspace_id: string;
+  /** For a room it has left, the name it had then. */
+  workspace_name: string;
+  role: string;
+  /** Null for a room it has left, which says nothing about that room since. */
+  status: "active" | "archived" | null;
+  left: boolean;
 };
 
-export type ReadableRoom = { id: string; name: string; role: string | null; lists_agent: boolean };
+/** A row of `GET /v1/oversight/rooms`. One per agent, and it can include a room whose task reads refuse. */
+export type OversightRoom = { workspace_id: string; workspace_name: string; status: string | null; agent_id: string; org_id: string };
 
-/**
- * No route lists an agent's workrooms, so this joins the two things a person can read: the rooms they belong to, and the
- * rooms in the agent's inbox. Only a room's member list counts as proof of membership. Leaving a room clears its events
- * from the inbox and leaves only the notice, and only current participants get events after that, so any other event means
- * the agent has been in that room since it last left.
- */
-export function roomsOf(readable: ReadableRoom[], events: InboxEvent[]): AgentRoom[] {
-  const rooms: AgentRoom[] = readable.filter((room) => room.lists_agent).map(({ id, name, role }) => ({ id, name, role, source: "listed" as const }));
-  const latest = new Map<string, InboxEvent>();
-  for (const event of events) if ((latest.get(event.workspace_id)?.seq ?? -1) < event.seq) latest.set(event.workspace_id, event);
-  for (const [id, event] of latest) {
-    if (event.type === REMOVAL_NOTICE || rooms.some((room) => room.id === id)) continue;
-    rooms.push({ id, name: readable.find((room) => room.id === id)?.name ?? null, role: null, source: "inbox" });
-  }
-  return rooms;
-}
+export const oversightPath = (workspace: string, agent: string) => `/oversight/${encodeURIComponent(workspace)}/${encodeURIComponent(agent)}`;
 
 const STATUS_EVENT = "podster:agent-status";
 
 /** The Sheet just read this from the server, so the row behind it can show the same thing without asking again. */
 export const announceStatus = (id: string, status: ConnectionStatus) => window.dispatchEvent(new CustomEvent(STATUS_EVENT, { detail: { id, status } }));
+
+const WITHDRAWN_EVENT = "podster:agent-withdrawn";
+
+/** The listing catches up a moment later, so a confirmed withdrawal tells the rows behind the Sheet now. */
+export const announceWithdrawn = (agent: string, workspace: string) => window.dispatchEvent(new CustomEvent(WITHDRAWN_EVENT, { detail: { agent, workspace } }));
+
+export function onWithdrawn(listener: (agent: string, workspace: string) => void) {
+  const handle = (event: Event) => {
+    const { agent, workspace } = (event as CustomEvent<{ agent: string; workspace: string }>).detail;
+    listener(agent, workspace);
+  };
+  window.addEventListener(WITHDRAWN_EVENT, handle);
+  return () => window.removeEventListener(WITHDRAWN_EVENT, handle);
+}
 
 export function onStatusAnnounced(listener: (id: string, status: ConnectionStatus) => void) {
   const handle = (event: Event) => {

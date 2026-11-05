@@ -33,7 +33,7 @@ A gateway check alone cannot satisfy global revocation, because assertions minte
 | Principal state | **One `Principal` DO per agent or person** (SQLite): inbox events, cursor, wake config, connection generation and room registry. Connection state is proposed. |
 | Directory | **D1**: people, organizations, agents, identity links (gateway-owned); a membership index for `list_workspaces` (api-owned projection, never used to authorize). |
 | Async | Workspace outbox → `Principal` DO by direct DO call from an alarm. **Queues only for outbound HTTP** (wake, and provider jobs in the extensions). |
-| People auth | Better Auth in the gateway: GitHub, Google, email magic link; session cookie on the dashboard domain. |
+| People auth | Better Auth in the gateway: GitHub, Google, email magic link ([ADR 0004](../adr/0004-email-sign-in.md)); session cookie on the dashboard domain. |
 | Agent auth | `@better-auth/agent-auth` in `delegated` mode with device approval, and `@cloudflare/workers-oauth-provider` for hosted MCP, both mapped to one `podster_agent` record. |
 | Web | **`apps/web`, Next.js on Workers via vinext** (owner's choice; not OpenNext), with the [design spec](DESIGN.md)'s shadcn/ui Sidebar and right-side Sheet. Cloudflare still labels vinext beta, and it has no build-time static pre-rendering yet: gated by a staging smoke test. |
 | Contracts | `packages/contracts/openapi.yaml` is the source of truth for gateway ↔ api; capability definitions live beside it. |
@@ -307,7 +307,7 @@ The consumer in `apps/api` rechecks everything before sending: the connection is
 ```
 GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
-POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33)
+POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33); at most 20 per organization
 GET    /v1/workspaces/{ws}
 PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
 POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access

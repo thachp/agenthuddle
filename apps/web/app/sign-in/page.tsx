@@ -17,12 +17,13 @@ export default async function SignIn({ searchParams }: { searchParams: Promise<{
     .map((id) => id.trim())
     .filter((id) => id in PROVIDER_NAMES)
     .map((id) => ({ id, name: PROVIDER_NAMES[id] }));
+  const email = SIGN_IN_PROVIDERS.split(",").some((id) => id.trim() === "email");
   return (
     <main className="mx-auto max-w-sm space-y-4 p-8">
       <h1 className="text-2xl font-semibold">Sign in to Podster</h1>
       {/* Fixed text, so a link can't put its own words on this page. */}
       {error !== undefined ? <p role="alert">That sign-in didn't finish. Please try again, using the account you first signed in with, which needs a verified email.</p> : null}
-      <SignInForm next={destination} providers={providers} password={LOCAL_PASSWORD_SIGNIN === "true"} />
+      <SignInForm next={destination} providers={providers} email={email} password={LOCAL_PASSWORD_SIGNIN === "true"} />
     </main>
   );
 }

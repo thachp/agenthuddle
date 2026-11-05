@@ -1,5 +1,5 @@
 /** The session paths a browser may use through this host. Agent Auth, capabilities and MCP stay on the gateway's host. */
-const PERSON_AUTH = [/^\/api\/auth\/sign-in\/(social|email)$/, /^\/api\/auth\/sign-up\/email$/, /^\/api\/auth\/sign-out$/, /^\/api\/auth\/callback\/[\w-]+$/, /^\/api\/auth\/get-session$/, /^\/api\/auth\/error$/];
+const PERSON_AUTH = [/^\/api\/auth\/sign-in\/(social|email|magic-link)$/, /^\/api\/auth\/magic-link\/verify$/, /^\/api\/auth\/sign-up\/email$/, /^\/api\/auth\/sign-out$/, /^\/api\/auth\/callback\/[\w-]+$/, /^\/api\/auth\/get-session$/, /^\/api\/auth\/error$/];
 const DASHBOARD = [/^\/api\/v1\//, /^\/api\/orgs$/, /^\/api\/orgs\/org_[\w-]+\/(members|invitations)(\/[\w-]+)?$/, /^\/api\/org-invitations\/(preview|accept)$/, /^\/api\/agents(\/|$)/, /^\/api\/consent$/, /^\/api\/claim$/];
 
 export function isForwardable(path: string) {
@@ -23,7 +23,7 @@ export const readCookie = (header: string | null, name: string) =>
  */
 export function forwardedHeaders(incoming: Headers) {
   const headers = new Headers();
-  for (const name of ["cookie", "content-type", "accept", "idempotency-key", "origin", "cf-connecting-ip", "user-agent"]) {
+  for (const name of ["cookie", "content-type", "accept", "idempotency-key", "origin", "sec-fetch-site", "cf-connecting-ip", "user-agent"]) {
     const value = incoming.get(name);
     if (value) headers.set(name, value);
   }
@@ -37,9 +37,13 @@ export async function forwardToGateway(request: Request, gateway: Pick<Fetcher, 
   const url = new URL(request.url);
   if (!isForwardable(url.pathname)) return Response.json({ error: { code: "not_found", message: "not_found" } }, { status: 404 });
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
+  const sent = forwardedHeaders(request.headers);
+  // Only here, where the gateway checks a sign-in link came from its landing page. A referrer can hold anything otherwise.
+  const referer = request.headers.get("referer");
+  if (url.pathname === "/api/auth/magic-link/verify" && referer) sent.set("referer", referer);
   const response = await gateway.fetch(new URL(url.pathname + url.search, appUrl).toString(), {
     method: request.method,
-    headers: forwardedHeaders(request.headers),
+    headers: sent,
     body: hasBody ? await request.arrayBuffer() : undefined,
     redirect: "manual",
   });
