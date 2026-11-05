@@ -26,7 +26,8 @@ export type SheetApi<T> = {
   /**
    * Runs a command for this Sheet's own target. Never optimistic: on success the Sheet reloads and shows the server's state.
    * `explain` words a failure for this command, and a lost response or server error reaches it as code "unknown". After one of
-   * those the Sheet reads the target again too, because the command may have gone through.
+   * those the Sheet reads the target again too, because the command may have gone through. It stays unsure until a command
+   * succeeds, so a later refusal gets the Sheet's own "still can't tell" wording rather than `explain`.
    */
   run: <R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string) => Promise<GatewayResult<R> | null>;
   /** Reads the target again, for a command that doesn't go through `run`. */
@@ -62,6 +63,23 @@ function hrefWith(pathname: string, search: URLSearchParams, param: string, targ
   else next.set(param, target);
   const query = next.toString();
   return query ? `${pathname}?${query}` : pathname;
+}
+
+const FAILURE_COPY: Record<string, string> = {
+  unknown: "We can't tell whether this saved. Refresh before trying again.",
+  still_unknown: "We still can't tell whether your earlier change saved. Refresh to see where things stand.",
+  signed_out: "You've been signed out, so this didn't save. Refresh to sign in again.",
+  signed_out_unknown: "You've been signed out, so we still can't tell whether your earlier change saved. Refresh to sign in again.",
+  rate_limited: "Too many requests, so this didn't save. Wait a minute and try again.",
+  workspace_archived: "This workroom is archived, so nothing new can happen in it. Nothing changed. Its owner or an admin can bring it back.",
+  refused: "That didn't save, and nothing changed. You may no longer be allowed to do this.",
+};
+
+function failureKind(status: number, code: string, earlierUnknown: boolean) {
+  if (status === 401) return earlierUnknown ? "signed_out_unknown" : "signed_out";
+  if (earlierUnknown) return "still_unknown";
+  if (status === 429) return "rate_limited";
+  return code === "workspace_archived" ? code : "refused";
 }
 
 const launcherKey = (param: string, target: string) => `${param}:${target}`;
@@ -174,6 +192,8 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   const [heldFailure, setHeldFailure] = useState(false);
   const [failedCode, setFailedCode] = useState<string | null>(null);
   const [failedText, setFailedText] = useState<string | null>(null);
+  // An earlier attempt here may have committed. Authority and rate limits answer before a replay, so a refusal can't rule that out.
+  const outcomeUnknown = useRef(false);
   const [asking, setAsking] = useState(false);
   const [closing, setClosing] = useState(false);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -300,7 +320,10 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     try {
       const result = await command(binding);
       // The list behind may have changed, whatever became of this Sheet.
-      if (result.ok) onRefreshList();
+      if (result.ok) {
+        outcomeUnknown.current = false;
+        onRefreshList();
+      } else if (result.status >= 500) outcomeUnknown.current = true;
       if (!alive.current) return result;
       if (result.ok) {
         setDirty(false);
@@ -308,15 +331,19 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
       } else {
         if (result.code === "version_conflict") setConflict(true);
         else {
-          const code = result.status >= 500 ? "unknown" : result.code;
-          setFailedCode(code);
-          setFailedText(explain?.(code, result.status) ?? null);
-          if (code === "unknown") rereadAfterUnknown();
+          const kind = result.status >= 500 ? "unknown" : failureKind(result.status, result.code, outcomeUnknown.current);
+          setFailedCode(kind);
+          // A command's own explanation says why it was refused, which can't speak for an earlier attempt that may have gone through.
+          const answersForEarlier = kind === "still_unknown" || kind === "signed_out_unknown";
+          setFailedText(answersForEarlier ? null : (explain?.(kind === "unknown" ? "unknown" : result.code, result.status) ?? null));
+          // Not after being signed out, when a read would only send the person to sign in, with their draft still here.
+          if (kind === "unknown" || kind === "still_unknown") rereadAfterUnknown();
         }
         if (selectedRef.current !== target) setHeldFailure(true);
       }
       return result;
     } catch {
+      outcomeUnknown.current = true;
       if (alive.current) {
         setFailedCode("unknown");
         setFailedText(explain?.("unknown", 0) ?? null);
@@ -394,7 +421,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
             ) : null}
             {failedCode && !failedText ? (
               <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-                {failedCode === "unknown" ? "We can't tell whether this saved. Refresh before trying again." : "That didn't save, and nothing changed. You may no longer be allowed to do this."}
+                {FAILURE_COPY[failedCode] ?? FAILURE_COPY.refused}
               </p>
             ) : null}
             {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, setSending, saving: inFlight, run, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}

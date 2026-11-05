@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { taskPath } from "./task-actions";
 import { FIELD_CLASS } from "./task-bits";
-import { changeProblem, LIMITS, tooLong } from "./task-model";
+import { changeProblem, LIMITS, messageStillUnknown, tooLong } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
 
 /**
@@ -48,9 +48,11 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
     try {
       const result = await clientCommand(taskPath(data, "messages"), { body }, { idempotencyKey: key });
       if (!result.ok) {
-        setProblem(changeProblem("message", result.code, result.status));
+        // A refusal says nothing about an earlier attempt, so that attempt's key stays. A new one could post twice.
+        const earlier = unknownOutcomes.current.has(body);
+        setProblem(earlier && result.status < 500 ? messageStillUnknown(result.status) : changeProblem("message", result.code, result.status));
         if (result.status >= 500) unknown();
-        else unknownOutcomes.current.delete(body);
+        else if (earlier && result.status !== 401) refresh();
         return;
       }
       unknownOutcomes.current.delete(body);

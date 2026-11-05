@@ -254,6 +254,9 @@ const REFUSED: Record<TaskChange, Record<string, string>> = {
   },
 };
 
+/** A refusal can't rule out an earlier attempt: access and rate limits answer before the replay lookup. Its key is still good, so posting again is still safe. */
+export const messageStillUnknown = (status: number) => (status === 401 ? "You've been signed out, so we still can't tell whether this posted. Copy your text, then sign in again." : "We still can't tell whether this posted. Check the thread above, and post it again without changing it: that can't post it twice.");
+
 /** What to say when a change fails. A refusal says why, except that anything about access stays general. */
 export function changeProblem(change: TaskChange, code: string, status: number) {
   if (code === "unknown" || status >= 500) return LOST[change];
@@ -289,6 +292,7 @@ export function createProblem(status: number, code: string) {
   if (code === "self_sign_off") return `${nothingChanged} The reviewer and the assignee can't be the same.`;
   if (code === "invalid_argument") return `${nothingChanged} Check the fields. The title and instructions are required, and the reviewer and assignee must still be in this workroom.`;
   if (code === "limit_exceeded") return `${nothingChanged} This workroom has too many open tasks. Finish or cancel some first.`;
+  if (code === "workspace_archived") return `${nothingChanged} This workroom is archived, so nothing new can happen in it. Its owner or an admin can bring it back.`;
   // Stays general, because anything more may say something about access.
   return `${nothingChanged} You may no longer be allowed to do this.`;
 }

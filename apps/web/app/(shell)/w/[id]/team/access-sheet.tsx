@@ -16,7 +16,7 @@ type Connection = { id: string; status: string; generation: number };
 type Ended = "revoked" | "withdrawn" | "disconnected";
 
 /** What the viewer may see of this agent's access. The API said so on this read; nothing here is remembered from the list. */
-type Access = { member: Member; policyVersion: number | null; connection: Connection | null; ended: Ended | null };
+type Access = { member: Member; policyVersion: number | null; archived: boolean; connection: Connection | null; ended: Ended | null };
 
 const CONNECTION_LABELS: Record<string, string> = { active: "Connected", disconnecting: "Disconnecting", disconnected: "Disconnected" };
 
@@ -59,7 +59,7 @@ export function AccessSheet({ roomId, roomName, viewer, names, orgNames }: Props
         // result this Sheet remembers can't show to someone who has since lost their authority.
         if (policyVersion === null && !connection.ok) return null;
         if (!member) return ended.current?.target === target ? { ...ended.current.last, connection: connection.ok ? connection.data : ended.current.last.connection, ended: ended.current.how } : null;
-        return { member, policyVersion, connection: connection.ok ? connection.data : null, ended: null };
+        return { member, policyVersion, archived: room.data.status === "archived", connection: connection.ok ? connection.data : null, ended: null };
       }}
       title={(access) => label(access.member.principal_id)}
       description={() => `Workroom: ${plainName(roomName)}`}
@@ -74,6 +74,11 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
   const { data, run, saving, dirty, setDirty, close } = api;
   const { member, policyVersion, connection } = data;
   const canManage = policyVersion !== null && data.ended === null;
+  // An archived room can still lose a participant, but its roles can't change.
+  const canEdit = canManage && !data.archived;
+  // One key per intent, so sending the same thing again after an unknown outcome gets the stored answer.
+  const saveKey = useRef(crypto.randomUUID());
+  const revokeKey = useRef(crypto.randomUUID());
   const isOwner = connection !== null && data.ended === null;
   const [role, setRole] = useState<"member" | "guest">(member.role === "guest" ? "guest" : "member");
   // The room's read doesn't say whether a guest may create tasks, so the default leaves it as the server has it.
@@ -84,6 +89,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
 
   const edit = (apply: () => void) => {
     apply();
+    saveKey.current = crypto.randomUUID();
     setDirty(true);
   };
 
@@ -101,7 +107,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
   };
 
   const save = async () => {
-    const result = await run(({ target, version }) => clientCommand(`${memberPath}/${encodeURIComponent(target)}/role`, { policy_version: version, role, ...(role === "guest" && guestCreate !== "keep" ? { guest_can_create: guestCreate === "allow" } : {}) }));
+    const result = await run(({ target, version }) => clientCommand(`${memberPath}/${encodeURIComponent(target)}/role`, { policy_version: version, role, ...(role === "guest" && guestCreate !== "keep" ? { guest_can_create: guestCreate === "allow" } : {}) }, { idempotencyKey: saveKey.current }));
     if (!result?.ok) showTop();
   };
 
@@ -146,7 +152,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
           <h3 id="access-local" className="font-medium">
             Workroom access
           </h3>
-          {canManage ? (
+          {canEdit ? (
             <fieldset disabled={saving} className="space-y-3">
               <label className="block space-y-1 text-sm">
                 <span>Role in this workroom</span>
@@ -167,7 +173,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
               ) : null}
             </fieldset>
           ) : (
-            <p className="text-sm text-muted-foreground">Read-only for you. Only this workroom's owner and appointed admins can change it.</p>
+            <p className="text-sm text-muted-foreground">{data.archived ? "Read-only while this workroom is archived." : "Read-only for you. Only this workroom's owner and appointed admins can change it."}</p>
           )}
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm">
             <span>Members and access</span>
@@ -190,7 +196,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
         </Button>
       ) : (
         <footer className="space-y-3 border-t pt-4">
-          {canManage ? <p className="text-sm text-muted-foreground">Saving workroom access doesn't grant GitHub, merge or deployment access.</p> : null}
+          {canEdit ? <p className="text-sm text-muted-foreground">Saving workroom access doesn't grant GitHub, merge or deployment access.</p> : null}
           <div className="flex flex-wrap gap-2">
             {canManage ? (
               <ConfirmAction
@@ -202,7 +208,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
                 description="It loses access to this workroom straight away. Its tasks follow the departure rules, and its submitted work and history stay."
                 confirm="Revoke access"
                 focusAfter={statusRef}
-                action={() => end("revoked", (target, version) => clientCommand(`${memberPath}/${encodeURIComponent(target)}`, { policy_version: version }, { method: "DELETE" }))}
+                action={() => end("revoked", (target, version) => clientCommand(`${memberPath}/${encodeURIComponent(target)}`, { policy_version: version }, { method: "DELETE", idempotencyKey: revokeKey.current }))}
               />
             ) : null}
             {isOwner ? (
@@ -232,7 +238,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
             <Button type="button" variant="outline" className={MOBILE_TARGET} disabled={saving} onClick={close}>
               Cancel
             </Button>
-            {canManage ? (
+            {canEdit ? (
               <Button
                 type="button"
                 className={MOBILE_TARGET}

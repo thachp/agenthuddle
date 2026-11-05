@@ -450,6 +450,36 @@ describe("posting to the thread", () => {
     await waitFor(() => expect(currentUrl()).not.toContain("task="));
   });
 
+  it("after a lost post, a refusal keeps the key and doesn't say it didn't post", async () => {
+    const user = userEvent.setup();
+    const answers = [() => json(502, {}), () => refused(429, "rate_limited"), () => json(200, { id: "msg_2" })];
+    answer = (_, method) => (method === "POST" ? answers.shift()!() : json(200, detail()));
+    await openDiscussion(user);
+    await user.type(screen.getByLabelText("Post a message"), "On it");
+    await user.click(screen.getByRole("button", { name: "Post message" }));
+    await screen.findByText(/can't tell whether this posted/);
+    await user.click(screen.getByRole("button", { name: "Post message" }));
+    expect(await screen.findByText(/still can't tell whether this posted/)).toBeInTheDocument();
+    expect(screen.queryByText(/didn't post/)).toBeNull();
+    expect(screen.getByLabelText("Post a message")).toHaveValue("On it");
+    await user.click(screen.getByRole("button", { name: "Post message" }));
+    await screen.findByText("Posted.");
+    expect(new Set(commands().map((call) => call.key)).size).toBe(1);
+  });
+
+  it("a first refusal of a post is explained, and doesn't hold its key for next time", async () => {
+    const user = userEvent.setup();
+    const answers = [() => refused(429, "rate_limited"), () => json(200, { id: "msg_2" })];
+    answer = (_, method) => (method === "POST" ? answers.shift()!() : json(200, detail()));
+    await openDiscussion(user);
+    await user.type(screen.getByLabelText("Post a message"), "On it");
+    await user.click(screen.getByRole("button", { name: "Post message" }));
+    expect(await screen.findByText(/That didn't post. Too many requests/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Post message" }));
+    await screen.findByText("Posted.");
+    expect(commands()[0].key).not.toBe(commands()[1].key);
+  });
+
   it("uses a new key for the same words posted a second time on purpose", async () => {
     const user = userEvent.setup();
     answer = (_, method) => (method === "POST" ? json(200, { id: "msg_2" }) : json(200, detail()));
@@ -648,6 +678,24 @@ describe("editing a task", () => {
     expect(screen.getByText("Awaiting acceptance")).toBeInTheDocument();
     // The controls started afresh for the new version, and focus still finds its way back.
     expect(screen.getByRole("button", { name: "Edit task" })).toHaveFocus();
+  });
+
+  it("after a lost save, a refusal doesn't say nothing changed, and the draft stays guarded", async () => {
+    const user = userEvent.setup();
+    const answers = [() => json(502, {}), () => refused(403, "not_allowed")];
+    answer = (_, method) => (method === "POST" ? answers.shift()!() : accepted());
+    await open();
+    await user.click(screen.getByRole("button", { name: "Edit task" }));
+    await user.type(screen.getByLabelText("Title"), " now");
+    await user.click(screen.getByRole("button", { name: "Save edit" }));
+    await screen.findByText(/can't tell whether your edit saved/);
+    await user.click(screen.getByRole("button", { name: "Save edit" }));
+    expect(await screen.findByText(/We still can't tell whether your earlier change saved/)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing changed/)).toBeNull();
+    expect(screen.queryByText(/Only this task's requester/)).toBeNull();
+    expect(commands()[0].key).toBe(commands()[1].key);
+    expect(screen.getByLabelText("Title")).toHaveValue("Design the API now");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
   });
 
   it("gives back only the person's own words if the task can no longer be edited", async () => {

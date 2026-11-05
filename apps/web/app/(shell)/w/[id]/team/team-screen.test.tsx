@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routerCalls, setUrl } from "@/test/next-navigation";
@@ -149,6 +149,117 @@ describe("Team, as the owner", () => {
     render(<TeamScreen {...props} invitations={null} />);
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
     expect(screen.queryByText(/No invitations are pending/)).not.toBeInTheDocument();
+  });
+});
+
+describe("Team, in an archived room", () => {
+  const archived = { ...props, archived: true };
+
+  it("offers only what still works: taking people and links out", () => {
+    render(<TeamScreen {...archived} />);
+    expect(screen.queryByRole("button", { name: "Make admin" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Add from your organization" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create invitation" })).not.toBeInTheDocument();
+    expect(within(row("per_m")).getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+    expect(within(row("ivt_1")).getByRole("button", { name: "Withdraw" })).toBeInTheDocument();
+  });
+
+  it("marks pending invitations as paused", () => {
+    render(<TeamScreen {...archived} />);
+    expect(within(row("ivt_1")).getByText("Paused")).toBeInTheDocument();
+  });
+
+  it("explains workspace_archived if a stale page tries anyway", async () => {
+    reply = { status: 409, body: { error: { code: "workspace_archived" } } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(within(row("per_m")).getByRole("button", { name: "Make admin" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Make admin" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("This workroom is archived");
+  });
+});
+
+describe("Team, when a response is lost", () => {
+  const keys: (string | null)[] = [];
+
+  beforeEach(() => {
+    keys.length = 0;
+    let failing = true;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      keys.push(new Headers(init.headers).get("idempotency-key"));
+      sent.push({ method: init.method ?? "GET", url, body: JSON.parse(String(init.body)) });
+      if (failing) {
+        failing = false;
+        throw new TypeError("fetch failed");
+      }
+      return new Response(JSON.stringify(reply.body), { status: reply.status });
+    });
+  });
+
+  it("says the outcome is unknown, then repeats the same request under the same key", async () => {
+    render(<TeamScreen {...props} />);
+    await userEvent.click(within(row("ivt_1")).getByRole("button", { name: "Withdraw" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Withdraw invitation" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("We can't tell whether this saved.");
+    expect(routerCalls.refresh).toBe(0);
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(/Invitation withdrawn/)).toBeInTheDocument();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+    expect(sent[1]).toEqual(sent[0]);
+    expect(routerCalls.refresh).toBe(1);
+  });
+
+  it("a stored answer has no token, so it says the link can't be shown and doesn't pretend", async () => {
+    reply = { status: 200, body: { id: "ivt_2", role: "guest", expires_at: 1 } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    const alert = await screen.findByText(/Withdraw ivt_2 below and create another/);
+    expect(alert).toHaveFocus();
+    expect(screen.queryByText(/Copy its link now/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/shown only once/)).not.toBeInTheDocument();
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it("clicking Create invitation again repeats the attempt rather than making a second one", async () => {
+    reply = { status: 200, body: { id: "ivt_2", role: "guest", expires_at: 1 } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
+    await screen.findByRole("button", { name: "Try again" });
+    await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
+    await screen.findByText(/Withdraw ivt_2 below/);
+    expect(keys[1]).toBe(keys[0]);
+    expect(sent[1]).toEqual(sent[0]);
+  });
+
+  it("clears the warning once that invitation is withdrawn", async () => {
+    reply = { status: 200, body: { id: "ivt_1", role: "guest", expires_at: 1 } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    await screen.findByText(/Withdraw ivt_1 below/);
+    await userEvent.click(within(row("ivt_1")).getByRole("button", { name: "Withdraw" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Withdraw invitation" }));
+    await screen.findByText(/Invitation withdrawn/);
+    expect(screen.queryByText(/Withdraw ivt_1 below/)).not.toBeInTheDocument();
+  });
+
+  it("a new command gets a new key", async () => {
+    render(<TeamScreen {...props} />);
+    await userEvent.click(within(row("ivt_1")).getByRole("button", { name: "Withdraw" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Withdraw invitation" }));
+    await screen.findByRole("button", { name: "Try again" });
+    await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
+    await waitFor(() => expect(keys).toHaveLength(2));
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+});
+
+describe("Team's invitation list", () => {
+  it("shows status, and says when the list is cut short", () => {
+    render(<TeamScreen {...props} invitations={{ pending: props.invitations!.pending, complete: false }} />);
+    expect(within(row("ivt_1")).getByText("Pending")).toBeInTheDocument();
+    expect(screen.getByText(/more pending invitations than we can list/)).toBeInTheDocument();
   });
 });
 

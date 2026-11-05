@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { asConflict, briefAuthor, canCreateTask, changedSince, changeProblem, crossRoomTarget, draftOf, flagged, flagText, isArchivedRoom, isChosenName, nameOf, newRequesterChoices, newReviewerChoices, ownWords, textNameOf, parseCrossRoomTarget, rebaseDraft, reoffers, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, taskPatch, toLocalInput, tooLong, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
+import { messageStillUnknown, asConflict, briefAuthor, createProblem, canCreateTask, changedSince, changeProblem, crossRoomTarget, draftOf, flagged, flagText, isArchivedRoom, isChosenName, nameOf, newRequesterChoices, newReviewerChoices, ownWords, textNameOf, parseCrossRoomTarget, rebaseDraft, reoffers, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, taskPatch, toLocalInput, tooLong, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
 
 const task = (over: Partial<Task> = {}): Task => ({ id: "tsk_1", title: "T", instructions: "I", acceptance_criteria: null, requester: "per_r", assignee: "agt_a", reviewer: "per_v", status: "submitted", version: 3, due_at: null, follow_up_of: null, submission_no: 2, needs_attention: false, ...over });
 
@@ -253,5 +253,17 @@ describe("briefAuthor after an edit", () => {
   it("doesn't credit someone who only offered it", () => {
     const history = [event({}), event({ type: "task.offered", prior_status: "open", from: { id: "per_e", org: "o" } })];
     expect(briefAuthor({ task: task(), history }).id).toBe("per_r");
+  });
+});
+
+describe("createProblem", () => {
+  it("explains an archived room", () => expect(createProblem(409, "workspace_archived")).toMatch(/nothing changed\. This workroom is archived/));
+});
+
+describe("a post whose earlier attempt has an unknown outcome", () => {
+  it("doesn't say it didn't post", () => {
+    expect(messageStillUnknown(429)).toMatch(/still can't tell whether this posted/);
+    expect(messageStillUnknown(403)).not.toMatch(/didn't post/);
+    expect(messageStillUnknown(401)).toMatch(/signed out, so we still can't tell/);
   });
 });

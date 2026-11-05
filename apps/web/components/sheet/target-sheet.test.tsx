@@ -470,6 +470,14 @@ describe("TargetSheet", () => {
       expect(alert).not.toHaveTextContent("nothing changed");
     });
 
+    it("says a session that ended isn't a refusal", async () => {
+      setUrl("/agents?agent=a");
+      render(<Screen command={async () => ({ ok: false, status: 401, code: "sign_in_required" })} />);
+      await title("Agent A");
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("You've been signed out, so this didn't save.");
+    });
+
     it("says a denied save didn't happen", async () => {
       setUrl("/agents?agent=a");
       render(<Screen command={async () => ({ ok: false, status: 403, code: "not_allowed" })} />);
@@ -667,5 +675,96 @@ describe("TargetSheet", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByText("Discard unsaved changes?")).toBeNull();
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  describe("after an unknown outcome", () => {
+    const leave = () => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    function Commands({ results, load = resolved }: { results: GatewayResult<unknown>[]; load?: typeof resolved }) {
+      const queue = [...results];
+      return (
+        <TargetSheet<Item> param="agent" load={load} title={(data) => data.title} description={() => "Room"}>
+          {({ run, setDirty }) => (
+            <>
+              <Button onClick={() => setDirty(true)}>Type</Button>
+              <Button onClick={() => setDirty(false)}>Drop</Button>
+              <Button onClick={() => void run(async () => queue.shift()!, (code, status) => `Explained ${code} ${status}`)}>Do it</Button>
+            </>
+          )}
+        </TargetSheet>
+      );
+    }
+    const LOST: GatewayResult<unknown> = { ok: false, status: 502, code: "bad_gateway" };
+    const DENIED: GatewayResult<unknown> = { ok: false, status: 403, code: "not_allowed" };
+    const doIt = () => userEvent.click(screen.getByRole("button", { name: "Do it" }));
+
+    it("won't let a later refusal's explanation speak for the earlier attempt, and reads again", async () => {
+      setUrl("/a?agent=a");
+      const load = vi.fn(resolved);
+      render(<Commands results={[LOST, DENIED]} load={load} />);
+      await screen.findByRole("button", { name: "Do it" });
+      await doIt();
+      expect(await screen.findByText("Explained unknown 502")).toBeInTheDocument();
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+      await doIt();
+      expect(await screen.findByText(/We still can't tell whether your earlier change saved/)).toBeInTheDocument();
+      expect(screen.queryByText(/Explained not_allowed/)).toBeNull();
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(3));
+    });
+
+    it("doesn't read again when signed out, which would send the person away from their draft", async () => {
+      setUrl("/a?agent=a");
+      const load = vi.fn(resolved);
+      render(<Commands results={[LOST, { ok: false, status: 401, code: "sign_in_required" }]} load={load} />);
+      await screen.findByRole("button", { name: "Do it" });
+      await doIt();
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+      await doIt();
+      expect(await screen.findByText(/You've been signed out, so we still can't tell/)).toBeInTheDocument();
+      expect(load).toHaveBeenCalledTimes(2);
+    });
+
+    it("goes back to explaining refusals once a command succeeds", async () => {
+      setUrl("/a?agent=a");
+      render(<Commands results={[LOST, { ok: true, data: {} }, DENIED]} />);
+      await screen.findByRole("button", { name: "Do it" });
+      await doIt();
+      await screen.findByText("Explained unknown 502");
+      await doIt();
+      await waitFor(() => expect(screen.queryByText("Explained unknown 502")).toBeNull());
+      await doIt();
+      expect(await screen.findByText("Explained not_allowed 403")).toBeInTheDocument();
+    });
+
+    it("explains a first refusal, a limit and an archived room with the command's own words", async () => {
+      setUrl("/a?agent=a");
+      render(<Commands results={[{ ok: false, status: 429, code: "rate_limited" }, { ok: false, status: 409, code: "workspace_archived" }]} />);
+      await screen.findByRole("button", { name: "Do it" });
+      await doIt();
+      expect(await screen.findByText("Explained rate_limited 429")).toBeInTheDocument();
+      await doIt();
+      expect(await screen.findByText("Explained workspace_archived 409")).toBeInTheDocument();
+    });
+
+    it("still guards a draft, and stays unsure after the draft is dropped", async () => {
+      setUrl("/a?agent=a");
+      render(<Commands results={[LOST, DENIED]} />);
+      await userEvent.click(await screen.findByRole("button", { name: "Type" }));
+      await doIt();
+      await screen.findByText("Explained unknown 502");
+      await waitFor(() => expect(leave()).toBe(true));
+      await userEvent.keyboard("{Escape}");
+      expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+      await userEvent.click(screen.getByRole("button", { name: "Drop" }));
+      expect(screen.queryByText("Explained unknown 502")).toBeNull();
+      await waitFor(() => expect(leave()).toBe(false));
+      await doIt();
+      expect(await screen.findByText(/We still can't tell whether your earlier change saved/)).toBeInTheDocument();
+    });
   });
 });
