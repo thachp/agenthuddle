@@ -340,7 +340,7 @@ describe("access management", () => {
     // A second add in the same membership is still refused.
     const again = await api(OWNER, "POST", members, { principal_id: ADMIN.id, kind: "person", org_id: "org_a", role: "member" }, { token: await assertion(OWNER, { claims: { target_member } }) });
     expect(again.code).toBe("already_member");
-    // Owner authority ends the same way, under decision 35. This comes last, because the room records it as a departure.
+    // Owner authority ends the same way, under decision 35.
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`, undefined, { token: await rejoined(OWNER) })).code).toBe("workspace_not_found");
   });
 
@@ -2661,15 +2661,16 @@ describe("transferring and recovering a room's ownership", () => {
   const ownerRow = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT owner_person_id, owner_since, owner_left_at, policy_version FROM workspace").one() as any);
   const memberRow = (id: string, who: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT role, revoked_at, added_at FROM member WHERE principal_id = ?", who).toArray()[0] as any);
   const eventsOf = (id: string, type: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM event WHERE type = ?", type).one().n as number);
-  /** Waits for delivery to finish, then returns what's waiting and how many events there are, so a rollback can be compared. */
-  const settled = async (id: string) => {
-    const read = () => runInDurableObject(stub(id), (_: any, state: any) => ({
-      events: state.storage.sql.exec("SELECT count(*) AS n FROM event").one().n as number,
-      outbox: state.storage.sql.exec("SELECT count(*) AS n FROM outbox").one().n as number,
-      index: state.storage.sql.exec("SELECT count(*) AS n FROM index_outbox").one().n as number,
-    }));
-    await vi.waitFor(async () => expect(await read()).toMatchObject({ outbox: 0, index: 0 }), { timeout: 5000 });
-    return read();
+  const counts = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => ({
+    events: state.storage.sql.exec("SELECT count(*) AS n FROM event").one().n as number,
+    outbox: state.storage.sql.exec("SELECT count(*) AS n FROM outbox").one().n as number,
+    index: state.storage.sql.exec("SELECT count(*) AS n FROM index_outbox").one().n as number,
+  }));
+  /** Lets delivery finish, then holds the event outbox, so what a command leaves behind stays there to be read. */
+  const settledAndHeld = async (id: string) => {
+    await vi.waitFor(async () => expect(await counts(id)).toMatchObject({ outbox: 0, index: 0 }), { timeout: 5000 });
+    await holdOutbox(id);
+    return counts(id);
   };
   const recover = (id: string, admin: Who, to: string, expected_owner: string, opts: { key?: string; since?: Record<string, number>; fail?: boolean } = {}) =>
     naming(admin, to, opts.since).then((token) => api(admin, "POST", `${path(id)}/owner/recover`, { to, expected_owner }, { token, key: opts.key, fail: opts.fail }));
@@ -2748,15 +2749,18 @@ describe("transferring and recovering a room's ownership", () => {
     it("leaves nothing behind when it fails partway, and a retry gets one answer", async () => {
       const { id, founder, helper } = await scene();
       const body = { to: helper.id, policy_version: await version(id, founder) };
-      const before = await settled(id);
+      const before = await settledAndHeld(id);
       const failed = await api(founder, "POST", `${path(id)}/owner/transfer`, body, { token: await naming(founder, helper.id), fail: true, key: "transfer-key" });
+      // Read straight away, before an alarm could deliver anything the failure left behind.
+      expect(await counts(id)).toEqual(before);
       expect(failed.status).toBe(500);
       expect((await ownerRow(id)).owner_person_id).toBe(founder.id);
       expect((await memberRow(id, helper.id)).role).toBe("admin");
       expect(await memberRow(id, founder.id)).toBeUndefined();
       expect(await log(id, founder, "owner.transferred")).toEqual([]);
-      expect(await settled(id)).toEqual(before);
       expect((await api(founder, "POST", `${path(id)}/owner/transfer`, body, { token: await naming(founder, helper.id), key: "transfer-key" })).status).toBe(200);
+      // The same read does see what a command that succeeds leaves.
+      expect((await counts(id)).outbox).toBeGreaterThan(0);
       const again = await api(founder, "POST", `${path(id)}/owner/transfer`, body, { token: await naming(founder, helper.id), key: "transfer-key" });
       expect(again.body.owner).toBe(helper.id);
       expect(await log(id, helper, "owner.transferred")).toHaveLength(1);
@@ -2924,15 +2928,18 @@ describe("transferring and recovering a room's ownership", () => {
       const boss = human(["org_a"]);
       const leftAt = Date.now();
       await departs(id, founder.id, leftAt);
-      const before = await settled(id);
-      expect((await recover(id, boss, helper.id, founder.id, { fail: true, key: "fails" })).status).toBe(500);
+      const before = await settledAndHeld(id);
+      const failed = await recover(id, boss, helper.id, founder.id, { fail: true, key: "fails" });
+      // Read straight away, before an alarm could deliver anything the failure left behind.
+      expect(await counts(id)).toEqual(before);
+      expect(failed.status).toBe(500);
       const row = await ownerRow(id);
       expect(row.owner_person_id).toBe(founder.id);
       expect(row.owner_left_at).toBe(leftAt);
       expect((await memberRow(id, helper.id)).role).toBe("admin");
       expect(await log(id, helper, "owner.recovered")).toEqual([]);
-      expect(await settled(id)).toEqual(before);
       expect((await recover(id, boss, helper.id, founder.id, { key: "fails" })).status).toBe(200);
+      expect((await counts(id)).outbox).toBeGreaterThan(0);
     });
 
     it("records refusals, and doesn't move the room's version when it refuses", async () => {
@@ -2948,37 +2955,32 @@ describe("transferring and recovering a room's ownership", () => {
     });
   });
 
-  describe("a room that never heard its owner left", () => {
-    const back = (who: Who, since: number) => assertion(who, { claims: { org_since: { org_a: since } } });
-
-    it("notices from the owner's own newer membership, once, on a read, so an organization admin can recover it", async () => {
+  describe("an owner who rejoined before the room heard they left", () => {
+    it("is refused, and being refused changes nothing, until the departure reaches the room", async () => {
       const { id, founder, helper } = await scene();
       const boss = human(["org_a"]);
       const rejoined = Date.now();
-      expect(await ownerless(boss, id)).toEqual([]);
+      const token = () => assertion(founder, { claims: { org_since: { org_a: rejoined } } });
+      const state = async () => ({ row: await ownerRow(id), audit: (await api(helper, "GET", `${path(id)}/audit`)).body.audit.length, events: (await counts(id)).events });
+      const before = await state();
+      expect((await api(founder, "GET", path(id), undefined, { token: await token() })).code).toBe("workspace_not_found");
+      expect((await api(founder, "POST", `${path(id)}/tasks`, { title: "x", instructions: "y", acceptance_criteria: "z" }, { token: await token() })).code).toBe("workspace_not_found");
+      expect(await state()).toEqual(before);
       expect((await recover(id, boss, helper.id, founder.id)).code).toBe("workspace_not_found");
-      for (let i = 0; i < 2; i++) expect((await api(founder, "GET", path(id), undefined, { token: await back(founder, rejoined) })).code).toBe("workspace_not_found");
-      expect((await ownerRow(id)).owner_left_at).toBe(rejoined);
-      const entries = await log(id, helper, "owner.left_organization");
-      expect(entries.map((e) => [e.actor_id, e.actor_kind])).toEqual([["system", "system"]]);
-      expect(JSON.parse(entries[0].new_json)).toEqual({ org_id: "org_a", left_at: rejoined, noticed: true });
-      // The real departure arriving after that adds nothing.
-      await departs(id, founder.id, rejoined - 1000);
-      expect(await log(id, helper, "owner.left_organization")).toHaveLength(1);
-      expect((await ownerRow(id)).owner_left_at).toBe(rejoined);
-      await vi.waitFor(async () => expect((await ownerless(boss, id)).map((r) => r.owner)).toEqual([founder.id]), { timeout: 5000 });
+      // The departure comes from before their new membership began, under the one they own the room with.
+      const leftAt = rejoined - 1000;
+      await departs(id, founder.id, leftAt);
+      expect((await ownerRow(id)).owner_left_at).toBe(leftAt);
       expect((await recover(id, boss, helper.id, founder.id)).status).toBe(200);
     });
 
-    it("isn't set off by anyone else, or by the owner's own membership", async () => {
+    it("withdraws their pending invitations when the departure arrives", async () => {
       const { id, founder, helper } = await scene();
-      const later = Date.now();
-      expect((await api(helper, "GET", path(id), undefined, { token: await back(helper, 1) })).status).toBe(200);
-      expect((await api(helper, "GET", path(id), undefined, { token: await back(helper, later) })).code).toBe("workspace_not_found");
-      expect((await api(human(), "GET", path(id), undefined, { token: await back(human(), later) })).code).toBe("workspace_not_found");
-      expect((await api(founder, "GET", path(id), undefined, { token: await back(founder, 1) })).status).toBe(200);
-      expect((await api(founder, "GET", path(id))).status).toBe(200);
-      expect((await ownerRow(id)).owner_left_at).toBeNull();
+      const invitation = await api(founder, "POST", `${path(id)}/invitations`, { role: "guest", policy_version: await version(id, founder) });
+      expect(invitation.status).toBe(200);
+      await departs(id, founder.id, Date.now());
+      const withdrawn = await log(id, helper, "invitation.withdrawn");
+      expect(withdrawn.map((e) => e.target_id)).toEqual([invitation.body.id]);
     });
   });
 

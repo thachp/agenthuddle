@@ -75,12 +75,11 @@ Today nobody can manage its access or take over its tasks. Recovery fixes this, 
   This is a new use of `admin_orgs`, and a new exception to the rule against revealing a private room: it shows a room's ID and name, its departed owner's ID and when they left to someone outside it. It's limited to rooms their own organization owns, and shows no content, members, tasks or archived status.
 - Removing someone from an organization should say which rooms they own. The gateway can ask the same listing before removal. This is a screen's job, and the route should exist first.
 
-An organization can't lose its last admin, because the gateway refuses that. So a room in a team organization has someone who can run recovery, once the room knows its owner left. It can learn that in two ways:
+An organization can't lose its last admin, because the gateway refuses that. So a room in a team organization has someone who can run recovery, once a departure reaches it. The person's `Principal` looks for their rooms for about 30 days, further and further apart, so an index write that fails for a while doesn't lose it. A refused request never records a departure, because a denied request changes nothing.
 
-- **A departure reaches it.** The person's `Principal` looks for their rooms for about 30 days, further and further apart, so an index write that fails for a while doesn't lose it.
-- **The owner comes back.** If the owner's own assertion shows a newer membership than `owner_since`, the room records the departure, on a read or a command. It uses the start of that membership as `left_at`, and the log's actor is `system`.
+**What's still stuck:** a room the departure never reaches, whether or not its owner rejoins. That takes index writes failing for more than 30 days, or an owner removed before departures existed, which only staging's test data can have. The room still treats them as its owner: a rejoined owner gets not-found, nobody can recover the room, and it still counts toward the 20. Until a departure arrives, the room also keeps them as a participant, and pending invitations they made still work. The only way out is a change by hand.
 
-**What's still stuck:** a room whose owner left, who doesn't come back, where no departure reaches it. That means someone removed before departures existed, or an index write failing for more than 30 days. Nobody can recover that room, and it still counts toward the 20. Only staging can hold the first case, because production has never run. There's no way out for it short of a change by hand.
+**An old room made within clock skew of its owner's membership** is a separate case. It takes `owner_since` from when it was made, from a different clock, so an owner who never left could be refused, with nothing to recover from. New rooms take it from the assertion and can't hit this. Only staging has rooms that old.
 
 ### What's built, and what isn't
 
@@ -111,6 +110,7 @@ These aren't in the acceptance tests yet, so they become a new AC:
 - A delayed departure doesn't undo a transfer, or take out a new owner.
 - A room with no admin and a departed owner is recovered by an organization admin who was never in it.
 - A personal organization's room never reaches recovery.
-- A departure reaches a room whose listing appears only after the first sweeps, and the room notices an owner who comes back with a newer membership when no departure reached it.
+- A departure reaches a room whose listing appears only after the first sweeps.
+- A rejoined owner being refused changes nothing in the room, and the room learns only from a departure.
 - A departed owner who rejoins doesn't see the room in their list until recovery names them.
 - Each case leaves one audit entry, one event and nothing partial when a command fails partway.
