@@ -48,6 +48,7 @@ export default defineConfig({
               PRINCIPAL: { className: "Principal", useSQLite: true },
             },
             d1Databases: { DB: "api-db" },
+            queueProducers: { WAKE: { queueName: "podster-wake" } },
           },
         ],
       },

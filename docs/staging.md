@@ -54,6 +54,10 @@ From `apps/api`, again answering no:
 npx wrangler d1 create podster-api-staging
 ```
 
+```bash
+npx wrangler queues create podster-wake-staging
+```
+
 Staging's IDs are already in the two `wrangler.jsonc` files. If you ever recreate these, put the new IDs under `env.staging` there.
 
 ### 3. Apply migrations

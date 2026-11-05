@@ -6,6 +6,7 @@
 mod error;
 mod principal;
 mod store;
+mod wake;
 mod workspace;
 
 use error::ApiError;
@@ -109,6 +110,13 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
     if path == "/health" {
         return Ok(Response::ok("ok")?);
     }
+    // The test pool can't run a queue consumer, so test builds reach the same work here.
+    #[cfg(feature = "failpoints")]
+    if path == "/test/consume-wake" {
+        let body: Value = req.json().await?;
+        let retry = wake::process(&env, body["agent"].as_str().unwrap_or_default()).await?;
+        return Ok(Response::from_json(&json!({ "retry": retry }))?);
+    }
 
     let token = req
         .headers()
@@ -156,8 +164,6 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
 
     let (workspace_id, forward_path) = match parts.as_slice() {
         ["v1", "me"] if method == Method::Get => return me(&env, &caller).await,
-        // Wake arrives with Phase 4.
-        ["v1", "inbox", "wake"] => return Err(ApiError::not_implemented()),
         // Addressed by the verified caller, so nobody can name another principal's inbox here.
         ["v1", "inbox", ..] => {
             let stub = env
