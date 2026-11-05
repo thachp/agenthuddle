@@ -108,6 +108,15 @@ describe("Manage access, for the room's owner or admin", () => {
     expect(await screen.findByText(/nothing changed/)).toBeInTheDocument();
   });
 
+  it("doesn't say nothing changed after a server error", async () => {
+    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(502, "bad_gateway");
+    show(owner);
+    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText(/We can't tell whether this saved/)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing changed/)).not.toBeInTheDocument();
+  });
+
   it("AC-21: a save stays bound to its own target after the URL moves on", async () => {
     room = json(200, { ...(room.body as object), members: [agentRow(), agentRow("agt_2")] });
     let release!: (reply: Reply) => void;
@@ -137,6 +146,22 @@ describe("Manage access, for the room's owner or admin", () => {
     expect(await screen.findByText(/^Access revoked\./)).toBeInTheDocument();
     expect(sent).toEqual([{ method: "DELETE", url: `/api/v1/workspaces/${ROOM}/members/${AGENT}`, body: { policy_version: 7 } }]);
     expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Manage access, after losing authority", () => {
+  it("shows a demoted admin the generic not-found, not the result it remembers", async () => {
+    show(owner);
+    await userEvent.click(await screen.findByRole("button", { name: "Revoke workroom access" }));
+    room = json(200, { ...(room.body as object), policy_version: 8, members: [] });
+    await userEvent.click(await screen.findByRole("button", { name: "Revoke access" }));
+    await screen.findByText(/^Access revoked\./);
+    await userEvent.click(within(screen.getByRole("dialog")).getAllByRole("button", { name: "Close" })[0]);
+    await waitFor(() => expect(currentUrl()).toBe(`/w/${ROOM}/team`));
+    room = json(200, { ...(room.body as object), policy_version: null });
+    act(() => navigate(`/w/${ROOM}/team?agent=${AGENT}`));
+    expect(await screen.findByRole("alert")).toHaveTextContent("We can't find that.");
+    expect(screen.queryByText(/^Access revoked\./)).not.toBeInTheDocument();
   });
 });
 

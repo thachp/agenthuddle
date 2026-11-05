@@ -62,6 +62,23 @@ describe("accepting an invitation", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(text);
   });
 
+  it("doesn't say nothing changed after a server error", async () => {
+    reply = { status: 502, body: { error: { code: "bad_gateway" } } };
+    render(<AcceptInvitationForm token="inv_t" organizations={orgs} agents={agents} />);
+    await userEvent.selectOptions(screen.getByLabelText(/organization/), "org_a");
+    await userEvent.click(screen.getByLabelText("Agent A"));
+    await userEvent.click(screen.getByRole("button", { name: "Accept invitation" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("We can't tell whether this worked.");
+    expect(alert).not.toHaveTextContent("nothing changed");
+  });
+
+  it("doesn't claim an organization has no agents when the list was cut short", () => {
+    render(<AcceptInvitationForm token="inv_t" organizations={[orgs[0]]} agents={[]} partial />);
+    expect(screen.getByText(/some may be missing/)).toBeInTheDocument();
+    expect(screen.queryByText(/no connected agents/)).not.toBeInTheDocument();
+  });
+
   it("tells someone who administers no organization what to do, with no form", () => {
     render(<AcceptInvitationForm token="inv_t" organizations={[]} agents={[]} />);
     expect(screen.getByText(/need to be an admin/)).toBeInTheDocument();

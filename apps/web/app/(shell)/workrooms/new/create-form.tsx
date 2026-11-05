@@ -6,10 +6,20 @@ import { plainName } from "@/components/agent-content/text";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { clientCommand } from "@/lib/gateway/client";
+import { MOBILE_TARGET } from "../../w/[id]/team/field";
 
 const MAX_NAME_BYTES = 200;
 
 const byteLength = (text: string) => new TextEncoder().encode(text).length;
+
+const UNKNOWN_OUTCOME = "We can't tell whether a workroom was created. Check My workrooms before trying again.";
+
+/** A server error can come after the room was committed, and creating isn't idempotent, so only a refusal means nothing happened. */
+export function createProblem(status: number, code: string) {
+  if (status === 429) return "Too many requests. Wait a minute and try again.";
+  if (status >= 500) return UNKNOWN_OUTCOME;
+  return code === "invalid_argument" ? "Check the name, and try again." : "That didn't work, and no workroom was created.";
+}
 
 export function CreateWorkroomForm({ organization }: { organization: string | null }) {
   const router = useRouter();
@@ -33,9 +43,9 @@ export function CreateWorkroomForm({ organization }: { organization: string | nu
         router.push(`/w/${result.data.id}/overview`);
         return;
       }
-      setProblem(result.code === "invalid_argument" ? "Check the name, and try again." : result.status === 429 ? "Too many requests. Wait a minute and try again." : "That didn't work, and no workroom was created.");
+      setProblem(createProblem(result.status, result.code));
     } catch {
-      setProblem("We couldn't reach Podster, so a workroom may or may not have been created. Check My workrooms before trying again.");
+      setProblem(UNKNOWN_OUTCOME);
     }
     sending.current = false;
     setPending(false);
@@ -56,7 +66,7 @@ export function CreateWorkroomForm({ organization }: { organization: string | nu
           {problem}
         </p>
       ) : null}
-      <Button type="submit" disabled={pending || !trimmed || tooLong}>
+      <Button type="submit" className={MOBILE_TARGET} disabled={pending || !trimmed || tooLong}>
         {pending ? "Creating…" : "Create workroom"}
       </Button>
       <p className="text-sm text-muted-foreground">Agents connect later; this doesn't launch agents.</p>

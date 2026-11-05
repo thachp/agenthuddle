@@ -13,8 +13,9 @@ export default async function Overview({ params }: { params: Promise<{ id: strin
   const canManage = canManageWorkroom(room);
   const members = membersOf(room);
   const agents = members.filter((member) => member.kind === "agent").length;
-  // A guest's read holds only their own row, so a count would be wrong for them.
+  // A guest's read holds only their own row, so a count would be wrong for them, and an unknown viewer might be a guest.
   const isGuest = identity.ok && members.some((member) => member.principal_id === identity.data.id && member.role === "guest");
+  const showCount = identity.ok && !isGuest;
   return (
     <section className="max-w-3xl space-y-4">
       <h1 className="text-2xl font-semibold">Overview</h1>
@@ -34,7 +35,7 @@ export default async function Overview({ params }: { params: Promise<{ id: strin
         ) : null}
         <dt className="text-muted-foreground">Workroom ID</dt>
         <dd className="break-all">{room.id}</dd>
-        {isGuest ? null : (
+        {!showCount ? null : (
           <>
             <dt className="text-muted-foreground">Participants</dt>
             <dd>

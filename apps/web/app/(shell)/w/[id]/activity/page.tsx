@@ -54,11 +54,11 @@ export default async function Activity({ params, searchParams }: { params: Promi
             ) : null}
           </div>
         </>
-      ) : events.status >= 500 || events.status === 429 ? (
-        <ReadFailure />
-      ) : (
+      ) : events.status === 403 ? (
         // The API opens the room's history to its owner and admins only. Tasks show each person what they may see.
         <p className="text-muted-foreground">Workroom history is open to the owner and admins for now. Your tasks and their history are on the Tasks tab.</p>
+      ) : (
+        <ReadFailure />
       )}
     </section>
   );

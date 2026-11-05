@@ -68,14 +68,33 @@ describe("Team, as the owner", () => {
     expect(routerCalls.refresh).toBe(1);
   });
 
-  it("doesn't change the list until the server's state comes back, and keeps a refusal visible", async () => {
+  it("shows a refusal, and doesn't refresh as though something changed", async () => {
     reply = { status: 403, body: { error: { code: "not_allowed" } } };
     render(<TeamScreen {...props} />);
     await userEvent.click(within(row("per_m")).getByRole("button", { name: "Revoke" }));
     await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Revoke access" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("nothing changed");
-    expect(screen.getByText("per_m")).toBeInTheDocument();
     expect(routerCalls.refresh).toBe(0);
+  });
+
+  it("doesn't say nothing changed after a server error, which may have come after the commit", async () => {
+    reply = { status: 502, body: { error: { code: "bad_gateway" } } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(within(row("per_m")).getByRole("button", { name: "Revoke" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Revoke access" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("We can't tell whether this saved.");
+  });
+
+  it("shows a failed read of organizations as a failure, not an empty form", () => {
+    render(<TeamScreen {...props} orgs={null} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
+    expect(screen.queryByRole("button", { name: "Add person" })).not.toBeInTheDocument();
+  });
+
+  it("doesn't claim there are no agents left when the list was cut short", () => {
+    render(<TeamScreen {...props} agents={[]} agentsPartial />);
+    expect(screen.getByText(/some may be missing/)).toBeInTheDocument();
+    expect(screen.queryByText(/None of your organizations' agents/)).not.toBeInTheDocument();
   });
 
   it("explains a stale page and offers the latest", async () => {

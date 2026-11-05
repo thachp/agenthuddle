@@ -54,10 +54,11 @@ export function AccessSheet({ roomId, roomName, viewer, names, orgNames }: Props
         }
         if (!connection.ok && !reachable(connection.status)) throw new Error(connection.code);
         const member = membersOf(room.data).find((row) => row.principal_id === target && row.kind === "agent");
-        if (!member) return ended.current?.target === target ? { ...ended.current.last, connection: connection.ok ? connection.data : ended.current.last.connection, ended: ended.current.how } : null;
         const policyVersion = room.data.policy_version ?? null;
-        // Neither the room's authority nor the agent's organization: the same as if it weren't there.
+        // Neither the room's authority nor the agent's organization: the same as if it weren't there. This comes first, so a
+        // result this Sheet remembers can't show to someone who has since lost their authority.
         if (policyVersion === null && !connection.ok) return null;
+        if (!member) return ended.current?.target === target ? { ...ended.current.last, connection: connection.ok ? connection.data : ended.current.last.connection, ended: ended.current.how } : null;
         return { member, policyVersion, connection: connection.ok ? connection.data : null, ended: null };
       }}
       title={(access) => label(access.member.principal_id)}

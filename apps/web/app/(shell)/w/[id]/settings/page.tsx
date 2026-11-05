@@ -54,6 +54,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
             ))}
           </ul>
         ) : null}
+        {identity.ok ? null : <ReadFailure />}
         {isOwner ? (
           <Link href={`/w/${id}/team`} prefetch={false} className="text-primary underline">
             Appoint or remove admins on Team

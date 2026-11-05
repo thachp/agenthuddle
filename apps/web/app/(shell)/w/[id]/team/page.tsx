@@ -11,7 +11,7 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
   const { id } = await params;
   const room = await loadWorkroom(id);
   const canManage = canManageWorkroom(room);
-  const [identity, organizations, agents, audit] = await Promise.all([getIdentity(), getOrganizations(), gatewayQuery<{ agents: AgentRow[] }>("/api/agents"), canManage ? readAudit(id) : null]);
+  const [identity, organizations, agents, audit] = await Promise.all([getIdentity(), getOrganizations(), gatewayQuery<{ agents: AgentRow[]; truncated?: boolean }>("/api/agents"), canManage ? readAudit(id) : null]);
   if (!identity.ok) {
     return (
       <section className="max-w-3xl space-y-2">
@@ -33,8 +33,9 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
       // Only what the viewer's own organizations can name. Other organizations' names have no read yet, so they show as IDs.
       names={Object.fromEntries(agentRows.map((agent) => [agent.id, agent.name]))}
       orgNames={Object.fromEntries(orgs.map((org) => [org.id, org.name]))}
-      orgs={orgs.map(({ id: orgId, name }) => ({ id: orgId, name }))}
+      orgs={organizations.ok ? orgs.map(({ id: orgId, name }) => ({ id: orgId, name })) : null}
       agents={agents.ok ? agentRows.filter((agent) => agent.revoked_at === null).map(({ id: agentId, name, org_id }) => ({ id: agentId, name, org_id })) : null}
+      agentsPartial={agents.ok && agents.data.truncated === true}
       invitations={audit?.ok ? { pending: pendingInvitations(audit.rows, Date.now()), complete: audit.complete } : null}
     />
   );

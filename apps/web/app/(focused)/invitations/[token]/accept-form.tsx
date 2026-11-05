@@ -5,13 +5,16 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { Button } from "@/components/ui/button";
 import { clientCommand } from "@/lib/gateway/client";
+import { FIELD, MOBILE_TARGET } from "../../../(shell)/w/[id]/team/field";
 
 export type AcceptAgent = { id: string; name: string; org_id: string };
 type Organization = { id: string; name: string };
 
 const MAX_AGENTS = 20;
 
-function explain(code: string) {
+function explain(code: string, status: number) {
+  // A server error can come after the accept committed. The API answers a repeat of the same choice with the first result.
+  if (status >= 500) return "We can't tell whether this worked. It's safe to try the same choice again.";
   switch (code) {
     case "invitation_not_found":
       return "This invitation isn't valid any more. It may have been used, withdrawn or have expired. Ask whoever sent it for a new one.";
@@ -28,8 +31,8 @@ function explain(code: string) {
   }
 }
 
-/** Nothing is chosen for the person, and it takes a deliberate choice of agents to accept. Names are shown as plain data. */
-export function AcceptInvitationForm({ token, organizations, agents }: { token: string; organizations: Organization[]; agents: AcceptAgent[] }) {
+/** No agent is chosen for the person, so accepting takes a deliberate choice. An only organization is preselected. Names are shown as plain data. */
+export function AcceptInvitationForm({ token, organizations, agents, partial = false }: { token: string; organizations: Organization[]; agents: AcceptAgent[]; partial?: boolean }) {
   const [org, setOrg] = useState(organizations.length === 1 ? organizations[0].id : "");
   const [chosen, setChosen] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
@@ -51,7 +54,7 @@ export function AcceptInvitationForm({ token, organizations, agents }: { token: 
     try {
       const result = await clientCommand<{ agents: string[] }>("/api/v1/invitations/accept", { token, org_id: org, agents: chosen });
       if (result.ok) setJoined(result.data.agents);
-      else setProblem(explain(result.code));
+      else setProblem(explain(result.code, result.status));
     } catch {
       setProblem("We couldn't reach Podster, so this may not have saved. It's safe to try the same choice again.");
     }
@@ -84,7 +87,7 @@ export function AcceptInvitationForm({ token, organizations, agents }: { token: 
       <label className="block space-y-1">
         <span className="font-medium">Accept for this organization</span>
         <select
-          className="h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 text-base shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 md:text-sm dark:bg-input/30"
+          className={FIELD}
           value={org}
           required
           onChange={(event) => {
@@ -103,7 +106,9 @@ export function AcceptInvitationForm({ token, organizations, agents }: { token: 
       {org ? (
         <fieldset className="space-y-2">
           <legend className="font-medium">Agents to bring in</legend>
-          {eligible.length === 0 ? (
+          {partial ? <p role="status">Your organizations have more agents than we can list here, so some may be missing.</p> : null}
+          {eligible.length === 0 && partial ? <p>None of the agents we could list belong to this organization.</p> : null}
+          {eligible.length === 0 && !partial ? (
             <p>
               This organization has no connected agents.{" "}
               <Link href="/agents/connect" prefetch={false} className="text-primary underline">
@@ -127,10 +132,10 @@ export function AcceptInvitationForm({ token, organizations, agents }: { token: 
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" disabled={pending || chosen.length === 0 || chosen.length > MAX_AGENTS}>
+        <Button type="submit" className={MOBILE_TARGET} disabled={pending || chosen.length === 0 || chosen.length > MAX_AGENTS}>
           {pending ? "Accepting…" : "Accept invitation"}
         </Button>
-        <Button asChild variant="outline">
+        <Button asChild variant="outline" className={MOBILE_TARGET}>
           <Link href="/workrooms" prefetch={false}>
             Not now
           </Link>

@@ -58,7 +58,9 @@ export function relationship(room: Pick<Workroom, "owner" | "members">, viewer: 
 export const isExternal = (orgId: string, viewer: Pick<Viewer, "orgs">) => !viewer.orgs.includes(orgId);
 
 /** What to say about a refused command. Every refusal changes nothing, and none of them say why beyond what the viewer knows. */
-export function explainRefusal(code: string) {
+export function explainRefusal(code: string, status = 400) {
+  // A server error can come after the change committed, so it can't say nothing changed.
+  if (status >= 500) return "We can't tell whether this saved. Refresh before trying again.";
   switch (code) {
     case "invitation_required":
       return "Only the workroom's own organization can be added directly. Send an invitation for anyone else.";

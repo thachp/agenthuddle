@@ -9,7 +9,7 @@ export default async function InvitationPage({ params, searchParams }: { params:
   const [{ token = "" }, query] = await Promise.all([params, searchParams]);
   const search = new URLSearchParams(query).toString();
   await requireSession(`/invitations/${token}${search ? `?${search}` : ""}`);
-  const [organizations, agents] = await Promise.all([getOrganizations(), gatewayQuery<{ agents: (AcceptAgent & { revoked_at: number | null })[] }>("/api/agents")]);
+  const [organizations, agents] = await Promise.all([getOrganizations(), gatewayQuery<{ agents: (AcceptAgent & { revoked_at: number | null })[]; truncated?: boolean }>("/api/agents")]);
   const room = claimedRoom(token);
   return (
     <section className="space-y-4">
@@ -19,7 +19,7 @@ export default async function InvitationPage({ params, searchParams }: { params:
         {room ? <p className="break-all text-sm">Workroom ID in this link: {room}</p> : null}
       </div>
       {organizations.ok && agents.ok ? (
-        <AcceptInvitationForm token={token} organizations={organizations.data.organizations.filter((org) => org.role === "admin").map(({ id, name }) => ({ id, name }))} agents={agents.data.agents.filter((agent) => agent.revoked_at === null).map(({ id, name, org_id }) => ({ id, name, org_id }))} />
+        <AcceptInvitationForm token={token} partial={agents.data.truncated === true} organizations={organizations.data.organizations.filter((org) => org.role === "admin").map(({ id, name }) => ({ id, name }))} agents={agents.data.agents.filter((agent) => agent.revoked_at === null).map(({ id, name, org_id }) => ({ id, name, org_id }))} />
       ) : (
         <ReadFailure />
       )}

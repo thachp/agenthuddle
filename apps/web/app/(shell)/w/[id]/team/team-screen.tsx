@@ -32,9 +32,12 @@ export type TeamProps = {
   viewer: Viewer;
   names: Record<string, string>;
   orgNames: Record<string, string>;
-  orgs: OrgOption[];
+  /** The viewer's organizations, or null if that read failed. */
+  orgs: OrgOption[] | null;
   /** The viewer's organizations' agents, or null if that read failed. */
   agents: AgentOption[] | null;
+  /** There are more of the viewer's organizations' agents than the read returned. */
+  agentsPartial?: boolean;
   /** Null if that read failed or isn't open to this viewer. */
   invitations: { pending: PendingInvitation[]; complete: boolean } | null;
 };
@@ -57,7 +60,7 @@ function useCommands(version: number | null) {
       router.refresh();
     } else if (result) {
       if (result.code === "version_conflict") setNotice({ kind: "conflict", text: "This workroom's access changed while you were working. Your change isn't saved." });
-      else setNotice({ kind: "refused", text: explainRefusal(result.code) });
+      else setNotice({ kind: "refused", text: explainRefusal(result.code, result.status) });
     }
     if (init.focus) noticeRef.current?.focus();
     return result;
@@ -67,7 +70,7 @@ function useCommands(version: number | null) {
 }
 
 export function TeamScreen(props: TeamProps) {
-  const { roomId, roomName, owner, policyVersion, members, viewer, names, orgNames, orgs, agents, invitations } = props;
+  const { roomId, roomName, owner, policyVersion, members, viewer, names, orgNames, orgs, agents, agentsPartial = false, invitations } = props;
   const canManage = policyVersion !== null;
   const isOwner = viewer.id === owner;
   const commands = useCommands(policyVersion);
@@ -175,7 +178,7 @@ export function TeamScreen(props: TeamProps) {
         {canManage ? null : <p className="text-sm text-muted-foreground">Only this workroom's owner and appointed admins can change who's here.</p>}
       </section>
 
-      {canManage ? <AddParticipants base={base} isOwner={isOwner} orgs={orgs} agents={agents} orgNames={orgNames} memberIds={memberIds} send={send} /> : null}
+      {canManage ? <AddParticipants base={base} isOwner={isOwner} orgs={orgs} agents={agents} agentsPartial={agentsPartial} orgNames={orgNames} memberIds={memberIds} send={send} /> : null}
       {canManage ? <Invitations base={base} room={room} invitations={invitations} orgLabel={orgLabel} label={label} send={send} focusAfter={noticeRef} /> : null}
 
       <AccessSheet roomId={roomId} roomName={roomName} viewer={viewer} names={names} orgNames={orgNames} />
@@ -185,12 +188,12 @@ export function TeamScreen(props: TeamProps) {
 
 type Send = ReturnType<typeof useCommands>["send"];
 
-function AddParticipants({ base, isOwner, orgs, agents, orgNames, memberIds, send }: { base: string; isOwner: boolean; orgs: OrgOption[]; agents: AgentOption[] | null; orgNames: Record<string, string>; memberIds: Set<string>; send: Send }) {
+function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames, memberIds, send }: { base: string; isOwner: boolean; orgs: OrgOption[] | null; agents: AgentOption[] | null; agentsPartial: boolean; orgNames: Record<string, string>; memberIds: Set<string>; send: Send }) {
   const available = agents?.filter((agent) => !memberIds.has(agent.id)) ?? [];
   const [agent, setAgent] = useState("");
   const [agentRole, setAgentRole] = useState<"member" | "guest">("member");
   const [person, setPerson] = useState("");
-  const [personOrg, setPersonOrg] = useState(orgs[0]?.id ?? "");
+  const [personOrg, setPersonOrg] = useState(orgs?.[0]?.id ?? "");
   const [personRole, setPersonRole] = useState<"admin" | "member" | "guest">("member");
   const [pending, setPending] = useState<"agent" | "person" | null>(null);
 
@@ -223,7 +226,8 @@ function AddParticipants({ base, isOwner, orgs, agents, orgNames, memberIds, sen
       <form onSubmit={addAgent} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add an agent</h3>
         {agents === null ? <ReadFailure /> : null}
-        {agents !== null && available.length === 0 ? (
+        {agentsPartial ? <p role="status" className="text-sm">Your organizations have more agents than we can list here, so some may be missing.</p> : null}
+        {agents !== null && available.length === 0 && !agentsPartial ? (
           <p className="text-sm text-muted-foreground">
             None of your organizations' agents are left to add.{" "}
             <Link href="/agents/connect" prefetch={false} className="text-primary underline">
@@ -259,6 +263,12 @@ function AddParticipants({ base, isOwner, orgs, agents, orgNames, memberIds, sen
           </Button>
         ) : null}
       </form>
+      {orgs === null ? (
+        <div className="space-y-2 rounded-lg border p-3">
+          <h3 className="font-medium">Add a person</h3>
+          <ReadFailure />
+        </div>
+      ) : (
       <form onSubmit={addPerson} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add a person</h3>
         <p className="text-sm text-muted-foreground">People are added by their person ID, because Podster has no directory of an organization's people yet.</p>
@@ -290,6 +300,7 @@ function AddParticipants({ base, isOwner, orgs, agents, orgNames, memberIds, sen
           {pending === "person" ? "Adding…" : "Add person"}
         </Button>
       </form>
+      )}
     </section>
   );
 }
