@@ -413,7 +413,8 @@ async function acceptance() {
       listed = await agentRooms();
       if (!listed?.workspace_name?.endsWith("renamed")) await sleep(isLocal ? 200 : 1000);
     }
-    eq(listed?.left, false, "the agent's rooms, while it's in this one");
+    ok(listed?.workspace_name?.endsWith("renamed"), `the agent's rooms never showed the new name: ${listed?.workspace_name}`);
+    eq(listed.left, false, "the agent's rooms, while it's in this one");
     await personA.revoke(managed, agent.id);
     await agent.close();
   });

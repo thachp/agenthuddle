@@ -1304,7 +1304,12 @@ describe("inbox", () => {
   };
   /** Runs the alarm until nothing is due, so a test sees what delivery produced. */
   const drain = async (id: string) => {
-    for (let i = 0; i < 20 && (await count(id, "outbox")) > 0; i++) await runDurableObjectAlarm(stub(id));
+    for (let i = 0; i < 20 && (await count(id, "outbox")) > 0; i++) {
+      // Set each time, because `runDurableObjectAlarm` does nothing while no alarm is pending. After a restart, an alarm
+      // that was running comes back later by itself, so these turns could otherwise all pass with nothing run.
+      await runInDurableObject(stub(id), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
+      await runDurableObjectAlarm(stub(id));
+    }
     expect(await count(id, "outbox")).toBe(0);
   };
   const inbox = async (who: Who, query = "") => (await api(who, "GET", `/v1/inbox${query}`)).body;
@@ -1708,9 +1713,11 @@ describe("inbox", () => {
     const { id, tasks, bob } = await setup();
     await holdOutbox(id);
     const task = await offerTo(tasks, bob);
-    await releaseOutbox(id);
+    // Still held here, because an alarm already running from an earlier command would deliver as soon as the hold lifts.
     expect(await count(id, "outbox")).toBeGreaterThan(0);
     await runInDurableObject(stub(id), (_: any, state: any) => { try { state.abort("restart"); } catch {} }).catch(() => {});
+    expect(await count(id, "outbox")).toBeGreaterThan(0);
+    await releaseOutbox(id);
     await drain(id);
     expect((await inbox(bob)).events.map((e: any) => e.task_id)).toEqual([task.id]);
   });
