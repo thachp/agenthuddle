@@ -470,6 +470,14 @@ describe("TargetSheet", () => {
       expect(alert).not.toHaveTextContent("nothing changed");
     });
 
+    it("says a session that ended isn't a refusal", async () => {
+      setUrl("/agents?agent=a");
+      render(<Screen command={async () => ({ ok: false, status: 401, code: "sign_in_required" })} />);
+      await title("Agent A");
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("You've been signed out, so this didn't save.");
+    });
+
     it("says a denied save didn't happen", async () => {
       setUrl("/agents?agent=a");
       render(<Screen command={async () => ({ ok: false, status: 403, code: "not_allowed" })} />);
