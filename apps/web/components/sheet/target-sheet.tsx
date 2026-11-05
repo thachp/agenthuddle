@@ -20,10 +20,13 @@ export type SheetApi<T> = {
   setDirty: (dirty: boolean) => void;
   /** A draft that doesn't answer to a version, such as a new message. It holds the Sheet open like an edit, and leaves version checks and `dirty` alone. */
   setUnsaved: (unsaved: boolean) => void;
+  /** A command in flight outside `run`, such as a new message. The Sheet won't close or discard under it, and other commands wait. */
+  setSending: (sending: boolean) => void;
   saving: boolean;
   /**
    * Runs a command for this Sheet's own target. Never optimistic: on success the Sheet reloads and shows the server's state.
-   * `explain` words a failure for this command, and a lost response or server error reaches it as code "unknown".
+   * `explain` words a failure for this command, and a lost response or server error reaches it as code "unknown". After one of
+   * those the Sheet reads the target again too, because the command may have gone through.
    */
   run: <R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string) => Promise<GatewayResult<R> | null>;
   /** Reads the target again, for a command that doesn't go through `run`. */
@@ -162,6 +165,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   const [reloads, setReloads] = useState(0);
   const [dirty, setDirtyState] = useState(false);
   const [unsaved, setUnsaved] = useState(false);
+  const [sending, setSending] = useState(false);
   // The version a draft was read at. A reload can show newer data, but the draft still answers to this one, so saving it conflicts instead of overwriting.
   const draftVersion = useRef<number | null>(null);
   const [saving, setSaving] = useState(false);
@@ -217,15 +221,24 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   }, [target, reloads]);
 
   const hasDraft = dirty || unsaved;
-  const busy = hasDraft || saving || heldFailure;
+  const inFlight = saving || sending;
+  const busy = hasDraft || inFlight || heldFailure;
   useEffect(() => {
     onBusyChange(busy);
   }, [busy, onBusyChange]);
 
   // The URL moved away, by Back or a link, while this Sheet was busy. A save finishes first; edits need an answer.
   useEffect(() => {
-    if (selected !== target && hasDraft && !saving) setAsking(true);
-  }, [selected, target, hasDraft, saving]);
+    if (selected !== target && hasDraft && !inFlight) setAsking(true);
+  }, [selected, target, hasDraft, inFlight]);
+
+  // Leaving the app altogether is beyond the Sheet's own prompt, so this asks the browser to. Browsers choose the wording.
+  useEffect(() => {
+    if (!hasDraft && !inFlight) return;
+    const ask = (event: BeforeUnloadEvent) => event.preventDefault();
+    window.addEventListener("beforeunload", ask);
+    return () => window.removeEventListener("beforeunload", ask);
+  }, [hasDraft, inFlight]);
 
   const finish = () => {
     setClosing(true);
@@ -234,7 +247,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   };
 
   const requestClose = () => {
-    if (saving) return;
+    if (inFlight) return;
     if (hasDraft) setAsking(true);
     // The URL has already moved on, so closing this goes there.
     else if (selected !== target) setHeldFailure(false);
@@ -260,9 +273,19 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   const shownVersion = data !== null && version ? version(data) : null;
   const binding: SheetBinding = { target, version: dirty ? draftVersion.current : shownVersion };
 
+  const rereadAfterUnknown = () => {
+    setReloads((count) => count + 1);
+    onRefreshList();
+  };
+
   function setDirty(next: boolean) {
     if (next && !dirty) draftVersion.current = shownVersion;
     setDirtyState(next);
+    // A failure about a draft that's gone would tell the person to retry something they can't.
+    if (!next) {
+      setFailedCode(null);
+      setFailedText(null);
+    }
   }
 
   async function run<R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string): Promise<GatewayResult<R> | null> {
@@ -288,6 +311,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
           const code = result.status >= 500 ? "unknown" : result.code;
           setFailedCode(code);
           setFailedText(explain?.(code, result.status) ?? null);
+          if (code === "unknown") rereadAfterUnknown();
         }
         if (selectedRef.current !== target) setHeldFailure(true);
       }
@@ -296,6 +320,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
       if (alive.current) {
         setFailedCode("unknown");
         setFailedText(explain?.("unknown", 0) ?? null);
+        rereadAfterUnknown();
         if (selectedRef.current !== target) setHeldFailure(true);
       }
       return null;
@@ -362,12 +387,17 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
                 </Button>
               </p>
             ) : null}
-            {failedCode ? (
+            {failedText ? (
               <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-                {failedText ?? (failedCode === "unknown" ? "We can't tell whether this saved. Refresh before trying again." : "That didn't save, and nothing changed. You may no longer be allowed to do this.")}
+                {failedText}
               </p>
             ) : null}
-            {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, saving, run, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
+            {failedCode && !failedText ? (
+              <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
+                {failedCode === "unknown" ? "We can't tell whether this saved. Refresh before trying again." : "That didn't save, and nothing changed. You may no longer be allowed to do this."}
+              </p>
+            ) : null}
+            {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, setSending, saving: inFlight, run, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
           </div>
         </SheetContent>
       </Sheet>

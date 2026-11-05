@@ -29,7 +29,10 @@ export type HistoryEvent = { seq: number; id: string; type: string; from: From; 
 export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Artifact[]; messages: Message[]; history: HistoryEvent[] };
 
 export type Member = { principal_id: string; kind: string; org_id: string; role: string };
-export type Room = { id: string; name: string; owner: string; members?: Member[] };
+export type Room = { id: string; name: string; owner: string; status?: string; members?: Member[] };
+
+/** Display only. In an archived room Rust refuses every new command with `workspace_archived`. */
+export const isArchivedRoom = (room: Pick<Room, "status">) => room.status === "archived";
 
 /** IDs, and what we know to call them. Only the viewer's own organizations have names so far, so everyone else shows as an ID. */
 export type Names = Record<string, string>;
@@ -104,7 +107,8 @@ const isAdmin = (role: string | undefined) => role === "owner" || role === "admi
  * Which controls to show. This mirrors crates/policy so people aren't offered what would fail, and it grants nothing:
  * the server decides each request again.
  */
-export function viewerActions(task: Task, me: string, role: string | undefined) {
+export function viewerActions(task: Task, me: string, role: string | undefined, archived = false) {
+  if (archived) return { review: false, cancel: false, assign: false, edit: false, setReviewer: false, setRequester: false };
   const admin = isAdmin(role);
   const manages = task.requester === me || admin;
   const live = !isTerminal(task.status);
@@ -152,11 +156,12 @@ export const newReviewerChoices = (room: Pick<Room, "owner" | "members">, task: 
 export const newRequesterChoices = (room: Pick<Room, "owner" | "members">, task: Pick<Task, "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(reviewerChoices(room, ""), task.requester, task, room, role);
 
 /** The flag in words, including who can fix it, because that's often not the person reading. */
-export function flagText(task: Task, room: Pick<Room, "owner" | "members">, me: string, role: string | undefined) {
+export function flagText(task: Task, room: Pick<Room, "owner" | "members" | "status">, me: string, role: string | undefined) {
   const can = viewerActions(task, me, role);
   const need = flagged(task, room, role);
   const whom = need.requester && need.reviewer ? "a new reviewer and a new requester" : need.requester ? "a new requester" : need.reviewer ? "a new reviewer" : "a new reviewer or requester";
   const opening = `Someone left this workroom, so this task needs ${whom}.`;
+  if (isArchivedRoom(room)) return `${opening} It can be fixed once the workroom is back.`;
   const fixable = need.requester === need.reviewer ? can.setRequester || can.setReviewer : need.requester ? can.setRequester : can.setReviewer;
   return `${opening} ${fixable ? "You can choose below." : "An owner or admin of this workroom can fix it."}`;
 }
@@ -191,6 +196,17 @@ export function taskPatch(task: Task, draft: TaskDraft): TaskPatch {
 /** Decision 4: this edit would send accepted work back to be accepted again. Rust decides the same way, and the result says what happened. */
 export const reoffers = (task: Pick<Task, "status">, patch: TaskPatch) => task.status === "accepted" && (patch.instructions !== undefined || patch.acceptance_criteria !== undefined);
 
+/** Only what the person changed: the rest may be someone else's words, which can't show here as if they were the person's. */
+export function ownWords(saved: { readAt: Task; draft: TaskDraft }) {
+  const before = draftOf(saved.readAt);
+  const fields: [string, string, string][] = [
+    ["Title", saved.draft.title, before.title],
+    ["Instructions", saved.draft.instructions, before.instructions],
+    ["Acceptance criteria", saved.draft.criteria, before.criteria],
+  ];
+  return fields.filter(([, mine, theirs]) => mine.trim() !== theirs.trim() && mine.trim() !== "").map(([label, mine]) => ({ label, text: mine }));
+}
+
 /** Limits from crates/core, in bytes, so a form can say so before the server refuses. */
 export const LIMITS = { title: 500, instructions: 64 * 1024, criteria: 16 * 1024, message: 16 * 1024 };
 export const tooLong = (text: string, limit: number) => new TextEncoder().encode(text.trim()).length > limit;
@@ -214,8 +230,8 @@ export type TaskChange = "edit" | "reviewer" | "requester" | "message";
 
 const LOST: Record<TaskChange, string> = {
   edit: "We can't tell whether your edit saved. Save again without changing it: that can't apply it twice.",
-  reviewer: "We can't tell whether the reviewer changed. Choose the same person and try again: that can't apply it twice.",
-  requester: "We can't tell whether the requester changed. Choose the same person and try again: that can't apply it twice.",
+  reviewer: "We can't tell whether the reviewer changed, so we read the task again. Check the reviewer above before trying again.",
+  requester: "We can't tell whether the requester changed, so we read the task again. Check the requester above before trying again.",
   message: "We can't tell whether this posted. Post it again without changing it: that can't post it twice.",
 };
 
@@ -244,6 +260,7 @@ export function changeProblem(change: TaskChange, code: string, status: number) 
   const nothingChanged = change === "message" ? "That didn't post." : "That didn't save, and nothing changed.";
   if (status === 401) return `${nothingChanged} Your session has ended. Copy anything you want to keep, then sign in again.`;
   if (status === 429) return `${nothingChanged} Too many requests, so wait a minute and try again.`;
+  if (code === "workspace_archived") return `${nothingChanged} This workroom is archived, so nothing new can happen in it. Its owner or an admin can bring it back.`;
   return `${nothingChanged} ${REFUSED[change][code] ?? "You may no longer be allowed to do this."}`;
 }
 

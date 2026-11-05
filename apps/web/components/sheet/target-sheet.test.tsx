@@ -551,10 +551,10 @@ describe("TargetSheet", () => {
   it("holds the Sheet open for an unversioned draft without pinning the version, and refresh reads again", async () => {
     const user = userEvent.setup();
     setUrl("/a?agent=a");
-    const load = vi.fn(resolved);
+    let version = 3;
     const seen: (number | null)[] = [];
     render(
-      <TargetSheet<Item> param="agent" load={load} title={(data) => data.title} description={() => "Room"} version={(data) => data.version}>
+      <TargetSheet<Item> param="agent" load={async () => ({ ...ITEMS.a, version })} title={(data) => data.title} description={() => "Room"} version={(data) => data.version}>
         {({ setUnsaved, refresh, binding, dirty }) => {
           seen.push(binding.version);
           return (
@@ -570,10 +570,102 @@ describe("TargetSheet", () => {
     await user.click(await screen.findByRole("button", { name: "Type" }));
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
     expect(screen.getByText("clean")).toBeInTheDocument();
+    version = 4;
     await user.click(screen.getByRole("button", { name: "Read again" }));
-    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    // Commands would carry the newer version. A real edit would still answer to 3.
+    await waitFor(() => expect(seen.at(-1)).toBe(4));
     await user.keyboard("{Escape}");
     expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
-    expect(new Set(seen)).toEqual(new Set([3]));
+  });
+
+  it("reads the target again after an unknown outcome, and not after a refusal", async () => {
+    const user = userEvent.setup();
+    setUrl("/a?agent=a");
+    const load = vi.fn(resolved);
+    let result: GatewayResult<unknown> = { ok: false, status: 400, code: "invalid_argument" };
+    render(
+      <TargetSheet<Item> param="agent" load={load} title={(data) => data.title} description={() => "Room"}>
+        {({ run }) => <Button onClick={() => void run(async () => result)}>Do it</Button>}
+      </TargetSheet>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Do it" }));
+    await screen.findByText(/That didn't save/);
+    expect(load).toHaveBeenCalledTimes(1);
+    result = { ok: false, status: 502, code: "bad_gateway" };
+    await user.click(screen.getByRole("button", { name: "Do it" }));
+    await screen.findByText(/We can't tell/);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(routerCalls.refresh).toBeGreaterThan(0);
+  });
+
+  it("clears a failure once the draft it was about is gone", async () => {
+    const user = userEvent.setup();
+    setUrl("/a?agent=a");
+    render(
+      <TargetSheet<Item> param="agent" load={resolved} title={(data) => data.title} description={() => "Room"}>
+        {({ run, setDirty }) => (
+          <>
+            <Button onClick={() => setDirty(true)}>Type</Button>
+            <Button onClick={() => void run(async () => ({ ok: false, status: 502, code: "bad_gateway" }), () => "Save again")}>Save</Button>
+            <Button onClick={() => setDirty(false)}>Drop</Button>
+          </>
+        )}
+      </TargetSheet>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Type" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByText("Save again");
+    await user.click(screen.getByRole("button", { name: "Drop" }));
+    expect(screen.queryByText("Save again")).toBeNull();
+  });
+
+  it("asks the browser before leaving with a draft or a command in flight, and not otherwise", async () => {
+    const user = userEvent.setup();
+    setUrl("/a?agent=a");
+    const leave = () => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    render(
+      <TargetSheet<Item> param="agent" load={resolved} title={(data) => data.title} description={() => "Room"}>
+        {({ setUnsaved, setSending }) => (
+          <>
+            <Button onClick={() => setUnsaved(true)}>Type</Button>
+            <Button onClick={() => setUnsaved(false)}>Clear</Button>
+            <Button onClick={() => setSending(true)}>Send</Button>
+          </>
+        )}
+      </TargetSheet>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Type" }));
+    expect(leave()).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Clear" }));
+    expect(leave()).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(leave()).toBe(true);
+  });
+
+  it("won't close while a command outside run is in flight", async () => {
+    const user = userEvent.setup();
+    setUrl("/a?agent=a");
+    render(
+      <TargetSheet<Item> param="agent" load={resolved} title={(data) => data.title} description={() => "Room"}>
+        {({ setSending, setUnsaved }) => (
+          <Button
+            onClick={() => {
+              setUnsaved(true);
+              setSending(true);
+            }}
+          >
+            Send
+          </Button>
+        )}
+      </TargetSheet>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Send" }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByText("Discard unsaved changes?")).toBeNull();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 });

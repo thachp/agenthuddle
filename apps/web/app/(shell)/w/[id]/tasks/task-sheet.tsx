@@ -10,7 +10,7 @@ import { goToSignIn } from "./go-to-sign-in";
 import { TaskActions, type SavedEdit } from "./task-actions";
 import { TaskComposer } from "./task-composer";
 import { PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
-import { briefAuthor, flagText, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail } from "./task-model";
+import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail } from "./task-model";
 
 export type LoadedTask = TaskDetail & { workspace: string; room: Room };
 
@@ -74,6 +74,7 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
   if (!api.dirty) held.current = data;
   // Survives the controls starting fresh, because "Review latest" keeps the person's input (DESIGN.md, "Saving and conflicts").
   const savedEdit = useRef<SavedEdit | null>(null);
+  const returnFocus = useRef(false);
   // A decision removes the button that made it, and focus shouldn't vanish with it. This also lands on the result.
   useEffect(() => {
     if (notice) noticeRef.current?.focus();
@@ -133,7 +134,7 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
         {/* Stays mounted, so a draft or a post in flight outlives a look at another tab. */}
         <Tabs.Content value="discussion" forceMount hidden={tab !== "discussion"} className="mt-4 space-y-3 outline-none">
           <Discussion data={data} me={me} names={names} orgNames={orgNames} />
-          <TaskComposer api={api} />
+          {isArchivedRoom(data.room) ? null : <TaskComposer api={api} />}
         </Tabs.Content>
         <Tabs.Content value="activity" className="mt-4 outline-none">
           <Activity data={data} me={me} names={names} orgNames={orgNames} />
@@ -141,7 +142,7 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
       </Tabs.Root>
 
       {/* Fresh for each version, so a draft or key from before a change can't go out against what's on screen now. */}
-      <TaskActions key={`${held.current.task.version}:${held.current.task.submission_no}`} api={{ ...api, data: held.current }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} />
+      <TaskActions key={`${held.current.task.version}:${held.current.task.submission_no}`} api={{ ...api, data: held.current }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} returnFocus={returnFocus} />
     </div>
   );
 }

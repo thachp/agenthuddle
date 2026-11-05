@@ -414,6 +414,42 @@ describe("posting to the thread", () => {
     expect(commands()[0].key).toBe(commands()[1].key);
   });
 
+  it("keeps the key of a post with an unknown outcome, even if the words change and change back", async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    answer = (_, method) => {
+      if (method !== "POST") return json(200, detail());
+      attempts += 1;
+      return attempts === 1 ? json(502, {}) : json(200, { id: "msg_2" });
+    };
+    await openDiscussion(user);
+    const field = screen.getByLabelText("Post a message");
+    await user.type(field, "On it");
+    await user.click(screen.getByRole("button", { name: "Post message" }));
+    await screen.findByText(/can't tell whether this posted/);
+    await user.type(field, "!");
+    await user.keyboard("{Backspace}");
+    await user.click(screen.getByRole("button", { name: "Post message" }));
+    await screen.findByText("Posted.");
+    expect(commands()[0].key).toBe(commands()[1].key);
+    await waitFor(() => expect(calls.filter((call) => call.method === "GET").length).toBeGreaterThan(2));
+  });
+
+  it("won't discard or close while a message is posting", async () => {
+    const user = userEvent.setup();
+    let release!: (response: Response) => void;
+    answer = (_, method) => (method === "POST" ? new Promise<Response>((resolve) => (release = resolve)) : json(200, detail()));
+    await openDiscussion(user);
+    await user.type(screen.getByLabelText("Post a message"), "On it");
+    await user.click(screen.getByRole("button", { name: "Post message" }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByText("Discard unsaved changes?")).toBeNull();
+    await act(async () => release(json(200, { id: "msg_2" })));
+    await screen.findByText("Posted.");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(currentUrl()).not.toContain("task="));
+  });
+
   it("uses a new key for the same words posted a second time on purpose", async () => {
     const user = userEvent.setup();
     answer = (_, method) => (method === "POST" ? json(200, { id: "msg_2" }) : json(200, detail()));
@@ -548,7 +584,73 @@ describe("editing a task", () => {
     expect(screen.getByLabelText("Title")).toHaveValue("Their title");
   });
 
-  it("gives the words back if the task can no longer be edited", async () => {
+  it("explains a refusal, not a generic failure", async () => {
+    const user = userEvent.setup();
+    answer = (_, method) => (method === "POST" ? refused(403, "not_allowed") : accepted());
+    await open();
+    await user.click(screen.getByRole("button", { name: "Edit task" }));
+    await user.type(screen.getByLabelText("Title"), " now");
+    await user.click(screen.getByRole("button", { name: "Save edit" }));
+    expect(await screen.findByText(/Only this task's requester, or an owner or admin/)).toBeInTheDocument();
+    expect(screen.queryByText(/You may no longer be allowed/)).toBeNull();
+  });
+
+  it("asks before discarding an edit, and returns focus to the button, having sent nothing", async () => {
+    const user = userEvent.setup();
+    answer = accepted;
+    await open();
+    await user.click(screen.getByRole("button", { name: "Edit task" }));
+    await user.type(screen.getByLabelText("Title"), " now");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByText(/Discard your edit to “Design the API”\?/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByLabelText("Title")).toHaveValue("Design the API now");
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(await screen.findByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Edit task" })).toHaveFocus());
+    expect(screen.queryByText("Unsaved changes")).toBeNull();
+    expect(commands()).toHaveLength(0);
+  });
+
+  it("doesn't ask when there's nothing to discard", async () => {
+    const user = userEvent.setup();
+    answer = accepted;
+    await open();
+    await user.click(screen.getByRole("button", { name: "Edit task" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText(/Discard/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Edit task" })).toHaveFocus();
+  });
+
+  it("after a lost response reads the task again, and discarding leaves no advice to save", async () => {
+    const user = userEvent.setup();
+    let committed = false;
+    answer = (_, method) => {
+      if (method === "POST") {
+        committed = true;
+        throw new TypeError("network");
+      }
+      return json(200, detail({ status: committed ? "offered" : "accepted", requester: "per_me", reviewer: "agt_b", version: committed ? 6 : 5, instructions: committed ? "Write it better" : "Write it" }));
+    };
+    await open();
+    await user.click(screen.getByRole("button", { name: "Edit task" }));
+    await user.type(screen.getByLabelText("Instructions"), " better");
+    await user.click(screen.getByRole("button", { name: "Save and ask for acceptance again" }));
+    expect(await screen.findByText(/can't tell whether your edit saved/)).toBeInTheDocument();
+    // The latest shows above, with the draft held as it was read, and saving again would answer to the old version.
+    await waitFor(() => expect(screen.getByText("Awaiting acceptance")).toBeInTheDocument());
+    expect(screen.getByLabelText("Instructions")).toHaveValue("Write it better");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(await screen.findByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(screen.queryByText(/can't tell whether your edit saved/)).toBeNull());
+    expect(screen.queryByLabelText("Instructions")).toBeNull();
+    expect(screen.getByText("Awaiting acceptance")).toBeInTheDocument();
+    // The controls started afresh for the new version, and focus still finds its way back.
+    expect(screen.getByRole("button", { name: "Edit task" })).toHaveFocus();
+  });
+
+  it("gives back only the person's own words if the task can no longer be edited", async () => {
     const user = userEvent.setup();
     let latest = false;
     answer = (_, method) => {
@@ -563,31 +665,10 @@ describe("editing a task", () => {
     await user.type(screen.getByLabelText("Instructions"), " better");
     await user.click(screen.getByRole("button", { name: /Save/ }));
     await user.click(await screen.findByRole("button", { name: "Review latest" }));
-    expect(await screen.findByText(/can't be edited now/)).toBeInTheDocument();
-    expect(screen.getByText("Write it better")).toBeInTheDocument();
-  });
-
-  it("explains a refusal, not a generic failure", async () => {
-    const user = userEvent.setup();
-    answer = (_, method) => (method === "POST" ? refused(403, "not_allowed") : accepted());
-    await open();
-    await user.click(screen.getByRole("button", { name: "Edit task" }));
-    await user.type(screen.getByLabelText("Title"), " now");
-    await user.click(screen.getByRole("button", { name: "Save edit" }));
-    expect(await screen.findByText(/Only this task's requester, or an owner or admin/)).toBeInTheDocument();
-    expect(screen.queryByText(/You may no longer be allowed/)).toBeNull();
-  });
-
-  it("returns focus to the button when canceled, having sent nothing", async () => {
-    const user = userEvent.setup();
-    answer = accepted;
-    await open();
-    await user.click(screen.getByRole("button", { name: "Edit task" }));
-    await user.type(screen.getByLabelText("Title"), " now");
-    await user.click(screen.getByRole("button", { name: "Discard changes" }));
-    expect(screen.getByRole("button", { name: "Edit task" })).toHaveFocus();
-    expect(screen.queryByText("Unsaved changes")).toBeNull();
-    expect(commands()).toHaveLength(0);
+    const callout = (await screen.findByText(/can't be edited now/)).parentElement!;
+    expect(within(callout).getByText("Write it better")).toBeInTheDocument();
+    expect(within(callout).queryByText("Design the API")).toBeNull();
+    expect(within(callout).queryByText("It works")).toBeNull();
   });
 
   it("credits the edit to its author, though an edit of accepted work is recorded as an offer", async () => {
@@ -601,12 +682,56 @@ describe("editing a task", () => {
       );
     await open();
     const user = userEvent.setup();
+    // The brief is credited to the editor, not the task's creator.
+    const brief = screen.getByRole("heading", { name: "Instructions" }).closest("section")!;
+    expect(within(brief).getByText("You")).toBeInTheDocument();
+    expect(within(brief).queryByTitle("per_r")).toBeNull();
     await user.click(screen.getByRole("tab", { name: "Activity" }));
     expect(screen.getByText(/edited the instructions or criteria, so this needs accepting again/)).toBeInTheDocument();
   });
 });
 
+describe("in an archived room", () => {
+  const archived: Room = { ...OWNED, status: "archived" };
+
+  it("offers nothing that would be refused, and says why", async () => {
+    answer = () => json(200, detail({ status: "submitted", requester: "per_me", reviewer: "per_me", needs_attention: true }));
+    await open({ room: archived });
+    expect(screen.getByText(/This workroom is archived, so nothing new can happen on this task/)).toBeInTheDocument();
+    for (const name of [/Approve/, "Request changes", "Offer task", "Cancel task", "Edit task", "Set reviewer", "Set requester", "Post message"]) expect(screen.queryByRole("button", { name, hidden: true })).toBeNull();
+    expect(screen.queryByLabelText("Post a message")).toBeNull();
+  });
+
+  it("explains a refusal when the room was archived after the Sheet opened", async () => {
+    const user = userEvent.setup();
+    answer = (_, method) => (method === "POST" ? refused(409, "workspace_archived") : json(200, detail({ status: "accepted", requester: "per_me", reviewer: "agt_b" })));
+    await open();
+    await user.click(screen.getByRole("tab", { name: /Discussion/ }));
+    await user.type(screen.getByLabelText("Post a message"), "On it");
+    await user.click(screen.getByRole("button", { name: "Post message" }));
+    expect(await screen.findByText(/This workroom is archived/)).toBeInTheDocument();
+  });
+});
+
 describe("changing the reviewer or requester", () => {
+  it("after a lost response shows the latest, with the choice gone if it went through", async () => {
+    const user = userEvent.setup();
+    let committed = false;
+    answer = (_, method) => {
+      if (method === "POST") {
+        committed = true;
+        return json(502, {});
+      }
+      return json(200, detail({ status: "accepted", requester: "per_me", reviewer: committed ? "per_o" : "per_me", version: committed ? 6 : 5 }));
+    };
+    await open();
+    await user.selectOptions(screen.getByLabelText("Change reviewer"), "per_o");
+    await user.click(screen.getByRole("button", { name: "Set reviewer" }));
+    expect(await screen.findByText(/can't tell whether the reviewer changed, so we read the task again/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Change reviewer")).toHaveValue(""));
+    expect(within(screen.getByLabelText("Change reviewer")).queryByRole("option", { name: "per_o" })).toBeNull();
+  });
+
   const flaggedDetail = (over: Partial<Task> = {}) => json(200, detail({ status: "accepted", requester: "per_gone", reviewer: "per_gone", needs_attention: true, ...over }));
 
   it("opens on a flagged task, says what it needs, and sets the requester with the version it read", async () => {

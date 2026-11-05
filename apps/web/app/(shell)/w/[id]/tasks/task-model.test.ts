@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { asConflict, briefAuthor, canCreateTask, changedSince, changeProblem, crossRoomTarget, draftOf, flagged, flagText, isChosenName, nameOf, newRequesterChoices, newReviewerChoices, textNameOf, parseCrossRoomTarget, rebaseDraft, reoffers, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, taskPatch, toLocalInput, tooLong, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
+import { asConflict, briefAuthor, canCreateTask, changedSince, changeProblem, crossRoomTarget, draftOf, flagged, flagText, isArchivedRoom, isChosenName, nameOf, newRequesterChoices, newReviewerChoices, ownWords, textNameOf, parseCrossRoomTarget, rebaseDraft, reoffers, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, taskPatch, toLocalInput, tooLong, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
 
 const task = (over: Partial<Task> = {}): Task => ({ id: "tsk_1", title: "T", instructions: "I", acceptance_criteria: null, requester: "per_r", assignee: "agt_a", reviewer: "per_v", status: "submitted", version: 3, due_at: null, follow_up_of: null, submission_no: 2, needs_attention: false, ...over });
 
@@ -216,5 +216,42 @@ describe("changeProblem", () => {
   it("says what a limit or a lapsed session means", () => {
     expect(changeProblem("edit", "rate_limited", 429)).toMatch(/wait a minute/);
     expect(changeProblem("message", "unauthorized", 401)).toMatch(/session has ended/);
+  });
+});
+
+describe("an archived room", () => {
+  it("offers nothing to anyone, whatever their role", () => {
+    for (const [viewer, role] of [["per_v", "member"], ["per_r", "member"], ["per_x", "owner"], ["per_x", "admin"]]) {
+      expect(Object.values(viewerActions(task(), viewer, role, true))).toEqual([false, false, false, false, false, false]);
+    }
+    expect(isArchivedRoom({ status: "archived" })).toBe(true);
+    expect(isArchivedRoom({ status: "active" })).toBe(false);
+  });
+  it("says so when refused, and doesn't call it a question of access", () => {
+    expect(changeProblem("message", "workspace_archived", 409)).toMatch(/archived/);
+    expect(changeProblem("edit", "workspace_archived", 409)).not.toMatch(/no longer be allowed/);
+  });
+  it("doesn't promise a fix now on a flagged task", () => {
+    expect(flagText(task({ needs_attention: true, requester: "per_gone" }), { owner: "per_x", members: [], status: "archived" }, "per_x", "owner")).toMatch(/once the workroom is back/);
+  });
+});
+
+describe("what comes back after an edit that can't be saved", () => {
+  it("is only what the person changed", () => {
+    const readAt = task({ title: "An agent's title", instructions: "An agent's words", acceptance_criteria: "Theirs too" });
+    expect(ownWords({ readAt, draft: { ...draftOf(readAt), instructions: "Mine" } })).toEqual([{ label: "Instructions", text: "Mine" }]);
+    expect(ownWords({ readAt, draft: draftOf(readAt) })).toEqual([]);
+  });
+});
+
+describe("briefAuthor after an edit", () => {
+  const event = (over: Partial<HistoryEvent>): HistoryEvent => ({ seq: 1, id: "e", type: "task.created", from: { id: "per_r", org: "o" }, external: false, reason: null, prior_status: null, new_status: "open", task_version: 1, created_at: 1, ...over });
+  it("credits whoever edited accepted work, though it's recorded as an offer", () => {
+    const history = [event({}), event({ type: "task.offered", prior_status: "accepted", from: { id: "per_e", org: "o" } })];
+    expect(briefAuthor({ task: task(), history }).id).toBe("per_e");
+  });
+  it("doesn't credit someone who only offered it", () => {
+    const history = [event({}), event({ type: "task.offered", prior_status: "open", from: { id: "per_e", org: "o" } })];
+    expect(briefAuthor({ task: task(), history }).id).toBe("per_r");
   });
 });

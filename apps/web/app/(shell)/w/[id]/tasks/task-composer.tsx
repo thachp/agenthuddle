@@ -5,7 +5,7 @@ import type { SheetApi } from "@/components/sheet/target-sheet";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
-import { useIntentKey, taskPath } from "./task-actions";
+import { taskPath } from "./task-actions";
 import { FIELD_CLASS } from "./task-bits";
 import { changeProblem, LIMITS, tooLong } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
@@ -15,15 +15,15 @@ import type { LoadedTask } from "./task-sheet";
  * carries no version, so it can't conflict and doesn't touch an edit in progress: it stays out of the Sheet's `run` and `dirty`.
  */
 export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
-  const { data, setUnsaved, refresh } = api;
+  const { data, setUnsaved, setSending: holdSheet, refresh } = api;
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [posted, setPosted] = useState(false);
   const fieldRef = useRef<HTMLTextAreaElement>(null);
   const body = text.trim();
-  // The same words sent again are one intent, so a retry after a lost response can't post twice. Clearing the field ends it.
-  const key = useIntentKey(`message:${body}`);
+  // A message has no version to catch a second attempt, so only its key can. Each post whose outcome is unknown keeps its key, even if the words change and change back.
+  const unknownOutcomes = useRef(new Map<string, string>());
   const oversized = tooLong(body, LIMITS.message);
   const hasText = text.length > 0;
 
@@ -36,23 +36,34 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
   const post = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!body || oversized || sending) return;
+    const key = unknownOutcomes.current.get(body) ?? crypto.randomUUID();
+    const unknown = () => {
+      unknownOutcomes.current.set(body, key);
+      refresh();
+    };
     setSending(true);
+    holdSheet(true);
     setProblem(null);
     setPosted(false);
     try {
       const result = await clientCommand(taskPath(data, "messages"), { body }, { idempotencyKey: key });
       if (!result.ok) {
         setProblem(changeProblem("message", result.code, result.status));
+        if (result.status >= 500) unknown();
+        else unknownOutcomes.current.delete(body);
         return;
       }
+      unknownOutcomes.current.delete(body);
       setText("");
       setPosted(true);
       refresh();
       fieldRef.current?.focus();
     } catch {
       setProblem(changeProblem("message", "unknown", 0));
+      unknown();
     } finally {
       setSending(false);
+      holdSheet(false);
     }
   };
 

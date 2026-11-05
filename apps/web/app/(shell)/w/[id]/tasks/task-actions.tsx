@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { FIELD_CLASS } from "./task-bits";
-import { asConflict, changedSince, changeProblem, draftOf, flagged, LIMITS, newRequesterChoices, newReviewerChoices, rebaseDraft, reoffers, taskPatch, textNameOf, tooLong, viewerActions, type Names, type Task, type TaskDraft } from "./task-model";
+import { asConflict, changedSince, changeProblem, draftOf, flagged, isArchivedRoom, LIMITS, newRequesterChoices, newReviewerChoices, ownWords, rebaseDraft, reoffers, taskPatch, textNameOf, tooLong, viewerActions, type Names, type Task, type TaskDraft } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
 
 type Props = { api: SheetApi<LoadedTask>; me: string; names: Names; role: string | undefined; onNotice: (notice: string | null) => void };
@@ -20,18 +20,26 @@ export type SavedEdit = { readAt: Task; draft: TaskDraft };
 const PRIMARY = "min-h-11 sm:min-h-9";
 
 /** Only what this viewer may do now. It's rebuilt for each task version, so nothing here can outlive what it was read against. */
-export function TaskActions({ api, me, names, role, onNotice, savedEdit }: Props & { savedEdit: RefObject<SavedEdit | null> }) {
-  const { task } = api.data;
-  const can = viewerActions(task, me, role);
+export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnFocus }: Props & { savedEdit: RefObject<SavedEdit | null>; returnFocus: RefObject<boolean> }) {
+  const { task, room } = api.data;
+  const archived = isArchivedRoom(room);
+  const can = viewerActions(task, me, role, archived);
   const [editing, setEditing] = useState(() => savedEdit.current !== null && can.edit);
   const editButton = useRef<HTMLButtonElement>(null);
-  const returnFocus = useRef(false);
-  // The form has gone, and focus shouldn't go with it. The button only exists again after this render.
+  // The form has gone, and focus shouldn't go with it. The button only exists again after this render, and these controls may be starting afresh if the version moved. If this task can't be edited any more, the open tab is the nearest place.
   useEffect(() => {
-    if (!editing && returnFocus.current) editButton.current?.focus();
+    if (!editing && returnFocus.current) (editButton.current ?? document.querySelector<HTMLElement>('[role="dialog"] [role="tab"][data-state="active"]'))?.focus();
     returnFocus.current = false;
-  }, [editing]);
+  }, [editing, returnFocus]);
 
+  if (archived) {
+    return (
+      <>
+        {savedEdit.current ? <UnsavableEdit savedEdit={savedEdit} /> : null}
+        <p className="border-t pt-4 text-sm text-muted-foreground">This workroom is archived, so nothing new can happen on this task. Its owner or an admin can bring the workroom back.</p>
+      </>
+    );
+  }
   if (editing) {
     return (
       <section aria-label="Actions" className="space-y-3 border-t pt-4">
@@ -87,14 +95,17 @@ export function TaskActions({ api, me, names, role, onNotice, savedEdit }: Props
 /** The task moved to a state that can't be edited, so all that's left is to give the person their words back. */
 function UnsavableEdit({ savedEdit }: { savedEdit: RefObject<SavedEdit | null> }) {
   const [, setDismissed] = useState(false);
-  const saved = savedEdit.current;
-  if (!saved) return null;
+  const words = savedEdit.current ? ownWords(savedEdit.current) : [];
+  if (words.length === 0) return null;
   return (
-    <div className="space-y-2 rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
-      <p>This task can't be edited now, so your edit wasn't saved. Here's what you wrote, to copy.</p>
-      <p className="break-words whitespace-pre-wrap">{saved.draft.title}</p>
-      <p className="break-words whitespace-pre-wrap">{saved.draft.instructions}</p>
-      {saved.draft.criteria ? <p className="break-words whitespace-pre-wrap">{saved.draft.criteria}</p> : null}
+    <div className="space-y-2 rounded-lg border p-3 text-sm">
+      <p className="text-status-amber">This task can't be edited now, so your edit wasn't saved. Here's what you wrote, to copy.</p>
+      {words.map(({ label, text }) => (
+        <div key={label} className="space-y-1">
+          <p className="font-medium">{label}</p>
+          <p className="break-words whitespace-pre-wrap">{text}</p>
+        </div>
+      ))}
       <Button
         variant="outline"
         className={PRIMARY}
@@ -117,6 +128,7 @@ function EditTask({ api, me, names, savedEdit, onDone, onNotice }: Pick<Props, "
   const { data, run, saving, setDirty } = api;
   const { task } = data;
   const earlier = useRef(savedEdit.current);
+  const [discarding, setDiscarding] = useState(false);
   const [draft, setDraftState] = useState<TaskDraft>(() => (earlier.current ? rebaseDraft(earlier.current.draft, earlier.current.readAt, task) : draftOf(task)));
   const titleRef = useRef<HTMLInputElement>(null);
   const patch = taskPatch(task, draft);
@@ -197,11 +209,30 @@ function EditTask({ api, me, names, savedEdit, onDone, onNotice }: Pick<Props, "
         <Button type="submit" className={PRIMARY} disabled={saving || !changed || invalid}>
           {saving ? "Saving…" : backToOffered ? "Save and ask for acceptance again" : "Save edit"}
         </Button>
-        <Button type="button" variant="outline" className={PRIMARY} disabled={saving} onClick={finish}>
-          {changed ? "Discard changes" : "Cancel"}
+        <Button type="button" variant="outline" className={PRIMARY} disabled={saving} onClick={() => (changed ? setDiscarding(true) : finish())}>
+          Cancel
         </Button>
       </div>
+      <ConfirmDiscard open={discarding} what={`your edit to “${plainName(task.title)}”`} onKeep={() => setDiscarding(false)} onDiscard={finish} />
     </form>
+  );
+}
+
+/** Names what's being thrown away, and goes nowhere until the person says so (DESIGN.md, "Sheets"). */
+function ConfirmDiscard({ open, what, onKeep, onDiscard }: { open: boolean; what: string; onKeep: () => void; onDiscard: () => void }) {
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => !next && onKeep()}>
+      <AlertDialogContent onCloseAutoFocus={(event) => event.preventDefault()}>
+        <AlertDialogHeader>
+          <AlertDialogTitle className="break-words">Discard {what}?</AlertDialogTitle>
+          <AlertDialogDescription>What you wrote won't be saved, and this can't be undone.</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Keep editing</AlertDialogCancel>
+          <AlertDialogAction onClick={onDiscard}>Discard</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -272,7 +303,7 @@ function Waiting({ api, me, names }: Pick<Props, "api" | "me" | "names">) {
 export const taskPath = (data: LoadedTask, action: string) => `/api/v1/workspaces/${encodeURIComponent(data.workspace)}/tasks/${encodeURIComponent(data.task.id)}/${action}`;
 
 /** One key per intent, so retrying after a lost response can't act twice. Changing what's being asked starts a new intent. */
-export function useIntentKey(intent: string) {
+function useIntentKey(intent: string) {
   const key = useRef({ intent, value: crypto.randomUUID() });
   if (key.current.intent !== intent) key.current = { intent, value: crypto.randomUUID() };
   return key.current.value;
@@ -282,6 +313,7 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
   const { data, run, saving, setDirty } = api;
   const submission = data.task.submission_no;
   const [asking, setAsking] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
   const [reason, setReason] = useState("");
   const fieldRef = useRef<HTMLTextAreaElement>(null);
   const approveKey = useIntentKey(`verify:${submission}`);
@@ -291,6 +323,13 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
   useEffect(() => {
     if (asking) fieldRef.current?.focus();
   }, [asking]);
+
+  const back = () => {
+    setAsking(false);
+    setDiscarding(false);
+    setReason("");
+    setDirty(false);
+  };
 
   const approve = async () => {
     onNotice(null);
@@ -330,15 +369,12 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
               variant="outline"
               className={PRIMARY}
               disabled={saving}
-              onClick={() => {
-                setAsking(false);
-                setReason("");
-                setDirty(false);
-              }}
+              onClick={() => (reason ? setDiscarding(true) : back())}
             >
               Back
             </Button>
           </div>
+          <ConfirmDiscard open={discarding} what={`your request for changes to submission ${submission}`} onKeep={() => setDiscarding(false)} onDiscard={back} />
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
