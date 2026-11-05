@@ -1631,8 +1631,10 @@ describe("sign-in and claim pages", () => {
     const real = createAuth({ ...e, BASE_URL: "https://gateway.podster.dev", ENABLE_PASSWORD_SIGNIN: "true" }).options as any;
     expect(real.account.accountLinking.disableImplicitLinking).toBe(true);
     const before = real.databaseHooks.user.create.before;
-    expect(await before({ emailVerified: false })).toBe(false);
-    expect(await before({ emailVerified: true })).toBeUndefined();
+    expect(await before({ email: "a@example.test", emailVerified: false })).toBe(false);
+    expect(await before({ email: "a@example.test", emailVerified: true })).toBeUndefined();
+    // Not even a provider vouching for it gets an address on the test people's domain.
+    expect(await before({ email: "a@e2e.podster.invalid", emailVerified: true })).toBe(false);
   });
 
   it("starts a provider's sign-in from a form on our own page only", async () => {
@@ -2414,5 +2416,166 @@ describe("kernel journey across two organizations", () => {
     expect((await reclaimed.json<any>()).agent_id).toBe(architect.id);
     expect((await execute(replacement, "get_identity")).data).toMatchObject({ id: architect.id, generation: 3 });
     expect((await execute(replacement, "get_workspace", { workspace_id: room })).status).toBe(403);
+  });
+});
+
+describe("staging's test sign-up", () => {
+  const GATEWAY = "https://gateway-staging.podster.dev";
+  const APP = "https://app-staging.podster.dev";
+  const SECRET = "local-test-only-e2e-secret-0123456789";
+  const ctx = { waitUntil() {}, passThroughOnException() {} } as never;
+  const counter = (retryAfter = 0) => ({ idFromName: (name: string) => name, get: () => ({ take: async () => retryAfter }) });
+  /** What staging's config gives the gateway. The counter is fake, because this file's tests would use up the real one. */
+  const staging = { ...e, BASE_URL: GATEWAY, APP_URL: APP, ENABLE_PASSWORD_SIGNIN: undefined, ENABLE_E2E_SIGNUP: "true", E2E_SIGNUP_SECRET: SECRET, STRICT_COUNTER: counter() };
+  const send = (url: string, init: RequestInit = {}, env: object = staging) => worker.fetch(new Request(url, { redirect: "manual", ...init }), env as never, ctx);
+  const signUpAs = (env: object = staging, url = `${GATEWAY}/api/auth/sign-up/e2e`, secret: string | null = SECRET) => send(url, { method: "POST", headers: secret === null ? {} : { authorization: `Bearer ${secret}` } }, env);
+  const testPerson = async (env: object = staging) => {
+    const res = await signUpAs(env);
+    expect(res.status).toBe(200);
+    return { body: await res.json<{ user_id: string; email: string }>(), cookie: res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; "), set: res.headers.getSetCookie().join("\n") };
+  };
+  const peopleCount = async () => (await e.DB.prepare(`SELECT COUNT(*) AS n FROM "user"`).first<{ n: number }>())!.n;
+
+  describe("is off unless everything lines up", () => {
+    // The answer any private auth route gives today, so being on can't be told from being off.
+    const today = async () => {
+      const res = await send(`${GATEWAY}/api/auth/not-a-route`, { method: "POST" });
+      return [res.status, await res.text()];
+    };
+    const refusals: [string, () => Promise<Response>][] = [
+      ["the var is missing", () => signUpAs({ ...staging, ENABLE_E2E_SIGNUP: undefined })],
+      ["the var isn't exactly true", () => signUpAs({ ...staging, ENABLE_E2E_SIGNUP: "1" })],
+      ["the secret isn't set", () => signUpAs({ ...staging, E2E_SIGNUP_SECRET: undefined })],
+      ["the secret is empty, and so is the header", () => signUpAs({ ...staging, E2E_SIGNUP_SECRET: "" }, undefined, "")],
+      ["the secret is too short", () => signUpAs({ ...staging, E2E_SIGNUP_SECRET: "short" }, undefined, "short")],
+      ["no secret is sent", () => signUpAs(staging, undefined, null)],
+      ["the secret is wrong", () => signUpAs(staging, undefined, `${SECRET}x`)],
+      ["the secret is only in the query", () => signUpAs(staging, `${GATEWAY}/api/auth/sign-up/e2e?secret=${SECRET}`, null)],
+      ["the deployment is production", () => signUpAs({ ...staging, BASE_URL: "https://gateway.podster.dev", APP_URL: "https://app.podster.dev" }, "https://gateway.podster.dev/api/auth/sign-up/e2e")],
+      ["the request is for production on staging's deployment", () => signUpAs(staging, "https://gateway.podster.dev/api/auth/sign-up/e2e")],
+      ["the deployment isn't staging's, whatever the request says", () => signUpAs({ ...staging, BASE_URL: "https://gateway.podster.dev" })],
+      ["the host only looks like staging's", () => signUpAs({ ...staging, BASE_URL: `${GATEWAY}.evil.test` }, `${GATEWAY}.evil.test/api/auth/sign-up/e2e`)],
+      ["the request is for the application host", () => signUpAs(staging, `${APP}/api/auth/sign-up/e2e`)],
+      ["it's a local target with password sign-in on", () => signUpAs({ ...e, ENABLE_E2E_SIGNUP: "true", E2E_SIGNUP_SECRET: SECRET, STRICT_COUNTER: counter() }, `${BASE}/api/auth/sign-up/e2e`)],
+      ["it isn't a POST", () => send(`${GATEWAY}/api/auth/sign-up/e2e`, { headers: { authorization: `Bearer ${SECRET}` } })],
+    ];
+    for (const [name, attempt] of refusals) {
+      it(`answers the same 404 when ${name}`, async () => {
+        const before = await peopleCount();
+        const res = await attempt();
+        expect([res.status, await res.text()]).toEqual(await today());
+        expect(res.headers.getSetCookie()).toEqual([]);
+        expect(await peopleCount()).toBe(before);
+      });
+    }
+
+    it("can't be turned on by the top-level config, or by any environment but staging", () => {
+      const config = JSON.parse(e.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+      const { staging: stagingConfig, ...others } = config.env;
+      for (const [name, environment] of Object.entries<any>({ top: config, ...others, production: config.env.production ?? {} })) {
+        expect(environment.vars?.ENABLE_E2E_SIGNUP, name).toBeUndefined();
+      }
+      // A var is what turns it on, and the secret isn't one: a plain var would sit in this repo.
+      for (const environment of [config, ...Object.values<any>(config.env)]) expect(environment.vars?.E2E_SIGNUP_SECRET).toBeUndefined();
+      expect(stagingConfig.vars.ENABLE_E2E_SIGNUP).toBe("true");
+      expect(stagingConfig.vars.BASE_URL).toBe(GATEWAY);
+      // Production's name mustn't be able to pass as staging's.
+      expect(config.vars.BASE_URL).not.toBe(GATEWAY);
+    });
+  });
+
+  it("makes a marked person with their own organization, and a session the real hosts accept", async () => {
+    const { body, cookie, set } = await testPerson();
+    expect(body.user_id.startsWith("e2e_")).toBe(true);
+    expect(body.email.endsWith("@e2e.podster.invalid")).toBe(true);
+    expect(cookie).toContain("__Secure-better-auth.session_token=");
+    expect(set.toLowerCase()).not.toContain("domain=");
+    expect(set.toLowerCase()).toContain("httponly");
+    for (const host of [GATEWAY, APP]) {
+      const me = await send(`${host}/api/v1/me`, { headers: { cookie } });
+      expect(me.status, host).toBe(200);
+      expect((await me.json<any>()).id, host).toBe(`per_${body.user_id}`);
+      const orgs = await (await send(`${host}/api/orgs`, { headers: { cookie } })).json<any>();
+      expect(orgs.organizations.filter((o: any) => o.personal), host).toHaveLength(1);
+    }
+    // Origin checks are what they were: this host's own origin, and nobody else's.
+    const create = (origin: string) => send(`${GATEWAY}/api/orgs`, { method: "POST", headers: { cookie, origin, "content-type": "application/json" }, body: JSON.stringify({ name: "x" }) });
+    expect((await create(APP)).status).toBe(403);
+    expect((await create(GATEWAY)).status).toBe(200);
+    const row = await e.DB.prepare(`SELECT s.expiresAt FROM session s WHERE s.userId = ?`).bind(body.user_id).first<{ expiresAt: string }>();
+    expect(new Date(row!.expiresAt).getTime() - Date.now()).toBeLessThanOrEqual(2 * 60 * 60 * 1000);
+  });
+
+  it("signs out on the gateway's host", async () => {
+    const { cookie } = await testPerson();
+    const out = await send(`${GATEWAY}/api/auth/sign-out`, { method: "POST", headers: { cookie, origin: GATEWAY, "content-type": "application/json" }, body: "{}" });
+    expect(out.status).toBe(200);
+    expect((await send(`${GATEWAY}/api/orgs`, { headers: { cookie } })).status).toBe(401);
+  });
+
+  it("takes no input, so a request can't name, sign in as or link to a real person", async () => {
+    const real = await signUp();
+    const realMe = await (await call("/api/v1/me", { headers: { cookie: real.cookie } })).json<any>();
+    const realRow = await e.DB.prepare(`SELECT email FROM "user" WHERE id = ?`).bind(realMe.id.slice("per_".length)).first<{ email: string }>();
+    const github = `${unique("github")}`;
+    await e.DB.prepare(`INSERT INTO account (id, accountId, providerId, userId, createdAt, updatedAt) VALUES (?, ?, 'github', ?, ?, ?)`).bind(github, github, realMe.id.slice("per_".length), new Date().toISOString(), new Date().toISOString()).run();
+    const accounts = () => e.DB.prepare(`SELECT id, providerId, password FROM account WHERE userId = ? ORDER BY id`).bind(realMe.id.slice("per_".length)).all();
+    const before = (await accounts()).results;
+
+    const res = await send(`${GATEWAY}/api/auth/sign-up/e2e`, { method: "POST", headers: { authorization: `Bearer ${SECRET}`, "content-type": "application/json" }, body: JSON.stringify({ email: realRow!.email, password: "chosen-password-123", name: "Real", user_id: realMe.id, id: realMe.id }) });
+    expect(res.status).toBe(200);
+    const made = await res.json<any>();
+    expect(made.email).not.toBe(realRow!.email);
+    expect(`per_${made.user_id}`).not.toBe(realMe.id);
+    expect((await accounts()).results).toEqual(before);
+  });
+
+  it("leaves password sign-in off everywhere else on staging, including for test people", async () => {
+    const { body } = await testPerson();
+    const form = (path: string, email: string) => send(`${APP}${path}`, { method: "POST", headers: { origin: APP, "content-type": "application/json" }, body: JSON.stringify({ email, password: "local-test-password-123", name: "x" }) });
+    for (const path of ["/api/auth/sign-in/email", "/api/auth/sign-up/email"]) {
+      for (const email of [body.email, `${unique("p")}@example.test`]) {
+        const res = await form(path, email);
+        expect(res.ok, `${path} ${email}`).toBe(false);
+        expect(res.headers.getSetCookie().filter((c) => c.includes("session_token")), path).toEqual([]);
+      }
+    }
+    // Someone who really has a password, the right one, gets nowhere either.
+    const email = `${unique("p")}@example.test`;
+    expect((await post("/api/auth/sign-up/email", { email, password: "local-test-password-123", name: "Has a password" })).status).toBe(200);
+    const correct = await form("/api/auth/sign-in/email", email);
+    expect(correct.ok).toBe(false);
+    expect(correct.headers.getSetCookie().filter((c) => c.includes("session_token"))).toEqual([]);
+    // And on the gateway's host, sign-up and sign-in are still its usual 404.
+    for (const path of ["/api/auth/sign-in/email", "/api/auth/sign-up/email", "/api/auth/callback/github"]) {
+      expect((await send(`${GATEWAY}${path}`, { method: "POST", headers: { origin: GATEWAY, "content-type": "application/json" }, body: "{}" })).status, path).toBe(404);
+    }
+  });
+
+  it("keeps the reserved domain for test people, so the mark means what it says", async () => {
+    const res = await post("/api/auth/sign-up/email", { email: `${unique("p")}@E2E.podster.invalid`, password: "local-test-password-123", name: "Pretender" });
+    expect(res.ok).toBe(false);
+    expect(res.headers.getSetCookie().filter((c) => c.includes("session_token"))).toEqual([]);
+  });
+
+  it("stops after a strict number across all clients, and refuses if it can't count", async () => {
+    const live = { ...staging, STRICT_COUNTER: e.STRICT_COUNTER };
+    const statuses: number[] = [];
+    for (const ip of ["192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4", "192.0.2.5", "192.0.2.6", "192.0.2.7"]) {
+      statuses.push((await send(`${GATEWAY}/api/auth/sign-up/e2e`, { method: "POST", headers: { authorization: `Bearer ${SECRET}`, "cf-connecting-ip": ip } }, live)).status);
+    }
+    expect(statuses).toEqual([200, 200, 200, 200, 200, 200, 429]);
+
+    const before = await peopleCount();
+    const over = await signUpAs({ ...staging, STRICT_COUNTER: counter(30) });
+    expect(over.status).toBe(429);
+    expect(over.headers.get("retry-after")).toBe("30");
+    const broken = { idFromName: (name: string) => name, get: () => ({ take: async () => { throw new Error("down"); } }) };
+    expect((await signUpAs({ ...staging, STRICT_COUNTER: broken })).status).toBe(429);
+    expect(await peopleCount()).toBe(before);
+  });
+
+  it("wrong guesses count under the route's limit per client, like other sign-up routes", () => {
+    expect(sensitiveRoute("POST", "/api/auth/sign-up/e2e")).toBe("auth");
   });
 });

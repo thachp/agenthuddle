@@ -8,7 +8,7 @@ A status is one of these, and an item only moves when the run has actually happe
 
 - **Not covered:** no test proves it.
 - **Local only:** a test passes under Miniflare or `wrangler dev`.
-- **Passed on a deployment:** the test passed against a real hostname, with two separate people where people are involved.
+- **Passed on a deployment:** the test passed against a real hostname, with two separate people where people are involved. If those were [test people](#with-test-people), the status says so.
 
 Last updated from commit `b892d31` plus this change, on 2026-11-05 UTC. `journey` means [e2e/journey.mjs](../e2e/journey.mjs), and the ID after it is the check's ID in its output. "Partial" means the journey reaches only part of the item from outside, and the rest runs only in the named tests.
 
@@ -111,11 +111,13 @@ cd e2e && node run-local.mjs
 
 This builds the API's release build, starts it and the gateway under `wrangler dev` with throwaway keys and empty databases, then runs the journey and the probe. CI runs the same thing. A check marked `GAP` is something the product doesn't do yet. It doesn't fail the run unless you pass `--strict`.
 
-`--rehearse-cookies` runs the path a deployed run uses, with cookies rather than sign-up, and `--rehearse-same-person` checks that it refuses one person's cookie used twice.
+`--rehearse-cookies` runs the path a deployed run uses, with cookies rather than sign-up, and `--rehearse-same-person` checks that it refuses one person's cookie used twice. `--rehearse-test-people` runs [the test-people path](#with-test-people) with staging's URLs, `APP_URL` and gates, on a local stack and throwaway secret. It reaches nothing remote, and CI runs it too. It's still not a deployed run: Cloudflare's real routing, limits and D1 aren't in it.
 
 ## Running it on staging
 
-This needs two people with different GitHub accounts, about five minutes, and the steps below. Staging has no delete route, so each run leaves about 5 rooms, 15 agents and their tasks behind, plus an organization called "Podster e2e outsiders" on the first person's account. It may pause for up to a minute if it reaches a rate limit.
+This needs two people with different GitHub accounts, about five minutes, and the steps below. Or the driver can make its own people, [with test people](#with-test-people), which proves less. Staging has no delete route, so each run leaves about 5 rooms, 15 agents and their tasks behind, plus organizations called "Podster e2e outsiders" and "Podster e2e team" on the first person's account. It may pause for up to a minute if it reaches a rate limit.
+
+The driver stays on the gateway's host with either kind of person, including its `POST`s to `/authorize` and `/claim`, which ADR 0001 keeps there. A session works on both hosts, and the origin it sends is the gateway's. Only sign-in itself moved to the application host.
 
 1. **Check what's deployed.** The result only counts for the commit that's running. Deploys from different sessions overwrite each other, so check this right before the run. From `apps/api`, and then from `apps/gateway`:
 
@@ -154,6 +156,26 @@ This needs two people with different GitHub accounts, about five minutes, and th
    ```bash
    node journey.mjs --base-url https://gateway-staging.podster.dev --sign-out-only
    ```
+
+### With test people
+
+The owner has no second person yet, and accepted that a run this way leaves a second real sign-in untested. With `PODSTER_E2E_SIGNUP_SECRET` set, the driver signs up two new test people through [staging's test sign-up](staging.md#test-people-for-the-journey), and signs them out when it ends. It sends the secret only to `https://gateway-staging.podster.dev`, refuses any other target even with `--allow-host`, and refuses a run that also has cookies. It never prints the secret or a session, and it still refuses two sessions that are one person.
+
+Steps 2 and 3 above are replaced by this. Paste the secret when it waits:
+
+```bash
+read -rs PODSTER_E2E_SIGNUP_SECRET && export PODSTER_E2E_SIGNUP_SECRET
+```
+
+Then do steps 1, 4, 5 and 6. If a run is killed outright, its sessions end by themselves within two hours, and step 7 isn't needed.
+
+**A run this way used test people, so it doesn't prove:**
+
+- A second real human, or their GitHub sign-in, working anything. Neither test person signed in through GitHub.
+- A real sign-in on the application host: GitHub's callback, the cookie crossing the web Worker, and the other probes at the end of [ADR 0001](adr/0001-application-host-and-session-cookie.md#what-staging-needs).
+- Gap 8 and decision 23 on a deployment. Those need an OAuth sign-up to create its personal organization, and test people sign up by email.
+
+The results file says `"people": "test_signup"`. In step 6, write such a pass as **Passed on a deployment, with test people**, with the date and commit, and keep this list open. These people are in separate organizations and separate accounts, so what a run shows across organizations still holds.
 
 ## Decision audit
 

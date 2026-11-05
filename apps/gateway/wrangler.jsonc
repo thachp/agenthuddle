@@ -25,10 +25,10 @@
       "preview_urls": false,
       "routes": [{ "pattern": "gateway-staging.podster.dev", "custom_domain": true }],
       "services": [{ "binding": "API", "service": "podster-api-staging" }],
-      // Secrets: AUTH_SECRET, ASSERTION_SIGNING_JWK, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET.
+      // Secrets: AUTH_SECRET, ASSERTION_SIGNING_JWK, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, E2E_SIGNUP_SECRET.
       "d1_databases": [{ "binding": "DB", "database_name": "podster-gateway-staging", "database_id": "055c6e16-853c-4dae-8a32-693b2d1f50c2", "migrations_dir": "migrations" }],
       "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "57637530b0404f209d89b9ab00b5ef0c" }],
-      "vars": { "BASE_URL": "https://gateway-staging.podster.dev", "APP_URL": "https://app-staging.podster.dev" },
+      "vars": { "BASE_URL": "https://gateway-staging.podster.dev", "APP_URL": "https://app-staging.podster.dev", "ENABLE_E2E_SIGNUP": "true" },
       "durable_objects": { "bindings": [{ "name": "STRICT_COUNTER", "class_name": "StrictCounter" }] },
       "triggers": { "crons": ["17 * * * *"] },
       "ratelimits": [

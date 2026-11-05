@@ -4,7 +4,9 @@
 //   node run-local.mjs [--skip-build] [--rehearse-cookies] [journey options]
 //
 // `--rehearse-cookies` signs two people up first and hands the journey their cookies, which is the path a deployed run
-// uses. `--rehearse-same-person` gives it one person's cookie twice, which it has to refuse.
+// uses. `--rehearse-same-person` gives it one person's cookie twice, which it has to refuse. `--rehearse-test-people`
+// runs staging's setup with nothing remote: the worker sees staging's URLs and `APP_URL`, and rehearse-fetch.mjs sends the
+// journey's requests for staging here, so the driver and the test sign-up meet with their real gates on.
 import { spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -24,7 +26,8 @@ const flags = process.argv.slice(2);
 const skipBuild = flags.includes("--skip-build");
 const rehearse = flags.includes("--rehearse-cookies");
 const samePerson = flags.includes("--rehearse-same-person");
-const passOn = flags.filter((f) => !["--skip-build", "--rehearse-cookies", "--rehearse-same-person"].includes(f));
+const testPeople = flags.includes("--rehearse-test-people");
+const passOn = flags.filter((f) => !["--skip-build", "--rehearse-cookies", "--rehearse-same-person", "--rehearse-test-people"].includes(f));
 
 if (!existsSync(wrangler)) {
   console.error("Run `npm ci` in apps/gateway first: this uses that app's pinned wrangler.");
@@ -76,7 +79,9 @@ run(wrangler, ["d1", "migrations", "apply", "podster-gateway", "--local", "--per
 run(wrangler, ["d1", "migrations", "apply", "podster-api", "--local", "--persist-to", persist, "-c", apiConfig], gateway);
 
 const port = await freePort();
-const base = `http://localhost:${port}`;
+// A worker only sees staging's HTTPS URLs if the local stack is on HTTPS too, with wrangler's own certificate.
+const base = `${testPeople ? "https" : "http"}://localhost:${port}`;
+if (testPeople) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 // These reach only the gateway, and die with this run.
 const vars = {
   AUTH_SECRET: randomBytes(32).toString("base64"),
@@ -86,10 +91,18 @@ const vars = {
   ENABLE_PASSWORD_SIGNIN: "true",
 };
 
+const STAGING_HOST = "gateway-staging.podster.dev";
+const signupSecret = randomBytes(32).toString("hex");
+if (testPeople) {
+  // Password sign-in stays off, as on staging. The secret dies with this run.
+  delete vars.ENABLE_PASSWORD_SIGNIN;
+  Object.assign(vars, { BASE_URL: `https://${STAGING_HOST}`, APP_URL: "https://app-staging.podster.dev", ENABLE_E2E_SIGNUP: "true", E2E_SIGNUP_SECRET: signupSecret });
+}
+
 const log = [];
 const stack = spawn(
   wrangler,
-  ["dev", "-c", join(gateway, "wrangler.jsonc"), "-c", apiConfig, ...Object.entries(vars).flatMap(([name, value]) => ["--var", `${name}:${value}`]), "--port", String(port), "--ip", "127.0.0.1", "--inspector-port", String(await freePort()), "--persist-to", persist, "--show-interactive-dev-session=false", "--log-level", "warn"],
+  ["dev", "-c", join(gateway, "wrangler.jsonc"), "-c", apiConfig, ...Object.entries(vars).flatMap(([name, value]) => ["--var", `${name}:${value}`]), ...(testPeople ? ["--local-upstream", STAGING_HOST, "--local-protocol", "https"] : []), "--port", String(port), "--ip", "127.0.0.1", "--inspector-port", String(await freePort()), "--persist-to", persist, "--show-interactive-dev-session=false", "--log-level", "warn"],
   { cwd: gateway, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, CI: "1", WRANGLER_SEND_METRICS: "false" } },
 );
 for (const stream of [stack.stdout, stack.stderr]) stream.on("data", (chunk) => log.push(chunk.toString()));
@@ -110,6 +123,12 @@ for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.exi
 async function waitForStack() {
   const deadline = Date.now() + 120_000;
   let cookie;
+  // Nobody can sign up on this stack without using up the test sign-up's limit, and any answer means it's listening.
+  while (testPeople && Date.now() < deadline && stack.exitCode === null) {
+    const answered = await fetch(`${base}/api/auth/ok`, { redirect: "manual", signal: AbortSignal.timeout(30_000) }).catch(() => null);
+    if (answered) return;
+    await new Promise((done) => setTimeout(done, 500));
+  }
   while (Date.now() < deadline) {
     if (stack.exitCode !== null) break;
     try {
@@ -131,9 +150,9 @@ async function signUp() {
   return res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
 }
 
-function child(script, args, env = {}) {
+function child(script, args, env = {}, nodeArgs = []) {
   return new Promise((done) => {
-    const proc = spawn(process.execPath, [join(here, script), ...args], { cwd: here, stdio: "inherit", env: { ...process.env, ...env } });
+    const proc = spawn(process.execPath, [...nodeArgs, join(here, script), ...args], { cwd: here, stdio: "inherit", env: { ...process.env, ...env } });
     proc.on("exit", (code) => done(code ?? 1));
   });
 }
@@ -142,6 +161,14 @@ let code = 1;
 try {
   await waitForStack();
   console.log(`local stack is up at ${base}\n`);
+  if (testPeople) {
+    const redirect = ["--import", join(here, "rehearse-fetch.mjs")];
+    const rehearsal = { PODSTER_E2E_REHEARSE_PORT: String(port), PODSTER_E2E_SIGNUP_SECRET: signupSecret, PODSTER_E2E_COOKIE_A: "", PODSTER_E2E_COOKIE_B: "" };
+    code = await child("journey.mjs", ["--base-url", `https://${STAGING_HOST}`, ...passOn], rehearsal, redirect);
+    if (code !== 0) console.error(`\n--- last of the stack's log ---\n${log.join("").slice(-4000)}`);
+    stop();
+    process.exit(code);
+  }
   const first = rehearse || samePerson ? await signUp() : undefined;
   const cookies = first ? { PODSTER_E2E_COOKIE_A: first, PODSTER_E2E_COOKIE_B: samePerson ? first : await signUp() } : {};
   const journey = await child("journey.mjs", ["--base-url", base, ...passOn], cookies);

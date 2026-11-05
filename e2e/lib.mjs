@@ -101,6 +101,16 @@ export class Person {
     return new Person(target, label, cookie).load();
   }
 
+  /**
+   * A new test person's session cookie from staging's test sign-up. The secret goes only in this header, and a failure
+   * names only the status, so neither it nor the cookie can reach the output.
+   */
+  static async testSessionCookie(target, label, secret) {
+    const res = await target.http("/api/auth/sign-up/e2e", { method: "POST", headers: { authorization: `Bearer ${secret}` } });
+    ok(res.status === 200, `test sign-up for ${label} answered ${res.status}. A 404 means it's off on this deployment, or PODSTER_E2E_SIGNUP_SECRET is wrong.`);
+    return res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
+  }
+
   /** A session someone signed in to in their browser. */
   static fromCookie(target, label, cookie) {
     return new Person(target, label, cookie).load();

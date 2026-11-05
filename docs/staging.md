@@ -136,6 +136,41 @@ npx wrangler deploy --config dist/server/wrangler.json
 
 Deploy in the order API, gateway, web. The gateway's `APP_URL` moves sign-in to the application host, so GitHub's callback has to be `https://app-staging.podster.dev/api/auth/callback/github`. An OAuth app has one callback host, so sign-in fails until the two match.
 
+## Test people for the journey
+
+The journey needs two separate people, and staging can make its own when a run has no second human. It's off until all of these hold, and otherwise the route answers like any other private auth route, with a 404:
+
+- `ENABLE_E2E_SIGNUP` is `true`. It's set only under `env.staging` in `apps/gateway/wrangler.jsonc`, and a test fails if the top level or any other environment sets it.
+- `BASE_URL` and the request's URL are both exactly `https://gateway-staging.podster.dev`. It doesn't answer on the application host.
+- `E2E_SIGNUP_SECRET` is set, at least 32 characters, and sent as a bearer token. It's compared in constant time.
+
+To turn it on, from `apps/gateway`, once a build with the route is deployed. Paste the output of `openssl rand -hex 32` when asked:
+
+```bash
+npx wrangler secret put E2E_SIGNUP_SECRET --env staging
+```
+
+To turn it off, which takes effect at once:
+
+```bash
+npx wrangler secret delete E2E_SIGNUP_SECRET --env staging
+```
+
+`POST /api/auth/sign-up/e2e` takes no input. Each use makes a new person and answers with their session cookie, which lasts two hours. It's limited to 6 people a minute and 40 a day across all clients, and wrong guesses count under the limit per client that other sign-up routes have. Password sign-in stays off for everything else, and nobody ever sees a test person's password, so they can't be signed in to again, and no request can name, sign in as or link to anyone else.
+
+Test people are easy to tell apart, and only this route can make them:
+
+| Where | What marks them |
+| --- | --- |
+| Directory: `user` | The ID starts `e2e_`, the email ends `@e2e.podster.invalid`, and the name starts `E2E test person` |
+| Directory: `organization`, `org_member`, `identity_link`, and the API's audit log and events | The person's ID starts `per_e2e_`. A Better Auth ID has no underscore, so a real person's never does. A personal organization has the person's name too |
+
+Agents and rooms have no mark of their own, so find them through the person who owns them. Staging has no delete route, so these rows stay. From `apps/gateway`, this lists the people:
+
+```bash
+npx wrangler d1 execute podster-gateway-staging --remote --env staging --command "SELECT id, email, createdAt FROM \"user\" WHERE email LIKE '%@e2e.podster.invalid'"
+```
+
 ## After a deploy
 
 Run the journey in the [kernel success criteria](spec/PRODUCT.md#coordination-kernel-success-criteria) against the real hostname, and probe that the API has no public route.
