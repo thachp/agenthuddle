@@ -46,7 +46,7 @@ describe("people in an organization", () => {
     await user.click(within(row("Sam")).getByRole("button", { name: "Remove" }));
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("Every credential they connected stops working");
-    expect(dialog).toHaveTextContent("left without a working owner");
+    expect(dialog).toHaveTextContent("Workrooms whose owner left");
     expect(sent).toEqual([]);
     await user.click(within(dialog).getByRole("button", { name: "Remove from organization" }));
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("credentials they connected no longer work"));
@@ -107,7 +107,7 @@ describe("people in an organization", () => {
     render(<PeopleScreen {...props} />);
     await user.click(within(row("You")).getByRole("button", { name: "Leave" }));
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveTextContent("A workroom you own stays yours");
+    expect(dialog).toHaveTextContent("A workroom you own stays on record as yours");
     await user.click(within(dialog).getByRole("button", { name: "Leave organization" }));
     await waitFor(() => expect(currentUrl()).toBe("/settings/organization?left=1"));
   });

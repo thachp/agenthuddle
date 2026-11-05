@@ -67,9 +67,29 @@ async function seed() {
   const roomInvite = await owner.invite(room, partner.org);
   const teamOrg = (await owner.must("POST", "/orgs", { name: "Ada team" })).id;
   const orgInvite = await owner.must("POST", `/orgs/${teamOrg}/invitations`, { role: "member" });
+  // A workroom in that organization with an admin to transfer it to, and an archived one whose owner has left.
+  const join = async (person, role) => person.must("POST", "/org-invitations/accept", { token: (await owner.must("POST", `/orgs/${teamOrg}/invitations`, { role })).token });
+  const heir = await signUp("Cid Admin");
+  await join(heir, "member");
+  const inTeam = { org: teamOrg };
+  const transferRoom = (await owner.must("POST", "/v1/workspaces", { name: "Room to hand over" }, inTeam)).id;
+  await owner.must("POST", `/v1/workspaces/${transferRoom}/members`, { principal_id: heir.id, kind: "person", org_id: teamOrg, role: "admin", policy_version: await owner.policyVersion(transferRoom) }, inTeam);
+  await join(partner, "admin");
+  const ownerlessRoom = (await partner.must("POST", "/v1/workspaces", { name: "Room to recover" }, inTeam)).id;
+  await partner.must("POST", `/v1/workspaces/${ownerlessRoom}/archive`, { policy_version: (await partner.must("GET", `/v1/workspaces/${ownerlessRoom}`, undefined, inTeam)).policy_version }, inTeam);
+  const until = async (test, label) => {
+    for (let tries = 0; tries < 50; tries++) {
+      if (await test()) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error(`${label} never happened`);
+  };
+  await until(async () => (await partner.must("GET", "/v1/workspaces")).workspaces.some((w) => w.workspace_id === ownerlessRoom), "the workroom being listed");
+  await owner.must("DELETE", `/orgs/${teamOrg}/members/${partner.id}`);
+  await until(async () => (await owner.must("GET", "/v1/oversight/ownerless")).rooms.some((r) => r.workspace_id === ownerlessRoom), "the workroom reaching the ownerless list");
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
-  return { owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, off, pending, roomInvite, orgInvite, teamOrg, consent };
+  return { owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -89,6 +109,7 @@ const screens = (s) => {
     ["Notifications", "/settings/notifications", "Notifications"],
     ["Organization", "/settings/organization", "Ada Owner"],
     ["Organization, team", "/settings/organization", "Ada team", "owner", false, s.teamOrg],
+    ["Organization, a workroom to recover", "/settings/organization", "Room to recover", "owner", false, s.teamOrg],
     ["Overview", `${w}/overview`, "Billing v2"],
     ["Tasks", `${w}/tasks`, "An open task"],
     ["Tasks, empty", `/w/${s.emptyRoom}/tasks`, "Tasks"],
@@ -97,6 +118,7 @@ const screens = (s) => {
     ["Team", `${w}/team`, "Lead agent"],
     ["Access Sheet", `${w}/team?agent=${s.lead.id}`, "Revoke workroom access", "owner", true],
     ["Workroom settings", `${w}/settings`, "Billing v2"],
+    ["Workroom settings, with an admin", `/w/${s.transferRoom}/settings`, "Transfer ownership"],
     ["Collaboration", `${w}/collaboration`, "Collaboration"],
     ["Artifacts", `${w}/artifacts`, "Artifacts"],
     ["Claim", `/claim?agent_id=${s.pending.pluginId}&code=${s.pending.userCode}`, "Confirm ownership"],
@@ -307,6 +329,68 @@ async function keyboardPaths(s) {
     await dialog.waitFor({ state: "hidden", timeout: 15_000 });
     const status = await page.evaluate(() => document.activeElement?.closest('[role="status"], [role="alert"], [aria-live]') ? (document.activeElement.textContent ?? "") : null);
     ok(status !== null, `after revoking, focus is on ${await activeText(page)}, not on a status that says what happened`);
+  });
+  // Phone width comes first, because the paths below change what these pages show.
+  await keyboardPath("ownership screens at phone width", async () => {
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    for (const [label, path, control] of [["recovery", "/settings/organization", "Name new owner"], ["transfer", `/w/${s.transferRoom}/settings`, "Transfer ownership"]]) {
+      await small.goto(`${app}${path}`);
+      await hydrated(small);
+      const button = small.getByRole("button", { name: control }).first();
+      await button.waitFor({ timeout: 15_000 });
+      const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      ok(overflow <= 0, `${label} scrolls sideways by ${overflow}px at 375px`);
+      const height = (await button.boundingBox())?.height ?? 0;
+      ok(height >= 44, `${label}'s button is ${height}px tall at 375px`);
+    }
+    await phone.close();
+  });
+  await keyboardPath("transfer ownership", async () => {
+    await page.goto(`${app}/w/${s.transferRoom}/settings`);
+    await hydrated(page);
+    const select = page.getByLabel("New owner");
+    await tabTo(page, select, "New owner");
+    // Keys inside a native select differ by platform, so the browser's own control isn't what's tested here.
+    await select.selectOption({ index: 1 });
+    const button = page.getByRole("button", { name: "Transfer ownership" });
+    await tabTo(page, button, "Transfer ownership");
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("alertdialog");
+    await dialog.waitFor({ timeout: 15_000 });
+    await audit(page, "Transfer confirmation");
+    ok(await dialog.evaluate((el) => el.contains(document.activeElement)), `the confirmation left focus on ${await activeText(page)}`);
+    await tabTo(page, dialog.getByRole("button", { name: "Transfer ownership" }), "the confirmation's Transfer ownership");
+    await page.keyboard.press("Enter");
+    await dialog.waitFor({ state: "hidden", timeout: 15_000 });
+    await page.getByText("Transferred.").waitFor({ timeout: 15_000 });
+    const status = await page.evaluate(() => (document.activeElement?.closest('[role="status"], [role="alert"]') ? document.activeElement.textContent : null));
+    ok(status !== null, `after transferring, focus is on ${await activeText(page)}, not on a status that says what happened`);
+    ok((await s.heir.must("GET", `/v1/workspaces/${s.transferRoom}`)).owner === s.heir.id, "the stored owner after transferring");
+  });
+  await keyboardPath("recover a workroom", async () => {
+    await page.goto(`${app}/settings/organization`);
+    await hydrated(page);
+    const row = page.getByRole("listitem").filter({ hasText: "Room to recover" });
+    const select = row.getByLabel("New owner");
+    await tabTo(page, select, "New owner");
+    // The first person offered is this admin, who has never been in the workroom.
+    await select.selectOption({ index: 1 });
+    const button = row.getByRole("button", { name: "Name new owner" });
+    await tabTo(page, button, "Name new owner");
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("alertdialog");
+    await dialog.waitFor({ timeout: 15_000 });
+    await audit(page, "Recovery confirmation");
+    await tabTo(page, dialog.getByRole("button", { name: "Name new owner" }), "the confirmation's Name new owner");
+    await page.keyboard.press("Enter");
+    await dialog.waitFor({ state: "hidden", timeout: 15_000 });
+    await page.getByText("They're now the owner").waitFor({ timeout: 15_000 });
+    const status = await page.evaluate(() => (document.activeElement?.closest('[role="status"], [role="alert"]') ? document.activeElement.textContent : null));
+    ok(status !== null, `after recovering, focus is on ${await activeText(page)}, not on a status that says what happened`);
+    const read = await s.owner.must("GET", `/v1/workspaces/${s.ownerlessRoom}`);
+    ok(read.owner === s.owner.id, "the stored owner after recovering");
+    ok(read.status === "archived", `the workroom is ${read.status} after recovering, and should still be archived`);
   });
   await page.close();
 }
