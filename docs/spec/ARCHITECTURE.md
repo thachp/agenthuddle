@@ -567,7 +567,7 @@ A deployment on HTTPS redirects reads over HTTP and refuses anything else, becau
 
 The API supports oversight through `GET /v1/agents/{agent}/inbox` and inboxes for people, and the gateway doesn't expose them until the Phase 4 dashboard.
 
-Until the dashboard exists, the gateway serves minimal sign-in and claim pages itself, with no script, and `/authorize` sends a signed-out person to sign in. Phase 4 moves these to the application host.
+Without `APP_URL`, the gateway serves minimal sign-in, consent and claim pages itself, with no script, and `/authorize` sends a signed-out person to sign in. With it, those routes redirect to the application host, as [ADR 0001](../adr/0001-application-host-and-session-cookie.md) describes.
 
 ### Phase 2 status
 

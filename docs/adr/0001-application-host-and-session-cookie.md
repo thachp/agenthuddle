@@ -42,13 +42,14 @@ The web Worker forwards the browser's own `Origin`. The gateway's check keeps it
 - Rate limits count per client from `cf-connecting-ip`, so the web Worker forwards that header. Without it, every person would share one limit.
 - Rust is unaffected. It stays private under every option.
 
-## What this leaves to do
+## What was built
 
-Not done yet, because it changes what staging's sign-in does:
+The code does nothing until `APP_URL` is set on the gateway.
 
-1. Redirect `/authorize`, `/claim` and `/sign-in` on the gateway's host when `APP_URL` is set, and give the consent and claim pages a read and a decision the application host can call.
-2. Build `/oauth/consent` and the claim page on the application host. They are placeholders now.
-3. Decide the claim URL. `DESIGN.md` proposes `/claim/:token`, but the Agent Auth plugin's link carries `agent_id` and a code in the query.
+- **Redirects.** On the gateway's host, `GET /authorize` validates the client, redirect URI, scope and PKCE, then redirects to `/oauth/consent` with the same query. A bad request gets a 400 and goes nowhere. `GET /claim` and `/sign-in` redirect too, and sign-in's `next` is translated to the application host's paths. A `POST` to `/sign-in` goes to the application host's sign-in, because finishing it here would use a callback GitHub no longer accepts. A `POST` to `/authorize` or `/claim` stays, with its origin check: browsers have no session here, and test clients with a cookie use it.
+- **Read and decision.** `GET` and `POST` on `/api/consent` and `/api/claim` answer only for the application host. A decision answers with JSON naming where to send the browser, because a page's `fetch` can't follow a redirect to another host, and its CSP stops a form doing so. The consent decision must say `approve` or `decline`. There's no default.
+- **`iss`.** The OAuth library takes the `iss` it sends clients from the URL it parses, so consent always parses the request as one to the gateway's host. Clients compare it with the issuer they discovered there.
+- **Claim URL: `/claim?agent_id=…&code=…`.** It's the link the Agent Auth plugin already gives agents, so the redirect only changes the host. A `/claim/:token` URL would need a new stored token or a second encoding of both values, and the code would still be in the URL. Nothing there would be safer, and a person compares the code by eye anyway.
 
 ## What staging needs
 
