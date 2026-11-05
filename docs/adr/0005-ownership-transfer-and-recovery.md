@@ -1,12 +1,12 @@
 # ADR 0005: Ownership transfer and recovery
 
-**Status:** Proposed. **Needs the owner's approval.** Nothing here is built.
+**Status:** Accepted by the owner on 2026-11-05, who accepted all five recommendations. Not built yet.
 
-## Choices for the owner
+## The owner's choices
 
-Each has a recommendation, and the design below assumes it.
+The owner accepted each recommendation, and they're now [decisions 35 to 39](../spec/PRODUCT.md#decisions-needed). The design below assumes them.
 
-| # | Choice | Recommendation | The other option |
+| # | Choice | Accepted | The option not taken |
 | --- | --- | --- | --- |
 | 1 | Once recovery exists, does a departed owner who rejoins still get their room back? | **No.** [Decision 32](../spec/PRODUCT.md#decisions-needed) says "until ownership transfer exists". An organization admin can run recovery and name them, which is on the record. Someone must have invited them, so an admin always exists | Keep it. Rejoining as a plain member keeps restoring full owner authority unless recovery ran first |
 | 2 | Does recovery wait before it takes effect? | **No wait, in M0.** Stuck rooms stay stuck for less time. The cost is in "Takeover" below | A waiting period, such as 72 hours, when someone else removed the owner. The owner would then have time to object, but Podster has no way yet to reach them or hear an objection |
@@ -18,7 +18,7 @@ Each has a recommendation, and the design below assumes it.
 
 [Decision 34](../spec/PRODUCT.md#decisions-needed) lets any organization admin remove another. With recovery, one organization admin can therefore remove a room's owner and make themselves owner, with no second person involved. That gives them everything in the room, including what other organizations wrote there.
 
-This follows from decisions 8 and 34, and it's the main thing to accept here. Choice 2's waiting period is the only mitigation short of changing decision 34. Every step is on the record, in the organization's log and the room's, and it tells the room's people.
+This follows from decisions 8 and 34. **The owner was told this before answering and accepted it for M0, so it's a known risk and not an open question.** A waiting period under choice 2 is the only mitigation short of changing decision 34, and M0 doesn't have one. Every step is on the record, in the organization's log and the room's, and it tells the room's people.
 
 ## Decision
 
