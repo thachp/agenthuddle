@@ -534,9 +534,13 @@ describe("leaving an organization", () => {
       expect((await dash(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "person", org_id: org, role: "admin", policy_version: await version() }, { "idempotency-key": crypto.randomUUID() })).status).toBe(200);
     }
     const transfer = async (to: string) => dash(owner, "POST", `/v1/workspaces/${id}/owner/transfer`, { to, policy_version: await version() }, { "idempotency-key": crypto.randomUUID() });
-    await dash(owner, "DELETE", `/orgs/${org}/members/${leaver.id}`);
-    // Which one depends on whether the departure has reached the room yet. Either way, the room refuses.
-    expect(["invalid_argument", "not_in_organization"]).toContain((await transfer(leaver.id)).code);
+    // A sweep finds rooms from the index, and applying a departure moves the room's version, so each form below has to be
+    // read after it arrives. apps/api covers the moments before that, where it controls the timing.
+    await vi.waitFor(async () => expect(await e.API_DB.prepare("SELECT 1 FROM membership_index WHERE workspace_id = ? AND principal_id = ? AND removed = 0").bind(id, leaver.id).first()).toBeTruthy(), { timeout: 5000 });
+    expect((await dash(owner, "DELETE", `/orgs/${org}/members/${leaver.id}`)).status).toBe(200);
+    await vi.waitFor(async () => expect((await dash(owner, "GET", `/v1/workspaces/${id}`)).body.members.map((m: any) => m.principal_id)).not.toContain(leaver.id), { timeout: 5000 });
+    expect((await transfer(leaver.id)).code).toBe("invalid_argument");
+    expect((await dash(owner, "GET", `/v1/workspaces/${id}`)).body.owner).toBe(owner.id);
     expect((await transfer(heir.id)).status).toBe(200);
     const read = await dash(heir, "GET", `/v1/workspaces/${id}`);
     expect(read.body.owner).toBe(heir.id);
