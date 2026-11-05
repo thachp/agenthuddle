@@ -95,7 +95,7 @@ Browser → `/api/*` on this host ([`app/api/[...path]/route.ts`](app/api/[...pa
 | Operation | Path through this host |
 | --- | --- |
 | `createWorkspace`, `addMember`, `revokeMember`, `changeMemberRole`, `listEvents`, `listAudit`, `clearRemoval`, `createInvitation`, `withdrawInvitation`, `withdrawAgent`, `consentToAgentReturn`, `acceptInvitation` | `/api/v1/...`, the same path as the contract |
-| `readAgentInbox` | `GET /api/v1/agents/{agent}/inbox`, new in this PR. Org admins see the whole inbox, IDs only (decision 31). |
+| `readAgentInbox` | `GET /api/v1/agents/{agent}/inbox`, new in this PR. Org admins see the whole inbox: IDs, event type and time, never content (decision 31). |
 | `getAgent` | `GET /api/agents/{agent}` |
 | `disconnectAgent`, `reconnectAgent` | `POST /api/agents/{agent}/{disconnect,reconnect}` |
 | `registerAgent` | Not exposed, and shouldn't be. The gateway calls it itself when a person claims or consents. |

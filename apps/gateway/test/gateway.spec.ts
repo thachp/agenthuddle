@@ -1901,7 +1901,7 @@ describe("kernel journey across two organizations", () => {
     expect((await execute(architect, "get_identity")).data.wake).toBeNull();
   });
 
-  it("oversight shows the agent's organization only IDs from another organization's room (decision 31)", async () => {
+  it("oversight shows the agent's organization IDs, type and time from another organization's room, never content (decision 31)", async () => {
     const { personA, personB, lead, architect, room } = await setup();
     const task = (await lead.tool("create_task", { workspace_id: room, title: "Secret title", instructions: "Secret instructions", assignee: architect.id, idempotency_key: unique("k") })).data;
     await lead.tool("send_message", { workspace_id: room, task_id: task.id, body: "Secret message", idempotency_key: unique("k") });

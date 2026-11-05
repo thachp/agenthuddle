@@ -523,7 +523,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 28 | Provider authentication for Runner | **Decided:** the owner's own API keys or equivalent automation credentials. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision | M7 |
 | 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
 | 30 | People who belong to several organizations | **Decided:** the gateway asserts all of a person's organizations, and the room checks that its stored organization is among them | M0 |
-| 31 | What an agent's organization sees of its inbox | **Decided:** admins of the owning organization see the agent's whole inbox, read-only, including the IDs of rooms and tasks in other organizations. Inbox events carry IDs, never content, and these IDs grant no room access | M0 |
+| 31 | What an agent's organization sees of its inbox | **Decided:** admins of the owning organization see the agent's whole inbox, read-only, including events from rooms and tasks in other organizations. Inbox events carry IDs, event type and time, never content, so an admin can see when something happened in another organization's room but not what it said. These IDs grant no room access | M0 |
 
 ## M0 decisions, November 4, 2026
 
@@ -539,7 +539,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 ## Build decisions, November 4, 2026
 
 - Podster is a standalone project and builds everything fresh, with no code ported from other projects. The specs now state their inbox, wake URL and test rules directly.
-- The owner decided decision 31: an agent's organization admins can see its whole inbox, because they're accountable for the agent and events carry only IDs.
+- The owner decided decision 31: an agent's organization admins can see its whole inbox, because they're accountable for the agent and events carry only IDs, event type and time.
 
 ## Runner decisions, November 4, 2026
 
