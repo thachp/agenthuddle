@@ -1,6 +1,6 @@
 # ADR 0005: Ownership transfer and recovery
 
-**Status:** On 2026-11-05 the owner accepted the five choices below, the risk in "Takeover", the ownerless list ([decision 40](../spec/PRODUCT.md#decisions-needed)) and recovery in archived rooms ([decision 41](../spec/PRODUCT.md#decisions-needed)). The rest of this design follows from them and wasn't separately approved. Built, locally only, with no screens for transfer or recovery yet.
+**Status:** On 2026-11-05 the owner accepted the five choices below, the risk in "Takeover", the ownerless list ([decision 40](../spec/PRODUCT.md#decisions-needed)) and recovery in archived rooms ([decision 41](../spec/PRODUCT.md#decisions-needed)). The rest of this design follows from them and wasn't separately approved. Built, locally only.
 
 ## The owner's choices
 
@@ -91,7 +91,7 @@ Nobody can recover these rooms, they still count toward the 20, and the only way
 
 ### What's built, and what isn't
 
-Everything above is built in the API, with `AC-33` in the journey. There are no screens yet for transfer, recovery or the ownerless list, and removing someone doesn't yet say which rooms they own. The note about personal organizations is on the create form.
+Everything above is built in the API, with `AC-33` in the journey. Transfer is in a room's settings, and the ownerless list and recovery are in organization settings. Removing someone says what happens to rooms they own, but not which rooms, because [decision 40](../spec/PRODUCT.md#decisions-needed) only covers rooms whose owner has already left. The list doesn't say which organization a room is in, so someone who administers several chooses from all their people, and the room refuses a person from the wrong one. The note about personal organizations is on the create form.
 
 ### Audit
 

@@ -3,12 +3,14 @@ import { notFound } from "next/navigation";
 import { AuthorLine } from "@/components/agent-content/agent-content";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { Badge } from "@/components/ui/badge";
-import { gatewayQuery, getIdentity } from "@/lib/gateway/server";
+import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { canManageWorkroom, isArchived, loadWorkroom } from "@/lib/workroom";
 import { auditAction, auditTarget, pageAfter } from "../activity/model";
+import { loadPeopleNames } from "../tasks/load-tasks";
 import { Time } from "../activity/time";
 import { membersOf, type AuditRow } from "../team/model";
 import { RoomControls } from "./room-controls";
+import { TransferOwnership } from "./transfer-ownership";
 
 const Section = ({ id, title, children }: { id: string; title: string; children: React.ReactNode }) => (
   <section aria-labelledby={id} className="space-y-2">
@@ -28,6 +30,12 @@ export default async function Settings({ params, searchParams }: { params: Promi
   const [identity, audit] = await Promise.all([getIdentity(), gatewayQuery<{ audit: AuditRow[]; next_cursor: number | null }>(`/api/v1/workspaces/${id}/audit?after=${after}`)]);
   const admins = membersOf(room).filter((member) => member.role === "admin");
   const isOwner = identity.ok && identity.data.id === room.owner;
+  // Only what to offer. Rust checks all of this again when asked.
+  const heirs = membersOf(room).filter((member) => member.role === "admin" && member.kind === "person" && member.org_id === room.owner_org);
+  // Names are only worth a read for someone choosing one. A failure leaves IDs.
+  const organizations = isOwner && heirs.length > 0 ? await getOrganizations() : null;
+  const names = organizations?.ok ? await loadPeopleNames(gatewayQuery, organizations.data.organizations) : {};
+  const candidates = heirs.map((member) => ({ id: member.principal_id, name: names[member.principal_id] ?? null }));
   const now = Date.now();
   return (
     <section className="max-w-3xl space-y-6">
@@ -61,6 +69,19 @@ export default async function Settings({ params, searchParams }: { params: Promi
             Appoint or remove admins on Team
           </Link>
         ) : null}
+      </Section>
+
+      <Section id="settings-ownership" title="Ownership">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2">
+          <dt className="text-muted-foreground">Owner</dt>
+          <dd className="break-all">{isOwner ? "You" : room.owner}</dd>
+        </dl>
+        {typeof room.owner_left_at === "number" ? (
+          <p className="rounded-lg bg-status-amber-surface p-3 text-status-amber">
+            The owner left this workroom's organization on {new Date(room.owner_left_at).toISOString().slice(0, 10)}. An admin of that organization can name a new owner from its settings, whether or not they're in this workroom.
+          </p>
+        ) : null}
+        <TransferOwnership roomId={id} name={room.name} policyVersion={room.policy_version} archived={isArchived(room)} isOwner={isOwner} candidates={candidates} />
       </Section>
 
       <Section id="settings-services" title="Repository and release">

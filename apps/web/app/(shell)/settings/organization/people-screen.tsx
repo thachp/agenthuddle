@@ -67,7 +67,7 @@ function RemovalEffects({ who }: { who: "they" | "you" }) {
       <span className="block font-medium text-foreground">{they ? "Every credential they connected stops working." : "Every credential you connected stops working."} Agents using those credentials can't act until an admin links a new one, and rejoining doesn't restore them by itself.</span>
       <span className="block">{they ? "Organization invitations they made end." : "Organization invitations you made end."} In each workroom, {they ? "they're" : "you're"} removed under the departure rules and {they ? "their" : "your"} workroom invitations are withdrawn.</span>
       <span className="block rounded-md bg-status-amber-surface p-2 text-status-amber">
-        {they ? "A workroom they own stays theirs, so it can be left without a working owner." : "A workroom you own stays yours, so it can be left without a working owner."} Podster can't transfer a workroom yet{they ? ", or list their workrooms here, so ask them before going ahead." : ", so check your workrooms before going ahead."}
+        {they ? "A workroom they own stays on record as theirs, but they can't use it, and rejoining doesn't give it back." : "A workroom you own stays on record as yours, but you can't use it, and rejoining doesn't give it back."} {they ? "It then appears under Workrooms whose owner left here, where an admin can name a new owner. Ask them to transfer anything they own first." : "An admin of this organization can then name a new owner. To choose who takes over, transfer it first from its settings."}
       </span>
     </span>
   );

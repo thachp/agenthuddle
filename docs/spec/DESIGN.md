@@ -236,11 +236,11 @@ An admin of the agent's organization may open an agent's inbox from the Agents p
 
 ### Settings
 
-Account-level only: profile, organization, member management, and notification choices. Add a note that workroom visibility, roles, repository and deployment settings live inside each workroom. Show only notification types the product actually delivers.
+Account-level only: profile, organization, member management, **Workrooms whose owner left** (organization admins only, with recovery), and notification choices. Add a note that workroom visibility, roles, repository and deployment settings live inside each workroom. Show only notification types the product actually delivers.
 
 ### Workroom Settings
 
-Owner and admin only. Sections: General, Visibility (with a preview of what will be public or removed), Roles, **Administrators** (owner only), Repository, Release and Danger zone (archive). Repository and Release show who holds external authority and link to it. Each states what it does not do.
+Owner and admin only. Sections: General, Visibility (with a preview of what will be public or removed), Roles, **Administrators** (owner only), **Ownership** (transfer, owner only), Repository, Release and Danger zone (archive). Repository and Release show who holds external authority and link to it. Each states what it does not do.
 
 ### Approval pages
 

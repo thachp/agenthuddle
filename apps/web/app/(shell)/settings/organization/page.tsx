@@ -5,7 +5,11 @@ import { ReadFailure } from "@/components/shell/read-failure";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { CreateOrganization } from "./create-organization";
 import type { OrgInvitation, OrgMember } from "./model";
+import { OwnerlessRooms, type OwnerlessRoom, type PeopleGroup } from "./ownerless-rooms";
 import { PeopleScreen } from "./people-screen";
+
+/** Each read spends the person's rate limit, and few people administer this many. */
+const OWNERLESS_PEOPLE_ORGS = 10;
 
 type AgentRow = { id: string; name: string; org_id: string; revoked_at: number | null; credentials_owner_left?: number };
 
@@ -23,6 +27,14 @@ export default async function OrganizationSettings({ searchParams }: { searchPar
         admin ? gatewayQuery<{ agents: AgentRow[]; truncated?: boolean }>("/api/agents") : null,
       ])
     : [null, null, null];
+  // Everyone administers their personal organization, whose rooms never lose their owner, so that doesn't count here. This
+  // only decides what to show: the API answers from the person's own organizations.
+  const teams = orgs.filter((org) => org.role === "admin" && !org.personal);
+  const ownerless = teams.length > 0 ? await gatewayQuery<{ rooms: OwnerlessRoom[]; truncated: boolean }>("/api/v1/oversight/ownerless") : null;
+  const peopleReads = ownerless?.ok && ownerless.data.rooms.length > 0 ? await Promise.all(teams.slice(0, OWNERLESS_PEOPLE_ORGS).map((org) => gatewayQuery<{ members: OrgMember[] }>(`/api/orgs/${encodeURIComponent(org.id)}/members`))) : [];
+  const groups: PeopleGroup[] | null = peopleReads.every((read) => read.ok)
+    ? peopleReads.map((read, index) => ({ orgId: teams[index].id, org: teams[index].name, people: read.ok ? read.data.members.map((member) => ({ id: member.person_id, name: member.name })) : [] }))
+    : null;
   return (
     <section className="space-y-4">
       <h1 className="text-xl font-semibold">Organization</h1>
@@ -66,6 +78,7 @@ export default async function OrganizationSettings({ searchParams }: { searchPar
       ) : selected ? (
         <ReadFailure />
       ) : null}
+      {ownerless && identity.ok ? <OwnerlessRooms rooms={ownerless.ok ? ownerless.data.rooms : null} truncated={ownerless.ok && ownerless.data.truncated} groups={groups} partial={teams.length > OWNERLESS_PEOPLE_ORGS} me={identity.data.id} /> : null}
       <CreateOrganization />
     </section>
   );

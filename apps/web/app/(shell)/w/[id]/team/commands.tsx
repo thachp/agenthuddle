@@ -33,7 +33,7 @@ type Notice = { kind: "ok" | "refused" | "conflict" | "unknown" | "signed-out"; 
 
 type Success<T> = string | ((data: T) => string | null);
 
-type Options<T> = { method?: Method; focus?: boolean; onOk?: (data: T) => void; onDone?: (outcome: Outcome<T>) => void };
+type Options<T> = { method?: Method; focus?: boolean; onOk?: (data: T) => void; onDone?: (outcome: Outcome<T>) => void; explain?: (code: string, status: number) => string; conflict?: string };
 
 type Pending<T> = { attempt: Attempt; success: Success<T>; options: Options<T> };
 
@@ -49,6 +49,7 @@ function sameIntent(attempt: Attempt, path: string, method: Method, body: Record
  * its first answer and doesn't happen twice. A different command replaces it.
  */
 export function useCommands(version: number | null) {
+  // Null is a command with no version to send, such as recovery, whose caller can't read one.
   const router = useRouter();
   const [notice, setNotice] = useState<Notice>(null);
   const [retrying, setRetrying] = useState(false);
@@ -68,7 +69,7 @@ export function useCommands(version: number | null) {
       options.onOk?.(outcome.data);
       router.refresh();
     } else if (outcome.kind === "conflict") {
-      setNotice({ kind: "conflict", text: "This workroom changed while you were working. Your change isn't saved." });
+      setNotice({ kind: "conflict", text: options.conflict ?? "This workroom changed while you were working. Your change isn't saved." });
     } else if (outcome.kind === "unknown") {
       setNotice({ kind: "unknown", text: "We can't tell whether this saved. Try again: if it did, you'll get that answer and it won't happen twice." });
     } else if (outcome.status === 401) {
@@ -78,7 +79,7 @@ export function useCommands(version: number | null) {
       // Authority and rate limits come before the replay lookup, so this says nothing about the first attempt.
       setNotice({ kind: "unknown", text: outcome.status === 429 ? "Too many requests, so we still can't tell whether this saved. Wait a minute and try again." : "We still can't tell whether this saved. Refresh to see where things stand." });
     } else {
-      setNotice({ kind: "refused", text: explainRefusal(outcome.code, outcome.status) });
+      setNotice({ kind: "refused", text: (options.explain ?? explainRefusal)(outcome.code, outcome.status) });
     }
     options.onDone?.(outcome);
     if (options.focus) noticeRef.current?.focus();
@@ -87,7 +88,7 @@ export function useCommands(version: number | null) {
 
   const send = <T,>(path: string, body: Record<string, unknown>, success: Success<T>, options: Options<T> = {}) => {
     const method = options.method ?? "POST";
-    const full = { policy_version: version, ...body };
+    const full = version === null ? body : { policy_version: version, ...body };
     const unfinished = pending.current as Pending<T> | null;
     if (unfinished && sameIntent(unfinished.attempt, path, method, full)) return run<T>({ ...unfinished, success, options }, true);
     return run<T>({ attempt: newAttempt(path, full, method), success, options }, false);

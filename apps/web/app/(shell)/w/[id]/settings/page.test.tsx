@@ -1,0 +1,67 @@
+import { render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { setUrl } from "@/test/next-navigation";
+
+const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[] }));
+vi.mock("react", async (original) => ({ ...(await original<object>()), cache: <T,>(fn: T) => fn }));
+vi.mock("@/lib/gateway/server", () => ({
+  gatewayQuery: async (path: string) => {
+    state.asked.push(path);
+    if (path === "/api/v1/workspaces/ws_1") return { ok: true, data: state.room };
+    if (path.includes("/audit")) return { ok: true, data: { audit: [], next_cursor: null } };
+    if (path === "/api/orgs/org_a/members") return { ok: true, data: { members: [{ person_id: "per_heir", name: "Heir" }] } };
+    return { ok: false, status: 404, code: "not_found" };
+  },
+  getIdentity: async () => ({ ok: true, data: { id: state.me, org_id: "org_a", orgs: ["org_a"], admin_orgs: [] } }),
+  getOrganizations: async () => ({ ok: true, data: { organizations: [{ id: "org_a", name: "Acme", personal: 0, role: "admin" }] } }),
+  signInPath: (next: string) => `/sign-in?next=${next}`,
+}));
+
+const { default: Settings } = await import("./page");
+const show = async () => render((await Settings({ params: Promise.resolve({ id: "ws_1" }), searchParams: Promise.resolve({}) })) as ReactElement);
+const member = (principal_id: string, kind: string, role: string, org_id = "org_a") => ({ principal_id, kind, role, org_id });
+
+describe("workroom settings' ownership section", () => {
+  beforeEach(() => {
+    setUrl("/w/ws_1/settings");
+    state.me = "per_owner";
+    state.asked.length = 0;
+    state.room = {
+      id: "ws_1",
+      name: "Launch room",
+      owner: "per_owner",
+      owner_org: "org_a",
+      status: "active",
+      policy_version: 3,
+      members: [member("per_heir", "person", "admin"), member("per_plain", "person", "member"), member("agt_admin", "agent", "admin"), member("per_outside", "person", "admin", "org_b")],
+    };
+  });
+
+  it("offers only human admins in the workroom's organization, by name and ID", async () => {
+    await show();
+    const offered = screen.getAllByRole("option").map((option) => option.textContent);
+    expect(offered).toEqual(["Choose an admin", "per_heir · Heir"]);
+  });
+
+  it("shows IDs if the names can't be read", async () => {
+    (state.room as { members: unknown[] }).members = [member("per_unnamed", "person", "admin")];
+    await show();
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose an admin", "per_unnamed"]);
+  });
+
+  it("doesn't spend a read on names for someone who can't transfer", async () => {
+    state.me = "per_heir";
+    await show();
+    expect(screen.queryByLabelText("New owner")).toBeNull();
+    expect(screen.getByText("Only this workroom's owner can transfer it.")).toBeInTheDocument();
+    expect(state.asked).not.toContain("/api/orgs/org_a/members");
+  });
+
+  it("says when the owner has left", async () => {
+    state.me = "per_heir";
+    (state.room as { owner_left_at: number }).owner_left_at = Date.UTC(2026, 10, 3);
+    await show();
+    expect(screen.getByText(/The owner left this workroom's organization on 2026-11-03/)).toBeInTheDocument();
+  });
+});
