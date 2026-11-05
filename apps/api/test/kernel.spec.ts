@@ -2739,6 +2739,26 @@ describe("transferring and recovering a room's ownership", () => {
       expect(await log(id, founder, "owner.transferred")).toEqual([]);
     });
 
+    it("refuses a form read before a departure reached the room, because that moved the version", async () => {
+      const { id, founder, helper, member } = await scene();
+      const v = await version(id, founder);
+      await departs(id, member.id, Date.now());
+      const stale = await api(founder, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: v }, { token: await naming(founder, helper.id) });
+      expect(stale.code).toBe("version_conflict");
+      expect((await ownerRow(id)).owner_person_id).toBe(founder.id);
+      expect((await api(founder, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: await version(id, founder) }, { token: await naming(founder, helper.id) })).status).toBe(200);
+    });
+
+    it("refuses someone who left, before and after the departure reaches the room", async () => {
+      const { id, founder, helper } = await scene();
+      const send = async (orgs: Record<string, number>) => (await api(founder, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: await version(id, founder) }, { token: await naming(founder, helper.id, orgs) })).code;
+      // The directory no longer has them, and the room hasn't heard.
+      expect(await send({ org_other: 1 })).toBe("not_in_organization");
+      await departs(id, helper.id, Date.now());
+      expect(await send({ org_a: 1 })).toBe("invalid_argument");
+      expect((await ownerRow(id)).owner_person_id).toBe(founder.id);
+    });
+
     it("is refused in an archived room", async () => {
       const { id, founder, helper } = await scene();
       expect((await api(founder, "POST", `${path(id)}/archive`, { policy_version: await version(id, founder) })).status).toBe(200);
