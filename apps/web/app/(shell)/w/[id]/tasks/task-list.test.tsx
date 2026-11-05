@@ -132,17 +132,24 @@ describe("creating (decision 22)", () => {
     await fill(user);
     reply = () => Promise.reject(new TypeError("lost"));
     await user.click(screen.getByRole("button", { name: "Create task" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Check your connection/);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/We can't tell whether this task was created/);
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/nothing changed/);
     expect(screen.getByLabelText("Title")).toHaveValue("Write it");
     await user.click(screen.getByRole("button", { name: "Create task" }));
     await waitFor(() => expect(sent).toHaveLength(2));
     expect(sent[0].key).toBe(sent[1].key);
 
+    reply = () => new Response(JSON.stringify({ error: { code: "internal_error" } }), { status: 500 });
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+    await waitFor(() => expect(sent).toHaveLength(3));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/We can't tell whether this task was created/));
+    expect(sent[2].key).toBe(sent[1].key);
+
     reply = () => new Response(JSON.stringify({ error: { code: "self_sign_off" } }), { status: 400 });
     await user.type(screen.getByLabelText("Title"), "!");
     await user.click(screen.getByRole("button", { name: "Create task" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/can't be the same/);
-    expect(sent[2].key).not.toBe(sent[1].key);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/nothing changed. The reviewer and the assignee can't be the same/);
+    expect(sent[3].key).not.toBe(sent[2].key);
   });
 
   it("Cancel saves nothing", async () => {

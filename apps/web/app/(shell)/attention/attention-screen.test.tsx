@@ -102,12 +102,30 @@ describe("acknowledging", () => {
     expect(routerCalls.refresh).toBe(1);
   });
 
-  it("a failure says so, and doesn't refresh", async () => {
+  it("a refusal says nothing changed, and doesn't refresh", async () => {
     const user = userEvent.setup();
-    reply = () => new Response(JSON.stringify({ error: { code: "internal_error" } }), { status: 500 });
+    reply = () => new Response(JSON.stringify({ error: { code: "ack_beyond_inbox" } }), { status: 400 });
     show({ inbox });
     await user.click(screen.getByRole("button", { name: "Acknowledge these 2 updates" }));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/That didn't save/));
+    expect(routerCalls.refresh).toBe(0);
+  });
+
+  it.each([
+    ["a server error", () => new Response(JSON.stringify({ error: { code: "internal_error" } }), { status: 500 })],
+    [
+      "a lost response",
+      () => {
+        throw new TypeError("lost");
+      },
+    ],
+  ])("%s says the outcome is unknown, not that nothing changed", async (_, answer) => {
+    const user = userEvent.setup();
+    reply = answer;
+    show({ inbox });
+    await user.click(screen.getByRole("button", { name: "Acknowledge these 2 updates" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/We can't tell whether this was acknowledged/));
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/nothing changed/);
     expect(routerCalls.refresh).toBe(0);
   });
 

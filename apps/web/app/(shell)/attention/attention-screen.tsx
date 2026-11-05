@@ -122,26 +122,30 @@ function UpdateRow({ event, me, names, roomName, taskTitle }: { event: InboxEven
   );
 }
 
+/** A lost response may have come after the cursor moved. Moving it again to the same place does nothing, so retrying is safe. */
+const UNKNOWN_ACK = "We can't tell whether this was acknowledged. It's safe to try again.";
+const NOT_ACKED = "That didn't save, and nothing changed. Try again.";
+
 /** Moves only this person's own cursor. Reviews stay until they're decided, whatever's acknowledged. */
 function Acknowledge({ events }: { events: InboxEvent[] }) {
   const router = useRouter();
   const [saving, setSaving] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const upTo = acknowledgeUpTo(events);
 
   const acknowledge = async () => {
     setSaving(true);
-    setFailed(false);
+    setProblem(null);
     setNotice(null);
     try {
       const result = await clientCommand<{ acked_seq: number; unread: number }>("/api/v1/inbox/ack", { up_to: upTo });
       if (result.ok) {
         setNotice(`Acknowledged. ${result.data.unread} unread.`);
         router.refresh();
-      } else setFailed(true);
+      } else setProblem(result.status >= 500 ? UNKNOWN_ACK : NOT_ACKED);
     } catch {
-      setFailed(true);
+      setProblem(UNKNOWN_ACK);
     } finally {
       setSaving(false);
     }
@@ -153,9 +157,9 @@ function Acknowledge({ events }: { events: InboxEvent[] }) {
         {saving ? "Acknowledging…" : events.length === 1 ? "Acknowledge this update" : `Acknowledge these ${events.length} updates`}
       </Button>
       <p className="text-xs text-muted-foreground">This clears them from your queue only, and changes nothing for anyone else. Reviews stay listed until you decide them.</p>
-      {failed ? (
+      {problem ? (
         <p role="alert" className="text-sm text-status-danger">
-          That didn't save, and nothing changed. Try again.
+          {problem}
         </p>
       ) : null}
       <p role="status" className="text-sm empty:hidden">

@@ -130,11 +130,17 @@ export function parseCrossRoomTarget(target: string) {
  */
 export const asConflict = <T extends { ok: boolean; code?: string }>(result: T): T => (!result.ok && (result.code === "submission_mismatch" || result.code === "invalid_transition" || result.code === "commit_changed") ? { ...result, code: "version_conflict" } : result);
 
-/** Plain words for a refused create or offer. Anything else stays general, because it may say something about access. */
-export function refusalMessage(code: string) {
-  if (code === "self_sign_off") return "The reviewer and the assignee can't be the same.";
-  if (code === "invalid_argument") return "Check the fields. The title and instructions are required, and the reviewer and assignee must still be in this workroom.";
-  if (code === "limit_exceeded") return "This workroom has too many open tasks. Finish or cancel some first.";
-  if (code === "network") return "Check your connection and try again.";
-  return "You may no longer be allowed to do this.";
+/** A lost response or a server error may have come after the task was committed. The form's key is unchanged, so sending it again returns that task. */
+export const UNKNOWN_CREATE = "We can't tell whether this task was created. Send it again without changing it: that can't make a second task.";
+
+/** What to say about a create that didn't succeed. Only a refusal or a limit means nothing happened. */
+export function createProblem(status: number, code: string) {
+  if (status >= 500) return UNKNOWN_CREATE;
+  if (status === 429) return "That didn't save, and nothing changed. Too many requests, so wait a minute and try again.";
+  const nothingChanged = "That didn't save, and nothing changed.";
+  if (code === "self_sign_off") return `${nothingChanged} The reviewer and the assignee can't be the same.`;
+  if (code === "invalid_argument") return `${nothingChanged} Check the fields. The title and instructions are required, and the reviewer and assignee must still be in this workroom.`;
+  if (code === "limit_exceeded") return `${nothingChanged} This workroom has too many open tasks. Finish or cancel some first.`;
+  // Stays general, because anything more may say something about access.
+  return `${nothingChanged} You may no longer be allowed to do this.`;
 }

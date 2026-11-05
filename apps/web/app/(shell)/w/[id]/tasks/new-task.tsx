@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { FIELD_CLASS } from "./task-bits";
-import { refusalMessage, textNameOf, reviewerChoices, type Names, type Room, type Task } from "./task-model";
+import { createProblem, textNameOf, UNKNOWN_CREATE, reviewerChoices, type Names, type Room, type Task } from "./task-model";
 
 const PRIMARY = "min-h-11 sm:min-h-9";
 
@@ -99,7 +99,7 @@ function NewTaskForm({ room, me, names, onCancel, onCreated }: { room: Room; me:
     try {
       const result = await clientCommand<Task>(`/api/v1/workspaces/${encodeURIComponent(room.id)}/tasks`, JSON.parse(body), { idempotencyKey: intent.current.key });
       if (!result.ok) {
-        setFailure(refusalMessage(result.code));
+        setFailure(createProblem(result.status, result.code));
         return;
       }
       // Says what the server did, which is what the list behind this now shows too.
@@ -110,7 +110,7 @@ function NewTaskForm({ room, me, names, onCancel, onCreated }: { room: Room; me:
       });
       router.refresh();
     } catch {
-      setFailure(refusalMessage("network"));
+      setFailure(UNKNOWN_CREATE);
     } finally {
       setSaving(false);
     }
@@ -157,7 +157,7 @@ function NewTaskForm({ room, me, names, onCancel, onCreated }: { room: Room; me:
       </div>
       {failure ? (
         <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-sm text-status-danger">
-          That didn't save, and nothing changed. {failure}
+          {failure}
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">

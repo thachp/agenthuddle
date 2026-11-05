@@ -282,7 +282,7 @@ describe("reviewing", () => {
     };
     await open();
     await user.click(screen.getByRole("button", { name: "Approve submission 2" }));
-    await screen.findByText(/Check your connection/);
+    await screen.findByText(/We can't tell whether this saved/);
     await user.click(screen.getByRole("button", { name: "Approve submission 2" }));
     await waitFor(() => expect(attempts).toBe(2));
     expect(commands()[0].key).toBe(commands()[1].key);
