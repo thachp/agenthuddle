@@ -386,6 +386,13 @@ async function acceptance() {
     refused(await personB.dash("POST", "/v1/invitations/preview", { token: link.token }), "invitation_not_found", "a link to an archived room");
     await personA.must("POST", `/v1/workspaces/${managed}/unarchive`, { policy_version: await version() });
     ok((await agent.call("create_task", { workspace_id: managed, title: "Back", instructions: "x", idempotency_key: key() })).ok, "work resumes");
+    const agentRooms = async () => (await personA.must("GET", `/v1/agents/${agent.id}/rooms`)).rooms.find((r) => r.workspace_id === managed);
+    let listed;
+    for (let tries = 0; tries < 20 && !listed?.workspace_name?.endsWith("renamed"); tries++) {
+      listed = await agentRooms();
+      if (!listed?.workspace_name?.endsWith("renamed")) await sleep(isLocal ? 200 : 1000);
+    }
+    eq(listed?.left, false, "the agent's rooms, while it's in this one");
     await personA.revoke(managed, agent.id);
     await agent.close();
   });

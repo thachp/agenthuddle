@@ -2793,7 +2793,14 @@ describe("managing a room and reading its details", () => {
     expect((await admit(id, leaving)).status).toBe(200);
     const going = await newAgent();
     expect((await admit(id, going)).status).toBe(200);
-    expect((await api(OWNER, "POST", `${roomPath(id)}/archive`, { policy_version: await version(id) })).body).toEqual({ status: "archived" });
+    const replayKey = `create-${crypto.randomUUID()}`;
+    const replayed = await api(LEAD, "POST", tasks, { title: "Before archiving", instructions: "x" }, { key: replayKey });
+    expect(replayed.status).toBe(200);
+    const versionBefore = await version(id);
+    expect((await api(OWNER, "POST", `${roomPath(id)}/archive`, { policy_version: versionBefore }, { key: "archive-retry" })).body).toEqual({ status: "archived" });
+    // Retrying what committed gets its answer, even though the room is archived now.
+    expect((await api(OWNER, "POST", `${roomPath(id)}/archive`, { policy_version: versionBefore }, { key: "archive-retry" })).body).toEqual({ status: "archived" });
+    expect((await api(LEAD, "POST", tasks, { title: "Before archiving", instructions: "x" }, { key: replayKey })).body.id).toBe(replayed.body.id);
     expect((await api(OWNER, "POST", `${roomPath(id)}/archive`, { policy_version: await version(id) })).code).toBe("workspace_archived");
     const refused = "workspace_archived";
     const v = await version(id);
@@ -2862,7 +2869,18 @@ describe("managing a room and reading its details", () => {
     const link = await api(ADMIN, "POST", `${roomPath(id)}/invitations`, { role: "guest", invited_org_id: BOB.org, guest_can_create: true });
     const preview = (who: Who, token: unknown) => api(who, "POST", "/v1/invitations/preview", { token }, { key: null });
     const read = await preview(orgAdmin(BOB.org), link.body.token);
-    expect(read.body).toEqual(expect.objectContaining({ workspace_id: id, workspace_name: "Billing v2", owner_org: "org_a", role: "guest", guest_can_create: true, invited_org_id: BOB.org, invited_by: ADMIN.id }));
+    expect(read.body).toEqual(expect.objectContaining({ workspace_id: id, workspace_name: "Billing v2", role: "guest", guest_can_create: true, invited_org_id: BOB.org, invited_by: ADMIN.id }));
+    expect(read.body.owner_org).toBeUndefined();
+    // A link naming an organization says nothing to anyone outside it, even an admin elsewhere.
+    expect((await preview(orgAdmin(CAROL.org), link.body.token)).code).toBe("invitation_not_found");
+    const open = await api(ADMIN, "POST", `${roomPath(id)}/invitations`, { role: "guest" });
+    expect((await preview(orgAdmin(CAROL.org), open.body.token)).status).toBe(200);
+    // Once an organization is revoked it learns nothing from an older link, whichever organization it acts in.
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/organizations/${CAROL.org}`, {})).status).toBe(200);
+    expect((await preview(orgAdmin(CAROL.org), open.body.token)).code).toBe("invitation_not_found");
+    const inBoth: Who = { id: "per_both", kind: "person", org: "org_personal", orgs: ["org_personal", CAROL.org], adminOrgs: ["org_personal"] };
+    expect((await preview(inBoth, open.body.token)).code).toBe("invitation_not_found");
+    expect((await preview({ ...inBoth, orgs: ["org_personal"] }, open.body.token)).status).toBe(200);
     expect(JSON.stringify(read.body)).not.toContain(link.body.token.split(".").at(-1));
     // An agent can't, even holding it.
     expect((await preview(LEAD, link.body.token)).code).toBe("not_allowed");
@@ -2886,7 +2904,10 @@ describe("managing a room and reading its details", () => {
     expect(read.members.find((m: any) => m.principal_id === allowed.id).guest_can_create).toBe(true);
     expect(read.members.find((m: any) => m.principal_id === LEAD.id).guest_can_create).toBe(false);
     expect(read.removed.map((m: any) => [m.principal_id, m.revocation_reason])).toEqual([[out.id, "room_removed"]]);
-    for (const who of [LEAD, BOB]) expect((await api(who, "GET", roomPath(id))).body.removed).toBeUndefined();
+    for (const who of [LEAD, BOB]) {
+      const seen = (await api(who, "GET", roomPath(id))).body;
+      expect([seen.removed, seen.owner_org]).toEqual([undefined, undefined]);
+    }
     const guest = (await api(allowed, "GET", roomPath(id))).body;
     expect(guest.members).toEqual([expect.objectContaining({ principal_id: allowed.id, guest_can_create: true })]);
   });
@@ -2902,6 +2923,16 @@ describe("managing a room and reading its details", () => {
       expect(read.rooms.map((r: any) => [r.workspace_id, r.left]).sort()).toEqual([[first.id, false], [second.id, true]].sort());
     }, { timeout: 5000 });
     expect((await rooms(orgAdmin(BOB.org))).body.truncated).toBe(false);
+    // What happens to a room after the agent left doesn't reach its organization.
+    const before = (await rooms(orgAdmin(BOB.org))).body.rooms.find((r: any) => r.workspace_id === second.id);
+    expect([before.workspace_name, before.status]).toEqual(["Billing v2", null]);
+    expect((await api(OWNER, "PUT", `${roomPath(second.id)}/name`, { name: "Replacing Org B", policy_version: await version(second.id) })).status).toBe(200);
+    expect((await api(OWNER, "POST", `${roomPath(second.id)}/archive`, { policy_version: await version(second.id) })).status).toBe(200);
+    await vi.waitFor(async () => expect((await listed(LEAD, second.id))?.status).toBe("archived"), { timeout: 5000 });
+    const after = (await rooms(orgAdmin(BOB.org))).body.rooms.find((r: any) => r.workspace_id === second.id);
+    expect([after.workspace_name, after.status, after.left]).toEqual(["Billing v2", null, true]);
+    const row = await (env as any).DB.prepare("SELECT workspace_name, workspace_status FROM membership_index WHERE workspace_id = ? AND principal_id = ?").bind(second.id, agent.id).first();
+    expect([row.workspace_name, row.workspace_status]).toEqual(["Billing v2", "active"]);
     expect((await rooms(agent)).status).toBe(200);
     for (const who of [orgAdmin("org_a"), OWNER, BOB, OUTSIDER]) expect((await rooms(who)).code).toBe("agent_not_found");
   });

@@ -1197,15 +1197,19 @@ impl Principal {
             (Method::Get, Some("rooms")) => {
                 let found = self.env.d1("DB")?
                     .prepare("SELECT workspace_id, workspace_name, role, removed, workspace_status FROM membership_index WHERE principal_id = ? AND org_id = ? ORDER BY removed, workspace_name LIMIT ?")
-                    .bind(&[agent_id.as_str().into(), org.into(), AGENT_ROOMS_LISTED.into()])?
+                    .bind(&[agent_id.as_str().into(), org.into(), (AGENT_ROOMS_LISTED + 1).into()])?
                     .all()
                     .await?
                     .results::<Value>()?;
-                let truncated = found.len() >= AGENT_ROOMS_LISTED as usize;
-                let rooms: Vec<Value> = found.iter().map(|row| json!({
-                    "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "role": row["role"],
-                    "status": row["workspace_status"], "left": row["removed"].as_i64() == Some(1),
-                })).collect();
+                let truncated = found.len() > AGENT_ROOMS_LISTED as usize;
+                // A room it has left shows the name it knew, and nothing about the room's state since.
+                let rooms: Vec<Value> = found.iter().take(AGENT_ROOMS_LISTED as usize).map(|row| {
+                    let left = row["removed"].as_i64() == Some(1);
+                    json!({
+                        "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "role": row["role"],
+                        "status": if left { Value::Null } else { row["workspace_status"].clone() }, "left": left,
+                    })
+                }).collect();
                 Ok(json!({ "rooms": rooms, "truncated": truncated }))
             }
             (Method::Get, Some("inbox")) => {

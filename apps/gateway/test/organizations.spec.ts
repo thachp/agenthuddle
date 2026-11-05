@@ -664,9 +664,10 @@ describe("managing a room through the dashboard", () => {
     expect((await dash(owner, "PUT", `/v1/workspaces/${id}/name`, { name: "No", policy_version: await version() })).code).toBe("workspace_archived");
     expect((await dash(owner, "POST", `/v1/workspaces/${id}/unarchive`, { policy_version: await version() })).body.status).toBe("active");
     // An agent's room list goes through the same narrow gate as its inbox.
-    expect((await dash(owner, "GET", "/v1/agents/agt_nobody/rooms")).status).toBe(404);
-    expect((await dash(owner, "POST", "/v1/agents/agt_nobody/rooms", {})).status).toBe(404);
-    expect((await dash(owner, "GET", "/v1/agents/agt_nobody/other")).status).toBe(404);
+    // The API's own answer, so this fails if the gateway stops forwarding the route.
+    expect((await dash(owner, "GET", "/v1/agents/agt_nobody/rooms")).code).toBe("agent_not_found");
+    expect((await dash(owner, "POST", "/v1/agents/agt_nobody/rooms", {})).code).toBe("not_found");
+    expect((await dash(owner, "GET", "/v1/agents/agt_nobody/other")).code).toBe("not_found");
   });
 });
 

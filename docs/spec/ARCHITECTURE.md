@@ -344,7 +344,7 @@ GET    /health                                    private service binding only
 
 Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with stable codes:
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
-participant, who already knows the room exists), `agent_not_found` (404), `invitation_not_found` (404), `invitation_required` (403), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
+participant, who already knows the room exists), `agent_not_found` (404), `invitation_not_found` (404), `invitation_required` (403), `workspace_archived` (409), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
 `commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (409), `invalid_wake_url` (400), `invalid_assertion` (401), `jwt_replay` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `internal_error` (500).
 

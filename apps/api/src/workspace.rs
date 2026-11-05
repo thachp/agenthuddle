@@ -606,10 +606,6 @@ fn handle_add_member(
 ) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
     require_policy_version(sql, body)?;
-    // Checked again here, because adding an agent awaits its Principal after the check in `dispatch`.
-    if room_archived(sql)? {
-        return Err(ApiError::workspace_archived());
-    }
     let principal = required(body, "principal_id")?;
     let kind = required(body, "kind")?;
     let org = required(body, "org_id")?;
@@ -1226,7 +1222,8 @@ fn room_archived(sql: &SqlStorage) -> R<bool> {
         .unwrap_or(false))
 }
 
-/// Queues a listing update for everyone the room lists, because its name and status are on each of their rows.
+/// Queues a listing update for everyone still in the room, because its name and status are on each of their rows. Rows
+/// for anyone who left keep what they had, so a later name or status doesn't reach them.
 fn requeue_listing(sql: &SqlStorage, now: i64) -> R<()> {
     let room = rows(
         sql,
@@ -1244,16 +1241,14 @@ fn requeue_listing(sql: &SqlStorage, now: i64) -> R<()> {
     }
     for member in rows(
         sql,
-        "SELECT principal_id, org_id, role, revoked_at FROM member",
+        "SELECT principal_id, org_id, role FROM member WHERE revoked_at IS NULL",
         vec![],
     )? {
         queue_index(
             sql,
             member["principal_id"].as_str().unwrap_or_default(),
             member["org_id"].as_str().unwrap_or_default(),
-            member["revoked_at"]
-                .is_null()
-                .then(|| member["role"].as_str().unwrap_or_default()),
+            member["role"].as_str(),
             now,
         )?;
     }
@@ -1421,11 +1416,12 @@ mod queries {
             "guest_can_create": int(&m["guest_can_create"]) != 0,
         })).collect();
         let mut answer = json!({
-            "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "owner_org": room["owner_org_id"], "status": room["status"],
+            "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"],
             "policy_version": manages.then(|| room["policy_version"].clone()), "members": members,
         });
-        // Who has left, and why, is for those who decide whether they can return.
+        // Who has left and why, and which organization holds the room, are for those who manage its access.
         if manages {
+            answer["owner_org"] = room["owner_org_id"].clone();
             answer["removed"] = json!(rows(sql, "SELECT principal_id, kind, org_id, revoked_at, revocation_reason FROM member WHERE revoked_at IS NOT NULL ORDER BY revoked_at DESC LIMIT ?", vec![REMOVED_LISTED.into()])?);
         }
         Ok(answer)
@@ -1568,6 +1564,7 @@ impl Workspace {
         identity: &Identity,
         key: Option<String>,
         hash: String,
+        stops_when_archived: bool,
         test_fail: bool,
         handler: impl FnOnce(&SqlStorage, &Participant, i64) -> R<Value> + 'static,
     ) -> R<Value> {
@@ -1593,6 +1590,9 @@ impl Workspace {
                     prior["response_json"].as_str().unwrap_or("null"),
                 )?);
                 return Ok(());
+            }
+            if stops_when_archived && room_archived(&sql)? {
+                return Err(ApiError::workspace_archived());
             }
             let value = handler(&sql, &who, now)?;
             // A secret in a response is returned once and never stored, so a replay can't reveal it.
@@ -1717,7 +1717,7 @@ impl Workspace {
     }
 
     /// What a link offers, for the person holding it. It needs the secret, and every failure looks the same.
-    fn preview_invitation(&self, body: &Value) -> R<Value> {
+    fn preview_invitation(&self, identity: &Identity, body: &Value) -> R<Value> {
         let sql = self.state.storage().sql();
         let token = required(body, "token").map_err(|_| ApiError::invitation_not_found())?;
         let (id, secret) = parse_token(&token).ok_or_else(ApiError::invitation_not_found)?;
@@ -1728,10 +1728,21 @@ impl Workspace {
         let invitation = find_invitation(&sql, &id, &secret, now_ms())?
             .filter(|row| row["status"].as_str() == Some("pending"))
             .ok_or_else(ApiError::invitation_not_found)?;
-        let room = rows(&sql, "SELECT id, name, owner_org_id FROM workspace", vec![])?;
+        // A link naming an organization is for that organization's people. Anyone in an organization revoked since the link
+        // was made learns nothing, like any other bad link.
+        let invited = invitation["invited_org_id"].as_str();
+        if invited.is_some_and(|org| !in_org(identity, org)) {
+            return Err(ApiError::invitation_not_found());
+        }
+        for org in identity.orgs.iter().chain([&identity.org]) {
+            if barred_by_revocation(&sql, org, &invitation)? {
+                return Err(ApiError::invitation_not_found());
+            }
+        }
+        let room = rows(&sql, "SELECT id, name FROM workspace", vec![])?;
         let room = room.first().ok_or_else(ApiError::invitation_not_found)?;
         Ok(json!({
-            "workspace_id": room["id"], "workspace_name": room["name"], "owner_org": room["owner_org_id"],
+            "workspace_id": room["id"], "workspace_name": room["name"],
             "role": invitation["role"], "guest_can_create": int(&invitation["guest_can_create"]) != 0,
             "invited_org_id": invitation["invited_org_id"], "invited_by": invitation["created_by"], "expires_at": invitation["expires_at"],
         }))
@@ -1928,19 +1939,28 @@ impl Workspace {
         let pending = rows(&sql, "SELECT seq, principal_id, org_id, role, removed FROM index_outbox ORDER BY seq LIMIT 100", vec![])?;
         let db = self.env.d1("DB")?;
         for row in &pending {
+            // The room's name and status as they are now aren't for someone already out.
+            let removed = int(&row["removed"]) != 0;
             let args: Vec<JsValue> = vec![
                 room["id"].as_str().unwrap_or("").into(),
                 row["principal_id"].as_str().unwrap_or("").into(),
                 row["org_id"].as_str().unwrap_or("").into(),
                 row["role"].as_str().map_or(JsValue::NULL, JsValue::from),
-                room["name"].as_str().unwrap_or("").into(),
+                if removed {
+                    ""
+                } else {
+                    room["name"].as_str().unwrap_or("")
+                }
+                .into(),
                 JsValue::from_f64(int(&row["removed"]) as f64),
                 JsValue::from_f64(int(&row["seq"]) as f64),
                 room["status"].as_str().unwrap_or(ACTIVE_ROOM).into(),
             ];
             db.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq, workspace_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT (workspace_id, principal_id) DO UPDATE SET org_id = excluded.org_id, role = excluded.role, workspace_name = excluded.workspace_name,
-                removed = excluded.removed, workspace_status = excluded.workspace_status, updated_seq = excluded.updated_seq WHERE excluded.updated_seq > membership_index.updated_seq")
+              ON CONFLICT (workspace_id, principal_id) DO UPDATE SET org_id = excluded.org_id, role = excluded.role,
+                workspace_name = CASE WHEN excluded.removed = 1 THEN membership_index.workspace_name ELSE excluded.workspace_name END,
+                workspace_status = CASE WHEN excluded.removed = 1 THEN membership_index.workspace_status ELSE excluded.workspace_status END,
+                removed = excluded.removed, updated_seq = excluded.updated_seq WHERE excluded.updated_seq > membership_index.updated_seq")
                 .bind(&args)?.run().await?;
             exec(
                 &sql,
@@ -2290,7 +2310,7 @@ impl Workspace {
         if path == INTERNAL_PREVIEW_PATH {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
-            return self.preview_invitation(&body);
+            return self.preview_invitation(&identity, &body);
         }
         if path == INTERNAL_INIT_PATH {
             let body: Value = serde_json::from_str(&req.text().await?)
@@ -2336,19 +2356,16 @@ impl Workspace {
         let parts: Vec<&str> = segments.iter().map(String::as_str).collect();
         let tail = parts.get(3..).unwrap_or(&[]);
 
-        // An archived room can still lose participants and links, and can come back. Nothing new happens in it.
-        let still_allowed = matches!(
+        // An archived room can still lose participants and links, and can come back. Nothing new happens in it. `command`
+        // checks this in its transaction, after the replay lookup, so a retry of something committed earlier gets its answer.
+        let stops_when_archived = !matches!(
             (&method, tail),
-            (Method::Get, _)
-                | (Method::Post, ["unarchive"])
+            (Method::Post, ["unarchive"])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
                 )
         );
-        if !still_allowed && room_archived(&sql)? {
-            return Err(ApiError::workspace_archived());
-        }
 
         if method == Method::Get {
             return match tail {
@@ -2380,21 +2397,30 @@ impl Workspace {
         let verb = parts.get(5).map(|s| (*s).to_string()).unwrap_or_default();
 
         match (method, tail) {
-            (Method::Post, ["tasks"]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_create_task(sql, &who.caller, &body, now)
-                })
-            }
-            (Method::Post, ["tasks", _, "messages"]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_send_message(sql, who, &target, &body, now)
-                })
-            }
-            (Method::Post, ["tasks", _, _]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_task_command(sql, who, &target, &verb, &body, now)
-                })
-            }
+            (Method::Post, ["tasks"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_create_task(sql, &who.caller, &body, now),
+            ),
+            (Method::Post, ["tasks", _, "messages"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_send_message(sql, who, &target, &body, now),
+            ),
+            (Method::Post, ["tasks", _, _]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_task_command(sql, who, &target, &verb, &body, now),
+            ),
             (Method::Post, ["members"]) => {
                 // A registered agent's generation comes from its Principal before this room commits the join.
                 let mut registered = None;
@@ -2420,57 +2446,105 @@ impl Workspace {
                     registered = Some((self.test_generation.borrow().unwrap_or(generation), org));
                 }
                 let target_member = identity.target_member.clone();
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_add_member(sql, &who.caller, &body, registered, target_member, now)
-                })
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        handle_add_member(sql, &who.caller, &body, registered, target_member, now)
+                    },
+                )
             }
-            (Method::Post, ["members", _, "clear-removal"]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_clear_removal(sql, &who.caller, &target, &body, now)
-                })
-            }
+            (Method::Post, ["members", _, "clear-removal"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_clear_removal(sql, &who.caller, &target, &body, now),
+            ),
             (Method::Post, ["invitations"]) => {
                 let room = identity.workspace_id.clone();
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_create_invitation(sql, &who.caller, &room, &body, now)
-                })
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        handle_create_invitation(sql, &who.caller, &room, &body, now)
+                    },
+                )
             }
-            (Method::Delete, ["invitations", _]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+            (Method::Delete, ["invitations", _]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| {
                     handle_withdraw_invitation(sql, &who.caller, &target, &body, now)
-                })
-            }
+                },
+            ),
             (Method::Post, ["members", _, "role"]) => {
                 let target_member = identity.target_member.clone();
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_change_role(sql, &who.caller, &target, &body, target_member, now)
-                })
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        handle_change_role(sql, &who.caller, &target, &body, target_member, now)
+                    },
+                )
             }
-            (Method::Put, ["name"]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_rename_room(sql, &who.caller, &body, now)
-                })
-            }
-            (Method::Post, ["archive"]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_set_room_status(sql, &who.caller, ARCHIVED, &body, now)
-                })
-            }
-            (Method::Post, ["unarchive"]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+            (Method::Put, ["name"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_rename_room(sql, &who.caller, &body, now),
+            ),
+            (Method::Post, ["archive"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_set_room_status(sql, &who.caller, ARCHIVED, &body, now),
+            ),
+            (Method::Post, ["unarchive"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| {
                     handle_set_room_status(sql, &who.caller, ACTIVE_ROOM, &body, now)
-                })
-            }
-            (Method::Delete, ["organizations", _]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                },
+            ),
+            (Method::Delete, ["organizations", _]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| {
                     handle_revoke_organization(sql, &who.caller, &target, &body, now)
-                })
-            }
-            (Method::Delete, ["members", _]) => {
-                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_revoke_member(sql, &who.caller, &target, &body, now)
-                })
-            }
+                },
+            ),
+            (Method::Delete, ["members", _]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_revoke_member(sql, &who.caller, &target, &body, now),
+            ),
             _ => Err(ApiError::not_found()),
         }
     }
