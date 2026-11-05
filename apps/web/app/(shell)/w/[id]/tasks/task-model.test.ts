@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { asConflict, briefAuthor, createProblem, canCreateTask, crossRoomTarget, isChosenName, nameOf, textNameOf, parseCrossRoomTarget, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
+import { messageStillUnknown, asConflict, briefAuthor, createProblem, canCreateTask, changedSince, changeProblem, crossRoomTarget, draftOf, flagged, flagText, isArchivedRoom, isChosenName, nameOf, newRequesterChoices, newReviewerChoices, ownWords, textNameOf, parseCrossRoomTarget, rebaseDraft, reoffers, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, taskPatch, toLocalInput, tooLong, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
 
 const task = (over: Partial<Task> = {}): Task => ({ id: "tsk_1", title: "T", instructions: "I", acceptance_criteria: null, requester: "per_r", assignee: "agt_a", reviewer: "per_v", status: "submitted", version: 3, due_at: null, follow_up_of: null, submission_no: 2, needs_attention: false, ...over });
 
@@ -12,9 +12,13 @@ describe("status vocabulary (UI-01)", () => {
     expect(TASK_STATUSES.filter((status) => /complet|approved|done/i.test(TASK_STATUS[status].label))).toEqual(["completed"]);
   });
   it("uses the design's verbs, and an unknown event doesn't claim anything", () => {
-    expect(verbFor("task.completed")).toBe("approved");
-    expect(verbFor("task.changes_requested")).toBe("requested changes");
-    expect(verbFor("task.future_thing")).toBe("changed this task");
+    expect(verbFor({ type: "task.completed", prior_status: "submitted" })).toBe("approved");
+    expect(verbFor({ type: "task.changes_requested", prior_status: "submitted" })).toBe("requested changes");
+    expect(verbFor({ type: "task.future_thing", prior_status: null })).toBe("changed this task");
+  });
+  it("says an edit that undid an acceptance is an edit, though it's recorded as an offer (decision 4)", () => {
+    expect(verbFor({ type: "task.offered", prior_status: "accepted" })).toMatch(/edited .* needs accepting again/);
+    expect(verbFor({ type: "task.offered", prior_status: "open" })).toBe("offered this task");
   });
 });
 
@@ -103,6 +107,163 @@ describe("asConflict", () => {
   });
 });
 
+describe("who sees the new controls", () => {
+  it("lets the requester or an admin edit, up to submission and never after the end", () => {
+    expect(viewerActions(task({ status: "accepted" }), "per_r", "member").edit).toBe(true);
+    expect(viewerActions(task({ status: "open" }), "per_x", "admin").edit).toBe(true);
+    expect(viewerActions(task({ status: "accepted" }), "per_x", "member").edit).toBe(false);
+    expect(viewerActions(task({ status: "submitted" }), "per_r", "owner").edit).toBe(false);
+    expect(viewerActions(task({ status: "completed" }), "per_r", "owner").edit).toBe(false);
+  });
+  it("keeps the reviewer change from a plain requester once work is submitted", () => {
+    expect(viewerActions(task({ status: "accepted" }), "per_r", "member").setReviewer).toBe(true);
+    expect(viewerActions(task({ status: "submitted" }), "per_r", "member").setReviewer).toBe(false);
+    expect(viewerActions(task({ status: "submitted" }), "per_x", "admin").setReviewer).toBe(true);
+    expect(viewerActions(task({ status: "canceled" }), "per_x", "owner").setReviewer).toBe(false);
+  });
+  it("gives the requester change to owners and admins alone (decision 24)", () => {
+    expect(viewerActions(task(), "per_x", "owner").setRequester).toBe(true);
+    expect(viewerActions(task(), "per_x", "admin").setRequester).toBe(true);
+    expect(viewerActions(task(), "per_r", "member").setRequester).toBe(false);
+    expect(viewerActions(task({ status: "completed" }), "per_x", "owner").setRequester).toBe(false);
+  });
+});
+
+describe("choosing a new reviewer or requester", () => {
+  const room = { owner: "per_o", members: [{ principal_id: "per_v", kind: "person", org_id: "o", role: "member" }, { principal_id: "agt_a", kind: "agent", org_id: "o", role: "member" }] };
+  it("never offers the assignee as reviewer, or the current one", () => {
+    expect(newReviewerChoices(room, task(), "owner")).toEqual(["per_o"]);
+    expect(newRequesterChoices(room, task({ requester: "per_o" }), "owner")).toEqual(["per_v", "agt_a"]);
+  });
+  it("offers the current one when a flag can't be placed, because they may have come back and naming them again clears it", () => {
+    expect(newReviewerChoices(room, task({ needs_attention: true, requester: "per_o" }), "owner")).toEqual(["per_o", "per_v"]);
+    // Here it's clear the requester is what's missing, so the reviewer list stays as it was.
+    expect(newReviewerChoices(room, task({ needs_attention: true, requester: "per_gone" }), "owner")).toEqual(["per_o"]);
+  });
+  it("works out what a flag needs from who has left", () => {
+    expect(flagged(task({ needs_attention: true, requester: "per_gone" }), room, "owner")).toEqual({ requester: true, reviewer: false });
+    expect(flagged(task({ needs_attention: true, reviewer: "per_gone", requester: "per_v" }), room, "owner")).toEqual({ requester: false, reviewer: true });
+    expect(flagged(task({ needs_attention: false, requester: "per_gone" }), room, "owner")).toEqual({ requester: false, reviewer: false });
+  });
+  it("doesn't guess for a guest, who sees only itself in the member list", () => {
+    expect(flagged(task({ needs_attention: true, requester: "per_o" }), { owner: "per_o", members: [] }, "guest")).toEqual({ requester: false, reviewer: false });
+  });
+  it("says who can fix a flag", () => {
+    const left = task({ needs_attention: true, requester: "per_gone", status: "accepted" });
+    expect(flagText(left, room, "per_o", "owner")).toBe("Someone left this workroom, so this task needs a new requester. You can choose below.");
+    expect(flagText(left, room, "per_v", "member")).toBe("Someone left this workroom, so this task needs a new requester. An owner or admin of this workroom can fix it.");
+  });
+});
+
+describe("what an edit sends", () => {
+  const accepted = task({ status: "accepted", title: "T", instructions: "I\n", acceptance_criteria: null, due_at: null });
+  it("sends only what changed, so an untouched field can't count as a change", () => {
+    expect(taskPatch(accepted, draftOf(accepted))).toEqual({});
+    expect(taskPatch(accepted, { ...draftOf(accepted), title: " New " })).toEqual({ title: "New" });
+    expect(taskPatch(accepted, { ...draftOf(accepted), instructions: "I" })).toEqual({});
+  });
+  it("can clear criteria, and that counts as changing them", () => {
+    const withCriteria = task({ status: "accepted", acceptance_criteria: "C" });
+    const patch = taskPatch(withCriteria, { ...draftOf(withCriteria), criteria: "" });
+    expect(patch).toEqual({ acceptance_criteria: "" });
+    expect(reoffers(withCriteria, patch)).toBe(true);
+  });
+  it("warns only for instructions or criteria, on an accepted task (decision 4)", () => {
+    expect(reoffers(accepted, { title: "New" })).toBe(false);
+    expect(reoffers(accepted, { due_at: 5 })).toBe(false);
+    expect(reoffers(accepted, { instructions: "New" })).toBe(true);
+    expect(reoffers(task({ status: "offered" }), { instructions: "New" })).toBe(false);
+  });
+  it("round-trips a due date through the field, and leaves one alone when the field is empty", () => {
+    const at = new Date(2030, 0, 2, 3, 4).getTime();
+    expect(new Date(toLocalInput(at)).getTime()).toBe(at);
+    const due = task({ due_at: at });
+    expect(taskPatch(due, draftOf(due))).toEqual({});
+    expect(taskPatch(due, { ...draftOf(due), due: "" })).toEqual({});
+    expect(taskPatch(due, { ...draftOf(due), due: toLocalInput(at + 3_600_000) })).toEqual({ due_at: at + 3_600_000 });
+  });
+  it("counts bytes, as the server does", () => {
+    expect(tooLong("é".repeat(3), 5)).toBe(true);
+    expect(tooLong("é".repeat(2), 5)).toBe(false);
+  });
+});
+
+describe("an edit that lost a race", () => {
+  const readAt = task({ status: "accepted", title: "Old title", instructions: "Old" });
+  const latest = task({ status: "offered", title: "Their title", instructions: "Old", version: 4 });
+  it("keeps what the person typed, and doesn't undo what they didn't touch", () => {
+    const draft = { ...draftOf(readAt), instructions: "Mine" };
+    expect(rebaseDraft(draft, readAt, latest)).toEqual({ ...draftOf(latest), instructions: "Mine" });
+  });
+  it("says what moved", () => {
+    expect(changedSince(readAt, latest)).toEqual(["title", "status"]);
+  });
+});
+
+describe("changeProblem", () => {
+  it("says the outcome is unknown after a lost response or a server error", () => {
+    expect(changeProblem("edit", "unknown", 0)).toMatch(/can't tell.*can't apply it twice/);
+    expect(changeProblem("message", "internal", 500)).toMatch(/can't tell.*can't post it twice/);
+  });
+  it("explains the reviewer refusals", () => {
+    expect(changeProblem("reviewer", "self_sign_off", 422)).toMatch(/can't be the person doing the work/);
+    expect(changeProblem("reviewer", "invalid_argument", 400)).toMatch(/isn't in this workroom/);
+    expect(changeProblem("reviewer", "not_allowed", 403)).toMatch(/Once work is submitted, only an owner or admin/);
+  });
+  it("stays general about anything else, which may be about access", () => {
+    expect(changeProblem("requester", "task_not_found", 404)).toBe("That didn't save, and nothing changed. You may no longer be allowed to do this.");
+  });
+  it("says what a limit or a lapsed session means", () => {
+    expect(changeProblem("edit", "rate_limited", 429)).toMatch(/wait a minute/);
+    expect(changeProblem("message", "unauthorized", 401)).toMatch(/session has ended/);
+  });
+});
+
+describe("an archived room", () => {
+  it("offers nothing to anyone, whatever their role", () => {
+    for (const [viewer, role] of [["per_v", "member"], ["per_r", "member"], ["per_x", "owner"], ["per_x", "admin"]]) {
+      expect(Object.values(viewerActions(task(), viewer, role, true))).toEqual([false, false, false, false, false, false]);
+    }
+    expect(isArchivedRoom({ status: "archived" })).toBe(true);
+    expect(isArchivedRoom({ status: "active" })).toBe(false);
+  });
+  it("says so when refused, and doesn't call it a question of access", () => {
+    expect(changeProblem("message", "workspace_archived", 409)).toMatch(/archived/);
+    expect(changeProblem("edit", "workspace_archived", 409)).not.toMatch(/no longer be allowed/);
+  });
+  it("doesn't promise a fix now on a flagged task", () => {
+    expect(flagText(task({ needs_attention: true, requester: "per_gone" }), { owner: "per_x", members: [], status: "archived" }, "per_x", "owner")).toMatch(/once the workroom is back/);
+  });
+});
+
+describe("what comes back after an edit that can't be saved", () => {
+  it("is only what the person changed", () => {
+    const readAt = task({ title: "An agent's title", instructions: "An agent's words", acceptance_criteria: "Theirs too" });
+    expect(ownWords({ readAt, draft: { ...draftOf(readAt), instructions: "Mine" } })).toEqual([{ label: "Instructions", text: "Mine" }]);
+    expect(ownWords({ readAt, draft: draftOf(readAt) })).toEqual([]);
+  });
+});
+
+describe("briefAuthor after an edit", () => {
+  const event = (over: Partial<HistoryEvent>): HistoryEvent => ({ seq: 1, id: "e", type: "task.created", from: { id: "per_r", org: "o" }, external: false, reason: null, prior_status: null, new_status: "open", task_version: 1, created_at: 1, ...over });
+  it("credits whoever edited accepted work, though it's recorded as an offer", () => {
+    const history = [event({}), event({ type: "task.offered", prior_status: "accepted", from: { id: "per_e", org: "o" } })];
+    expect(briefAuthor({ task: task(), history }).id).toBe("per_e");
+  });
+  it("doesn't credit someone who only offered it", () => {
+    const history = [event({}), event({ type: "task.offered", prior_status: "open", from: { id: "per_e", org: "o" } })];
+    expect(briefAuthor({ task: task(), history }).id).toBe("per_r");
+  });
+});
+
 describe("createProblem", () => {
   it("explains an archived room", () => expect(createProblem(409, "workspace_archived")).toMatch(/nothing changed\. This workroom is archived/));
+});
+
+describe("a post whose earlier attempt has an unknown outcome", () => {
+  it("doesn't say it didn't post", () => {
+    expect(messageStillUnknown(429)).toMatch(/still can't tell whether this posted/);
+    expect(messageStillUnknown(403)).not.toMatch(/didn't post/);
+    expect(messageStillUnknown(401)).toMatch(/signed out, so we still can't tell/);
+  });
 });

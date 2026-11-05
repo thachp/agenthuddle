@@ -46,7 +46,9 @@ export function ProfileMenu({ name, email, organizations, currentOrg }: ProfileM
       <SidebarMenuItem>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <SidebarMenuButton size="lg" aria-label="Profile menu">
+            {/* The visible name stays in the accessible name, so speech control can find it by what it says. */}
+            <SidebarMenuButton size="lg">
+              <span className="sr-only">Profile menu: </span>
               <span className="grid min-w-0 flex-1 text-left leading-tight">
                 <span className="truncate font-medium">{name}</span>
                 <span className="truncate text-xs text-muted-foreground">{current?.name ?? email}</span>

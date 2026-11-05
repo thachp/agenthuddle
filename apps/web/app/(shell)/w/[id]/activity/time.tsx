@@ -13,8 +13,9 @@ export function relativeTime(at: number, now: number) {
 export function Time({ at, now }: { at: number; now: number }) {
   const absolute = new Date(at).toUTCString();
   return (
-    <time dateTime={new Date(at).toISOString()} title={absolute} tabIndex={0} aria-label={`${relativeTime(at, now)}, ${absolute}`} className="rounded outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">
+    <time dateTime={new Date(at).toISOString()} title={absolute} tabIndex={0} className="rounded outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">
       {relativeTime(at, now)}
+      <span className="sr-only">, {absolute}</span>
     </time>
   );
 }

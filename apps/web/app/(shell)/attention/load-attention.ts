@@ -37,7 +37,14 @@ export async function loadAttention(query: Query, me: string): Promise<Attention
   const [inboxResult, roomsResult] = await Promise.all([query<Inbox>("/api/v1/inbox?limit=50"), query<{ workspaces: RoomEntry[] }>("/api/v1/workspaces")]);
   const inbox = inboxResult.ok ? inboxResult.data : null;
   const roomNames: Record<string, string> = {};
-  if (roomsResult.ok) for (const room of roomsResult.data.workspaces) roomNames[room.workspace_id] = room.workspace_name;
+  // Nothing can be decided in an archived room. The listing can lag, and the room would still refuse.
+  const archived = new Set<string>();
+  if (roomsResult.ok) {
+    for (const room of roomsResult.data.workspaces) {
+      roomNames[room.workspace_id] = room.workspace_name;
+      if (room.status === "archived") archived.add(room.workspace_id);
+    }
+  }
 
   // The listing can lag behind a room this person was just added to, and the inbox knows about those.
   const inboxRooms = new Set(inbox?.events.map((event) => event.workspace_id) ?? []);
@@ -61,8 +68,8 @@ export async function loadAttention(query: Query, me: string): Promise<Attention
         if (!isGone(submitted)) failedRooms += 1;
         return;
       }
-      if (submitted.data.more) fullRooms += 1;
-      for (const task of reviewsFor(submitted.data.tasks, me)) reviews.push({ workspace, workspaceName: roomNames[workspace] ?? workspace, task });
+      if (submitted.data.more && !archived.has(workspace)) fullRooms += 1;
+      if (!archived.has(workspace)) for (const task of reviewsFor(submitted.data.tasks, me)) reviews.push({ workspace, workspaceName: roomNames[workspace] ?? workspace, task });
       remember(taskTitles, submitted.data.tasks);
       // Inbox events carry IDs only. A title makes a row readable, and it's worth one more read only where there's something unread.
       if (titled.has(workspace)) {

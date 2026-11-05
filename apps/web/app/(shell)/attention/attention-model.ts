@@ -2,7 +2,7 @@ import { textNameOf, type Names, type Task } from "../w/[id]/tasks/task-model";
 
 export type InboxEvent = { seq: number; event_id: string; workspace_id: string; type: string; task_id: string | null; actor_id: string | null; created_at: number };
 export type Inbox = { events: InboxEvent[]; acked_seq: number; unread: number; dropped: number };
-export type RoomEntry = { workspace_id: string; workspace_name: string; role: string };
+export type RoomEntry = { workspace_id: string; workspace_name: string; role: string; status?: string | null };
 
 export type ReviewItem = { workspace: string; workspaceName: string; task: Task };
 
