@@ -79,6 +79,11 @@ async fn forward(
         .await?)
 }
 
+/// Tests share a few organizations across many rooms, so in test builds the limit only applies where a test asks for it.
+fn room_limit_applies(org: &str) -> bool {
+    !cfg!(feature = "failpoints") || org.starts_with("org_limit_")
+}
+
 async fn list_workspaces(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiError> {
     let db = env.d1("DB")?;
     let found = db
@@ -255,10 +260,45 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
             if is_agent {
                 return Err(ApiError::not_allowed());
             }
-            (
-                format!("ws_{}", uuid::Uuid::new_v4().simple()),
-                INTERNAL_INIT_PATH.to_string(),
+            let workspace = format!("ws_{}", uuid::Uuid::new_v4().simple());
+            // Someone who can't create takes no slot, and the room gives their refusal.
+            let counted =
+                caller.admin_orgs.contains(&caller.org) && room_limit_applies(&caller.org);
+            if counted {
+                principal::reserve_org_room(&env, &caller.org, &workspace).await?;
+            }
+            caller.workspace_id = workspace.clone();
+            let stub = env
+                .durable_object("WORKSPACE")?
+                .id_from_name(&workspace)?
+                .get_stub()?;
+            let created = forward(
+                stub,
+                INTERNAL_INIT_PATH,
+                &query,
+                caller_header(&caller)?,
+                method,
+                body,
             )
+            .await;
+            // A failure here can come after the room committed, so only a definite refusal gives the slot back. Keeping it
+            // when in doubt can only make the count too high, never let an organization pass the limit.
+            #[cfg(feature = "failpoints")]
+            let created = if req.headers().get("x-test-fail")?.is_some() {
+                Err(ApiError::internal("injected failure after creating"))
+            } else {
+                created
+            };
+            let refused = created
+                .as_ref()
+                .is_ok_and(|response| (400..500).contains(&response.status_code()));
+            if counted && refused {
+                if let Err(error) = principal::release_org_room(&env, &caller.org, &workspace).await
+                {
+                    console_error!("couldn't give back a room slot: {:?}", error.code());
+                }
+            }
+            return created;
         }
         ["v1", "invitations", "preview"] if method == Method::Post => {
             if is_agent {

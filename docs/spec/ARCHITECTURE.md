@@ -307,7 +307,7 @@ The consumer in `apps/api` rechecks everything before sending: the connection is
 ```
 GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
-POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33)
+POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33); at most 20 per organization
 GET    /v1/workspaces/{ws}
 PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
 POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access
