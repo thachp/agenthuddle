@@ -1,0 +1,371 @@
+"use client";
+
+import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import { cn } from "cn";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Skeleton } from "@/components/ui/skeleton";
+import type { GatewayResult } from "@/lib/gateway/result";
+
+/** What a pending request is bound to. A command gets this, so it can't address whatever is selected by the time it runs. */
+export type SheetBinding = { target: string; version: number | null };
+
+export type SheetApi<T> = {
+  data: T;
+  binding: SheetBinding;
+  dirty: boolean;
+  setDirty: (dirty: boolean) => void;
+  saving: boolean;
+  /** Runs a command for this Sheet's own target. Never optimistic: on success the Sheet reloads and shows the server's state. */
+  run: <R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>) => Promise<GatewayResult<R> | null>;
+  close: () => void;
+};
+
+export type TargetSheetProps<T> = {
+  /** The query parameter that holds the target's ID, such as `task` for `?task=:taskId`. */
+  param: string;
+  /** `md` for access and agent details, `lg` for tasks. */
+  size?: "md" | "lg";
+  /** Resolve `null` when the target is missing or hidden. The viewer gets one message for both, and nothing about it. */
+  load: (target: string, init: { signal: AbortSignal }) => Promise<T | null>;
+  /** Names the object. Agent-written text shows as text only. */
+  title: (data: T) => string;
+  /** Names its workroom. */
+  description: (data: T) => string;
+  version?: (data: T) => number | null;
+  /** The wording on a conflict, such as "task". */
+  noun?: string;
+  children: (api: SheetApi<T>) => ReactNode;
+};
+
+const SIZES = { md: "sm:max-w-[480px]", lg: "sm:max-w-[720px]" };
+
+const InsideSheet = createContext(false);
+
+/** The URL with this Sheet's parameter set or cleared. */
+function hrefWith(pathname: string, search: URLSearchParams, param: string, target: string | null) {
+  const next = new URLSearchParams(search);
+  if (target === null) next.delete(param);
+  else next.set(param, target);
+  const query = next.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
+
+const launcherKey = (param: string, target: string) => `${param}:${target}`;
+
+/**
+ * Opens a Sheet from a list. It's a real link, so it can be opened in a new tab and shared, and it marks itself so focus
+ * can find it again on close, even after a re-render or a reload.
+ */
+export function SheetLink({ param, target, ...props }: { param: string; target: string } & Omit<ComponentProps<typeof Link>, "href">) {
+  if (useContext(InsideSheet)) throw new Error("A Sheet can't open another Sheet. Close it, then open the other.");
+  const pathname = usePathname();
+  const search = useSearchParams();
+  return <Link {...props} href={hrefWith(pathname, new URLSearchParams(search.toString()), param, target)} scroll={false} prefetch={false} data-sheet-launcher={launcherKey(param, target)} />;
+}
+
+function focusLauncher(param: string, target: string) {
+  const launcher = document.querySelector<HTMLElement>(`[data-sheet-launcher="${CSS.escape(launcherKey(param, target))}"]`);
+  (launcher ?? document.getElementById("main-content"))?.focus();
+}
+
+/**
+ * The one right-side Sheet. The URL says what's selected, and `bound` says what's open: they differ only while an open
+ * Sheet has unsaved edits or a save in flight, which finish or are discarded before it moves on. Each target gets its own
+ * instance, so a late response belongs to the instance that asked for it and can't reach another target's.
+ */
+export function TargetSheet<T>(props: TargetSheetProps<T>) {
+  const { param } = props;
+  const router = useRouter();
+  const pathname = usePathname();
+  const search = useSearchParams();
+  const selected = search.get(param);
+
+  const [bound, setBound] = useState<string | null>(selected);
+  const [busy, setBusy] = useState(false);
+  const [goneNotice, setGoneNotice] = useState(false);
+  const noticeRef = useRef<HTMLParagraphElement>(null);
+  // The target just found to be gone. Navigation is asynchronous, so the URL still names it for a moment.
+  const left = useRef<string | null>(null);
+
+  const navigate = useCallback((target: string | null) => router.push(hrefWith(pathname, new URLSearchParams(search.toString()), param, target), { scroll: false }), [router, pathname, search, param]);
+
+  // Follows the URL, unless this Sheet still has something unfinished. Then the instance holds it and asks.
+  useEffect(() => {
+    if (selected !== left.current) left.current = null;
+    if (selected === bound || busy || (selected !== null && selected === left.current)) return;
+    if (selected !== null) setGoneNotice(false);
+    setBound(selected);
+  }, [selected, bound, busy]);
+
+  useEffect(() => {
+    if (goneNotice) noticeRef.current?.focus();
+  }, [goneNotice]);
+
+  const onGone = useCallback(() => {
+    left.current = bound;
+    setBusy(false);
+    setGoneNotice(true);
+    setBound(null);
+    navigate(null);
+  }, [navigate, bound]);
+
+  return (
+    <>
+      {goneNotice ? (
+        <p ref={noticeRef} tabIndex={-1} role="alert" className="rounded-lg border p-3 outline-none">
+          We can't find that. It may not exist, or you may not have access to it.
+        </p>
+      ) : null}
+      {bound === null ? null : (
+        <BoundSheet
+          key={bound}
+          {...props}
+          target={bound}
+          selected={selected}
+          onBusyChange={setBusy}
+          onGone={onGone}
+          onClose={() => navigate(null)}
+          onStay={() => navigate(bound)}
+          onRefreshList={() => router.refresh()}
+        />
+      )}
+    </>
+  );
+}
+
+type BoundProps<T> = TargetSheetProps<T> & {
+  target: string;
+  /** What the URL says now. */
+  selected: string | null;
+  onBusyChange: (busy: boolean) => void;
+  onGone: () => void;
+  onClose: () => void;
+  onStay: () => void;
+  onRefreshList: () => void;
+};
+
+type Loaded<T> = { phase: "loading" } | { phase: "ready"; data: T; refreshFailed: boolean } | { phase: "failed" };
+
+function BoundSheet<T>({ param, size = "md", load, title, description, version, noun = "item", children, target, selected, onBusyChange, onGone, onClose, onStay, onRefreshList }: BoundProps<T>) {
+  const [loaded, setLoaded] = useState<Loaded<T>>({ phase: "loading" });
+  const [reloads, setReloads] = useState(0);
+  const [dirty, setDirtyState] = useState(false);
+  // The version a draft was read at. A reload can show newer data, but the draft still answers to this one, so saving it conflicts instead of overwriting.
+  const draftVersion = useRef<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  // A save that failed after the URL moved on. The Sheet holds until the person has seen it.
+  const [heldFailure, setHeldFailure] = useState(false);
+  const [failedCode, setFailedCode] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const savingRef = useRef(false);
+  const alive = useRef(true);
+
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const goneRef = useRef(onGone);
+  goneRef.current = onGone;
+  const goneCalled = useRef(false);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+
+  // Mounted once per target, so `alive` going false means this target's Sheet is finished with.
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let current = true;
+    setLoaded((previous) => (previous.phase === "failed" ? { phase: "loading" } : previous));
+    loadRef
+      .current(target, { signal: controller.signal })
+      .then((data) => {
+        if (!current) return;
+        if (data === null) {
+          // It's gone, or the viewer's access is. Either way, nothing more about it shows.
+          goneCalled.current = true;
+          goneRef.current();
+        } else setLoaded({ phase: "ready", data, refreshFailed: false });
+      })
+      .catch(() => {
+        // A read failure keeps prior data on screen.
+        if (current) setLoaded((previous) => (previous.phase === "ready" ? { ...previous, refreshFailed: true } : { phase: "failed" }));
+      });
+    return () => {
+      current = false;
+      controller.abort();
+    };
+  }, [target, reloads]);
+
+  const busy = dirty || saving || heldFailure;
+  useEffect(() => {
+    onBusyChange(busy);
+  }, [busy, onBusyChange]);
+
+  // The URL moved away, by Back or a link, while this Sheet was busy. A save finishes first; edits need an answer.
+  useEffect(() => {
+    if (selected !== target && dirty && !saving) setAsking(true);
+  }, [selected, target, dirty, saving]);
+
+  const finish = () => {
+    setClosing(true);
+    onBusyChange(false);
+    onClose();
+  };
+
+  const requestClose = () => {
+    if (saving) return;
+    if (dirty) setAsking(true);
+    // The URL has already moved on, so closing this goes there.
+    else if (selected !== target) setHeldFailure(false);
+    else finish();
+  };
+
+  const discard = () => {
+    setAsking(false);
+    setHeldFailure(false);
+    setDirty(false);
+    // Moves on to whatever the URL now says, or closes.
+    if (selected === target) finish();
+    else onBusyChange(false);
+  };
+
+  const keepEditing = () => {
+    setAsking(false);
+    if (selected !== target) onStay();
+  };
+
+  const data = loaded.phase === "ready" ? loaded.data : null;
+  const shownVersion = data !== null && version ? version(data) : null;
+  const binding: SheetBinding = { target, version: dirty ? draftVersion.current : shownVersion };
+
+  function setDirty(next: boolean) {
+    if (next && !dirty) draftVersion.current = shownVersion;
+    setDirtyState(next);
+  }
+
+  async function run<R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>): Promise<GatewayResult<R> | null> {
+    // A second click can't send a second command while the first is out.
+    if (savingRef.current) return null;
+    savingRef.current = true;
+    setSaving(true);
+    setConflict(false);
+    setFailedCode(null);
+    setHeldFailure(false);
+    try {
+      const result = await command(binding);
+      // The list behind may have changed, whatever became of this Sheet.
+      if (result.ok) onRefreshList();
+      if (!alive.current) return result;
+      if (result.ok) {
+        setDirty(false);
+        setReloads((count) => count + 1);
+      } else {
+        if (result.code === "version_conflict") setConflict(true);
+        else setFailedCode(result.code);
+        if (selectedRef.current !== target) setHeldFailure(true);
+      }
+      return result;
+    } catch {
+      if (alive.current) {
+        setFailedCode("network");
+        if (selectedRef.current !== target) setHeldFailure(true);
+      }
+      return null;
+    } finally {
+      savingRef.current = false;
+      if (alive.current) setSaving(false);
+    }
+  }
+
+  const heading = data !== null ? title(data) : loaded.phase === "failed" ? "Couldn't load this" : "Loading";
+
+  return (
+    <InsideSheet.Provider value={true}>
+      <Sheet open={!closing} onOpenChange={(open) => !open && requestClose()}>
+        <SheetContent
+          side="right"
+          className={cn("w-full overflow-y-auto", SIZES[size])}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            titleRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            // Moving to another target or a not-found message has its own place for focus.
+            if (goneCalled.current || (selectedRef.current !== null && selectedRef.current !== target)) return;
+            focusLauncher(param, target);
+          }}
+        >
+          <SheetHeader>
+            <SheetTitle ref={titleRef} tabIndex={-1} className="pr-8 break-words outline-none">
+              {heading}
+            </SheetTitle>
+            <SheetDescription className="break-words">{data !== null ? description(data) : "\u00a0"}</SheetDescription>
+            {dirty ? <p role="status">Unsaved changes</p> : null}
+          </SheetHeader>
+          <div className="flex-1 space-y-4 px-4 pb-4">
+            {loaded.phase === "loading" ? (
+              <div aria-hidden className="space-y-3">
+                <Skeleton className="h-5 w-2/3" />
+                <Skeleton className="h-24 w-full" />
+              </div>
+            ) : null}
+            {loaded.phase === "failed" || (loaded.phase === "ready" && loaded.refreshFailed) ? (
+              <p role="alert">
+                Couldn't refresh.{" "}
+                <Button variant="link" className="h-auto p-0" onClick={() => setReloads((count) => count + 1)}>
+                  Try again
+                </Button>
+              </p>
+            ) : null}
+            {conflict ? (
+              <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-status-amber">
+                This {noun} changed while you were editing. Your changes aren't saved.{" "}
+                <Button
+                  variant="link"
+                  className="h-auto p-0 text-status-amber underline"
+                  onClick={() => {
+                    setConflict(false);
+                    setDirty(false);
+                    setReloads((count) => count + 1);
+                  }}
+                >
+                  Review latest
+                </Button>
+              </p>
+            ) : null}
+            {failedCode ? (
+              <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
+                That didn't save, and nothing changed. {failedCode === "network" ? "Check your connection and try again." : "You may no longer be allowed to do this."}
+              </p>
+            ) : null}
+            {data !== null ? children({ data, binding, dirty, setDirty, saving, run, close: requestClose }) : null}
+          </div>
+        </SheetContent>
+      </Sheet>
+      <AlertDialog open={asking}>
+        <AlertDialogContent onEscapeKeyDown={keepEditing}>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+            <AlertDialogDescription className="break-words">{data !== null ? <>Your changes to “{title(data)}” won't be saved.</> : "Your changes won't be saved."}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={keepEditing}>Keep editing</AlertDialogCancel>
+            <AlertDialogAction onClick={discard}>Discard changes</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </InsideSheet.Provider>
+  );
+}

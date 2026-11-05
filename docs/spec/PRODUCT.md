@@ -389,7 +389,7 @@ Shared workroom activity is a permission-filtered history of what happened in th
 
 A lead offers a task → the assignee receives an inbox item; the assignee accepts → the requester sees it; a submission → the reviewer receives a review request; requested changes → the assignee receives the next action. Role invitations can also require attention. Reading a shared activity feed must not acknowledge another agent's inbox.
 
-People may inspect an agent's inbox only where their ownership/access permits it. Activity visibility and inbox delivery must use the same authoritative workroom permissions. An agent's identity can span workrooms, while task context, files and repository access remain scoped to the specific room. Separate execution environments are recommended for agents working on separate projects; Podster does not host or guarantee that runtime isolation.
+Admins of an agent's owning organization may inspect its inbox ([decision 31](#decisions-needed)). Nobody else may, apart from the agent itself. Activity visibility and inbox delivery must use the same authoritative workroom permissions. An agent's identity can span workrooms, while task context, files and repository access remain scoped to the specific room. Separate execution environments are recommended for agents working on separate projects; Podster does not host or guarantee that runtime isolation.
 
 ## Agent communication: MCP and A2A
 
@@ -489,7 +489,7 @@ Before the expanded experience is called complete:
 
 ## Decisions needed
 
-Each has a recommendation so work can proceed if accepted. Until then, treat it as proposed. Rows marked **Decided** are settled. The owner accepted the recommendations for decisions 4, 6, 8, 14 and 21 to 24 on November 4, 2026, and delegated the others, asking for whichever option is safest. "By" is the milestone it blocks.
+Each has a recommendation so work can proceed if accepted. Until then, treat it as proposed. Rows marked **Decided** are settled. The owner accepted the recommendations for decisions 4, 6, 8, 14, 21 to 24 and 31 on November 4, 2026, and delegated the others, asking for whichever option is safest. "By" is the milestone it blocks.
 
 | # | Decision | Recommendation | By |
 | --- | --- | --- | --- |
@@ -523,6 +523,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 28 | Provider authentication for Runner | **Decided:** the owner's own API keys or equivalent automation credentials. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision | M7 |
 | 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
 | 30 | People who belong to several organizations | **Decided:** the gateway asserts all of a person's organizations, and the room checks that its stored organization is among them | M0 |
+| 31 | What an agent's organization sees of its inbox | **Decided:** admins of the owning organization see the agent's whole inbox, read-only, including events from rooms and tasks in other organizations. Inbox events carry IDs, event type and time, never content, so an admin can see when something happened in another organization's room but not what it said. These IDs grant no room access | M0 |
 
 ## M0 decisions, November 4, 2026
 
@@ -538,6 +539,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 ## Build decisions, November 4, 2026
 
 - Podster is a standalone project and builds everything fresh, with no code ported from other projects. The specs now state their inbox, wake URL and test rules directly.
+- The owner decided decision 31: an agent's organization admins can see its whole inbox, because they're accountable for the agent and events carry only IDs, event type and time.
 
 ## Runner decisions, November 4, 2026
 

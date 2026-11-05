@@ -14,6 +14,8 @@ export interface Env {
   OAUTH_KV: KVNamespace;
   API: Fetcher;
   BASE_URL: string;
+  /** The application host, reached only through the web Worker's service binding. See docs/adr/0001. Unset, nothing changes. */
+  APP_URL?: string;
   AUTH_SECRET: string;
   ASSERTION_SIGNING_JWK: string;
   GITHUB_CLIENT_ID?: string;
@@ -115,7 +117,7 @@ async function refusedRegistration(request: Request, text: string): Promise<Resp
 /** Test environments only: password sign-in can't be turned on anywhere with a real hostname. */
 function passwordSignInEnabled(env: Env) {
   const host = new URL(env.BASE_URL).hostname;
-  return env.ENABLE_PASSWORD_SIGNIN === "true" && (host === "localhost" || host.endsWith(".test"));
+  return env.ENABLE_PASSWORD_SIGNIN === "true" && (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".test"));
 }
 
 const STRICT_PER_MINUTE = 20;
@@ -376,6 +378,13 @@ async function personIdentity(env: Env, request: Request, userId: string): Promi
   return { kind: "person", id: person, org, orgs, adminOrgs };
 }
 
+/**
+ * A request for the application host is for a person there, so sign-in, its cookies and the origin check all use that
+ * host. This assumes only the web Worker can send one, because public traffic for that hostname is routed to it. ADR 0001
+ * lists that as something to probe on staging.
+ */
+const forPublicHost = (request: Request, env: Env): Env => (env.APP_URL && new URL(request.url).origin === new URL(env.APP_URL).origin ? { ...env, BASE_URL: env.APP_URL } : env);
+
 /** Session requests that change something must come from our own origin. */
 const sameOrigin = (request: Request, env: Env) => request.headers.get("origin") === new URL(env.BASE_URL).origin;
 
@@ -384,6 +393,26 @@ export function allowedPassthrough(path: string) {
   // Something between here and the API may collapse a double slash, which would slip past the prefix checks below.
   if (!path.startsWith("/v1/") || path.includes("//")) return false;
   return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox");
+}
+
+/**
+ * A person's own inbox and read-only oversight of an agent's. An `ack` on a read would let a link move the cursor, because
+ * reads skip the origin check, so acknowledging is only the POST.
+ */
+function allowedInbox(method: string, path: string, search: URLSearchParams) {
+  if (method === "POST") return path === "/v1/inbox/ack";
+  if (method !== "GET" || search.has("ack")) return false;
+  return path === "/v1/inbox" || /^\/v1\/agents\/[\w-]+\/inbox$/.test(path);
+}
+
+const MAX_LISTED_AGENTS = 500;
+
+/** Agents the person's organizations own. The directory is the gateway's own, and this reads only their memberships. */
+async function listAgents(env: Env, orgs: string[]): Promise<Response> {
+  const placeholders = orgs.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(`SELECT id, org_id, name, description, created_at, revoked_at FROM podster_agent WHERE org_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`).bind(...orgs, MAX_LISTED_AGENTS + 1).all();
+  // Newest first. There's no paging yet, so a longer list says it was cut.
+  return json({ agents: results.slice(0, MAX_LISTED_AGENTS), truncated: results.length > MAX_LISTED_AGENTS });
 }
 
 async function registerWithApi(env: Env, identity: Identity, agentId: string, org: string, name: string) {
@@ -786,7 +815,8 @@ function publicConfiguration(configuration: any) {
 }
 
 const appHandler = {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, publicEnv: Env): Promise<Response> {
+    const env = forPublicHost(request, publicEnv);
     const url = new URL(request.url);
     // Refusals come before the auth instance exists, so an anonymous refusal doesn't start its setup.
     if (url.pathname === "/.well-known/agent-configuration" || url.pathname === "/api/auth/agent-configuration") return json(publicConfiguration(await createAuth(env).api.getAgentConfiguration({ headers: request.headers })));
@@ -804,7 +834,9 @@ const appHandler = {
     }
 
     const auth = createAuth(env);
-    const session = await auth.api.getSession({ headers: request.headers });
+    // Refreshing here would slide the session and drop its new cookie, because this response doesn't carry it. Only
+    // /api/auth/get-session slides it, where the cookie reaches the browser.
+    const session = await auth.api.getSession({ headers: request.headers, query: { disableRefresh: true } });
     if (url.pathname === "/sign-in" && request.method === "GET") return signInPage(env, safeNext(url.searchParams.get("next")), url.searchParams.has("error"));
     if (url.pathname === "/sign-in" && request.method === "POST") return handleSignIn(request, env);
     if (url.pathname === "/signed-in" && request.method === "GET") return page("You're signed in", "<p>You can close this page.</p>");
@@ -840,6 +872,7 @@ const appHandler = {
 
     const connection = url.pathname.match(/^\/api\/agents\/([\w-]+)\/(disconnect|reconnect)$/);
     if (connection && request.method === "POST") return handleConnection(env, identity, connection[1], connection[2] as "disconnect" | "reconnect");
+    if (url.pathname === "/api/agents" && request.method === "GET") return listAgents(env, (await memberships(env, person)).orgs);
     const agent = url.pathname.match(/^\/api\/agents\/([\w-]+)$/);
     if (agent && request.method === "GET") {
       const response = await callApi(env, identity, { method: "GET", path: `/v1/agents/${agent[1]}` });
@@ -848,7 +881,7 @@ const appHandler = {
 
     // Everything else in the dashboard goes straight to the API, which decides.
     const path = url.pathname.slice("/api".length);
-    if (!allowedPassthrough(path)) return denied("not_found", 404);
+    if (!allowedPassthrough(path) && !allowedInbox(request.method, path, url.searchParams)) return denied("not_found", 404);
     if (sensitiveCommand(request.method, path) && !(await withinLimit(env.RL_SENSITIVE, `invite-or-create:${session.user.id}`))) return rateLimited();
     const hasBody = !["GET", "HEAD"].includes(request.method);
     const response = await callApi(env, identity, {

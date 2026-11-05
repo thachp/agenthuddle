@@ -127,7 +127,7 @@ describe("people and organizations", () => {
 
   it("the dashboard can't reach agent registration, connection state or inboxes through the API path", async () => {
     const a = await signUp();
-    for (const [method, path] of [["PUT", "/v1/agents/agt_x"], ["POST", "/v1/agents/agt_x/disconnect"], ["GET", "/v1/inbox"], ["GET", "/v1//inbox"], ["PUT", "/v1//agents/agt_abcdefabcdef"], ["POST", "/internal/init"], ["GET", "/v1/../internal/init"]]) {
+    for (const [method, path] of [["PUT", "/v1/agents/agt_x"], ["POST", "/v1/agents/agt_x/disconnect"], ["GET", "/v1//inbox"], ["PUT", "/v1//agents/agt_abcdefabcdef"], ["POST", "/internal/init"], ["GET", "/v1/../internal/init"]]) {
       const res = await dashboard(a, method, path, method === "GET" ? undefined : { org_id: a.org });
       expect(res.status, `${method} ${path}`).toBe(404);
     }
@@ -1657,6 +1657,104 @@ describe("sign-in and claim pages", () => {
   });
 });
 
+describe("the application host", () => {
+  const APP = "https://app.test";
+  const onApp = (path: string, init: RequestInit = {}) => SELF.fetch(APP + path, { redirect: "manual", ...init });
+  const appPost = (path: string, body: unknown, headers: Record<string, string> = {}) => onApp(path, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", origin: APP, ...headers } });
+
+  it("keeps the session on that host alone, and checks origin against it", async () => {
+    const res = await appPost("/api/auth/sign-up/email", { email: `${unique("p")}@example.test`, password: "local-test-password-123", name: "Test person" });
+    expect(res.status).toBe(200);
+    const set = res.headers.get("set-cookie") ?? "";
+    expect(set.toLowerCase()).not.toContain("domain=");
+    expect(set.toLowerCase()).toContain("httponly");
+    const cookie = set.split(";")[0];
+    expect((await (await onApp("/api/v1/me", { headers: { cookie } })).json<any>()).kind).toBe("person");
+
+    const body = JSON.stringify({ name: "x" });
+    const headers = { cookie, "content-type": "application/json" };
+    expect((await onApp("/api/orgs", { method: "POST", headers: { ...headers, origin: APP }, body })).status).toBe(200);
+    // Each host trusts only itself.
+    expect((await onApp("/api/orgs", { method: "POST", headers: { ...headers, origin: BASE }, body })).status).toBe(403);
+    expect((await call("/api/orgs", { method: "POST", headers: { ...headers, origin: APP }, body })).status).toBe(403);
+  });
+
+  it("brings a provider's sign-in back to that host, and leaves agents on the gateway's", async () => {
+    const res = await appPost("/api/auth/sign-in/social", { provider: "github", callbackURL: "/attention" });
+    const { url } = await res.json<{ url: string }>();
+    expect(new URL(url).searchParams.get("redirect_uri")).toBe(`${APP}/api/auth/callback/github`);
+    const direct = await post("/api/auth/sign-in/social", { provider: "github", callbackURL: "/signed-in" });
+    expect(new URL((await direct.json<{ url: string }>()).url).searchParams.get("redirect_uri")).toBe(`${BASE}/api/auth/callback/github`);
+    const discovery = await (await call("/.well-known/agent-configuration")).json<any>();
+    expect(JSON.stringify(discovery)).not.toContain(APP);
+  });
+});
+
+describe("dashboard inbox and agents", () => {
+  it("reads a person's own inbox, but only the POST acknowledges", async () => {
+    const a = await signUp();
+    expect((await dash(a, "GET", "/v1/inbox")).status).toBe(200);
+    expect((await dashboard(a, "GET", "/v1/inbox?ack=true")).status).toBe(404);
+    expect((await dash(a, "POST", "/v1/inbox/ack", { up_to: 0 })).status).toBe(200);
+    expect((await dashboard(a, "POST", "/v1/inbox/ack", { up_to: 0 }, { origin: "https://evil.test" })).status).toBe(403);
+    expect((await dashboard(a, "PUT", "/v1/inbox/wake", { url: "https://x.test" })).status).toBe(404);
+  });
+
+  it("lets the owning organization's admins oversee an agent's inbox, and nobody else", async () => {
+    const [a, b] = [await signUp(), await signUp()];
+    const agent = await claimedAgent(a);
+    expect((await dash(a, "GET", `/v1/agents/${agent.id}/inbox`)).status).toBe(200);
+    expect(await dash(b, "GET", `/v1/agents/${agent.id}/inbox`)).toMatchObject({ status: 404, code: "agent_not_found" });
+    expect((await dashboard(a, "GET", `/v1/agents/${agent.id}/inbox?ack=true`)).status).toBe(404);
+    expect((await dashboard(a, "POST", `/v1/agents/${agent.id}/inbox`, {})).status).toBe(404);
+  });
+
+  it("lists only the agents of the person's own organizations", async () => {
+    const [a, b] = [await signUp(), await signUp()];
+    const mine = await claimedAgent(a);
+    const theirs = await claimedAgent(b);
+    const res = await call("/api/agents", { headers: { cookie: a.cookie } });
+    const ids = (await res.json<any>()).agents.map((row: { id: string }) => row.id);
+    expect(ids).toContain(mine.id);
+    expect(ids).not.toContain(theirs.id);
+    expect((await call("/api/agents")).status).toBe(401);
+  });
+
+  it("lists the newest agents first", async () => {
+    const a = await signUp();
+    const [first, second] = [await claimedAgent(a), await claimedAgent(a)];
+    await e.DB.prepare("UPDATE podster_agent SET created_at = 1000 WHERE id = ?").bind(first.id).run();
+    const { agents, truncated } = await (await call("/api/agents", { headers: { cookie: a.cookie } })).json<any>();
+    expect(agents.map((row: { id: string }) => row.id)).toEqual([second.id, first.id]);
+    expect(truncated).toBe(false);
+  });
+});
+
+describe("sliding a session", () => {
+  const age = (cookie: string) => {
+    const token = decodeURIComponent(cookie.split("=")[1]).split(".")[0];
+    const aged = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+    return { token, aged, write: () => e.DB.prepare(`UPDATE session SET expiresAt = ? WHERE token = ?`).bind(aged.toISOString(), token).run() };
+  };
+  const expiry = async (token: string) => e.DB.prepare(`SELECT expiresAt FROM session WHERE token = ?`).bind(token).first<string>("expiresAt");
+
+  it("happens only where the new cookie reaches the browser", async () => {
+    const a = await signUp();
+    const { token, write } = age(a.cookie);
+    await write();
+    const before = await expiry(token);
+
+    // These answer without a new cookie, so they mustn't move the expiry.
+    expect((await dashboard(a, "GET", "/v1/me")).status).toBe(200);
+    expect((await call("/api/auth/get-session?disableRefresh=true", { headers: { cookie: a.cookie } })).status).toBe(200);
+    expect(await expiry(token)).toBe(before);
+
+    const refreshed = await call("/api/auth/get-session", { headers: { cookie: a.cookie } });
+    expect(refreshed.headers.get("set-cookie")).toContain("better-auth.session_token=");
+    expect(await expiry(token)).not.toBe(before);
+  });
+});
+
 describe("dashboard passthrough", () => {
   it("refuses paths that could become a private route if a slash collapses", () => {
     for (const path of ["/v1//inbox", "/v1//agents/agt_x", "//v1/agents/agt_x", "/v1/inbox", "/v1/agents/agt_x", "/internal/init"]) expect(allowedPassthrough(path), path).toBe(false);
@@ -1801,6 +1899,28 @@ describe("kernel journey across two organizations", () => {
     expect((await linked.tool("set_wake", { url: "http://hooks.example.com/" })).code).toBe("invalid_wake_url");
     expect((await linked.tool("delete_wake")).data).toEqual({ deleted: true });
     expect((await execute(architect, "get_identity")).data.wake).toBeNull();
+  });
+
+  it("oversight shows the agent's organization IDs, type and time from another organization's room, never content (decision 31)", async () => {
+    const { personA, personB, lead, architect, room } = await setup();
+    const task = (await lead.tool("create_task", { workspace_id: room, title: "Secret title", instructions: "Secret instructions", assignee: architect.id, idempotency_key: unique("k") })).data;
+    await lead.tool("send_message", { workspace_id: room, task_id: task.id, body: "Secret message", idempotency_key: unique("k") });
+    await waitForEvent((q) => execute(architect, "read_inbox", q), "task.offered", task.id);
+    const before = (await execute(architect, "read_inbox", {})).data.acked_seq;
+
+    const seen = await dash(personB, "GET", `/v1/agents/${architect.id}/inbox?after=0&limit=50`);
+    expect(seen.status).toBe(200);
+    const offered = seen.body.events.find((event: any) => event.type === "task.offered" && event.task_id === task.id);
+    expect(offered).toMatchObject({ workspace_id: room, task_id: task.id });
+    for (const event of seen.body.events) expect(Object.keys(event).sort()).toEqual(["actor_id", "created_at", "event_id", "seq", "task_id", "type", "workspace_id"]);
+    expect(JSON.stringify(seen.body)).not.toMatch(/Secret|Billing v2/);
+
+    // The IDs open nothing, and looking moves nothing.
+    expect(await dash(personB, "GET", `/v1/workspaces/${room}`)).toMatchObject({ status: 404, code: "workspace_not_found" });
+    expect(await dash(personB, "GET", `/v1/workspaces/${room}/tasks/${task.id}`)).toMatchObject({ status: 404, code: "workspace_not_found" });
+    expect((await execute(architect, "read_inbox", {})).data.acked_seq).toBe(before);
+    // A room's owner isn't the agent's organization, so the panel isn't theirs.
+    expect(await dash(personA, "GET", `/v1/agents/${architect.id}/inbox`)).toMatchObject({ status: 404, code: "agent_not_found" });
   });
 
   it("both connection methods share one inbox and cursor", async () => {
