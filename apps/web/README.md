@@ -121,7 +121,11 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Connect: **Connected** | No event says a connection arrived. The Sheet polls `GET /api/agents` every 10 seconds, only while it's open and visible. |
 | Any screen showing a name, including who invited on `/invitations/:token` | Tasks and members carry principal IDs, and only the viewer's own organizations can be named: `loadNames` reads their agents and, once per shared organization (5 at most), their people. Other organizations' principals, and anyone who has since left, stay IDs (UI-07). Messages do carry `external`. |
 | Needs attention | No query across rooms for reviews assigned to me, so the screen asks up to 20 rooms per render. Nothing lists a person's role invitations or their agents' wake and connection problems. |
-| Tasks | Tasks have no creation or update time, so rows can't show age. A task read returns only the latest 20 messages. |
+| Tasks | Tasks have no creation or update time, so rows can't show age. A task read returns only the latest 20 messages, and no screen pages through older ones yet, though `listMessages` exists. |
+| Tasks: a flagged task | `needs_attention` doesn't say whether the reviewer or the requester is missing, so the Sheet works it out from who has left. It can't tell for a guest, who sees only itself in `members`, or for a departed owner, who stays listed, and then it says "a new reviewer or requester" and offers both. |
+| Needs attention: a flagged task | `task.needs_attention` has no recipients, so it reaches nobody's inbox, and nothing lists flagged tasks across rooms. An owner or admin finds one only on the workroom's Tasks tab. |
+| Tasks: editing | `update_task` treats a missing `due_at` as "leave it alone", so a due date can be changed but not removed. Events don't say which fields an edit changed, so a title-only edit makes its author the shown author of the instructions and criteria. |
+| Tasks: reviewer choices | The room read doesn't say that its owner has left the organization (`owner_left_at`), so a departed owner stays on offer. The server refuses them with `invalid_argument`, and the Sheet explains that. A guest requester gets only its own row in `members`, so it can choose only the owner or itself as reviewer, though the server may allow others. Decision 24's Coordinator and the room's person-review policy arrive in M1. |
 | Settings: Profile | Forwarding doesn't include Better Auth's update route, so name and email are read-only. |
 | Settings: Organization | The audit list (`/api/orgs/{org}/audit`) has no screen and isn't forwarded. No route says which workrooms a person owns, so the removal warning can't name them, and nothing transfers one. |
 | Create a workroom | Offered only to an admin of the organization the person is working in, from `/v1/me`. A failed read keeps the offer, says so, and leaves the decision to Rust. |
@@ -130,5 +134,6 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Team: role openings | Role openings are M1, and the room read has only members. |
 | Team: removed members | The routes now exist, and this screen doesn't use them: the room read's `removed` and `guest_can_create` fields. |
 | Oversight: `/oversight/{room}/{agent}` | Uses `GET /api/v1/oversight/rooms` and `GET /api/v1/workspaces/{ws}/agents/{agent}/tasks`, `.../tasks/{task}` and `.../tasks/{task}/messages`. Tasks in the list carry no organization or `external`, so External shows once a task is open. Other organizations' principals stay IDs. |
+| Settings: Access history | The denial record exists, and no screen shows it: `GET /api/v1/workspaces/{ws}/denials`. |
 | Team: **Revoke organization** | The route now exists, and no screen calls it: `DELETE /api/v1/workspaces/{ws}/organizations/{org}`. |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |

@@ -96,6 +96,57 @@ pub enum Verdict {
     NotParticipant,
 }
 
+/// A stable name for a change someone tried, from a route's method and segments after the room. It's built only from
+/// this fixed list, so nothing the caller wrote ends up in a record. `None` is a route that isn't a change.
+pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> {
+    Some(match (method, route) {
+        ("POST", ["tasks"]) => "task.create",
+        ("POST", ["tasks", _, "messages"]) => "task.message",
+        ("POST", ["tasks", _, "accept"]) => "task.accept",
+        ("POST", ["tasks", _, "decline"]) => "task.decline",
+        ("POST", ["tasks", _, "release"]) => "task.release",
+        ("POST", ["tasks", _, "submit"]) => "task.submit",
+        ("POST", ["tasks", _, "request-changes"]) => "task.request_changes",
+        ("POST", ["tasks", _, "verify"]) => "task.verify",
+        ("POST", ["tasks", _, "cancel"]) => "task.cancel",
+        ("POST", ["tasks", _, "assign"]) => "task.assign",
+        ("POST", ["tasks", _, "update"]) => "task.update",
+        ("POST", ["tasks", _, "set-reviewer"]) => "task.set_reviewer",
+        ("POST", ["tasks", _, "set-requester"]) => "task.set_requester",
+        ("POST", ["members"]) => "member.add",
+        ("POST", ["members", _, "role"]) => "member.change_role",
+        ("POST", ["members", _, "clear-removal"]) => "member.clear_removal",
+        ("POST", ["members", _, "withdraw"]) => "member.withdraw",
+        ("POST", ["members", _, "owner-consent"]) => "member.owner_consent",
+        ("DELETE", ["members", _]) => "member.revoke",
+        ("DELETE", ["organizations", _]) => "organization.revoke",
+        ("POST", ["invitations"]) => "invitation.create",
+        ("DELETE", ["invitations", _]) => "invitation.withdraw",
+        ("PUT", ["name"]) => "room.rename",
+        ("POST", ["archive"]) => "room.archive",
+        ("POST", ["unarchive"]) => "room.unarchive",
+        _ => return None,
+    })
+}
+
+/// Whether a refusal means someone lacked the authority for this change. A malformed request or a stale form doesn't,
+/// and neither does naming someone outside the organization, because that caller has the authority and the request is
+/// wrong. An agent's owner routes answer `not_found` to someone in the room with no authority over the agent.
+pub fn is_authority_refusal(action: &str, code: &str) -> bool {
+    match code {
+        "not_allowed"
+        | "access_revoked"
+        | "agent_disconnected"
+        | "workspace_not_found"
+        | "task_not_found"
+        | "self_sign_off"
+        | "invitation_required"
+        | "invitation_not_found" => true,
+        "not_found" => matches!(action, "member.withdraw" | "member.owner_consent"),
+        _ => false,
+    }
+}
+
 /// Whether leaving an organization at `left_at` ends something in a room: a role or invitation in that organization
 /// that began by then. Anything later belongs to a newer membership, so a delayed retry can't undo a rejoin.
 pub fn org_departure_ends(held_org: &str, departed_org: &str, began_at: i64, left_at: i64) -> bool {

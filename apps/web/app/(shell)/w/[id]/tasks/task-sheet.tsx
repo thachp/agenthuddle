@@ -7,9 +7,10 @@ import { destinationHost, plainName, safeLinkUrl, truncate } from "@/components/
 import { TargetSheet, type SheetApi } from "@/components/sheet/target-sheet";
 import { clientQuery } from "@/lib/gateway/client";
 import { goToSignIn } from "./go-to-sign-in";
-import { TaskActions } from "./task-actions";
+import { TaskActions, type SavedEdit } from "./task-actions";
+import { TaskComposer } from "./task-composer";
 import { PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
-import { briefAuthor, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail } from "./task-model";
+import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail } from "./task-model";
 
 export type LoadedTask = TaskDetail & { workspace: string; room: Room };
 
@@ -67,6 +68,13 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
   const [notice, setNotice] = useState<string | null>(null);
   const noticeRef = useRef<HTMLParagraphElement>(null);
   const label = (id: string) => nameOf(id, me, names);
+  const [tab, setTab] = useState("details");
+  // A person's edit answers to what they read. Posting a message reloads the task, and that mustn't move a draft underneath them, so the controls hold this until the draft is done.
+  const held = useRef(data);
+  if (!api.dirty) held.current = data;
+  // Survives the controls starting fresh, because "Review latest" keeps the person's input (DESIGN.md, "Saving and conflicts").
+  const savedEdit = useRef<SavedEdit | null>(null);
+  const returnFocus = useRef(false);
   // A decision removes the button that made it, and focus shouldn't vanish with it. This also lands on the result.
   useEffect(() => {
     if (notice) noticeRef.current?.focus();
@@ -88,6 +96,14 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
         <dd>
           <PrincipalName id={task.reviewer} label={label(task.reviewer)} me={me} />
         </dd>
+        {task.due_at !== null ? (
+          <>
+            <dt className="text-muted-foreground">Due</dt>
+            <dd>
+              <Timestamp at={task.due_at} />
+            </dd>
+          </>
+        ) : null}
         <dt className="text-muted-foreground">Task</dt>
         <dd className="truncate" title={task.id}>
           {task.id}
@@ -95,12 +111,12 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
         <dt className="text-muted-foreground">Submission</dt>
         <dd>{task.submission_no > 0 ? task.submission_no : "None yet"}</dd>
       </dl>
-      {task.needs_attention ? <p className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">Someone left this workroom, so this task needs a new reviewer or requester.</p> : null}
+      {task.needs_attention ? <p className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">{flagText(task, data.room, me, roleOf(data.room, me))}</p> : null}
       <p ref={noticeRef} tabIndex={-1} role="status" className="rounded-sm text-sm outline-none empty:hidden focus-visible:ring-2 focus-visible:ring-ring">
         {notice}
       </p>
 
-      <Tabs.Root defaultValue="details">
+      <Tabs.Root value={tab} onValueChange={setTab}>
         <Tabs.List aria-label="Task details" className="flex gap-1 border-b pb-1">
           <Tabs.Trigger value="details" className={TAB_CLASS}>
             Details
@@ -115,8 +131,10 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
         <Tabs.Content value="details" className="mt-4 space-y-4 outline-none">
           <Details data={data} me={me} names={names} orgNames={orgNames} />
         </Tabs.Content>
-        <Tabs.Content value="discussion" className="mt-4 space-y-3 outline-none">
+        {/* Stays mounted, so a draft or a post in flight outlives a look at another tab. */}
+        <Tabs.Content value="discussion" forceMount hidden={tab !== "discussion"} className="mt-4 space-y-3 outline-none">
           <Discussion data={data} me={me} names={names} orgNames={orgNames} />
+          {isArchivedRoom(data.room) ? null : <TaskComposer api={api} />}
         </Tabs.Content>
         <Tabs.Content value="activity" className="mt-4 outline-none">
           <Activity data={data} me={me} names={names} orgNames={orgNames} />
@@ -124,7 +142,7 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
       </Tabs.Root>
 
       {/* Fresh for each version, so a draft or key from before a change can't go out against what's on screen now. */}
-      <TaskActions key={`${task.version}:${task.submission_no}`} api={api} me={me} names={names} role={roleOf(data.room, me)} onNotice={setNotice} />
+      <TaskActions key={`${held.current.task.version}:${held.current.task.submission_no}`} api={{ ...api, data: held.current }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} returnFocus={returnFocus} />
     </div>
   );
 }
@@ -210,7 +228,7 @@ function ArtifactList({ artifacts, me, names, orgNames }: { artifacts: Artifact[
 const RECENT_MESSAGES = 20;
 
 function Discussion({ data, me, names, orgNames }: SectionProps) {
-  if (data.messages.length === 0) return <p className="text-sm text-muted-foreground">No messages yet. Agents post their progress here.</p>;
+  if (data.messages.length === 0) return <p className="text-sm text-muted-foreground">No messages yet. Agents post their progress here, and you can too.</p>;
   return (
     <>
       {data.messages.length >= RECENT_MESSAGES ? <p className="text-xs text-muted-foreground">Showing the latest {RECENT_MESSAGES} messages.</p> : null}
@@ -236,7 +254,7 @@ export function Activity({ data, me, names, orgNames }: SectionProps) {
         <li key={event.id} className="space-y-1 border-b pb-3 text-sm last:border-b-0">
           <AuthorLine author={author(event.from, me, names, orgNames)} external={event.external} />
           <p>
-            {verbFor(event.type)}{" "}
+            {verbFor(event)}{" "}
             <span className="text-xs">
               <Timestamp at={event.created_at} />
             </span>

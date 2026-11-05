@@ -19,7 +19,8 @@ use podster_core::{
 };
 use podster_policy::{
     authorize_reviewer_change, authorize_task, authorize_workroom, can_review, can_see_task,
-    org_departure_ends, Caller, PrincipalKind, Role, TaskAction, Verdict, WorkroomAction,
+    denied_change_name, is_authority_refusal, org_departure_ends, Caller, PrincipalKind, Role,
+    TaskAction, Verdict, WorkroomAction,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -41,6 +42,14 @@ const DELIVERY_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
     10_000
 };
 const INVITATIONS_LISTED: i64 = 200;
+const DENIAL_ROWS: i64 = 5000;
+/// Different refusals held in memory before they're written. Past this, a new actor counts as an outsider's refusal.
+const DENIALS_HELD: usize = 512;
+const DENIAL_FLUSH_SECS: u64 = 5;
+const DENIALS_PAGE: i64 = 100;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// Everyone who isn't and never was in the room shares one row, so new identities can't make new rows.
+const OUTSIDER: &str = "outsider";
 const REMOVED_LISTED: i64 = 200;
 const ARCHIVED: &str = "archived";
 const ACTIVE_ROOM: &str = "active";
@@ -85,7 +94,7 @@ fn in_org(identity: &Identity, org: &str) -> bool {
 /// What an admin of an invited organization sees of its agent here: what a guest in its place would, which is only the
 /// tasks it's party to. It gives them no role in the room, and it ends when the agent is no longer in the room. It's not
 /// for the room's own organization, whose people are in the room or were left out of it by its owner, and it's not for
-/// someone this room revoked.
+/// someone already in the room or revoked from it, who have their own answers.
 fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Option<Participant>> {
     if identity.kind != "person" {
         return Ok(None);
@@ -101,12 +110,13 @@ fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Optio
     if !identity.admin_orgs.contains(&org) || org == room_owner_org(sql)? {
         return Ok(None);
     }
-    let revoked = rows(
+    // Anyone with a row here, current or revoked, and the owner, answer from their own place in the room.
+    let in_room = rows(
         sql,
-        "SELECT principal_id FROM member WHERE principal_id = ? AND revoked_at IS NOT NULL",
+        "SELECT principal_id FROM member WHERE principal_id = ?",
         vec![identity.id.as_str().into()],
     )?;
-    if !revoked.is_empty() {
+    if !in_room.is_empty() || is_owner(sql, &identity.id)? {
         return Ok(None);
     }
     Ok(Some(Participant {
@@ -118,6 +128,40 @@ fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Optio
         },
         org,
     }))
+}
+
+fn write_denials(sql: &SqlStorage, held: &HeldDenials) -> R<()> {
+    {
+        // Oldest first, so a shared row's first and last actors come out right, up to refusals in the same millisecond.
+        let mut ordered: Vec<(&DenialKey, &HeldDenial)> = held.iter().collect();
+        ordered.sort_by_key(|(_, denial)| (denial.last_at, denial.first_at));
+        for (key, denial) in ordered {
+            let known = is_owner(sql, &key.actor)?
+                || !rows(
+                    sql,
+                    "SELECT principal_id FROM member WHERE principal_id = ?",
+                    vec![key.actor.as_str().into()],
+                )?
+                .is_empty();
+            let who = if known { key.actor.as_str() } else { OUTSIDER };
+            let day = denial.last_at / DAY_MS;
+            exec(sql, "INSERT INTO denial (day, actor_id, actor_kind, action, code, count, first_at, last_at, first_actor_id, last_actor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT (day, actor_id, actor_kind, action, code) DO UPDATE SET count = count + excluded.count, first_at = MIN(first_at, excluded.first_at), last_at = MAX(last_at, excluded.last_at), last_actor_id = excluded.last_actor_id", vec![
+                day.into(), who.into(), key.kind.as_str().into(), key.action.into(), key.code.into(), denial.count.into(), denial.first_at.into(), denial.last_at.into(), key.actor.as_str().into(), key.actor.as_str().into(),
+            ])?;
+        }
+        let total = rows(sql, "SELECT count(*) AS n FROM denial", vec![])?
+            .first()
+            .map_or(0, |row| int(&row["n"]));
+        for _ in 0..(total - DENIAL_ROWS).max(0) {
+            let largest = rows(sql, "SELECT actor_id FROM denial GROUP BY actor_id ORDER BY count(*) DESC, actor_id LIMIT 1", vec![])?;
+            let Some(largest) = largest.first().and_then(|row| text(&row["actor_id"])) else {
+                break;
+            };
+            exec(sql, "DELETE FROM denial WHERE rowid = (SELECT rowid FROM denial WHERE actor_id = ? ORDER BY last_at, rowid LIMIT 1)", vec![largest.as_str().into()])?;
+        }
+        Ok(())
+    }
 }
 
 /// Reads the caller's current authority. Assertions and read models never supply a role.
@@ -1465,6 +1509,20 @@ mod queries {
         Ok(answer)
     }
 
+    /// Changes that were refused for lack of authority, newest first, for those who may read the audit log.
+    pub fn list_denials(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
+        ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ReadAuditLog))?;
+        let offset = query_int(url, "offset")?.unwrap_or(0).max(0);
+        let found = rows(sql, "SELECT day, actor_id, actor_kind, action, code, count, first_at, last_at, first_actor_id, last_actor_id FROM denial ORDER BY last_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            vec![(DENIALS_PAGE + 1).into(), offset.into()])?;
+        let more = found.len() as i64 > DENIALS_PAGE;
+        let denials: Vec<Value> = found.into_iter().take(DENIALS_PAGE as usize).map(|row| json!({
+            "day_start": int(&row["day"]) * DAY_MS, "actor_id": row["actor_id"], "actor_kind": row["actor_kind"], "action": row["action"], "code": row["code"],
+            "count": row["count"], "first_at": row["first_at"], "last_at": row["last_at"], "first_actor_id": row["first_actor_id"], "last_actor_id": row["last_actor_id"],
+        })).collect();
+        Ok(json!({ "denials": denials, "next_offset": more.then_some(offset + DENIALS_PAGE) }))
+    }
+
     /// Invitations still usable, for those who manage access. The token was shown once and isn't kept.
     pub fn list_invitations(sql: &SqlStorage, caller: &Caller, now: i64) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
@@ -1593,6 +1651,26 @@ pub struct Workspace {
     env: Env,
     /// Test builds only: pretends a join started at an older generation.
     test_generation: RefCell<Option<u64>>,
+    /// Refusals not yet written. They wait here so the answer to a refusal does the same work for a real room and an
+    /// unknown one, and repeats cost nothing. A restart loses them.
+    denials_held: RefCell<HeldDenials>,
+}
+
+type HeldDenials = std::collections::HashMap<DenialKey, HeldDenial>;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DenialKey {
+    actor: String,
+    kind: String,
+    action: &'static str,
+    code: &'static str,
+}
+
+#[derive(Clone)]
+struct HeldDenial {
+    count: i64,
+    first_at: i64,
+    last_at: i64,
 }
 
 impl Workspace {
@@ -2168,6 +2246,105 @@ impl Workspace {
         Ok(())
     }
 
+    /// What to record if this request is refused: who tried, and a name for the change from a fixed list. Nothing here is
+    /// the request's content, and an internal route with no caller or no name has nothing to record.
+    fn denial_context(req: &Request) -> Option<(Identity, &'static str)> {
+        let identity: Identity = req
+            .headers()
+            .get(CALLER_HEADER)
+            .ok()?
+            .as_deref()
+            .and_then(|caller| serde_json::from_str(caller).ok())?;
+        let path = req.path();
+        let name = if path == INTERNAL_ACCEPT_PATH {
+            "invitation.accept"
+        } else {
+            let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+            let method = req.method().to_string();
+            denied_change_name(&method, parts.get(3..)?)?
+        };
+        Some((identity, name))
+    }
+
+    /// Counts a refusal in memory and returns. Nothing is stored on this path, so a real room and an unknown one do the
+    /// same work before answering, and many callers can't slow the room with writes. Only a burst's first refusal touches
+    /// storage, to set the alarm, and that's the same in either case. The alarm writes what's held.
+    async fn hold_denial(&self, identity: &Identity, action: &'static str, code: &'static str) {
+        let now = now_ms();
+        let start_flush = {
+            let mut held = self.denials_held.borrow_mut();
+            let was_empty = held.is_empty();
+            let mut key = DenialKey {
+                actor: identity.id.clone(),
+                kind: identity.kind.clone(),
+                action,
+                code,
+            };
+            // New identities can't grow this past its limit.
+            if held.len() >= DENIALS_HELD && !held.contains_key(&key) {
+                key.actor = OUTSIDER.to_string();
+            }
+            let entry = held.entry(key).or_insert(HeldDenial {
+                count: 0,
+                first_at: now,
+                last_at: now,
+            });
+            entry.count += 1;
+            entry.last_at = now;
+            was_empty
+        };
+        if start_flush {
+            let storage = self.state.storage();
+            let due = now + (DENIAL_FLUSH_SECS as i64) * 1000;
+            let sooner = match storage.get_alarm().await {
+                Ok(current) => current.is_none_or(|at| at > due),
+                Err(_) => true,
+            };
+            if sooner {
+                if let Err(error) = storage
+                    .set_alarm(std::time::Duration::from_secs(DENIAL_FLUSH_SECS))
+                    .await
+                {
+                    console_error!("couldn't schedule the denial record: {:?}", error);
+                }
+            }
+        }
+    }
+
+    /// Writes what's held, in one transaction. One row counts one actor's refusals of one kind in a day, and anyone who
+    /// was never in the room shares a row. Past the cap, the oldest row of whoever has the most rows goes, so one actor
+    /// can't push out another's record. An unknown room stays empty. On failure the counts wait for the next attempt.
+    fn flush_denials(&self) -> R<()> {
+        let held = std::mem::take(&mut *self.denials_held.borrow_mut());
+        if held.is_empty() {
+            return Ok(());
+        }
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Ok(());
+        }
+        let keep = held.clone();
+        let written = self.migrate_if_needed().and_then(|()| {
+            let inner = sql.clone();
+            transaction_sync(&self.state, move || write_denials(&inner, &held))?;
+            Ok(())
+        });
+        if written.is_err() {
+            let mut current = self.denials_held.borrow_mut();
+            for (key, denial) in keep {
+                let entry = current.entry(key).or_insert(HeldDenial {
+                    count: 0,
+                    first_at: denial.first_at,
+                    last_at: denial.last_at,
+                });
+                entry.count += denial.count;
+                entry.first_at = entry.first_at.min(denial.first_at);
+                entry.last_at = entry.last_at.max(denial.last_at);
+            }
+        }
+        written
+    }
+
     /// Keeps the start of the owner's latest membership, so a departure delayed past a rejoin can't take them out again,
     /// and records that an owner who left is back and acting here. It's separate from the command it comes before, so a
     /// refused command can't leave them out of the room's work.
@@ -2425,6 +2602,7 @@ impl Workspace {
             return match tail {
                 [] => queries::get_workspace(&sql, &who.caller),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
+                ["denials"] => queries::list_denials(&sql, &who.caller, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
@@ -2610,14 +2788,27 @@ impl DurableObject for Workspace {
             state,
             env,
             test_generation: RefCell::new(None),
+            denials_held: RefCell::new(HeldDenials::new()),
         }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let is_write = req.method() != Method::Get;
+        let denial = if is_write {
+            Self::denial_context(&req)
+        } else {
+            None
+        };
         let response = match self.dispatch(req).await {
             Ok(value) => Response::from_json(&value),
-            Err(error) => error.into_response(),
+            Err(error) => {
+                if let (Some((identity, action)), Some(code)) = (&denial, error.code()) {
+                    if is_authority_refusal(action, code) {
+                        self.hold_denial(identity, action, code).await;
+                    }
+                }
+                error.into_response()
+            }
         };
         if is_write {
             // The command has already committed, so a scheduling problem can't change its answer. The next write retries.
@@ -2629,6 +2820,18 @@ impl DurableObject for Workspace {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        let denials = self.flush_denials();
+        if let Err(error) = &denials {
+            console_error!("couldn't record denials: {:?}", error.code());
+            if let Err(error) = self
+                .state
+                .storage()
+                .set_alarm(std::time::Duration::from_secs(DENIAL_FLUSH_SECS))
+                .await
+            {
+                console_error!("couldn't schedule the denial record: {:?}", error);
+            }
+        }
         let index = self.drain_index().await;
         if let Err(error) = &index {
             console_error!("index projection failed: {:?}", error);
