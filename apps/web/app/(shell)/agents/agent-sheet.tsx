@@ -176,6 +176,8 @@ function AgentDetails({ api, organization, description, cache }: { api: SheetApi
   async function attempt(path: (target: string) => string, onDone?: () => void) {
     setNotice(null);
     setUnconfirmed(false);
+    // A Refresh whose read failed is still waiting, and this command's reload mustn't count as its answer.
+    refreshing.current = false;
     let confirmed = false;
     await run(async ({ target }) => {
       const result = await clientCommand<unknown>(path(target), {}).catch(() => null);

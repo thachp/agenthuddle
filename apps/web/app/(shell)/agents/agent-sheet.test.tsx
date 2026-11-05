@@ -179,6 +179,24 @@ describe("UI-13: disconnecting", () => {
     expect(screen.getByText("Disconnecting")).toBeInTheDocument();
   });
 
+  it("a failed Refresh doesn't clear the warning for the next command whose answer is lost", async () => {
+    const lost: Handler = (url, init) => (url.endsWith("/disconnect") && init.method === "POST" ? new Response("{}", { status: 502 }) : undefined);
+    special = lost;
+    render(<Screen />);
+    await opened();
+    await disconnect();
+    await screen.findByText(/We couldn't confirm that/);
+    special = (url) => (url === "/api/agents/agt_1" ? new Response("{}", { status: 503 }) : undefined);
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByText(/^Couldn't refresh/);
+    expect(screen.getByText(/We couldn't confirm that/)).toBeInTheDocument();
+    special = lost;
+    await disconnect();
+    await waitFor(() => expect(screen.queryByText(/^Couldn't refresh/)).toBeNull());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled());
+    expect(screen.getByText(/We couldn't confirm that/)).toBeInTheDocument();
+  });
+
   it("a network failure counts as unknown too", async () => {
     special = (url, init) => {
       if (url.endsWith("/disconnect") && init.method === "POST") throw new TypeError("lost");
