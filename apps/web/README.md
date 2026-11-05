@@ -34,6 +34,12 @@ Open <http://app.localhost:3000> and choose **Create test account**. If `rustc` 
 npm run typecheck && npm test
 ```
 
+Accessibility runs in a real browser against all three Workers, which it starts itself. It needs what `e2e/` and `apps/gateway` install, and `npx playwright install chromium` once. [docs/m0-gate.md](../../docs/m0-gate.md#accessibility-ui-10-ui-11) has what it covers.
+
+```bash
+cd ../../e2e && node run-a11y.mjs
+```
+
 `npm start` builds first. A `wrangler dev` left running across a separate `npm run build` keeps serving the old server build against new client chunks, so restart it after building.
 
 `GATEWAY_URL` in `wrangler.jsonc` is the gateway's public address, shown in the connection Sheet. It's set per environment, and never called from here.

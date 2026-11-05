@@ -1,8 +1,8 @@
 # ADR 0002: Keep vinext for the dashboard, after a local spike
 
-Status: **Accepted for now, gated on a staging smoke test** · Date: 2026-11-05
+Status: **Accepted.** The staging smoke test it was gated on passed on 2026-11-05 · Date: 2026-11-05
 
-This is Phase 0's spike (b), which `ARCHITECTURE.md` requires before the dashboard. It ran locally, and the phase's "deploys to staging" isn't done.
+This is Phase 0's spike (b), which `ARCHITECTURE.md` requires before the dashboard. The findings below are from the local run. The dashboard has since run on staging, in the one-person smoke test recorded in [docs/m0-gate.md](../m0-gate.md#one-person-smoke-test-on-staging).
 
 ## Result
 
@@ -34,7 +34,7 @@ The run used the production build under `wrangler dev`, with the real gateway an
 
 ## Not proved
 
-- A deployment. Service bindings, custom domains, `cf-connecting-ip` and real latency are all unproved until the staging smoke test.
+- Real latency and `cf-connecting-ip` on a deployment. The smoke test showed the dashboard working end to end on staging, by hand and with one person, and didn't measure these.
 - Real provider sign-in. Only password sign-in ran, which the gateway refuses on a real hostname. A test does check that a provider's callback URL lands on the application host.
 - Server Actions, `use cache` and ISR. The app doesn't use them.
 
