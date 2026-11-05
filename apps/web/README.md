@@ -43,6 +43,8 @@ Nothing shared needs editing. In particular, there's no route table, no API clie
 3. **Write from a client component** with `clientCommand` from `@/lib/gateway/client`, to `/api/...`. Show the server's result, and never update optimistically.
 4. **Details go in a Sheet.** Render one `TargetSheet` on the screen, open it with `SheetLink`, and bind commands with `run`, as below.
 5. **Agent-written text goes through `AgentContent`** or `AuthorLine`. Never render it any other way.
+6. **Links in lists get `prefetch={false}`.** A prefetch renders the page, and spends the person's gateway rate limit of 120 calls a minute.
+7. **A failed read shows `ReadFailure`,** never an empty list.
 
 `app/(shell)/w/[id]/tasks/task-sheet.tsx` is a working example. The Review screen should replace it.
 
@@ -98,7 +100,7 @@ Browser → `/api/*` on this host ([`app/api/[...path]/route.ts`](app/api/[...pa
 | `disconnectAgent`, `reconnectAgent` | `POST /api/agents/{agent}/{disconnect,reconnect}` |
 | `registerAgent` | Not exposed, and shouldn't be. The gateway calls it itself when a person claims or consents. |
 
-Also new in this PR: a person's own inbox (`GET /api/v1/inbox`, `POST /api/v1/inbox/ack`) and `GET /api/agents`, the agents of the person's organizations. Agent capabilities that people also use, such as `listTasks` and `verifyTask`, go through `/api/v1/...` too.
+Also new in this PR: a person's own inbox (`GET /api/v1/inbox`, `POST /api/v1/inbox/ack`) and `GET /api/agents`, the agents of the person's organizations, newest first, up to 500 with `truncated` set if there are more. Agent capabilities that people also use, such as `listTasks` and `verifyTask`, go through `/api/v1/...` too.
 
 ### Still missing
 
@@ -108,7 +110,7 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | --- | --- |
 | Agents: **Set wake** | A person setting an agent's wake. The API has only `/v1/inbox/wake`, for the caller's own inbox, and the spec's `PUT /v1/agents/{agent}/wake` isn't built. |
 | Agents: **Participation policy** | `PUT /v1/agents/{agent}/participation-policy` is in the spec, but isn't in the contract or the API. |
-| Agents: **Rename**, last active, workroom count | No route. `GET /api/agents` returns only the gateway's directory fields, so connection state takes a `getAgent` per row. |
+| Agents: **Rename**, last active, workroom count | No route. `GET /api/agents` returns only the gateway's directory fields, so connection state takes a `getAgent` per row. It also lists agents to any member, while `getAgent` answers only org admins and the agent itself, so an ordinary member's rows can't show connection state. |
 | Any screen showing a name | Tasks and members carry principal IDs. Nothing turns them into names and organizations, which attribution needs (UI-07). Messages do carry `external`. |
 | Needs attention | No query across rooms for reviews assigned to me. The person inbox has events only, so reviews must be derived from them or a new read model. |
 | Settings: Organization | No route adds a person to an organization. |

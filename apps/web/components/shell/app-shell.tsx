@@ -11,6 +11,7 @@ import { ProfileMenu, type ProfileMenuProps } from "./profile-menu";
 export function AppShell({ unread, profile, children }: { unread: number | null; profile: ProfileMenuProps; children: React.ReactNode }) {
   const pathname = usePathname();
 
+  // Links here don't prefetch. Each prefetch renders a page and spends the person's gateway rate limit, and this is on every screen.
   // A session slides forward on this read, and a server render can't pass the new cookie on to the browser.
   useEffect(() => {
     fetch("/api/auth/get-session").catch(() => undefined);
@@ -25,7 +26,7 @@ export function AppShell({ unread, profile, children }: { unread: number | null;
         <Sidebar>
           <SidebarHeader>
             {/* A wordmark until a brand mark clears review. */}
-            <Link href="/attention" className="px-2 py-1 text-base font-semibold">
+            <Link href="/attention" prefetch={false} className="px-2 py-1 text-base font-semibold">
               Podster
             </Link>
           </SidebarHeader>
@@ -36,7 +37,7 @@ export function AppShell({ unread, profile, children }: { unread: number | null;
                   {PRIMARY_NAV.map((item) => (
                     <SidebarMenuItem key={item.href}>
                       <SidebarMenuButton asChild isActive={isActive(item, pathname)}>
-                        <Link href={item.href} aria-current={isActive(item, pathname) ? "page" : undefined}>
+                        <Link href={item.href} prefetch={false} aria-current={isActive(item, pathname) ? "page" : undefined}>
                           <item.icon aria-hidden />
                           <span>{item.label}</span>
                         </Link>

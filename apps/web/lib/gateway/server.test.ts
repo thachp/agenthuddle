@@ -21,9 +21,10 @@ describe("server reads", () => {
     await expect(gatewayQuery("/api/v1/me")).resolves.toEqual({ ok: false, status: 403, code: "not_allowed" });
   });
 
-  it("no session is null", async () => {
+  it("no session is null, and reading one doesn't slide it", async () => {
     fetch.mockResolvedValue(Response.json(null));
     await expect(getSession()).resolves.toBeNull();
+    expect(fetch.mock.calls[0][0]).toBe("https://app.test/api/auth/get-session?disableRefresh=true");
   });
 
   it("an outage isn't a signed-out person", async () => {

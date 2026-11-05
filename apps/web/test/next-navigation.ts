@@ -13,11 +13,25 @@ const subscribe = (listener: () => void) => {
 
 export const routerCalls = { refresh: 0 };
 
+/** Real navigation finishes later. While true, `push` and `replace` wait until `settleNavigation`. */
+let holdNavigation = false;
+let held: (() => void)[] = [];
+export const setHoldNavigation = (hold: boolean) => {
+  holdNavigation = hold;
+};
+export const settleNavigation = () => {
+  const pending = held;
+  held = [];
+  pending.forEach((apply) => apply());
+};
+
 export function setUrl(next: string) {
   url = new URL(next, "http://app.test");
   history.length = 0;
   forward = [];
   routerCalls.refresh = 0;
+  holdNavigation = false;
+  held = [];
   notify();
 }
 
@@ -37,12 +51,15 @@ export const back = () => {
 
 export const currentUrl = () => url.pathname + url.search;
 
+const later = (apply: () => void) => (holdNavigation ? void held.push(apply) : apply());
+
 export const useRouter = () => ({
-  push: navigate,
-  replace: (next: string) => {
-    url = new URL(next, "http://app.test");
-    notify();
-  },
+  push: (next: string) => later(() => navigate(next)),
+  replace: (next: string) =>
+    later(() => {
+      url = new URL(next, "http://app.test");
+      notify();
+    }),
   refresh: () => {
     routerCalls.refresh += 1;
   },

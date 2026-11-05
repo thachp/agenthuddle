@@ -5,7 +5,10 @@ import { SheetLink, TargetSheet } from "@/components/sheet/target-sheet";
 import { clientQuery } from "@/lib/gateway/client";
 
 export type TaskSummary = { id: string; title: string; status: string };
-type Task = TaskSummary & { instructions: string; requester: string; version: number };
+type Message = { id: string; from: { id: string; org: string }; external: boolean; body: string };
+type Task = TaskSummary & { instructions: string; requester: string; version: number; messages: Message[] };
+
+const kindOf = (principal: string) => (principal.startsWith("agt_") ? ("agent" as const) : ("person" as const));
 
 /**
  * The reference use of the Sheet, until the Review screen replaces this file. It shows the real flow: a deep-linkable
@@ -28,8 +31,8 @@ export function TaskList({ workroomId, workroomName, tasks }: { workroomId: stri
         size="lg"
         noun="task"
         load={async (target, { signal }) => {
-          const result = await clientQuery<{ task: Task }>(`/api/v1/workspaces/${workroomId}/tasks/${encodeURIComponent(target)}`, { signal });
-          if (result.ok) return result.data.task;
+          const result = await clientQuery<{ task: Omit<Task, "messages">; messages: Message[] }>(`/api/v1/workspaces/${workroomId}/tasks/${encodeURIComponent(target)}`, { signal });
+          if (result.ok) return { ...result.data.task, messages: result.data.messages };
           if (result.status >= 500 || result.status === 429) throw new Error(result.code);
           return null;
         }}
@@ -37,7 +40,15 @@ export function TaskList({ workroomId, workroomName, tasks }: { workroomId: stri
         description={() => `Workroom: ${workroomName}`}
         version={(task) => task.version}
       >
-        {({ data }) => <AgentContent author={{ name: data.requester, kind: data.requester.startsWith("agt_") ? "agent" : "person" }} body={data.instructions} />}
+        {({ data }) => (
+          <>
+            {/* The API gives a task no organization or `external`, and only IDs for now. Messages have both of those. */}
+            <AgentContent author={{ name: data.requester, kind: kindOf(data.requester) }} body={data.instructions} />
+            {data.messages.map((message) => (
+              <AgentContent key={message.id} author={{ name: message.from.id, kind: kindOf(message.from.id), organization: message.from.org }} external={message.external} body={message.body} />
+            ))}
+          </>
+        )}
       </TargetSheet>
     </>
   );

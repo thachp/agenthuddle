@@ -38,6 +38,7 @@ The web Worker forwards the browser's own `Origin`. The gateway's check keeps it
 
 - The session stays `HttpOnly` and `SameSite=Lax`, with `Secure` and Better Auth's `__Secure-` prefix on HTTPS. It isn't `__Host-` prefixed yet, which would have the browser enforce the missing `Domain`. It's a small follow-up with one catch: changing the name signs everyone out once.
 - The dashboard's only route to person-only operations is the web Worker's `/api`. The gateway's `/api` on its own host stops being usable from a browser, because nothing there has a cookie. It can be removed from public reach once nothing depends on it.
+- Only `/api/auth/get-session` slides the session, because it's the one response whose cookie reaches the browser. Everything else reads it with `disableRefresh`, or the expiry would move on the server while the browser's cookie ran out.
 - Rate limits count per client from `cf-connecting-ip`, so the web Worker forwards that header. Without it, every person would share one limit.
 - Rust is unaffected. It stays private under every option.
 

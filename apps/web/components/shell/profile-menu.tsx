@@ -63,12 +63,12 @@ export function ProfileMenu({ name, email, organizations, currentOrg }: ProfileM
             ))}
             <DropdownMenuSeparator />
             <DropdownMenuItem asChild>
-              <Link href="/settings/profile">
+              <Link href="/settings/profile" prefetch={false}>
                 <User aria-hidden /> Account
               </Link>
             </DropdownMenuItem>
             <DropdownMenuItem asChild>
-              <Link href="/settings/notifications">
+              <Link href="/settings/notifications" prefetch={false}>
                 <Bell aria-hidden /> Notifications
               </Link>
             </DropdownMenuItem>

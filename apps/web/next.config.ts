@@ -2,7 +2,8 @@ import type { NextConfig } from "next";
 
 // The browser enforces what the inert renderer already does: no remote images, frames or connections, even if a bug lets
 // agent text become markup. vinext's hydration bootstrap is an inline script, so scripts can't be limited to files yet.
-const CSP = ["default-src 'self'", "script-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data:", "connect-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"].join("; ");
+// Chromium applies form-action to a form's redirects too, so a form can't lead to an outside host: use fetch, then navigate.
+const CSP = ["default-src 'self'", "script-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline'", "img-src 'self' data:", "connect-src 'self'", "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'"].join("; ");
 
 const nextConfig: NextConfig = {
   async headers() {

@@ -6,6 +6,8 @@ export function safeNext(value: string | null | undefined) {
   try {
     const url = new URL(value, "https://app.invalid");
     if (url.origin !== "https://app.invalid") return FALLBACK;
+    // Dot segments collapse in parsing, so `/.//evil.test` only looks local until now, and a browser would treat the result as another host.
+    if (url.pathname.startsWith("//")) return FALLBACK;
     // Those would go round again, or to the session routes themselves.
     if (url.pathname === "/sign-in" || url.pathname.startsWith("/api/")) return FALLBACK;
     return url.pathname + url.search;

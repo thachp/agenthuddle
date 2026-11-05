@@ -18,7 +18,8 @@ export type Session = { user: { id: string; name: string; email: string } };
 
 /** Once per render, whichever layouts and pages ask. */
 export const getSession = cache(async (): Promise<Session | null> => {
-  const result = await gatewayQuery<Session | null>("/api/auth/get-session");
+  // A read here can't pass a new cookie on to the browser, so it mustn't slide the session. AppShell's fetch does that.
+  const result = await gatewayQuery<Session | null>("/api/auth/get-session?disableRefresh=true");
   if (result.ok) return result.data;
   // An outage isn't a signed-out person. Sending them to sign in would look like the session ended.
   if (result.status >= 500 || result.status === 429) throw new Error("gateway_unavailable");

@@ -64,7 +64,7 @@ export function SheetLink({ param, target, ...props }: { param: string; target: 
   if (useContext(InsideSheet)) throw new Error("A Sheet can't open another Sheet. Close it, then open the other.");
   const pathname = usePathname();
   const search = useSearchParams();
-  return <Link {...props} href={hrefWith(pathname, new URLSearchParams(search.toString()), param, target)} scroll={false} data-sheet-launcher={launcherKey(param, target)} />;
+  return <Link {...props} href={hrefWith(pathname, new URLSearchParams(search.toString()), param, target)} scroll={false} prefetch={false} data-sheet-launcher={launcherKey(param, target)} />;
 }
 
 function focusLauncher(param: string, target: string) {
@@ -88,12 +88,15 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
   const [busy, setBusy] = useState(false);
   const [goneNotice, setGoneNotice] = useState(false);
   const noticeRef = useRef<HTMLParagraphElement>(null);
+  // The target just found to be gone. Navigation is asynchronous, so the URL still names it for a moment.
+  const left = useRef<string | null>(null);
 
   const navigate = useCallback((target: string | null) => router.push(hrefWith(pathname, new URLSearchParams(search.toString()), param, target), { scroll: false }), [router, pathname, search, param]);
 
   // Follows the URL, unless this Sheet still has something unfinished. Then the instance holds it and asks.
   useEffect(() => {
-    if (selected === bound || busy) return;
+    if (selected !== left.current) left.current = null;
+    if (selected === bound || busy || (selected !== null && selected === left.current)) return;
     if (selected !== null) setGoneNotice(false);
     setBound(selected);
   }, [selected, bound, busy]);
@@ -103,11 +106,12 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
   }, [goneNotice]);
 
   const onGone = useCallback(() => {
+    left.current = bound;
     setBusy(false);
     setGoneNotice(true);
     setBound(null);
     navigate(null);
-  }, [navigate]);
+  }, [navigate, bound]);
 
   return (
     <>
@@ -149,9 +153,13 @@ type Loaded<T> = { phase: "loading" } | { phase: "ready"; data: T; refreshFailed
 function BoundSheet<T>({ param, size = "md", load, title, description, version, noun = "item", children, target, selected, onBusyChange, onGone, onClose, onStay, onRefreshList }: BoundProps<T>) {
   const [loaded, setLoaded] = useState<Loaded<T>>({ phase: "loading" });
   const [reloads, setReloads] = useState(0);
-  const [dirty, setDirty] = useState(false);
+  const [dirty, setDirtyState] = useState(false);
+  // The version a draft was read at. A reload can show newer data, but the draft still answers to this one, so saving it conflicts instead of overwriting.
+  const draftVersion = useRef<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState(false);
+  // A save that failed after the URL moved on. The Sheet holds until the person has seen it.
+  const [heldFailure, setHeldFailure] = useState(false);
   const [failedCode, setFailedCode] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
   const [closing, setClosing] = useState(false);
@@ -199,7 +207,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     };
   }, [target, reloads]);
 
-  const busy = dirty || saving;
+  const busy = dirty || saving || heldFailure;
   useEffect(() => {
     onBusyChange(busy);
   }, [busy, onBusyChange]);
@@ -218,11 +226,14 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   const requestClose = () => {
     if (saving) return;
     if (dirty) setAsking(true);
+    // The URL has already moved on, so closing this goes there.
+    else if (selected !== target) setHeldFailure(false);
     else finish();
   };
 
   const discard = () => {
     setAsking(false);
+    setHeldFailure(false);
     setDirty(false);
     // Moves on to whatever the URL now says, or closes.
     if (selected === target) finish();
@@ -235,7 +246,13 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   };
 
   const data = loaded.phase === "ready" ? loaded.data : null;
-  const binding: SheetBinding = { target, version: data !== null && version ? version(data) : null };
+  const shownVersion = data !== null && version ? version(data) : null;
+  const binding: SheetBinding = { target, version: dirty ? draftVersion.current : shownVersion };
+
+  function setDirty(next: boolean) {
+    if (next && !dirty) draftVersion.current = shownVersion;
+    setDirtyState(next);
+  }
 
   async function run<R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>): Promise<GatewayResult<R> | null> {
     // A second click can't send a second command while the first is out.
@@ -244,6 +261,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     setSaving(true);
     setConflict(false);
     setFailedCode(null);
+    setHeldFailure(false);
     try {
       const result = await command(binding);
       // The list behind may have changed, whatever became of this Sheet.
@@ -252,11 +270,17 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
       if (result.ok) {
         setDirty(false);
         setReloads((count) => count + 1);
-      } else if (result.code === "version_conflict") setConflict(true);
-      else setFailedCode(result.code);
+      } else {
+        if (result.code === "version_conflict") setConflict(true);
+        else setFailedCode(result.code);
+        if (selectedRef.current !== target) setHeldFailure(true);
+      }
       return result;
     } catch {
-      if (alive.current) setFailedCode("network");
+      if (alive.current) {
+        setFailedCode("network");
+        if (selectedRef.current !== target) setHeldFailure(true);
+      }
       return null;
     } finally {
       savingRef.current = false;

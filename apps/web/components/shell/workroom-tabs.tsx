@@ -13,7 +13,7 @@ export function WorkroomTabs({ id, canManage }: { id: string; canManage: boolean
         const href = `/w/${id}/${tab.segment}`;
         const active = pathname === href || pathname.startsWith(`${href}/`);
         return (
-          <Link key={tab.segment} href={href} aria-current={active ? "page" : undefined} className={cn("border-b-2 border-transparent px-3 py-2 whitespace-nowrap text-muted-foreground", active && "border-primary font-medium text-foreground")}>
+          <Link key={tab.segment} href={href} prefetch={false} aria-current={active ? "page" : undefined} className={cn("border-b-2 border-transparent px-3 py-2 whitespace-nowrap text-muted-foreground", active && "border-primary font-medium text-foreground")}>
             {tab.label}
           </Link>
         );

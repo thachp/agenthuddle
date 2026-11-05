@@ -4,7 +4,7 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Button } from "@/components/ui/button";
 import type { GatewayResult } from "@/lib/gateway/result";
-import { back, currentUrl, navigate, routerCalls, setUrl } from "@/test/next-navigation";
+import { back, currentUrl, navigate, routerCalls, setHoldNavigation, settleNavigation, setUrl } from "@/test/next-navigation";
 import { SheetLink, TargetSheet, type SheetBinding } from "./target-sheet";
 
 type Item = { id: string; title: string; version: number };
@@ -118,6 +118,32 @@ describe("TargetSheet", () => {
       expect(notice).not.toHaveTextContent("hidden");
       expect(currentUrl()).toBe("/agents");
       expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("doesn't reopen or refetch while the URL catches up after not-found (UI-05)", async () => {
+      setUrl("/agents?agent=hidden");
+      setHoldNavigation(true);
+      const load = vi.fn(async () => null);
+      render(<Screen load={load} />);
+      expect(await screen.findByRole("alert")).toHaveTextContent("We can't find that.");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("alert")).toHaveTextContent("We can't find that.");
+      expect(currentUrl()).toBe("/agents?agent=hidden");
+      await act(async () => settleNavigation());
+      expect(currentUrl()).toBe("/agents");
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole("alert")).toHaveTextContent("We can't find that.");
+    });
+
+    it("can open the same target again after not-found", async () => {
+      setUrl("/agents?agent=a");
+      const load = vi.fn<(id: string) => Promise<Item | null>>().mockResolvedValueOnce(null).mockResolvedValue(ITEMS.a);
+      render(<Screen load={load} />);
+      await screen.findByRole("alert");
+      await act(async () => back());
+      await waitFor(() => expect(currentUrl()).toBe("/agents?agent=a"));
+      expect(await title("Agent A")).toBeInTheDocument();
     });
 
     it("closes the same way when access ends while it's open", async () => {
@@ -260,7 +286,7 @@ describe("TargetSheet", () => {
       expect(screen.queryByRole("alert")).toBeNull();
     });
 
-    it("a save that fails after a switch reports on its own target, not the new one", async () => {
+    it("a save that fails after a switch holds its own target until it's been seen", async () => {
       const save = deferred<GatewayResult<unknown>>();
       setUrl("/agents?agent=a");
       render(<Screen command={() => save.promise} />);
@@ -268,7 +294,32 @@ describe("TargetSheet", () => {
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       await act(async () => navigate("/agents?agent=b"));
       await act(async () => save.resolve({ ok: false, status: 403, code: "not_allowed" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("That didn't save, and nothing changed.");
+      expect(screen.getByRole("heading", { name: "Agent A" })).toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Agent B" })).toBeNull();
+
+      await userEvent.click(screen.getByRole("button", { name: "Close" }));
       await title("Agent B");
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("a draft keeps the version it was read at, so a newer reload can't let it overwrite", async () => {
+      const load = vi.fn<(id: string) => Promise<Item | null>>().mockResolvedValueOnce(ITEMS.a).mockRejectedValueOnce(new Error("down")).mockResolvedValue({ ...ITEMS.a, title: "Agent A newer", version: 9 });
+      const command = vi.fn(async (_: SheetBinding): Promise<GatewayResult<unknown>> => ({ ok: true, data: {} }));
+      setUrl("/agents?agent=a");
+      render(<Screen load={load} command={command} />);
+      await title("Agent A");
+      // A save, then a refresh that fails, leaves Try again on screen.
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      await screen.findByRole("button", { name: "Try again" });
+      await userEvent.type(screen.getByRole("textbox"), "x");
+      await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await title("Agent A newer");
+      command.mockResolvedValue({ ok: false, status: 409, code: "version_conflict" });
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      expect(command).toHaveBeenLastCalledWith({ target: "a", version: 3 });
+      expect(await screen.findByRole("alert")).toHaveTextContent("This agent changed while you were editing.");
+      expect(screen.getByRole("textbox")).toHaveValue("x");
     });
 
     it("can't close while a save is in flight, so its result isn't lost", async () => {
