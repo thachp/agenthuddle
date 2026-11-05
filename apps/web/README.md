@@ -50,7 +50,7 @@ Nothing shared needs editing. In particular, there's no route table, no API clie
 6. **Links in lists get `prefetch={false}`.** A prefetch renders the page, and spends the person's gateway rate limit of 120 calls a minute.
 7. **A failed read shows `ReadFailure`,** never an empty list.
 
-`app/(shell)/w/[id]/tasks/task-sheet.tsx` is a working example. The Review screen should replace it.
+`app/(shell)/w/[id]/tasks/task-sheet.tsx` is a working example, including a Sheet opened from another screen (`/attention`).
 
 | Later work | Owns |
 | --- | --- |
@@ -119,7 +119,8 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Agents: an agent's workrooms | No route lists them, though the agent's Principal holds them in `room_registry`. The Sheet joins the person's own rooms, at most 10, with the rooms in the agent's oldest 50 and newest inbox events, and says the list may be incomplete. Inbox reads go oldest first with no way to ask for the newest, so it estimates where they start. A room the owner isn't in shows only if those events mention it. Any other such room, even with events further along the inbox, can't be withdrawn from except by a full disconnect. |
 | Connect: **Connected** | No event says a connection arrived. The Sheet polls `GET /api/agents` every 10 seconds, only while it's open and visible. |
 | Any screen showing a name | Tasks and members carry principal IDs. Nothing turns them into names and organizations, which attribution needs (UI-07). Messages do carry `external`. |
-| Needs attention | No query across rooms for reviews assigned to me. The person inbox has events only, so reviews must be derived from them or a new read model. |
+| Needs attention | No query across rooms for reviews assigned to me, so the screen asks up to 20 rooms per render. Nothing lists a person's role invitations or their agents' wake and connection problems. |
+| Tasks | Tasks have no creation or update time, so rows can't show age. A task read returns only the latest 20 messages. |
 | Settings: Profile | Forwarding doesn't include Better Auth's update route, so name and email are read-only. |
 | Settings: Organization | No route adds a person to an organization, or lists its members. |
 | Settings: Notifications | Podster delivers no email, so there are no choices to offer. |
