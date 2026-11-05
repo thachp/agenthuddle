@@ -19,6 +19,7 @@ export function createProblem(status: number, code: string) {
   if (status === 429) return "Too many requests. Wait a minute and try again.";
   if (status >= 500) return UNKNOWN_OUTCOME;
   if (code === "invalid_argument") return "Check the name, and try again.";
+  if (code === "limit_exceeded") return "This organization has reached its limit of 20 workrooms, so no workroom was created. Archived workrooms count toward it.";
   return status === 403 ? "That didn't work, and no workroom was created. Only an organization's admins can create its workrooms." : "That didn't work, and no workroom was created.";
 }
 

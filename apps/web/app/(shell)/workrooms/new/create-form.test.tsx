@@ -30,6 +30,12 @@ describe("creating a workroom", () => {
     expect(alert).toHaveTextContent("admins");
   });
 
+  it("says when the organization has reached its limit", async () => {
+    answer(409, { error: { code: "limit_exceeded" } });
+    await submit();
+    expect(await screen.findByText(/limit of 20 workrooms, so no workroom was created/)).toBeTruthy();
+  });
+
   it("can't say a server error created nothing, because it may have come after the commit", async () => {
     answer(502, { error: { code: "bad_gateway" } });
     await submit();

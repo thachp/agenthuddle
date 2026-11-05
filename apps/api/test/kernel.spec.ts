@@ -3330,19 +3330,53 @@ describe("the limit on an organization's rooms", () => {
     expect((await create(admin)).code).toBe("limit_exceeded");
   }, 30000);
 
-  it("counts rooms from before the limit, from the listing, once", async () => {
+  const slots = (org: string) => runInDurableObject((env as any).PRINCIPAL.get((env as any).PRINCIPAL.idFromName(org)), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM org_room").one().n as number);
+  const oldRooms = (org: string, who: Who, n: number, tag: string) => (env as any).DB.batch(Array.from({ length: n }, (_, i) => (env as any).DB.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'owner', 'Old', 0, 1)").bind(`ws_${tag}_${org}_${i}`, who.id, org)));
+
+  it("counts rooms from before the limit from the listing once, and after that only its own table decides", async () => {
     const org = orgName();
     const admin = orgAdmin(org);
-    await (env as any).DB.batch(Array.from({ length: 19 }, (_, i) => (env as any).DB.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'owner', 'Old', 0, 1)").bind(`ws_old_${org}_${i}`, admin.id, org)));
+    await oldRooms(org, admin, 19, "old");
     expect((await create(admin)).status).toBe(200);
     expect((await create(admin)).code).toBe("limit_exceeded");
+    // Taking rows out of the listing doesn't free anything.
+    await (env as any).DB.prepare("DELETE FROM membership_index WHERE org_id = ?").bind(org).run();
+    expect((await create(admin)).code).toBe("limit_exceeded");
+    // And rows added later don't use anything up.
+    const roomy = orgName();
+    const other = orgAdmin(roomy);
+    await oldRooms(roomy, other, 5, "before");
+    expect((await create(other)).status).toBe(200);
+    expect(await slots(roomy)).toBe(6);
+    await oldRooms(roomy, other, 30, "after");
+    expect((await create(other)).status).toBe(200);
+    expect(await slots(roomy)).toBe(7);
   });
 
-  it("leaves agents and a room's owner reads alone", async () => {
+  it("keeps the slot when creation may have committed, and gives it back only on a refusal", async () => {
     const org = orgName();
     const admin = orgAdmin(org);
-    const created = await create(admin);
-    expect((await api(admin, "GET", `/v1/workspaces/${created.body.id}`)).status).toBe(200);
-    expect((await api(LEAD, "POST", "/v1/workspaces", { name: "x" })).code).toBe("not_allowed");
-  });
+    const lost = await api(admin, "POST", "/v1/workspaces", { name: "Maybe made" }, { fail: true });
+    expect(lost.status).toBe(500);
+    expect(await slots(org)).toBe(1);
+    expect((await create(admin, "")).code).toBe("invalid_argument");
+    expect(await slots(org)).toBe(1);
+    for (let i = 0; i < 19; i++) expect((await create(admin)).status).toBe(200);
+    expect((await create(admin)).code).toBe("limit_exceeded");
+  }, 30000);
+
+  it("takes no slot for an agent trying to create, and lets its owner read at the limit", async () => {
+    const org = orgName();
+    const admin = orgAdmin(org);
+    const agent = { id: `agt_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`, org };
+    await register(agent);
+    const refused = await api(agent, "POST", "/v1/workspaces", { name: "x" });
+    expect([refused.status, refused.code]).toEqual([403, "not_allowed"]);
+    const ids: string[] = [];
+    for (let i = 0; i < 20; i++) ids.push((await create(admin)).body.id);
+    expect(await slots(org)).toBe(20);
+    expect((await api(agent, "POST", "/v1/workspaces", { name: "x" })).code).toBe("not_allowed");
+    expect((await api(admin, "GET", `/v1/workspaces/${ids[0]}`)).status).toBe(200);
+    expect((await api(admin, "PUT", `/v1/workspaces/${ids[0]}/name`, { name: "Still works", policy_version: (await api(admin, "GET", `/v1/workspaces/${ids[0]}`)).body.policy_version })).status).toBe(200);
+  }, 30000);
 });

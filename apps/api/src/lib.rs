@@ -281,11 +281,18 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
                 body,
             )
             .await;
-            let failed = !created
+            // A failure here can come after the room committed, so only a definite refusal gives the slot back. Keeping it
+            // when in doubt can only make the count too high, never let an organization pass the limit.
+            #[cfg(feature = "failpoints")]
+            let created = if req.headers().get("x-test-fail")?.is_some() {
+                Err(ApiError::internal("injected failure after creating"))
+            } else {
+                created
+            };
+            let refused = created
                 .as_ref()
-                .is_ok_and(|response| response.status_code() == 200);
-            if counted && failed {
-                // A room that wasn't created doesn't count. If this fails, the slot stays taken, which errs on the safe side.
+                .is_ok_and(|response| (400..500).contains(&response.status_code()));
+            if counted && refused {
                 if let Err(error) = principal::release_org_room(&env, &caller.org, &workspace).await
                 {
                     console_error!("couldn't give back a room slot: {:?}", error.code());
