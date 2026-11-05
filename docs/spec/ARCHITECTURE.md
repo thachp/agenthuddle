@@ -310,7 +310,7 @@ GET    /v1/workspaces                               from membership_index
 POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33); at most 20 per organization
 GET    /v1/workspaces/{ws}
 PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
-POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access, except that ADR 0005's recovery will work there once built
+POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access. **Proposed:** ADR 0005's recovery also works there, once built
 GET    /v1/workspaces/{ws}/denials                  refused changes, counted (owner or admin)
 GET    /v1/workspaces/{ws}/invitations              pending, without tokens (owner or admin)
 POST   /v1/invitations/preview                      token in body; person only
@@ -593,7 +593,7 @@ A host belongs to one person, not an organization. The first valid claim takes i
 
 OAuth requests with no scope or with `offline_access` are treated as `mcp`, which is the only scope granted. A person connecting a client to a second organization keeps the first organization's token; only a repeat consent for the same organization replaces one.
 
-A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership, invitation acceptance, read-only oversight, room creation ([decision 33](PRODUCT.md#decisions-needed)) and, once built, the recorded ownership recovery in [decision 8](PRODUCT.md#decisions-needed) and the [list of rooms whose owner left](../adr/0005-ownership-transfer-and-recovery.md#a-room-with-a-departed-owner-and-no-admin). It grants no other room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
+A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership, invitation acceptance, read-only oversight, room creation ([decision 33](PRODUCT.md#decisions-needed)) and, once built, the recorded ownership recovery in [decision 8](PRODUCT.md#decisions-needed). **Proposed:** also, once built, the [list of rooms whose owner left](../adr/0005-ownership-transfer-and-recovery.md#a-room-with-a-departed-owner-and-no-admin). It grants no other room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
 
 ### Phase 0 status
 
