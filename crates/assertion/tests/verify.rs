@@ -196,3 +196,21 @@ fn rejects_malformed_input() {
     assert!(KeySet::from_json("not json").is_err());
     assert!(KeySet::from_json(r#"{"k":"short"}"#).is_err());
 }
+
+#[test]
+fn a_target_member_claim_is_read_and_is_optional() {
+    let without = verify(&sign(&claims()), &keys(), NOW).unwrap();
+    assert_eq!(without.target_member, None);
+    let mut body = claims();
+    body["target_member"] = json!({ "person": "per_x", "orgs": { "org_y": 5 } });
+    body["org_since"] = json!({ "org_y": 7 });
+    let with = verify(&sign(&body), &keys(), NOW).unwrap();
+    assert_eq!(
+        with.target_member,
+        Some(TargetMember {
+            person: "per_x".into(),
+            orgs: [("org_y".to_string(), 5)].into()
+        })
+    );
+    assert_eq!(with.org_since.get("org_y"), Some(&7));
+}

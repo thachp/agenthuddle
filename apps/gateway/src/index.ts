@@ -6,6 +6,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { betterAuth } from "better-auth";
 import { APIError } from "better-auth/api";
 import { calculateJwkThumbprint, decodeJwt, type JWK } from "jose";
+import { handleOrgPeople } from "./organizations";
 import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
 
@@ -36,9 +37,9 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-const denied = (code: string, status: number) => json({ error: { code, message: code } }, status);
-const newId = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
+export const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+export const denied = (code: string, status: number) => json({ error: { code, message: code } }, status);
+export const newId = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
 const personId = (userId: string) => `per_${userId}`;
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const MAX_NAME_BYTES = 200;
@@ -190,7 +191,7 @@ const RETRY_AFTER_SECONDS = "60";
  * In the shape each kind of client reads. OAuth clients need a standard error: the MCP SDK treats anything else as
  * unrecoverable and starts a new consent, which a headless agent can't complete. The Agent Auth SDK reads `error`.
  */
-function rateLimited(path = "", retryAfter = RETRY_AFTER_SECONDS) {
+export function rateLimited(path = "", retryAfter = RETRY_AFTER_SECONDS) {
   // A 503 on discovery makes OAuth clients stop and retry. They treat a 429 as no metadata, and head for a new consent.
   if (path.startsWith("/.well-known/")) return new Response(JSON.stringify({ error: { code: "temporarily_unavailable", message: "rate_limited" } }), { status: 503, headers: { "content-type": "application/json", "retry-after": retryAfter } });
   const body = path.startsWith("/oauth/") ? { error: "temporarily_unavailable", error_description: "rate_limited" } : path.startsWith("/api/auth/") ? { error: "rate_limited", message: "rate_limited" } : { error: { code: "rate_limited", message: "rate_limited" } };
@@ -200,7 +201,7 @@ function rateLimited(path = "", retryAfter = RETRY_AFTER_SECONDS) {
 let limiterFailureLogged = false;
 
 /** Limits protect against abuse, so a limiter failure doesn't take the service down. The limits are approximate by design. */
-async function withinLimit(limiter: RateLimit, key: string) {
+export async function withinLimit(limiter: RateLimit, key: string) {
   try {
     return (await limiter.limit({ key })).success;
   } catch (error) {
@@ -245,10 +246,13 @@ class AgentRefused extends Error {}
 /** Resolves a verified credential to one agent, and refuses unclaimed or disconnected ones before minting anything. */
 export async function resolveAgent(env: Env, provider: "agent_auth" | "mcp_oauth", externalId: string): Promise<Identity> {
   const row = await env.DB.prepare(
-    `SELECT a.id, a.org_id, a.generation, a.revoked_at FROM identity_link l JOIN podster_agent a ON a.id = l.agent_id WHERE l.provider = ? AND l.external_id = ?`,
-  ).bind(provider, externalId).first<{ id: string; org_id: string; generation: number; revoked_at: number | null }>();
+    `SELECT a.id, a.org_id, a.generation, a.revoked_at, EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id AND m.created_at <= l.created_at) AS linker_present FROM identity_link l JOIN podster_agent a ON a.id = l.agent_id WHERE l.provider = ? AND l.external_id = ?`,
+  ).bind(provider, externalId).first<{ id: string; org_id: string; generation: number; revoked_at: number | null; linker_present: number }>();
   if (!row) throw new AgentRefused("agent_unclaimed");
   if (row.revoked_at) throw new AgentRefused("agent_disconnected");
+  // A credential ends when whoever connected it leaves the organization, and rejoining doesn't bring it back, so it must
+  // be newer than their current membership. An admin can connect a new one to this agent.
+  if (!row.linker_present) throw new AgentRefused("credential_owner_left");
   return { kind: "agent", id: row.id, org: row.org_id, generation: row.generation };
 }
 
@@ -355,7 +359,7 @@ export function createAuth(env: Env) {
   });
 }
 
-type Memberships = { orgs: string[]; adminOrgs: string[]; defaultOrg: string | null };
+type Memberships = { orgs: string[]; adminOrgs: string[]; defaultOrg: string | null; orgSince: Record<string, number> };
 
 /**
  * Writes the person's personal organization and their admin membership if either is missing. It's safe to repeat, and
@@ -364,10 +368,12 @@ type Memberships = { orgs: string[]; adminOrgs: string[]; defaultOrg: string | n
  */
 async function ensurePersonalOrg(env: Env, person: string) {
   const now = Date.now();
+  // The membership is only ever written with a new organization, so nothing here re-adds someone to an existing one.
+  const org = newId("org");
   try {
     await env.DB.batch([
-      env.DB.prepare(`INSERT OR IGNORE INTO organization (id, name, personal, created_by, created_at) SELECT ?, COALESCE(NULLIF(name, ''), 'Personal'), 1, ?, ? FROM "user" WHERE id = ?`).bind(newId("org"), person, now, person.slice("per_".length)),
-      env.DB.prepare(`INSERT OR IGNORE INTO org_member (org_id, person_id, role, created_at) SELECT id, ?, 'admin', ? FROM organization WHERE personal = 1 AND created_by = ?`).bind(person, now, person),
+      env.DB.prepare(`INSERT OR IGNORE INTO organization (id, name, personal, created_by, created_at) SELECT ?, COALESCE(NULLIF(name, ''), 'Personal'), 1, ?, ? FROM "user" WHERE id = ?`).bind(org, person, now, person.slice("per_".length)),
+      env.DB.prepare(`INSERT OR IGNORE INTO org_member (org_id, person_id, role, created_at) SELECT id, ?, 'admin', ? FROM organization WHERE id = ? AND created_by = ?`).bind(person, now, org, person),
     ]);
   } catch (error) {
     // The driver's message names the SQL and the failure, and bound values, such as the person's name, aren't in it.
@@ -376,7 +382,7 @@ async function ensurePersonalOrg(env: Env, person: string) {
 }
 
 const membershipRows = async (env: Env, person: string) =>
-  (await env.DB.prepare(`SELECT m.org_id, m.role, o.personal FROM org_member m JOIN organization o ON o.id = m.org_id WHERE m.person_id = ? ORDER BY m.created_at, o.personal DESC`).bind(person).all<{ org_id: string; role: string; personal: number }>()).results;
+  (await env.DB.prepare(`SELECT m.org_id, m.role, m.created_at, o.personal, o.created_by FROM org_member m JOIN organization o ON o.id = m.org_id WHERE m.person_id = ? ORDER BY m.created_at, o.personal DESC`).bind(person).all<{ org_id: string; role: string; created_at: number; personal: number; created_by: string }>()).results;
 
 /**
  * The person's organizations, restoring their personal one first if a failed sign-up left it unwritten. The default is
@@ -385,7 +391,8 @@ const membershipRows = async (env: Env, person: string) =>
  */
 async function memberships(env: Env, person: string): Promise<Memberships> {
   let results = await membershipRows(env, person);
-  if (!results.some((r) => r.personal)) {
+  // Their own, because belonging to someone else's personal organization isn't having one.
+  if (!results.some((r) => r.personal && r.created_by === person)) {
     await ensurePersonalOrg(env, person);
     results = await membershipRows(env, person);
   }
@@ -393,16 +400,17 @@ async function memberships(env: Env, person: string): Promise<Memberships> {
     orgs: results.map((r) => r.org_id),
     adminOrgs: results.filter((r) => r.role === "admin").map((r) => r.org_id),
     defaultOrg: results[0]?.org_id ?? null,
+    orgSince: Object.fromEntries(results.map((r) => [r.org_id, r.created_at])),
   };
 }
 
 /** A signed-in person, acting in the organization they choose among their own. */
 async function personIdentity(env: Env, request: Request, userId: string): Promise<Identity | null> {
   const person = personId(userId);
-  const { orgs, adminOrgs, defaultOrg } = await memberships(env, person);
+  const { orgs, adminOrgs, defaultOrg, orgSince } = await memberships(env, person);
   const org = request.headers.get("x-podster-org") ?? defaultOrg;
   if (!org || !orgs.includes(org)) return null;
-  return { kind: "person", id: person, org, orgs, adminOrgs };
+  return { kind: "person", id: person, org, orgs, adminOrgs, orgSince };
 }
 
 /**
@@ -432,12 +440,36 @@ function allowedInbox(method: string, path: string, search: URLSearchParams) {
   return path === "/v1/inbox" || /^\/v1\/agents\/[\w-]+\/inbox$/.test(path);
 }
 
+/**
+ * The API can't see the directory, so when a room adds a person, the assertion states what the directory says about them.
+ * It's a fact from our own rows, present only if true. The API decides what follows from it.
+ */
+async function withTargetMember(env: Env, identity: Identity, method: string, path: string, body: string | undefined): Promise<Identity> {
+  if (identity.kind !== "person" || method !== "POST") return identity;
+  const person = /^\/v1\/workspaces\/[^/]+\/members$/.test(path) ? addedPerson(body) : path.match(/^\/v1\/workspaces\/[^/]+\/members\/(per_[\w-]+)\/role$/)?.[1];
+  if (!person) return identity;
+  const { results } = await env.DB.prepare(`SELECT org_id, created_at FROM org_member WHERE person_id = ?`).bind(person).all<{ org_id: string; created_at: number }>();
+  return results.length ? { ...identity, targetMember: { person, orgs: Object.fromEntries(results.map((r) => [r.org_id, r.created_at])) } } : identity;
+}
+
+function addedPerson(body: string | undefined) {
+  try {
+    const target = JSON.parse(body ?? "") as { kind?: unknown; principal_id?: unknown };
+    return target?.kind === "person" && typeof target.principal_id === "string" ? target.principal_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const MAX_LISTED_AGENTS = 500;
 
-/** Agents the person's organizations own. The directory is the gateway's own, and this reads only their memberships. */
+/**
+ * Agents the person's organizations own. The directory is the gateway's own, and this reads only their memberships.
+ * `credentials_owner_left` counts credentials that stopped working because whoever connected them left.
+ */
 async function listAgents(env: Env, orgs: string[]): Promise<Response> {
   const placeholders = orgs.map(() => "?").join(",");
-  const { results } = await env.DB.prepare(`SELECT id, org_id, name, description, created_at, revoked_at FROM podster_agent WHERE org_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`).bind(...orgs, MAX_LISTED_AGENTS + 1).all();
+  const { results } = await env.DB.prepare(`SELECT a.id, a.org_id, a.name, a.description, a.created_at, a.revoked_at, (SELECT COUNT(*) FROM identity_link l WHERE l.agent_id = a.id AND NOT EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id AND m.created_at <= l.created_at)) AS credentials_owner_left FROM podster_agent a WHERE a.org_id IN (${placeholders}) ORDER BY a.created_at DESC LIMIT ?`).bind(...orgs, MAX_LISTED_AGENTS + 1).all();
   // Newest first. There's no paging yet, so a longer list says it was cut.
   return json({ agents: results.slice(0, MAX_LISTED_AGENTS), truncated: results.length > MAX_LISTED_AGENTS });
 }
@@ -461,13 +493,29 @@ async function createAgent(env: Env, org: string, name: string, provider: LinkPr
   ]);
 }
 
+/**
+ * An MCP consent reuses one credential per person, client and organization. If that credential is from an earlier
+ * membership it stopped working, and a current admin consenting again is what starts it. Only a link older than the
+ * membership changes, and the organization's audit log records it. An Agent Auth key can't be claimed twice, so its
+ * way back is a new key linked to the agent.
+ */
+async function renewLink(env: Env, externalId: string, person: string, org: string) {
+  const now = Date.now();
+  const stale = `l.provider = 'mcp_oauth' AND l.external_id = ? AND l.person_id = ? AND l.created_at < (SELECT m.created_at FROM org_member m WHERE m.org_id = ? AND m.person_id = l.person_id)`;
+  const binds = [externalId, person, org];
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT ?, ?, ?, 'credential.reconnected', l.agent_id, NULL, ? FROM identity_link l WHERE ${stale}`).bind(newId("oau"), org, person, now, ...binds),
+    env.DB.prepare(`UPDATE identity_link AS l SET created_at = MAX(?, (SELECT m.created_at FROM org_member m WHERE m.org_id = ? AND m.person_id = l.person_id)) WHERE ${stale}`).bind(now, org, ...binds),
+  ]);
+}
+
 /** An existing, connected agent in this organization, which a new credential may link to. */
 async function linkableAgent(env: Env, id: string, org: string) {
   const row = await env.DB.prepare(`SELECT org_id FROM podster_agent WHERE id = ? AND revoked_at IS NULL`).bind(id).first<{ org_id: string }>();
   return row?.org_id === org;
 }
 
-const sha256Hex = async (value: string) =>
+export const sha256Hex = async (value: string) =>
   [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
 
 /** The API's answer when registering an agent, as this gateway's refusal. It refuses an agent already in another organization. */
@@ -673,6 +721,7 @@ async function approveConsent(request: Request, env: Env, gatewayUrl: string, us
   } else if (linkAgent && linkAgent !== existing.agent_id) {
     return denied("already_linked", 409);
   }
+  await renewLink(env, externalId, person, org);
   // The provider's own cleanup covers every grant for this person and client, which would end this client's agents in
   // other organizations. Only the grant being replaced goes.
   const replaced = await grantIds(env, person, externalId);
@@ -986,6 +1035,9 @@ const appHandler = {
     if (!(await withinLimit(env.RL_ACCOUNT, `person:${session.user.id}`))) return rateLimited();
     if (onApplicationHost && url.pathname === "/api/consent") return handleConsentApi(request, env, publicEnv.BASE_URL, session.user.id);
     if (onApplicationHost && url.pathname === "/api/claim") return handleClaimApi(request, env, session.user.id);
+    if (request.method !== "GET" && request.method !== "HEAD" && url.pathname.startsWith("/api/org") && !sameOrigin(request, env)) return denied("not_allowed", 403);
+    const orgPeople = await handleOrgPeople(request, env, person, url.pathname);
+    if (orgPeople) return orgPeople;
     if (url.pathname === "/api/orgs") {
       if (request.method === "POST" && !(await withinLimit(env.RL_SENSITIVE, `create-org:${session.user.id}`))) return rateLimited();
       await memberships(env, person);
@@ -1010,10 +1062,11 @@ const appHandler = {
     if (!allowedPassthrough(path) && !allowedInbox(request.method, path, url.searchParams)) return denied("not_found", 404);
     if (sensitiveCommand(request.method, path) && !(await withinLimit(env.RL_SENSITIVE, `invite-or-create:${session.user.id}`))) return rateLimited();
     const hasBody = !["GET", "HEAD"].includes(request.method);
-    const response = await callApi(env, identity, {
+    const text = hasBody ? await request.text() : undefined;
+    const response = await callApi(env, await withTargetMember(env, identity, request.method, path, text), {
       method: request.method,
       path: path + url.search,
-      body: hasBody ? await request.text() : undefined,
+      body: text,
       idempotencyKey: request.headers.get("idempotency-key") ?? undefined,
     });
     return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });

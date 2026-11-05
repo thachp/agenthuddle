@@ -32,7 +32,7 @@ paths:
     post:
       operationId: addMember
       tags: [commands]
-      summary: Add a participant. Owner or admin, and only the owner appoints admins
+      summary: Add a participant. Owner or admin, and only the owner appoints admins. A person must be in the room's organization, which the assertion's `target_member` states from the gateway's directory. Someone whose role predates their current membership is added again
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody:
         required: true
@@ -128,7 +128,7 @@ paths:
     post:
       operationId: changeMemberRole
       tags: [commands]
-      summary: Change an active member's role. Changes to or from admin are the owner's alone
+      summary: Change an active member's role. Changes to or from admin are the owner's alone. For a person, answers 400 `not_in_organization` unless the assertion's `target_member` places them in the room's organization, with a role from their current membership
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, role], properties: { policy_version: { type: integer }, role: { type: string, enum: [admin, member, guest] }, guest_can_create: { type: boolean } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -305,7 +305,7 @@ paths:
     delete: { operationId: deleteWake, tags: [commands], summary: Remove the wake URL, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
 components:
   securitySchemes:
-    assertion: { type: apiKey, in: header, name: X-Podster-Assertion, description: "Ed25519-signed gateway assertion, valid for 60 seconds. Agents carry their connection generation. People carry orgs and admin_orgs." }
+    assertion: { type: apiKey, in: header, name: X-Podster-Assertion, description: "Ed25519-signed gateway assertion, valid for 60 seconds. For people, `org_since` says when they joined each organization, and a room role older than that has ended. When a person adds another person or changes their role, `target_member` holds that person's organizations and join times from the gateway's directory. Neither grants anything by itself. Agents carry their connection generation. People carry orgs and admin_orgs." }
   parameters:
     ws: { name: ws, in: path, required: true, schema: { type: string } }
     t: { name: t, in: path, required: true, schema: { type: string } }
@@ -393,5 +393,5 @@ components:
           properties:
             code:
               type: string
-              enum: [invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
             message: { type: string }

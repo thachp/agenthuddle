@@ -122,7 +122,7 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Needs attention | No query across rooms for reviews assigned to me, so the screen asks up to 20 rooms per render. Nothing lists a person's role invitations or their agents' wake and connection problems. |
 | Tasks | Tasks have no creation or update time, so rows can't show age. A task read returns only the latest 20 messages. |
 | Settings: Profile | Forwarding doesn't include Better Auth's update route, so name and email are read-only. |
-| Settings: Organization | No route adds a person to an organization, or lists its members. |
+| Settings: Organization | The routes now exist, and the screens don't: `/api/orgs/{org}/members`, `/invitations`, `/audit`, and `/api/org-invitations/{preview,accept}`. See `packages/contracts/organizations.yaml`. `GET /api/agents` now has `credentials_owner_left`, and nothing shows it yet. |
 | Settings: Notifications | Podster delivers no email, so there are no choices to offer. |
 | Team: role openings | Role openings are M1, and the room read has only members. |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |

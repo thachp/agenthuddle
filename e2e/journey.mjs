@@ -306,14 +306,56 @@ async function acceptance() {
     refused(await personB.dash("POST", members(), { principal_id: personB.id, kind: "person", org_id: personB.org, role: "admin", policy_version: 1 }), "workspace_not_found", "a stranger appointing itself");
     refused(await personA.dash("POST", members(), { principal_id: lead.id, kind: "agent", org_id: personA.org, role: "admin", policy_version: await personA.policyVersion(room) }), ["invalid_argument", "already_member"], "making an agent an admin");
     refused(await personA.dash("POST", `${members()}/${lead.id}/role`, { role: "admin", policy_version: await personA.policyVersion(room) }), "invalid_argument", "promoting an agent to admin");
-    // Person B isn't in the owner's organization, so being named an admin must give them nothing.
-    const added = await personA.dash("POST", members(), { principal_id: personB.id, kind: "person", org_id: personA.org, role: "admin", policy_version: await personA.policyVersion(room) });
-    ok(added.ok, `the owner's add answered HTTP ${added.status} ${added.code ?? ""}. If gap 1's fix now refuses someone outside the organization, change this check to use a real second person.`);
-    refused(await personB.dash("GET", `/v1/workspaces/${room}`), "workspace_not_found", "someone outside the owner's organization acting on an admin role");
-    report.gap("AC-02+", "a real second person acting as admin", "Admins must be in the owner's organization, and no public route adds a person to one, so the success path, and an ordinary admin trying to appoint another, run only in apps/api tests.");
-    await personA.revoke(room, personB.id);
-    const actions = (await personA.audit(room)).filter((e) => e.target_id === personB.id).map((e) => [e.action, e.actor_id]);
-    eq(actions, [["member.added", personA.id], ["member.revoked", personA.id]], "audit entries");
+    // Person B isn't in the owner's organization, and naming them an admin must be refused, not recorded.
+    refused(await personA.dash("POST", members(), { principal_id: personB.id, kind: "person", org_id: personA.org, role: "admin", policy_version: await personA.policyVersion(room) }), "not_in_organization", "naming someone outside the organization an admin");
+    refused(await personB.dash("GET", `/v1/workspaces/${room}`), "workspace_not_found", "someone outside the owner's organization reading the room");
+    eq((await personA.audit(room)).filter((e) => e.target_id === personB.id), [], "audit entries for a refused add");
+  });
+
+  await check("AC-02+", "a real second person joins by a link, acts as a room admin, and loses the room when removed", async () => {
+    // Reused between runs, because organizations can't be deleted. A run that died midway may have left Person B in it.
+    const orgs = (await personA.must("GET", "/orgs")).organizations;
+    const team = orgs.find((o) => o.name === "Podster e2e team") ?? (await personA.must("POST", "/orgs", { name: "Podster e2e team" }));
+    const leftover = await personA.dash("DELETE", `/orgs/${team.id}/members/${personB.id}`);
+    ok(leftover.ok || leftover.code === "not_found", `clearing an earlier run: HTTP ${leftover.status} ${leftover.code ?? ""}`);
+    const teamRoom = (await personA.must("POST", "/v1/workspaces", { name: roomName("team") }, { org: team.id })).id;
+    const inTeam = { org: team.id };
+    const teamMembers = `/v1/workspaces/${teamRoom}/members`;
+    const version = () => personA.policyVersion(teamRoom);
+
+    refused(await personB.dash("POST", `/orgs/${team.id}/invitations`, { role: "member" }), "not_found", "someone outside inviting");
+    refused(await personA.dash("POST", `/orgs/${personA.org}/invitations`, { role: "member" }), "personal_organization", "inviting into a personal organization");
+    refused(await personA.dash("POST", teamMembers, { principal_id: personB.id, kind: "person", org_id: team.id, role: "admin", policy_version: await version() }, inTeam), "not_in_organization", "appointing them before they've joined");
+
+    const { token } = await personA.must("POST", `/orgs/${team.id}/invitations`, { role: "member" });
+    refused(await personB.dash("POST", "/org-invitations/accept", { token: `${token}x` }), "invitation_not_found", "a wrong token");
+    eq((await personB.must("POST", "/org-invitations/preview", { token })).org_name, "Podster e2e team", "preview");
+    eq((await personB.must("POST", "/org-invitations/accept", { token })).role, "member", "joined as");
+    refused(await personB.dash("POST", "/org-invitations/accept", { token }), "invitation_not_found", "a used link");
+    eq((await personB.must("GET", "/v1/me")).org_id, personB.org, "Person B's default organization");
+    refused(await personB.dash("POST", `/orgs/${team.id}/invitations`, { role: "admin" }), "not_allowed", "a member inviting");
+    refused(await personB.dash("PUT", `/orgs/${team.id}/members/${personB.id}`, { role: "admin" }), "not_allowed", "a member promoting themselves");
+
+    await personA.must("POST", teamMembers, { principal_id: personB.id, kind: "person", org_id: team.id, role: "admin", policy_version: await version() }, inTeam);
+    const asB = await personB.must("GET", `/v1/workspaces/${teamRoom}`, undefined, inTeam);
+    const listed = async () => (await personB.must("GET", "/v1/workspaces")).workspaces.map((w) => w.workspace_id);
+    // The listing is a read model that follows shortly after the room commits.
+    let inList = false;
+    for (let tries = 0; tries < 20 && !inList; tries++) {
+      inList = (await listed()).includes(teamRoom);
+      if (!inList) await sleep(isLocal ? 200 : 1000);
+    }
+    ok(inList, "the room is in Person B's list while they're in the organization");
+    refused(await personB.dash("POST", teamMembers, { principal_id: "per_nobody", kind: "person", org_id: team.id, role: "admin", policy_version: asB.policy_version }, inTeam), "not_allowed", "an admin appointing another");
+    const invite = await personB.must("POST", `/v1/workspaces/${teamRoom}/invitations`, { role: "guest", policy_version: asB.policy_version }, inTeam);
+    ok(invite.token, "an admin invites to the room");
+    eq((await personA.audit(teamRoom)).filter((e) => e.action === "invitation.created").map((e) => e.actor_id), [personB.id], "audit actor is the admin");
+
+    await personA.must("DELETE", `/orgs/${team.id}/members/${personB.id}`);
+    refused(await personB.dash("GET", `/v1/workspaces/${teamRoom}`, undefined, inTeam), "not_allowed", "acting in the organization after removal");
+    refused(await personB.dash("GET", `/v1/workspaces/${teamRoom}`), "workspace_not_found", "reading the room after removal");
+    ok(!(await listed()).includes(teamRoom), "the room left Person B's list when they were removed");
+    return "an admin appointing a real third person runs in the gateway's tests, because this run has two people";
   });
 
   await check("AC-03", "people outside the room and agents can't reach access commands, whatever their label", async () => {

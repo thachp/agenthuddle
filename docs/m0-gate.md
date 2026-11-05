@@ -37,15 +37,15 @@ The November 4 staging run doesn't count here. Its driver was never committed, o
 | ID | Test | Status | What's missing |
 | --- | --- | --- | --- |
 | AC-01 | journey `AC-01`; apps/api "only people create rooms, and the creator owns it whatever the body says" | Local only | |
-| AC-02 | journey `AC-02` is partial; apps/api "only the owner appoints admins, and agents can't be admins" | Local only | A real second person can't act as admin on a deployment, because no route adds a person to an organization (gap 1) |
+| AC-02 | journey `AC-02`, `AC-02+`; apps/api "only the owner appoints admins, and agents can't be admins"; gateway `organizations.spec.ts` | Local only | An admin appointing a real third person runs only in gateway tests, because a journey run has two people |
 | AC-03 | journey `AC-03` is partial; apps/api "members, guests and agents can't use any access command" | Local only | |
-| AC-04 | journey `AC-04`; apps/api "uses one key per route, moves the policy version, and pages the whole audit log" | Local only | The owner only: an admin needs gap 1 |
+| AC-04 | journey `AC-04`; apps/api "uses one key per route, moves the policy version, and pages the whole audit log" | Local only | The journey runs this as the owner. An admin changing a scope is only in apps/api tests |
 | AC-05 | journey `AC-05`; apps/api "keeps rooms apart" | Local only | Assets and provider IDs arrive in M2 and M5 |
 | AC-06 | journey `AC-06`; apps/api "the agent's own organization withdraws it without room authority, and nobody else can" | Local only | |
 | AC-07 | journey `AC-07` | Local only | |
 | AC-09 | journey `AC-09`; apps/api "an unknown room and a private room look identical to outsiders, and the unknown one stays empty" | Local only | Discovery and graph data arrive in M1 and M4 |
 | AC-12 | journey `AC-12`; `crates/assertion/tests/verify.rs`; apps/api "refuses forged, expired, wrong-audience and over-long assertions before routing" | Local only | A2A arrives in M3 |
-| AC-13 | journey `AC-13` is partial; apps/api "a stale form can't restore revoked access or apply over newer changes", "orders revocation against concurrent commands" | Local only | Timing against a live admin revocation can't be arranged from outside. An admin needs gap 1 |
+| AC-13 | journey `AC-13` is partial; apps/api "a stale form can't restore revoked access or apply over newer changes", "orders revocation against concurrent commands" | Local only | Timing against a live admin revocation can't be arranged from outside |
 | AC-14 | journey `AC-14` is partial; apps/api "refuses an assertion minted before the disconnect on every route" | Local only | A pre-minted assertion can't be made from outside, so this half can only run in tests |
 | AC-15 | journey `AC-15`; apps/api "returns the first result on retry" | Local only | |
 | AC-16 | apps/api "rolls back task, event, outbox and idempotency when a command fails after writing" | Local only | Failpoints never ship, so this closes on local proof ([ruling](#gate-rulings-2026-11-05-utc)). External providers arrive in M5 |
@@ -166,7 +166,7 @@ Each was checked against the code by a test that ran or by reading, and the line
 | 8. Ownership transfer and recovery | **Not built** | Gap 2 |
 | 14. Guests creating tasks | Holds | journey `D14`; `apps/api/src/workspace.rs:708`; `crates/policy/src/lib.rs:107` |
 | 21. Person inboxes | **Built, local only** | The API stores and serves them, and people can read them through the gateway (journey `D21`). Acknowledging through the gateway has a gateway test only. Org admins have read-only oversight of an agent's inbox (journey `D21`, [decision 31](spec/PRODUCT.md#decisions-needed)). The Needs attention screen isn't built yet |
-| 22. Who creates tasks from the dashboard | Holds for owners in the local journey. Admin and member people only in apps/api tests | journey `D22`; `crates/policy/src/lib.rs:107`. Reaching them needs gap 1 |
+| 22. Who creates tasks from the dashboard | Holds for owners in the local journey. Admin and member people only in apps/api tests | journey `D22`; `crates/policy/src/lib.rs:107`. Gap 1 makes them reachable, and the journey doesn't yet run them |
 | 23. Personal accounts | Holds for email sign-up, locally only, with one case open | journey `D23`; gateway "when the sign-up hook can't write the personal organization". Deployed sign-ups use OAuth because password sign-in only works on local hosts, and no test runs a failed write through OAuth. See gap 8 |
 | 24. Taking over a task when its requester leaves | Holds for owner and admin. Coordinator waits for M1 | journey `AC-25`; `crates/policy/src/lib.rs:154`. See gap 9 |
 
@@ -176,7 +176,7 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 
 | # | Gap | Size | Where | Blocks |
 | --- | --- | --- | --- | --- |
-| 1 | **Organizations can't have a second person.** The only inserts into `org_member` are at sign-up and organization creation. Workroom admins must be in the owner's organization, so nobody can act as one on a deployment. The owner's add still answers 200 and records an admin who can't act, for any person ID. | M, with contract | `apps/gateway/src/index.ts:308`, `:777`; `apps/api/src/workspace.rs:104`, `:574` | AC-02, AC-04, AC-13, decisions 8 and 22 |
+| 1 | **Mostly built, and open: organizations can have a second person, and leaving doesn't yet reach rooms.** An org admin invites by a link, and a signed-in person accepts. Adding someone outside the organization to a room, or changing their role, is refused with `not_in_organization`. Leaving ends their credentials, room listings and room roles, and rejoining restores none of those, except a room they own. Still open: see [Leaving an organization](#leaving-an-organization). The dashboard screens aren't built. | M, for the departure call | `apps/gateway/src/organizations.ts`; `apps/api/src/workspace.rs` `handle_add_member`, `handle_change_role` | Departure rules for people who leave an organization |
 | 2 | **No ownership transfer or recovery.** `owner_person_id` is written once, and there's no contract, policy action or command for either. Recovery needs an organization admin other than the owner, so it depends on gap 1. Personal organizations have no recovery ([ruling](#gate-rulings-2026-11-05-utc)). | L, with contract and audit | `apps/api/src/workspace.rs:1669`, `:80`; `crates/policy/src/lib.rs` | Decision 8 |
 | 3 | **Denied changes aren't recorded.** `audit_event` has an `outcome` column, and the only value ever written is `allowed`. ACCESS-CONTROL.md asks for a protected denial stream. Needs a design that can't be flooded, because a refused request rolls back its transaction. | M | `apps/api/src/workspace.rs:490` | AC-22 |
 | 4 | **Closed by [#26](https://github.com/thachp/podster/pull/26).** People can reach their inbox and, as org admins, an agent's. | Done | `apps/gateway/src/index.ts` | Decision 21, dashboard |
@@ -186,6 +186,16 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 | 8 | **A failed sign-up hook could leave a person with no organization.** Fixed in code: the person's next request restores it, and one index keeps it to one organization. Proven for email sign-up, locally only. It stays open until migration `0003_one_personal_org.sql` is applied on staging and an OAuth sign-up has created its organization there. | S, for the staging check | `apps/gateway/src/index.ts` `ensurePersonalOrg` | Decision 23 on a deployment |
 | 9 | **No Coordinator.** `set_requester` is for owners and admins only. The rest of decision 24 needs the Coordinator preset, which comes with decision 20, so it's M1 work ([ruling](#gate-rulings-2026-11-05-utc)). | S once presets exist | `crates/policy/src/lib.rs:154` | Nothing in M0 |
 | 10 | **Smaller baseline items.** The limit of 20 workspaces per organization isn't enforced. Rooms can't be deleted, though PRODUCT.md mentions it. Email magic-link sign-in isn't built. | S each | `apps/api/src/workspace.rs:1657`; `apps/gateway/src/index.ts` | Limits, AC-26's deleted case |
+
+## Leaving an organization
+
+The room can't see the directory, so removing someone from an organization doesn't reach their rooms. Each of these is true today, and the next backend item is a gateway-to-API departure call that runs `remove_member` in each of the person's rooms:
+
+- **A room invitation outlives its creator's departure.** A removed room admin who kept a link can accept it for an agent in their personal organization, unless it names an organization. The room's audit log records it.
+- **Departure rules don't run.** They run only when a room removes someone, so a departed person's tasks stall until someone revokes them in that room.
+- **Their person inbox keeps receiving** IDs, type and time for tasks they're party to.
+- **They stay in the room's member list,** where others can still name them, though they can't act. Someone who rejoins sees those rooms in their list and can't open them.
+- **A departed room owner who rejoins gets full owner authority back,** even from a member invitation, with nothing in the room's log. The owner needs to rule on this, and it ties into gap 2.
 
 ## Gate rulings, 2026-11-05 UTC
 

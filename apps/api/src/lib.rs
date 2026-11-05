@@ -31,6 +31,10 @@ pub struct Caller {
     pub orgs: Vec<String>,
     #[serde(default)]
     pub admin_orgs: Vec<String>,
+    #[serde(default)]
+    pub org_since: std::collections::HashMap<String, i64>,
+    #[serde(default)]
+    pub target_member: Option<podster_assertion::TargetMember>,
     pub gen: Option<u64>,
     #[serde(default)]
     pub workspace_id: String,
@@ -75,12 +79,22 @@ async fn forward(
 async fn list_workspaces(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiError> {
     let db = env.d1("DB")?;
     let found = db
-        .prepare("SELECT workspace_id, workspace_name, role FROM membership_index WHERE principal_id = ? AND removed = 0 ORDER BY workspace_name")
+        .prepare("SELECT workspace_id, workspace_name, role, org_id FROM membership_index WHERE principal_id = ? AND removed = 0 ORDER BY workspace_name")
         .bind(&[caller.id.as_str().into()])?
         .all()
         .await?
         .results::<Value>()?;
-    Ok(Response::from_json(&json!({ "workspaces": found }))?)
+    // A person who has left an organization isn't told about its rooms. Removal can't reach this index.
+    let current: Vec<Value> = found
+        .into_iter()
+        .filter(|row| {
+            row["org_id"]
+                .as_str()
+                .is_some_and(|org| org == caller.org || caller.orgs.iter().any(|o| o == org))
+        })
+        .map(|row| json!({ "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "role": row["role"] }))
+        .collect();
+    Ok(Response::from_json(&json!({ "workspaces": current }))?)
 }
 
 async fn me(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiError> {
@@ -135,6 +149,8 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         org: identity.org,
         orgs: identity.orgs,
         admin_orgs: identity.admin_orgs,
+        org_since: identity.org_since,
+        target_member: identity.target_member,
         gen: identity.gen,
         workspace_id: String::new(),
     };
