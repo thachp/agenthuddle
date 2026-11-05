@@ -1833,7 +1833,7 @@ describe("wake", () => {
 
   it("refuses private destinations and bad settings", async () => {
     const bob = await fresh();
-    for (const url of ["http://hooks.example.com/", "https://127.0.0.1/", "https://169.254.169.254/latest", "https://[::1]/", "https://2130706433/", "https://localhost/", "https://db.internal/", "https://user:pw@hooks.example.com/", "https://hooks.example.com:8443/", "nonsense", ""]) {
+    for (const url of ["https://gateway-staging.podster.dev/mcp", "http://hooks.example.com/", "https://127.0.0.1/", "https://169.254.169.254/latest", "https://[::1]/", "https://2130706433/", "https://localhost/", "https://db.internal/", "https://user:pw@hooks.example.com/", "https://hooks.example.com:8443/", "nonsense", ""]) {
       const res = await setWake(bob, url);
       expect(res.status, url).toBe(400);
       expect(res.code, url).toBe("invalid_wake_url");
@@ -1869,6 +1869,7 @@ describe("wake", () => {
     expect(received).toBeDefined();
     const body = JSON.parse(received.body);
     expect(Object.keys(body).sort()).toEqual(["agent_id", "at", "unread"]);
+    expect(received.agent).toMatch(/^Podster-Wake\//);
     expect(body).toMatchObject({ agent_id: bob.id, unread: 1 });
     expect(received.body).not.toContain("tsk_secret_title");
     const [t, v1] = received.signature.split(",").map((part: string) => part.split("=")[1]);
@@ -1979,21 +1980,101 @@ describe("wake", () => {
     expect(await hookLog(path)).toEqual([]);
   });
 
-  it("a wake set while disconnected stays quiet until the agent is back", async () => {
+  it("a wake can't be set while disconnected, and one found there stays quiet", async () => {
     const bob = await fresh();
     const path = unique();
     expect((await api(orgAdmin(bob.org), "POST", `/v1/agents/${bob.id}/disconnect`)).status).toBe(200);
-    // Its organization's admin can still set one.
-    expect((await api(orgAdmin(bob.org), "PUT", `/v1/agents/${bob.id}/wake`, { url: `https://hooks.example.com${path}` }, { key: null })).status).toBe(200);
+    const refused = await api(orgAdmin(bob.org), "PUT", `/v1/agents/${bob.id}/wake`, { url: `https://hooks.example.com${path}` }, { key: null });
+    expect([refused.status, refused.code]).toEqual([403, "agent_disconnected"]);
+    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => {
+      state.storage.sql.exec("CREATE TABLE IF NOT EXISTS wake (id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, secret TEXT NOT NULL, debounce_s INTEGER NOT NULL, last_sent_at INTEGER, consecutive_failures INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, queued_until INTEGER, sending_until INTEGER)");
+      state.storage.sql.exec("INSERT INTO wake (id, url, secret, debounce_s) VALUES (1, ?, 'whsec_x', 60)", `https://hooks.example.com${path}`);
+    });
     await deliver(bob);
     expect((await wakeRow(bob)).queued_until).toBeNull();
-    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET queued_until = 1"));
     await consume(bob);
     expect(await hookLog(path)).toEqual([]);
-    expect((await api(orgAdmin(bob.org), "POST", `/v1/agents/${bob.id}/reconnect`)).status).toBe(200);
-    await deliver(bob, 2);
+  });
+
+  it("what crosses the real queue names the agent", async () => {
+    const bob = await fresh();
+    await setWake(bob, `https://hooks.example.com${unique()}`);
+    await deliver(bob);
+    await vi.waitFor(async () => {
+      const bodies = (await hookLog("/__queue")).map((entry) => JSON.parse(entry.body));
+      expect(bodies).toContainEqual({ agent: bob.id });
+    }, { timeout: 10_000, interval: 50 });
+  });
+
+  it("setting it again can't skip the debounce window", async () => {
+    const bob = await fresh();
+    const path = unique();
+    await setWake(bob, `https://hooks.example.com${path}`, { debounce: 3600 });
+    await deliver(bob);
     await consume(bob);
     expect(await hookLog(path)).toHaveLength(1);
+    const sent = (await wakeRow(bob)).last_sent_at;
+    const again = unique();
+    await setWake(bob, `https://hooks.example.com${again}`, { debounce: 3600 });
+    expect((await wakeRow(bob)).last_sent_at).toBe(sent);
+    // It does start the count of failures over, and turns wake back on.
+    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET consecutive_failures = 2, enabled = 0"));
+    await setWake(bob, `https://hooks.example.com${again}`, { debounce: 3600 });
+    expect(await wakeRow(bob)).toMatchObject({ consecutive_failures: 0, enabled: 1, last_sent_at: sent });
+    await deliver(bob, 2);
+    const waits = await consume(bob);
+    expect(waits[0]).toBeGreaterThan(3000);
+    expect(await hookLog(again)).toEqual([]);
+  });
+
+  describe("around a send", () => {
+    const internalCall = (who: Who, path: string, body: object = {}) => principalStub(who.id).fetch(`https://principal/internal/${path}`, { method: "POST", body: JSON.stringify(body) }).then((r: Response) => r.json());
+
+    it("an event during a send still gets a nudge", async () => {
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 60 });
+      await deliver(bob);
+      const claim: any = await internalCall(bob, "wake-claim");
+      expect(claim.send).toBe(true);
+      await deliver(bob, 2);
+      const report: any = await internalCall(bob, "wake-report", { ok: true, secret: claim.secret, last_seq: claim.last_seq });
+      expect(report.requeue).toBe(true);
+      expect((await wakeRow(bob)).queued_until).toBeGreaterThan(Date.now());
+      // With nothing new, nothing more is queued.
+      const quiet = await fresh();
+      await setWake(quiet, `https://hooks.example.com${unique()}`);
+      await deliver(quiet);
+      const claimed: any = await internalCall(quiet, "wake-claim");
+      expect((await internalCall(quiet, "wake-report", { ok: true, secret: claimed.secret, last_seq: claimed.last_seq }) as any).requeue).toBe(false);
+      expect((await wakeRow(quiet)).queued_until).toBeNull();
+    });
+
+    it("two consumers holding the same wake send it once", async () => {
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`);
+      await deliver(bob);
+      const first: any = await internalCall(bob, "wake-claim");
+      expect(first.send).toBe(true);
+      expect(await internalCall(bob, "wake-claim")).toEqual({ send: false, reason: "sending" });
+      // A crash mid-send only delays the next: the lease runs out.
+      await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET sending_until = ?", Date.now() - 1));
+      expect((await internalCall(bob, "wake-claim") as any).send).toBe(true);
+      // A failed send releases it for the retry.
+      await internalCall(bob, "wake-report", { ok: false, secret: first.secret, last_seq: first.last_seq });
+      expect((await wakeRow(bob)).sending_until).toBeNull();
+    });
+
+    it("a late report about an old URL says nothing about the new one", async () => {
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`);
+      await deliver(bob);
+      const claim: any = await internalCall(bob, "wake-claim");
+      await setWake(bob, `https://hooks.example.com${unique()}`);
+      await internalCall(bob, "wake-report", { ok: false, secret: claim.secret, last_seq: claim.last_seq });
+      expect((await wakeRow(bob)).consecutive_failures).toBe(0);
+      await internalCall(bob, "wake-report", { ok: true, secret: claim.secret, last_seq: claim.last_seq });
+      expect((await wakeRow(bob)).last_sent_at).toBeNull();
+    });
   });
 
   it("a disconnect while a wake is queued sends nothing", async () => {

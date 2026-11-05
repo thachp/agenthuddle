@@ -5,6 +5,7 @@
 use crate::error::ApiError;
 use crate::store::{exec, int, rows, text, transaction_sync};
 use crate::{Caller, CALLER_HEADER};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 use worker::*;
@@ -33,9 +34,11 @@ INSERT OR IGNORE INTO inbox_state (id, acked_seq, last_seq, dropped) VALUES (1, 
 /// One wake URL per agent. The secret signs each request, and is shown only when it's set.
 const WAKE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS wake (id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, secret TEXT NOT NULL, debounce_s INTEGER NOT NULL,
-  last_sent_at INTEGER, consecutive_failures INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, queued_until INTEGER);
+  last_sent_at INTEGER, consecutive_failures INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, queued_until INTEGER, sending_until INTEGER);
 ";
 const WAKE_MAX_FAILURES: i64 = 3;
+// Longer than a send can take, so a second consumer can't send the same wake, and a crash mid-send only delays the next.
+const WAKE_SEND_LEASE_MS: i64 = 30_000;
 const WAKE_QUEUE_MAX_DELAY_SECS: i64 = 12 * 60 * 60;
 // If a queued wake is lost, the next event can queue another after this long.
 const WAKE_QUEUE_STALE_MS: i64 = 60 * 60 * 1000;
@@ -114,8 +117,9 @@ pub async fn claim_wake_for(env: &Env, agent: &str) -> R<Value> {
 }
 
 /// Tells the agent's Principal how a send went.
-pub async fn report_wake_for(env: &Env, agent: &str, ok: bool) -> R<Value> {
-    let mut response = internal(env, agent, "/internal/wake-report", &json!({ "ok": ok })).await?;
+pub async fn report_wake_for(env: &Env, agent: &str, ok: bool, claim: &Value) -> R<Value> {
+    let body = json!({ "ok": ok, "secret": claim["secret"], "last_seq": claim["last_seq"] });
+    let mut response = internal(env, agent, "/internal/wake-report", &body).await?;
     Ok(response.json().await?)
 }
 
@@ -335,9 +339,11 @@ fn set_wake(sql: &SqlStorage, body: &Value) -> R<Value> {
         uuid::Uuid::new_v4().simple()
     );
     exec(sql, WAKE_SCHEMA, vec![])?;
+    // Keeps when it last sent and anything queued, so setting it again can't be used to skip the debounce window.
     exec(
         sql,
-        "INSERT OR REPLACE INTO wake (id, url, secret, debounce_s, enabled) VALUES (1, ?, ?, ?, 1)",
+        "INSERT INTO wake (id, url, secret, debounce_s, enabled) VALUES (1, ?, ?, ?, 1)
+          ON CONFLICT (id) DO UPDATE SET url = excluded.url, secret = excluded.secret, debounce_s = excluded.debounce_s, enabled = 1, consecutive_failures = 0",
         vec![url.as_str().into(), secret.as_str().into(), debounce.into()],
     )?;
     Ok(json!({ "url": url, "debounce": debounce, "enabled": true, "secret": secret }))
@@ -379,6 +385,7 @@ fn wake_to_queue(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
 }
 
 /// What the consumer should send, rechecked at send time because anything could have changed while it was queued.
+/// Takes a short lease, so a second consumer holding the same wake sends nothing.
 fn claim_wake(sql: &SqlStorage, now: i64) -> R<Value> {
     let skip = |reason: &str| json!({ "send": false, "reason": reason });
     let Some(wake) = wake_row(sql)? else {
@@ -401,7 +408,7 @@ fn claim_wake(sql: &SqlStorage, now: i64) -> R<Value> {
         )?;
         return Ok(skip("url_refused"));
     }
-    let (acked, _, _) = inbox_state(sql)?;
+    let (acked, last_seq, _) = inbox_state(sql)?;
     let unread = unread_count(sql, acked, now)?;
     if unread == 0 {
         clear()?;
@@ -415,39 +422,61 @@ fn claim_wake(sql: &SqlStorage, now: i64) -> R<Value> {
             json!({ "send": false, "reason": "debounce", "retry_after": ((due - now) / 1000 + 1).min(WAKE_QUEUE_MAX_DELAY_SECS) }),
         );
     }
-    Ok(
-        json!({ "send": true, "url": url, "secret": wake["secret"], "unread": unread, "agent_id": conn["id"] }),
-    )
-}
-
-/// Records how a send went. Three failures in a row turn wake off until it's set again.
-fn report_wake(sql: &SqlStorage, ok: bool, now: i64) -> R<Value> {
-    let Some(wake) = wake_row(sql)? else {
-        return Ok(json!({ "retry": false }));
-    };
-    if ok {
-        exec(
-            sql,
-            "UPDATE wake SET last_sent_at = ?, consecutive_failures = 0, queued_until = NULL",
-            vec![now.into()],
-        )?;
-        return Ok(json!({ "retry": false }));
-    }
-    let failures = int(&wake["consecutive_failures"]) + 1;
-    if failures >= WAKE_MAX_FAILURES {
-        exec(
-            sql,
-            "UPDATE wake SET consecutive_failures = ?, enabled = 0, queued_until = NULL",
-            vec![failures.into()],
-        )?;
-        return Ok(json!({ "retry": false, "disabled": true }));
+    if wake["sending_until"]
+        .as_i64()
+        .is_some_and(|until| until > now)
+    {
+        return Ok(skip("sending"));
     }
     exec(
         sql,
-        "UPDATE wake SET consecutive_failures = ?",
+        "UPDATE wake SET sending_until = ?",
+        vec![(now + WAKE_SEND_LEASE_MS).into()],
+    )?;
+    Ok(
+        json!({ "send": true, "url": url, "secret": wake["secret"], "unread": unread, "agent_id": conn["id"], "last_seq": last_seq }),
+    )
+}
+
+/// Records how a send went. Three failures in a row turn wake off until it's set again. A report for a URL that's since
+/// been replaced says nothing about the new one, so it's ignored.
+fn report_wake(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let ignored = json!({ "retry": false, "requeue": false });
+    let Some(wake) = wake_row(sql)? else {
+        return Ok(ignored);
+    };
+    if body["secret"].as_str() != wake["secret"].as_str() {
+        return Ok(ignored);
+    }
+    if body["ok"].as_bool().unwrap_or(false) {
+        exec(
+            sql,
+            "UPDATE wake SET last_sent_at = ?, consecutive_failures = 0, queued_until = NULL, sending_until = NULL",
+            vec![now.into()],
+        )?;
+        // An event during the send was held back by the queued flag, and this wake's count didn't include it.
+        let (_, last_seq, _) = inbox_state(sql)?;
+        return Ok(
+            json!({ "retry": false, "requeue": last_seq > body["last_seq"].as_i64().unwrap_or(last_seq) }),
+        );
+    }
+    let failures = int(&wake["consecutive_failures"]) + 1;
+    if failures >= WAKE_MAX_FAILURES {
+        exec(sql, "UPDATE wake SET consecutive_failures = ?, enabled = 0, queued_until = NULL, sending_until = NULL", vec![failures.into()])?;
+        return Ok(json!({ "retry": false, "requeue": false, "disabled": true }));
+    }
+    exec(
+        sql,
+        "UPDATE wake SET consecutive_failures = ?, sending_until = NULL",
         vec![failures.into()],
     )?;
-    Ok(json!({ "retry": true, "failures": failures }))
+    Ok(json!({ "retry": true, "requeue": false, "failures": failures }))
+}
+
+/// A struct and not `json!`: the queue's serializer turns a JSON map into a JS `Map`, which arrives as `{}`.
+#[derive(Serialize)]
+struct WakeMessage<'a> {
+    agent: &'a str,
 }
 
 struct InboxQuery {
@@ -611,6 +640,12 @@ impl Principal {
         let sql = self.state.storage().sql();
         match method {
             Method::Put => {
+                // A disconnect ends wake along with the agent's credentials, so nothing can be set to survive a reconnect.
+                let active =
+                    connection(&sql)?.is_some_and(|c| c["status"].as_str() == Some(ACTIVE));
+                if !active {
+                    return Err(ApiError::agent_disconnected());
+                }
                 let body: Value = serde_json::from_str(&req.text().await?)
                     .map_err(|_| ApiError::invalid_argument())?;
                 set_wake(&sql, &body)
@@ -630,7 +665,7 @@ impl Principal {
             .unwrap_or_default();
         let sent = async {
             let queue = self.env.queue("WAKE")?;
-            let message = MessageBuilder::new(json!({ "agent": agent }))
+            let message = MessageBuilder::new(WakeMessage { agent: &agent })
                 .delay_seconds(delay as u32)
                 .build();
             queue.send(message).await
@@ -802,7 +837,14 @@ impl Principal {
             "/internal/wake-claim" => return claim_wake(&sql, now_ms()),
             "/internal/wake-report" => {
                 let body: Value = req.json().await?;
-                return report_wake(&sql, body["ok"].as_bool().unwrap_or(false), now_ms());
+                let now = now_ms();
+                let outcome = report_wake(&sql, &body, now)?;
+                if outcome["requeue"] == Value::Bool(true) {
+                    if let Err(error) = self.queue_wake(now).await {
+                        console_error!("couldn't queue wake: {:?}", error);
+                    }
+                }
+                return Ok(outcome);
             }
             "/internal/unread" => {
                 let (acked, _, _) = inbox_state(&sql)?;

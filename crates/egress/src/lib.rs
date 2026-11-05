@@ -25,6 +25,8 @@ const PRIVATE_SUFFIXES: &[&str] = &[
     "invalid",
     "onion",
     "arpa",
+    // Our own service: a wake is for an agent's systems, never for Podster.
+    "podster.dev",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,7 +66,12 @@ pub fn check_wake_url(raw: &str) -> Result<String, Refusal> {
         Some(Host::Ipv4(_) | Host::Ipv6(_)) => return Err(Refusal::IpAddress),
         None => return Err(Refusal::NotAUrl),
     }
-    Ok(url.to_string())
+    // Measured again after normalizing, which can lengthen it, so what's stored always passes the same check later.
+    let normalized = url.to_string();
+    if normalized.len() > MAX_URL_BYTES {
+        return Err(Refusal::TooLong);
+    }
+    Ok(normalized)
 }
 
 fn check_public_name(name: &str) -> Result<(), Refusal> {
@@ -129,6 +136,10 @@ mod tests {
             ),
             ("https://a.b.co.uk/", "https://a.b.co.uk/"),
             ("https://example.com", "https://example.com/"),
+            ("https://example.com./", "https://example.com./"),
+            // A public name that only ends like a private one.
+            ("https://notlocal.com/", "https://notlocal.com/"),
+            ("https://mylocalhost.org/", "https://mylocalhost.org/"),
         ] {
             assert_eq!(check_wake_url(given).as_deref(), Ok(stored), "{given}");
         }
@@ -143,6 +154,19 @@ mod tests {
             ("not a url", Refusal::NotAUrl),
             ("https://user:pw@example.com/", Refusal::HasCredentials),
             ("https://user@example.com/", Refusal::HasCredentials),
+            ("https://:pw@example.com/", Refusal::HasCredentials),
+            ("https://foo/", Refusal::NotPublicName),
+            ("https://podster.dev/", Refusal::NotPublicName),
+            (
+                "https://gateway-staging.podster.dev/mcp",
+                Refusal::NotPublicName,
+            ),
+            ("https://nas.lan/", Refusal::NotPublicName),
+            ("https://nas.home/", Refusal::NotPublicName),
+            ("https://hr.corp/", Refusal::NotPublicName),
+            ("https://hr.intranet/", Refusal::NotPublicName),
+            ("https://x.private/", Refusal::NotPublicName),
+            ("https://x.invalid/", Refusal::NotPublicName),
             ("https://example.com/#f", Refusal::HasFragment),
             ("https://example.com:8443/", Refusal::NotDefaultPort),
             ("https://127.0.0.1/", Refusal::IpAddress),
@@ -173,6 +197,10 @@ mod tests {
         }
         let long = format!("https://example.com/{}", "a".repeat(MAX_URL_BYTES));
         assert_eq!(check_wake_url(&long), Err(Refusal::TooLong));
+        // Under the limit as given, and over it once encoded.
+        let expands = format!("https://example.com/{}", "é".repeat(MAX_URL_BYTES / 3));
+        assert!(expands.len() <= MAX_URL_BYTES);
+        assert_eq!(check_wake_url(&expands), Err(Refusal::TooLong));
     }
 
     #[test]
