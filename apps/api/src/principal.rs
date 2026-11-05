@@ -324,7 +324,7 @@ fn wake_json(sql: &SqlStorage) -> R<Value> {
 }
 
 /// Sets the URL and a new secret, and turns wake back on. The secret is returned only here.
-fn set_wake(sql: &SqlStorage, body: &Value) -> R<Value> {
+fn set_wake(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let url = body["url"]
         .as_str()
         .ok_or_else(ApiError::invalid_argument)?;
@@ -342,24 +342,27 @@ fn set_wake(sql: &SqlStorage, body: &Value) -> R<Value> {
     );
     exec(sql, WAKE_SCHEMA, vec![])?;
     // Keeps when it last sent and anything queued, so setting it again can't be used to skip the debounce window.
+    // A send that failed or never reported recorded no time, so it counts from now.
     exec(
         sql,
         "INSERT INTO wake (id, url, secret, debounce_s, enabled) VALUES (1, ?, ?, ?, 1)
           ON CONFLICT (id) DO UPDATE SET url = excluded.url, secret = excluded.secret, debounce_s = excluded.debounce_s, enabled = 1, consecutive_failures = 0,
+            last_sent_at = CASE WHEN consecutive_failures > 0 OR sending_until IS NOT NULL THEN ? ELSE last_sent_at END,
             queued_until = CASE WHEN debounce_s = excluded.debounce_s THEN queued_until ELSE NULL END",
-        vec![url.as_str().into(), secret.as_str().into(), debounce.into()],
+        vec![url.as_str().into(), secret.as_str().into(), debounce.into(), now.into()],
     )?;
     Ok(json!({ "url": url, "debounce": debounce, "enabled": true, "secret": secret }))
 }
 
 /// Blanks the row rather than deleting it, so the time of the last send survives and deleting then setting a URL can't
 /// skip the debounce window.
-fn delete_wake(sql: &SqlStorage) -> R<Value> {
+fn delete_wake(sql: &SqlStorage, now: i64) -> R<Value> {
     if wake_row(sql)?.is_some() {
         exec(
             sql,
-            "UPDATE wake SET url = '', secret = '', enabled = 0, consecutive_failures = 0, queued_until = NULL, sending_until = NULL",
-            vec![],
+            "UPDATE wake SET url = '', secret = '', enabled = 0, consecutive_failures = 0, queued_until = NULL, sending_until = NULL,
+              last_sent_at = CASE WHEN consecutive_failures > 0 OR sending_until IS NOT NULL THEN ? ELSE last_sent_at END",
+            vec![now.into()],
         )?;
     }
     Ok(json!({ "deleted": true }))
@@ -666,9 +669,9 @@ impl Principal {
                 }
                 let body: Value = serde_json::from_str(&req.text().await?)
                     .map_err(|_| ApiError::invalid_argument())?;
-                set_wake(&sql, &body)
+                set_wake(&sql, &body, now_ms())
             }
-            Method::Delete => delete_wake(&sql),
+            Method::Delete => delete_wake(&sql, now_ms()),
             _ => Err(ApiError::not_found()),
         }
     }
@@ -1007,7 +1010,7 @@ impl Principal {
                         vec![DISCONNECTING.into()],
                     )?;
                     // A reconnect starts over, like its credentials: a leaked URL and secret shouldn't come back.
-                    delete_wake(&sql)?;
+                    delete_wake(&sql, now_ms())?;
                 }
                 self.fan_out().await?;
                 Ok(connection_json(

@@ -1945,7 +1945,11 @@ describe("wake", () => {
       expect((await api(bob, "GET", "/v1/inbox")).body.unread, kind).toBe(2);
       const okPath = unique();
       await setWake(bob, `https://hooks.example.com${okPath}`);
+      // Those attempts count against the window, so the new URL hears about it when the window ends.
       await deliver(bob, 3);
+      await consume(bob, 1);
+      expect(await hookLog(okPath), kind).toEqual([]);
+      await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET last_sent_at = ?", Date.now() - 86_400_000));
       await consume(bob);
       expect(await hookLog(okPath), kind).toHaveLength(1);
       expect((await wakeRow(bob)).consecutive_failures, kind).toBe(0);
@@ -2020,7 +2024,8 @@ describe("wake", () => {
     // It does start the count of failures over, and turns wake back on.
     await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET consecutive_failures = 2, enabled = 0"));
     await setWake(bob, `https://hooks.example.com${again}`, { debounce: 3600 });
-    expect(await wakeRow(bob)).toMatchObject({ consecutive_failures: 0, enabled: 1, last_sent_at: sent });
+    expect(await wakeRow(bob)).toMatchObject({ consecutive_failures: 0, enabled: 1 });
+    expect((await wakeRow(bob)).last_sent_at).toBeGreaterThanOrEqual(sent);
     await deliver(bob, 2);
     const waits = await consume(bob);
     expect(waits[0]).toBeGreaterThan(3000);
@@ -2033,6 +2038,59 @@ describe("wake", () => {
     await deliver(bob, 3);
     expect((await consume(bob))[0]).toBeGreaterThan(3000);
     expect(await hookLog(third)).toEqual([]);
+  });
+
+  describe("a send that recorded no time still counts against the window", () => {
+    const failOnce = async (bob: Who) => {
+      await setWake(bob, `https://hooks.example.com/fail/${crypto.randomUUID()}`, { debounce: 3600 });
+      await deliver(bob);
+      await consume(bob, 1);
+      expect(await wakeRow(bob)).toMatchObject({ consecutive_failures: 1, last_sent_at: null });
+    };
+    const expectHeldBack = async (bob: Who, path: string) => {
+      await deliver(bob, 2);
+      expect((await consume(bob))[0]).toBeGreaterThan(3000);
+      expect(await hookLog(path)).toEqual([]);
+    };
+
+    it("setting a new URL after a failure", async () => {
+      const bob = await fresh();
+      await failOnce(bob);
+      const path = unique();
+      await setWake(bob, `https://hooks.example.com${path}`, { debounce: 3600 });
+      expect((await wakeRow(bob)).last_sent_at).toBeGreaterThan(0);
+      await expectHeldBack(bob, path);
+    });
+
+    it("deleting and setting a new URL after a failure", async () => {
+      const bob = await fresh();
+      await failOnce(bob);
+      expect((await api(bob, "DELETE", "/v1/inbox/wake", {}, { key: null })).status).toBe(200);
+      const path = unique();
+      await setWake(bob, `https://hooks.example.com${path}`, { debounce: 3600 });
+      await expectHeldBack(bob, path);
+    });
+
+    it("setting a new URL after a send that never reported", async () => {
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 3600 });
+      await deliver(bob);
+      await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET sending_until = ?", Date.now() - 1000));
+      const path = unique();
+      await setWake(bob, `https://hooks.example.com${path}`, { debounce: 3600 });
+      await expectHeldBack(bob, path);
+    });
+
+    it("setting a URL on a wake with no attempts sends at once", async () => {
+      const bob = await fresh();
+      const first = unique(), path = unique();
+      await setWake(bob, `https://hooks.example.com${first}`, { debounce: 3600 });
+      await setWake(bob, `https://hooks.example.com${path}`, { debounce: 3600 });
+      expect((await wakeRow(bob)).last_sent_at).toBeNull();
+      await deliver(bob);
+      await consume(bob);
+      expect(await hookLog(path)).toHaveLength(1);
+    });
   });
 
   it("shortening the window applies to a wake already waiting", async () => {
