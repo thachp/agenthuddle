@@ -10,6 +10,8 @@ The gateway's default `BASE_URL` is the production hostname, and a deployment on
 BASE_URL=http://localhost:8787
 ```
 
+This only stops the redirect. A working local run also needs `AUTH_SECRET` and `ASSERTION_SIGNING_JWK` there, local D1 migrations, and the API Worker running with a matching `ASSERTION_KEYS`.
+
 ## Before you start
 
 - Node, and `npm ci` in `apps/gateway` and `apps/api`.

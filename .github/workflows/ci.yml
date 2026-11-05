@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# A newer commit on a pull request replaces the older run. Runs on main always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   rust:
     runs-on: ubuntu-latest

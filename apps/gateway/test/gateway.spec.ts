@@ -9,10 +9,10 @@ import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
-import worker, { safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import worker, { clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
-const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string };
+const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string; TEST_WRANGLER: string };
 const statements = (sql: string) => sql.split(";").map((s) => s.trim()).filter(Boolean);
 let counter = 0;
 const unique = (prefix: string) => `${prefix}-${++counter}-${crypto.randomUUID().slice(0, 8)}`;
@@ -986,6 +986,149 @@ describe("resilience and schema", () => {
     const { toBeCreated, toBeAdded } = await getMigrations(createAuth(e).options);
     expect(toBeCreated).toEqual([]);
     expect(toBeAdded).toEqual([]);
+  });
+});
+
+describe("rate limits", () => {
+  const ctx = { waitUntil() {}, passThroughOnException() {} } as never;
+  /** A limiter that records every key, and refuses the ones it's told to. */
+  const limiter = (refuse: (key: string) => boolean = () => false) => {
+    const keys: string[] = [];
+    const fake: RateLimit = { limit: async ({ key }) => (keys.push(key), { success: !refuse(key) }) };
+    return { fake, keys };
+  };
+  const send = (path: string, init: RequestInit = {}, env: object = {}) => worker.fetch(new Request(BASE + path, init), { ...e, ...env } as never, ctx);
+  const from = (ip: string, more: Record<string, string> = {}) => ({ "cf-connecting-ip": ip, ...more });
+  const jsonPost = (body: unknown, headers: Record<string, string> = {}) => ({ method: "POST", body: JSON.stringify(body), headers: { origin: BASE, "content-type": "application/json", ...headers } });
+  const expectLimited = async (res: Response) => {
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("60");
+    expect((await res.json<any>()).error.code).toBe("rate_limited");
+  };
+
+  it("counts each client separately, and an IPv6 network as one client", () => {
+    const ip = (value: string) => clientKey(new Request(BASE, { headers: { "cf-connecting-ip": value } }));
+    expect(ip("203.0.113.9")).toBe("203.0.113.9");
+    expect(ip("2001:db8:1:2:aaaa::1")).toBe("2001:db8:1:2");
+    expect(ip("2001:db8:1:2:bbbb:cccc:dddd:eeee")).toBe("2001:db8:1:2");
+    expect(ip("2001:DB8:0001:0002::")).toBe("2001:db8:1:2");
+    expect(ip("::1")).toBe("0:0:0:0");
+    expect(ip("2001:db8::1")).toBe("2001:db8:0:0");
+    expect(ip("2001:db8:1:3::1")).not.toBe(ip("2001:db8:1:2::1"));
+    expect(clientKey(new Request(BASE))).toBe("unknown");
+  });
+
+  it("refuses a client over its general limit before doing any work, on every route", async () => {
+    const general = limiter((key) => key === "ip:203.0.113.9");
+    for (const path of ["/sign-in", "/mcp", "/.well-known/oauth-authorization-server", "/api/v1/me"]) {
+      const res = await send(path, { headers: from("203.0.113.9") }, { RL_GENERAL: general.fake, AUTH_SECRET: "" });
+      await expectLimited(res);
+      expect(res.headers.get("strict-transport-security"), path).toBe("max-age=31536000");
+    }
+    expect((await send("/sign-in", { headers: from("203.0.113.10") }, { RL_GENERAL: general.fake })).status).toBe(200);
+  });
+
+  it("limits anonymous routes that start something, each counted separately", async () => {
+    for (const [method, path, route] of [["POST", "/sign-in", "sign-in"], ["POST", "/oauth/register", "oauth-register"], ["POST", "/oauth/token", "oauth-token"], ["POST", "/api/auth/agent/register", "agent-register"], ["POST", "/api/auth/sign-in/social", "auth"], ["POST", "/api/auth/sign-up/email", "auth"], ["GET", "/api/auth/callback/github", "auth"]] as const) {
+      expect(sensitiveRoute(method, path), path).toBe(route);
+      const sensitive = limiter((key) => key === `${route}:203.0.113.9`);
+      const res = await send(path, { method, headers: { ...from("203.0.113.9"), origin: BASE, "content-type": "application/json" }, body: method === "POST" ? "{}" : undefined }, { RL_SENSITIVE: sensitive.fake });
+      await expectLimited(res);
+    }
+    for (const [method, path] of [["GET", "/sign-in"], ["GET", "/oauth/register"], ["POST", "/mcp"], ["GET", "/api/auth/agent-configuration"], ["POST", "/api/auth/capability/execute"]]) expect(sensitiveRoute(method, path), path).toBeNull();
+  });
+
+  it("limits each agent credential, and a limited agent can retry with the same token", async () => {
+    const owner = await signUp();
+    const agent = await claimedAgent(owner);
+    const account = limiter(() => true);
+    const jwt = await signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE, capabilities: ["get_identity"] });
+    const run = (env: object) => send("/api/auth/capability/execute", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` }, body: JSON.stringify({ capability: "get_identity", arguments: {} }) }, env);
+    const limited = await run({ RL_ACCOUNT: account.fake });
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect((await limited.json<any>()).message).toBe("rate_limited");
+    expect(account.keys).toEqual([`agent:${agent.pluginId}`]);
+    expect((await run({})).status).toBe(200);
+    expect((await run({})).status).toBe(401);
+  });
+
+  it("limits each MCP credential", async () => {
+    const owner = await signUp();
+    const agent = await mcpAgent(owner);
+    const account = limiter(() => true);
+    const res = await send("/mcp", { method: "POST", headers: { authorization: `Bearer ${agent.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }, { RL_ACCOUNT: account.fake });
+    await expectLimited(res);
+    expect(account.keys).toHaveLength(1);
+    expect(account.keys[0]).toMatch(/^mcp:grant_/);
+  });
+
+  it("limits code guessing on the claim page and form, for each person", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const sensitive = limiter((key) => key.startsWith("claim:"));
+    const limits = { RL_SENSITIVE: sensitive.fake };
+    await expectLimited(await send(`/claim?agent_id=${agent.pluginId}&code=${agent.userCode}`, { headers: { cookie: owner.cookie } }, limits));
+    await expectLimited(await send("/claim", jsonPost({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org }, { cookie: owner.cookie }), limits));
+    expect(new Set(sensitive.keys).size).toBe(1);
+    expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ status: "pending" });
+  });
+
+  it("limits consent, organizations, rooms and invitations for each person, and not their reads", async () => {
+    const owner = await signUp();
+    const sensitive = limiter(() => true);
+    const limits = { RL_SENSITIVE: sensitive.fake };
+    const { query } = await authorizeQuery();
+    await expectLimited(await send("/authorize", { method: "POST", headers: { cookie: owner.cookie, origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ oauth_query: query, org_id: owner.org }) }, limits));
+    await expectLimited(await send("/api/orgs", jsonPost({ name: "x" }, { cookie: owner.cookie }), limits));
+    await expectLimited(await send("/api/v1/workspaces", jsonPost({ name: "x" }, { cookie: owner.cookie, "idempotency-key": unique("k") }), limits));
+    await expectLimited(await send("/api/v1/workspaces/ws_x/invitations", jsonPost({}, { cookie: owner.cookie, "idempotency-key": unique("k") }), limits));
+    await expectLimited(await send("/api/v1/invitations/accept", jsonPost({}, { cookie: owner.cookie }), limits));
+    const prefixes = sensitive.keys.map((key) => key.split(":")[0]);
+    expect(new Set(prefixes)).toEqual(new Set(["consent", "create-org", "invite-or-create"]));
+    // Reads and the consent page don't count against these.
+    const before = sensitive.keys.length;
+    expect((await send("/api/v1/me", { headers: { cookie: owner.cookie } }, limits)).status).toBe(200);
+    expect((await send("/api/orgs", { headers: { cookie: owner.cookie } }, limits)).status).toBe(200);
+    expect((await send(`/authorize${query}`, { headers: { cookie: owner.cookie } }, limits)).status).toBe(200);
+    expect((await send("/api/v1/workspaces", { headers: { cookie: owner.cookie } }, limits)).status).toBe(200);
+    // Ordinary room work isn't sensitive either: it's counted only by the person's overall limit.
+    expect((await send("/api/v1/workspaces/ws_none/tasks", jsonPost({ title: "x", instructions: "y" }, { cookie: owner.cookie, "idempotency-key": unique("k") }), limits)).status).not.toBe(429);
+    expect(sensitive.keys).toHaveLength(before);
+  });
+
+  it("limits each person's dashboard calls overall", async () => {
+    const owner = await signUp();
+    const account = limiter(() => true);
+    await expectLimited(await send("/api/v1/me", { headers: { cookie: owner.cookie } }, { RL_ACCOUNT: account.fake }));
+    await expectLimited(await send("/api/orgs", { headers: { cookie: owner.cookie } }, { RL_ACCOUNT: account.fake }));
+    expect(account.keys[0]).toMatch(/^person:/);
+  });
+
+  it("keeps working if a limiter fails", async () => {
+    const broken: RateLimit = { limit: async () => { throw new Error("limiter down"); } };
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      expect((await send("/sign-in", { headers: from("203.0.113.9") }, { RL_GENERAL: broken, RL_SENSITIVE: broken, RL_ACCOUNT: broken })).status).toBe(200);
+    } finally {
+      console.error = quiet;
+    }
+  });
+
+  it("every deployed environment has all three limits, with its own counters", () => {
+    const config = JSON.parse(e.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+    const expected = { RL_GENERAL: 600, RL_ACCOUNT: 120, RL_SENSITIVE: 20 };
+    const ids = new Set<string>();
+    for (const environment of [config, config.env.staging]) {
+      const found = Object.fromEntries(environment.ratelimits.map((r: any) => [r.name, r.simple.limit]));
+      expect(found).toEqual(expected);
+      for (const r of environment.ratelimits) {
+        expect(r.simple.period).toBe(60);
+        ids.add(r.namespace_id);
+      }
+    }
+    expect(ids.size).toBe(6);
   });
 });
 
