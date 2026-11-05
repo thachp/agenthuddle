@@ -43,6 +43,7 @@ CREATE TABLE audit_event (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, actor_kin
   reason_code TEXT, prior_json TEXT, new_json TEXT, policy_version INTEGER NOT NULL, created_at INTEGER NOT NULL);
 ", "
 ALTER TABLE workspace ADD COLUMN owner_left_at INTEGER;
+ALTER TABLE workspace ADD COLUMN owner_since INTEGER;
 "];
 
 pub fn int(value: &Value) -> i64 {

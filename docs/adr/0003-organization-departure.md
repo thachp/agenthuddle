@@ -18,19 +18,20 @@ The gateway tells the API, and each room decides from its own state.
    - A person member whose role began at or before `left_at` goes through `remove_member` with the reason `org_departure`, so departure rules, the audit entry and the removal notice all follow.
    - Their pending invitations from at or before `left_at` are withdrawn.
    - A role or invitation that started later is left alone, so a delayed retry can't undo a rejoin and a new add.
-6. **A pending room invitation needs its creator.** Accepting one checks that whoever made it is still the room's owner or an admin. So an invitation created just before the departure reached the room, or by someone the room revoked, stops working. Being demoted in the room ends it too.
+6. **A room invitation ends with its creator's authority.** A room revoking them, a departure, or being demoted from admin withdraws their pending invitations, and giving the role back doesn't bring them back. As a backstop, accepting one also checks that whoever made it is still the room's owner or an admin, which covers a link created just before the departure reached the room.
 
 ## Departed room owners
 
 A room's owner isn't a member row, and nobody else can own the room until decision 8's transfer exists. So the owner stays the owner, and the room records their departure in `owner_left_at`, with `owner.left_organization` in its log. While that's set:
 
 - They aren't a participant. Their tasks follow the departure table, nothing more reaches their inbox, and they can't be given work. Their pending invitations are withdrawn.
-- If the room has no admin, a task needing attention tells nobody until someone can act.
+- If the room has no admin, nobody can manage its access or take over its tasks until the owner rejoins or gap 2's transfer exists. A task needing attention tells nobody in the meantime.
 
-If they rejoin, they get full owner authority back, even from a member invitation. The first command they send in the room clears `owner_left_at` and records `owner.returned`, so a stale form they sent then may need one retry, because that changes the policy version. Reading doesn't record anything. Their old tasks don't return to them. **The owner needs to rule on whether a rejoin should restore this,** and it depends on gap 2.
+If they rejoin, they get full owner authority back, even from a member invitation. The first command they send in the room clears `owner_left_at` and records `owner.returned`, so a stale form they sent then may need one retry, because that changes the policy version. Reading doesn't record anything. The room keeps the start of their latest membership from their commands, so a departure delayed past their return doesn't take them out again, and an older departure can't lower `owner_left_at`. If the delayed departure arrives before their first command after rejoining, it does take them out until that command. Their old tasks don't return to them. **The owner needs to rule on whether a rejoin should restore this,** and it depends on gap 2.
 
 ## Consequences
 
 - Rooms normally catch up within moments of the removal, and authority doesn't wait for them, because memberships are read per request.
 - If the API can't be reached, the removal still answers, and delivery waits for a cron run. The cron takes 50 rows an hour, oldest first, so a backlog can take several hours, and 50 rows that keep failing would hold up the rest.
 - A room that keeps failing is retried for as long as it fails, at most hourly once backed off, and the departure stays open until it answers.
+- Someone in a very large number of rooms is slow rather than refused. Each alarm re-reads the whole index for that person and makes at most 100 room calls, and very large counts could reach the platform's limit on calls per alarm. This wasn't tested beyond 130 rooms.

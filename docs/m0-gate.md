@@ -192,8 +192,9 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 Removing someone from an organization now reaches their rooms, as [ADR 0003](adr/0003-organization-departure.md) describes, locally only: their role ends with the departure rules, and their room invitations are withdrawn. What's still open:
 
 - **A departed room owner keeps the room,** and gets full owner authority back if they rejoin, even from a member invitation. While they're out they aren't a participant, so their tasks follow the departure table and their inbox stops. The room's log records both the departure and their first command after returning. The owner needs to rule on this, and it ties into gap 2.
-- **A room with no admin** has nobody to tell when a task needs attention while its owner is out.
+- **A room with a departed owner and no admin** can't manage its access or take over tasks until the owner rejoins or gap 2's transfer exists, and a task needing attention tells nobody meanwhile.
 - **If the API can't be reached,** delivery waits for the cron, which takes 50 rows an hour, oldest first. So a backlog can take several hours, and rows that keep failing can hold up the rest. Authority doesn't wait for this.
+- **Very large room counts** are slow, and weren't tested beyond 130 rooms. ADR 0003 has the limits.
 - **A room the index never lists** keeps the person in its member list, and their invitations there stay usable until they expire, up to 7 days. `org_since` refuses their role but doesn't cover invitations.
 
 ## Gate rulings, 2026-11-05 UTC

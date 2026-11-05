@@ -2384,9 +2384,11 @@ describe("a person leaving the room's organization", () => {
     const invitation = await api(asPerson(who), "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" });
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${who}`)).status).toBe(200);
     await vi.waitFor(async () => expect(await (env as any).DB.prepare("SELECT 1 FROM membership_index WHERE principal_id = ? AND removed = 1").bind(who).first()).toBeTruthy(), { timeout: 5000 });
+    // A revocation ends it now, so this stands in for a link from before that, or one that revocation missed.
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE invitation SET status = 'pending' WHERE id = ?", invitation.body.id));
     expect((await depart(OWNER, { person: who, org: "org_a", left_at: Date.now() })).status).toBe(200);
     const withdrawn = (await auditLog(id)).filter((e) => e.action === "invitation.withdrawn" && e.target_id === invitation.body.id);
-    expect(withdrawn.map((e) => JSON.parse(e.new_json).reason)).toEqual(["org_departure"]);
+    expect(withdrawn.map((e) => JSON.parse(e.new_json).reason)).toEqual(["room_removed", "org_departure"]);
   });
 
   it("refuses a pending invitation once its creator can't invite, even with no departure", async () => {
@@ -2402,6 +2404,13 @@ describe("a person leaving the room's organization", () => {
     const accept = (token: string) => api(orgAdmin(BOB.org), "POST", "/v1/invitations/accept", { token, org_id: BOB.org, agents: [newcomer.id] });
     expect((await accept(links[0].body.token)).code).toBe("invitation_not_found");
     expect((await accept(links[1].body.token)).code).toBe("invitation_not_found");
+    // Giving them the role back doesn't bring a link back.
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: gone, kind: "person", org_id: "org_a", role: "admin" })).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${demoted}/role`, { role: "admin" })).status).toBe(200);
+    expect((await accept(links[0].body.token)).code).toBe("invitation_not_found");
+    expect((await accept(links[1].body.token)).code).toBe("invitation_not_found");
+    const reasons = (await auditLog(id)).filter((e) => e.action === "invitation.withdrawn").map((e) => JSON.parse(e.new_json).reason);
+    expect(reasons.sort()).toEqual(["role_changed", "room_removed"]);
     const fine = await accept(links[2].body.token);
     expect(fine.status).toBe(200);
     // An accepted one still replays, whoever made it.
@@ -2476,6 +2485,31 @@ describe("a person leaving the room's organization", () => {
     expect(accepted.status).toBe(200);
   });
 
+  it("doesn't take out an owner who rejoined before a delayed departure arrived, and keeps the newest", async () => {
+    const founder: Who = { id: person(), kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
+    const id = (await api(founder, "POST", "/v1/workspaces", { name: "Delayed" })).body.id as string;
+    const tasks = `/v1/workspaces/${id}/tasks`;
+    await listRoom(id, founder.id);
+    const leftOlder = Date.now();
+    const leftNewer = leftOlder + 1000;
+    const rejoinedAt = leftOlder + 500;
+    const token = () => assertion(founder, { claims: { org_since: { org_a: rejoinedAt } } });
+    // They rejoined and acted before the departure from before that rejoin reached the room.
+    const task = await api(founder, "POST", tasks, { title: "After rejoining", instructions: "x", acceptance_criteria: "y" }, { token: await token() });
+    expect(task.status).toBe(200);
+    expect((await depart(OWNER, { person: founder.id, org: "org_a", left_at: leftOlder })).status).toBe(200);
+    const log = async () => (await api(founder, "GET", `/v1/workspaces/${id}/audit`)).body.audit as any[];
+    expect((await log()).filter((e) => e.action === "owner.left_organization")).toEqual([]);
+    expect((await api(founder, "GET", `${tasks}/${task.body.id}`)).body.task.needs_attention).toBe(false);
+    // A later departure counts, and an older one arriving after it can't lower the time.
+    expect((await depart(OWNER, { person: founder.id, org: "org_a", left_at: leftNewer })).status).toBe(200);
+    const leftAt = () => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT owner_left_at AS t FROM workspace").one().t);
+    await vi.waitFor(async () => expect(await leftAt()).toBe(leftNewer), { timeout: 5000 });
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE workspace SET owner_since = NULL"));
+    await runInDurableObject(stub(id), (instance: any) => instance.fetch(new Request("https://workspace/internal/org-departure", { method: "POST", body: JSON.stringify({ person: founder.id, org: "org_a", left_at: leftOlder, actor: OWNER.id }) })));
+    expect(await leftAt()).toBe(leftNewer);
+  });
+
   it("gets through more rooms than one alarm can ask", async () => {
     const who = person();
     for (let i = 0; i < 130; i++) await listRoom(`ws_many_${i}_${who}`, who);
@@ -2532,6 +2566,7 @@ describe("a person leaving the room's organization", () => {
     await listRoom(id, who);
     const downgrade = () => runInDurableObject(stub(id), (_: any, state: any) => {
       state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN owner_left_at");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN owner_since");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
     });
     await downgrade();

@@ -847,6 +847,16 @@ fn handle_change_role(
         None => int(&member["guest_can_create"]) != 0,
         Some(v) => v.as_bool().ok_or_else(ApiError::invalid_argument)?,
     };
+    if role != "admin" && member["role"].as_str() == Some("admin") {
+        end_invitations_of(
+            sql,
+            &caller.id,
+            kind_name(caller),
+            principal,
+            "role_changed",
+            now,
+        )?;
+    }
     exec(
         sql,
         "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
@@ -927,6 +937,43 @@ async fn send_to_inbox(env: &Env, recipient: &str, body: &Value) -> bool {
     }
 }
 
+/// Ends the pending invitations this person made, because they can no longer invite. Being made an admin again later
+/// doesn't bring them back.
+fn end_invitations_of(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    creator: &str,
+    reason: &str,
+    now: i64,
+) -> R<()> {
+    let pending = rows(
+        sql,
+        "SELECT id FROM invitation WHERE created_by = ? AND status = 'pending'",
+        vec![creator.into()],
+    )?;
+    for invitation in &pending {
+        let id = text(&invitation["id"]).unwrap_or_default();
+        exec(
+            sql,
+            "UPDATE invitation SET status = 'withdrawn' WHERE id = ?",
+            vec![id.as_str().into()],
+        )?;
+        let reason = json!({ "reason": reason }).to_string();
+        audit_as(
+            sql,
+            actor,
+            actor_kind,
+            "invitation.withdrawn",
+            &id,
+            None,
+            Some(reason),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
 /// Applies the departure table to a principal's open tasks, and drops anything still queued for them.
 fn apply_departure_rules(sql: &SqlStorage, actor: &Caller, principal: &str, now: i64) -> R<()> {
     let affected = rows(sql, "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled') AND (assignee_id = ? OR reviewer_id = ? OR requester_id = ?)",
@@ -973,6 +1020,7 @@ fn remove_member(
         .unwrap_or_default();
     exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
     apply_departure_rules(sql, actor, principal, now)?;
+    end_invitations_of(sql, &actor.id, actor_kind, principal, reason, now)?;
     audit_as(
         sql,
         &actor.id,
@@ -1261,7 +1309,7 @@ impl Workspace {
         let key = key
             .filter(|k| !k.is_empty() && k.len() <= MAX_KEY_BYTES)
             .ok_or_else(ApiError::idempotency_required)?;
-        self.note_owner_return(identity)?;
+        self.note_owner_membership(identity)?;
         let sql = self.state.storage().sql();
         let identity = identity.clone();
         let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
@@ -1764,37 +1812,55 @@ impl Workspace {
         Ok(())
     }
 
-    /// Records that an owner who left the organization is back and acting here. It's separate from the command it comes
-    /// before, so a refused command can't leave them out of the room's work.
-    fn note_owner_return(&self, identity: &Identity) -> R<()> {
+    /// Keeps the start of the owner's latest membership, so a departure delayed past a rejoin can't take them out again,
+    /// and records that an owner who left is back and acting here. It's separate from the command it comes before, so a
+    /// refused command can't leave them out of the room's work.
+    fn note_owner_membership(&self, identity: &Identity) -> R<()> {
         let sql = self.state.storage().sql();
-        let room = rows(&sql, "SELECT owner_person_id, owner_org_id, owner_left_at FROM workspace WHERE owner_left_at IS NOT NULL", vec![])?;
+        let room = rows(
+            &sql,
+            "SELECT owner_person_id, owner_org_id, owner_left_at, owner_since FROM workspace",
+            vec![],
+        )?;
         let Some(room) = room.first() else {
             return Ok(());
         };
         let org = text(&room["owner_org_id"]).unwrap_or_default();
-        let back = room["owner_person_id"].as_str() == Some(identity.id.as_str())
-            && in_org(identity, &org)
-            && identity
-                .org_since
-                .get(&org)
-                .is_some_and(|since| *since > int(&room["owner_left_at"]));
-        if !back {
+        if room["owner_person_id"].as_str() != Some(identity.id.as_str()) || !in_org(identity, &org)
+        {
             return Ok(());
         }
-        let identity = identity.clone();
+        let Some(since) = identity.org_since.get(&org).copied() else {
+            return Ok(());
+        };
+        let newer = room["owner_since"].as_i64().is_none_or(|seen| since > seen);
+        let back = !room["owner_left_at"].is_null() && since > int(&room["owner_left_at"]);
+        if !newer && !back {
+            return Ok(());
+        }
+        let person = identity.id.clone();
         transaction_sync(&self.state, move || {
-            exec(&sql, "UPDATE workspace SET owner_left_at = NULL", vec![])?;
-            audit_as(
-                &sql,
-                &identity.id,
-                "person",
-                "owner.returned",
-                &identity.id,
-                None,
-                None,
-                now_ms(),
-            )
+            if newer {
+                exec(
+                    &sql,
+                    "UPDATE workspace SET owner_since = ?",
+                    vec![since.into()],
+                )?;
+            }
+            if back {
+                exec(&sql, "UPDATE workspace SET owner_left_at = NULL", vec![])?;
+                audit_as(
+                    &sql,
+                    &person,
+                    "person",
+                    "owner.returned",
+                    &person,
+                    None,
+                    None,
+                    now_ms(),
+                )?;
+            }
+            Ok(())
         })?;
         Ok(())
     }
@@ -1856,12 +1922,17 @@ impl Workspace {
             // The room keeps its owner, because nobody else can hold it yet. They stop being a participant, so their tasks
             // follow the departure table and nothing more reaches their inbox. Each departure applies once.
             if is_owner(&sql, &person)? && room_org == org {
+                let since = rows(&sql, "SELECT owner_since FROM workspace", vec![])?;
+                let rejoined = since
+                    .first()
+                    .and_then(|room| room["owner_since"].as_i64())
+                    .is_some_and(|since| since > left_at);
                 let note = json!({ "org_id": org, "left_at": left_at }).to_string();
                 let noted = rows(&sql, "SELECT id FROM audit_event WHERE action = 'owner.left_organization' AND new_json = ?", vec![note.as_str().into()])?;
-                if noted.is_empty() {
+                if !rejoined && noted.is_empty() {
                     exec(
                         &sql,
-                        "UPDATE workspace SET owner_left_at = ?",
+                        "UPDATE workspace SET owner_left_at = MAX(COALESCE(owner_left_at, 0), ?)",
                         vec![left_at.into()],
                     )?;
                     apply_departure_rules(&sql, &actor, &person, now)?;

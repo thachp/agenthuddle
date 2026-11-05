@@ -415,13 +415,37 @@ describe("leaving an organization", () => {
     expect(await listed(owner)).toContain(id);
   });
 
-  it("doesn't restore a room role by rejoining, until the owner adds them again", async () => {
+  // The room applies a departure moments after the removal answers, so these tests fix which comes first. Either way a
+  // role change is refused and changes nothing. It answers differently because the room's row is gone or still there.
+  it("doesn't restore a room role by rejoining once the departure has reached the room", async () => {
     const owner = await signUp();
     const org = await newOrg(owner);
     const id = await room(owner, org);
     const person = await joined(owner, org);
     expect((await addPerson(owner, id, org, person.id, "admin")).status).toBe(200);
-    await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`);
+    expect((await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`)).status).toBe(200);
+    await vi.waitFor(async () => expect((await dash(owner, "GET", `/v1/workspaces/${id}`)).body.members.map((m: any) => m.principal_id)).not.toContain(person.id), { timeout: 5000 });
+    expect((await setRole(owner, id, person.id, "member")).code).toBe("invalid_argument");
+    expect((await accept(person, (await invite(owner, org)).token)).status).toBe(200);
+    expect((await dash(person, "GET", `/v1/workspaces/${id}`)).code).toBe("workspace_not_found");
+    expect((await setRole(owner, id, person.id, "member")).code).toBe("invalid_argument");
+    expect((await addPerson(owner, id, org, person.id, "member")).status).toBe(200);
+    const back = await dash(person, "GET", `/v1/workspaces/${id}`);
+    expect(back.status).toBe(200);
+    expect(back.body.members.find((m: any) => m.principal_id === person.id).role).toBe("member");
+    expect((await setRole(owner, id, person.id, "guest")).status).toBe(200);
+  });
+
+  it("doesn't restore a room role by rejoining while the departure hasn't reached the room", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const id = await room(owner, org);
+    const person = await joined(owner, org);
+    expect((await addPerson(owner, id, org, person.id, "admin")).status).toBe(200);
+    // With the API unreachable, the departure waits in the outbox and the room still has its row.
+    const down = { ...e, API: { fetch: async () => { throw new Error("unreachable"); } } } as unknown as Env;
+    const request = new Request(`${BASE}/api/orgs/${org}/members/${person.id}`, { method: "DELETE" });
+    expect((await handleOrgPeople(request, down, owner.id, `/api/orgs/${org}/members/${person.id}`))!.status).toBe(200);
     expect((await setRole(owner, id, person.id, "member")).code).toBe("not_in_organization");
     expect((await accept(person, (await invite(owner, org)).token)).status).toBe(200);
     expect((await dash(person, "GET", `/v1/workspaces/${id}`)).code).toBe("workspace_not_found");
