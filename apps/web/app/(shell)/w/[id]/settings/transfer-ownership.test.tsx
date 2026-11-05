@@ -39,7 +39,7 @@ describe("transferring a workroom", () => {
     await userEvent.selectOptions(screen.getByLabelText("New owner"), "per_b");
     await userEvent.click(screen.getByRole("button", { name: "Transfer ownership" }));
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveTextContent("Bo (per_b) becomes the owner straight away");
+    expect(dialog).toHaveTextContent("New owner: per_b · Bo. They become the owner straight away");
     expect(dialog).toHaveTextContent("You become an admin of this workroom");
     expect(sent).toEqual([]);
     await userEvent.click(within(dialog).getByRole("button", { name: "Transfer ownership" }));
@@ -59,12 +59,12 @@ describe("transferring a workroom", () => {
   it("can't be started until someone is chosen", () => {
     show();
     expect(screen.getByRole("button", { name: "Transfer ownership" })).toBeDisabled();
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose an admin", "Bo (per_b)", "per_c"]);
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose an admin", "per_b · Bo", "per_c"]);
   });
 
   it("says a name that sounds like authority is only what they call themselves", () => {
     show({ candidates: [{ id: "per_x", name: "Org Admin" }] });
-    expect(screen.getAllByRole("option")[1]).toHaveTextContent("Org Admin (per_x) · Name chosen by this person");
+    expect(screen.getAllByRole("option")[1]).toHaveTextContent("per_x · Org Admin · Name chosen by this person");
   });
 
   it("drops a choice a refresh took off the list, and can't be started on nobody", async () => {

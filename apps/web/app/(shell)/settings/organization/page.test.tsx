@@ -9,7 +9,8 @@ vi.mock("@/lib/gateway/server", () => ({
   gatewayQuery: async (path: string) => {
     state.asked.push(path);
     if (path === "/api/v1/oversight/ownerless") return state.ownerless;
-    if (path.endsWith("/members")) return { ok: true, data: { members: [{ person_id: "per_me", role: "admin", created_at: 0, name: "Pat" }] } };
+    if (path === "/api/orgs/org_a/members") return { ok: true, data: { members: [{ person_id: "per_me", role: "admin", created_at: 0, name: "Pat" }, { person_id: "per_a", role: "member", created_at: 0, name: "In Acme" }] } };
+    if (path.endsWith("/members")) return { ok: true, data: { members: [{ person_id: "per_me", role: "admin", created_at: 0, name: "Pat" }, { person_id: "per_other", role: "member", created_at: 0, name: "Not offered" }] } };
     if (path.endsWith("/invitations")) return { ok: true, data: { invitations: [] } };
     if (path === "/api/agents") return { ok: true, data: { agents: [] } };
     return { ok: false, status: 404, code: "not_found" };
@@ -66,7 +67,8 @@ describe("workrooms whose owner left, on the organization page", () => {
     state.ownerless = { ok: true, data: { rooms: [{ workspace_id: "ws_1", workspace_name: "Room", owner: "per_gone", left_at: 0 }], truncated: false } };
     await show();
     expect(screen.getByLabelText("New owner")).toBeInTheDocument();
-    expect(state.asked.filter((path) => path === "/api/orgs/org_a/members").length).toBeGreaterThan(0);
-    expect(state.asked).not.toContain("/api/orgs/org_personal/invitations");
+    expect(state.asked).toContain("/api/orgs/org_a/members");
+    expect(state.asked).not.toContain("/api/orgs/org_b/members");
+    expect(screen.getAllByRole("option", { hidden: true }).map((option) => option.textContent)).toEqual(["Choose someone", "per_me · You", "per_a · In Acme"]);
   });
 });

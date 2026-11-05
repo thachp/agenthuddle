@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { CommandNotice, useCommands } from "../../w/[id]/team/commands";
@@ -45,6 +45,8 @@ export function recoveryQuestion(room: OwnerlessRoom, name: string, to: string, 
   return { title, description: `${effect} ${former} If it's archived, it stays archived. It's recorded, and everyone in the workroom is told.` };
 }
 
+const keyOf = (room: OwnerlessRoom) => `${room.workspace_id}:${room.owner}`;
+
 const dateOf = (at: number) => new Date(at).toISOString().slice(0, 10);
 
 /** Two organizations can share a name, so the same name gets its ID. */
@@ -54,14 +56,20 @@ function groupLabels(groups: PeopleGroup[]) {
 
 /**
  * One room, with its own attempt and notice, so another row can't clear a warning or a retry that belongs to this one. A
- * finished row stays until the page is left: the notice has focus, and the list may not have caught up.
+ * finished row stays with its notice, which has focus, because the list may not have caught up. A row whose answer never
+ * came stays too, even if a refresh drops it from the list: leaving would lose its retry, and sending again under a new key
+ * could say nothing changed when the first attempt did commit.
  */
-function Row({ room, groups, me, finished, finish, reopen, refresh }: { room: OwnerlessRoom; groups: PeopleGroup[]; me: string; finished: boolean; finish: () => void; reopen: () => void; refresh: () => void }) {
+function Row({ room, groups, me, finished, finish, reopen, hold, refresh }: { room: OwnerlessRoom; groups: PeopleGroup[]; me: string; finished: boolean; finish: () => void; reopen: () => void; hold: (unresolved: boolean) => void; refresh: () => void }) {
   const commands = useCommands(null);
   const { send, noticeRef, clear, retrying, review } = commands;
   const [chosen, setChosen] = useState("");
   const name = plainName(room.workspace_name);
-  const nameId = `ownerless-${room.workspace_id}`;
+  // Two rows can be for one room, after a conflict, each about a different owner.
+  const nameId = `ownerless-${keyOf(room)}`;
+  const kind = commands.notice?.kind;
+  const unresolved = kind === "unknown" || kind === "signed-out";
+  useEffect(() => hold(unresolved), [unresolved]); // eslint-disable-line react-hooks/exhaustive-deps
   // A refresh can take the chosen person off the list, so this is worked out each time.
   const person = groups.flatMap((group) => group.people).find((candidate) => candidate.id === chosen);
   const to = person ? chosen : "";
@@ -153,8 +161,6 @@ function Row({ room, groups, me, finished, finish, reopen, refresh }: { room: Ow
   );
 }
 
-const keyOf = (room: OwnerlessRoom) => `${room.workspace_id}:${room.owner}`;
-
 /**
  * Rooms of the organizations this person administers whose owner left, and naming a new owner. It's for organization admins
  * only, and hiding it only saves a refusal: each room decides for itself whether recovery runs. The list doesn't say which
@@ -163,11 +169,14 @@ const keyOf = (room: OwnerlessRoom) => `${room.workspace_id}:${room.owner}`;
 export function OwnerlessRooms({ rooms, truncated, groups, partial, me }: { rooms: OwnerlessRoom[] | null; truncated: boolean; groups: PeopleGroup[] | null; partial: boolean; me: string }) {
   const router = useRouter();
   const [finished, setFinished] = useState<OwnerlessRoom[]>([]);
+  const [held, setHeld] = useState<OwnerlessRoom[]>([]);
   const isFinished = (room: OwnerlessRoom) => finished.some((done) => keyOf(done) === keyOf(room));
-  // Rows keep their places, because moving one would lose the focus on its notice. A finished row stays after the list drops
-  // it. Each owner is a new question, so a choice made about the last one doesn't carry over.
+  // Rows keep their places, because moving one would lose the focus on its notice. Finished and unresolved rows stay after the
+  // list drops them, without their controls, since the list no longer says the room can be asked about. Each owner is a new
+  // question, so a choice made about the last one doesn't carry over.
   const listed = groups ? (rooms ?? []) : [];
-  const shown = [...listed.map((room) => ({ room, done: isFinished(room) })), ...finished.filter((room) => !listed.some((other) => keyOf(other) === keyOf(room))).map((room) => ({ room, done: true }))];
+  const kept = [...finished, ...held].filter((room, index, all) => !listed.some((other) => keyOf(other) === keyOf(room)) && all.findIndex((other) => keyOf(other) === keyOf(room)) === index);
+  const shown = [...listed.map((room) => ({ room, done: isFinished(room) })), ...kept.map((room) => ({ room, done: true }))];
   return (
     <section aria-labelledby="org-ownerless" className="space-y-3">
       <h2 id="org-ownerless" className="text-lg font-medium">
@@ -175,7 +184,7 @@ export function OwnerlessRooms({ rooms, truncated, groups, partial, me }: { room
       </h2>
       <p className="text-sm text-muted-foreground">An admin of a workroom's organization can name a new owner once its owner has left. This covers every organization you administer, including workrooms you aren't in.</p>
       {rooms === null || (rooms.length > 0 && groups === null) ? <ReadFailure /> : null}
-      {rooms?.length === 0 && finished.length === 0 ? <p>No workrooms are waiting for a new owner.</p> : null}
+      {rooms?.length === 0 && shown.length === 0 ? <p>No workrooms are waiting for a new owner.</p> : null}
       {shown.length > 0 ? (
         <ul className="divide-y rounded-lg border">
           {shown.map(({ room, done }) => (
@@ -187,6 +196,7 @@ export function OwnerlessRooms({ rooms, truncated, groups, partial, me }: { room
               finished={done}
               finish={() => setFinished((current) => (current.some((other) => keyOf(other) === keyOf(room)) ? current : [...current, room]))}
               reopen={() => setFinished((current) => current.filter((other) => keyOf(other) !== keyOf(room)))}
+              hold={(unresolved) => setHeld((current) => [...current.filter((other) => keyOf(other) !== keyOf(room)), ...(unresolved ? [room] : [])])}
               refresh={router.refresh}
             />
           ))}

@@ -68,13 +68,14 @@ export function explainRefusal(code: string, status = 400) {
 
 /**
  * A person as text, for someone choosing who gets authority, where nothing can be taken back by them accepting or waiting.
- * It always has the ID, and says when a name that sounds like authority is only what they call themselves, because a native
+ * It starts with the ID, and says when a name that sounds like authority is only what they call themselves, because a native
  * option can't hold a badge.
  */
 export function personChoice(person: { id: string; name: string | null }, me?: string) {
-  if (person.id === me) return `You (${person.id})`;
+  if (person.id === me) return `${person.id} · You`;
   if (!person.name) return person.id;
   const name = plainName(person.name);
-  const label = `${name} (${person.id})`;
-  return authoritySoundingName(name) ? `${label} · ${chosenNameLabel("person")}` : label;
+  const label = `${person.id} · ${name}`;
+  // A name can hold what looks like someone else's ID, which is why the real one comes first, where nothing can cut it off.
+  return authoritySoundingName(name) || /per_/i.test(name) ? `${label} · ${chosenNameLabel("person")}` : label;
 }

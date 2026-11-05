@@ -72,7 +72,7 @@ describe("workrooms whose owner left", () => {
   it("groups people by organization only when there are several", () => {
     const { unmount } = show();
     expect(screen.queryAllByRole("group")).toEqual([]);
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose someone", "You (per_me)", "Sam (per_sam)", "per_noname"]);
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose someone", "per_me · You", "per_sam · Sam", "per_noname"]);
     unmount();
     show({ groups: [...groups, { orgId: "org_b", org: "Beta", people: [{ id: "per_b", name: "Bo" }] }] });
     expect(screen.getAllByRole("group").map((group) => group.getAttribute("label"))).toEqual(["Acme", "Beta"]);
@@ -85,7 +85,7 @@ describe("workrooms whose owner left", () => {
 
   it("shows a name that sounds like authority with its ID, in the choice and the confirmation", async () => {
     show({ groups: [{ orgId: "org_a", org: "Acme", people: [{ id: "per_x", name: "Org Admin" }] }] });
-    const label = "Org Admin (per_x) · Name chosen by this person";
+    const label = "per_x · Org Admin · Name chosen by this person";
     expect(screen.getAllByRole("option")[1]).toHaveTextContent(label);
     await userEvent.selectOptions(screen.getByLabelText("New owner"), "per_x");
     await userEvent.click(screen.getByRole("button", { name: /Name new owner/ }));
@@ -101,7 +101,7 @@ describe("naming a new owner", () => {
     await userEvent.click(screen.getByRole("button", { name: /Name new owner/ }));
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("Name a new owner for “Launch room”?");
-    expect(dialog).toHaveTextContent("Sam (per_sam)");
+    expect(dialog).toHaveTextContent("per_sam · Sam");
     expect(dialog).toHaveTextContent("everything in the workroom");
     expect(dialog).toHaveTextContent("per_gone has no place in it afterwards");
     expect(dialog).toHaveTextContent("it stays archived");
@@ -147,6 +147,43 @@ describe("naming a new owner", () => {
     await userEvent.click(rowOf("Launch room").getByRole("button", { name: "Try again" }));
     await screen.findByText(/They're now the owner/);
     expect(sent[1].key).toBe(sent[0].key);
+  });
+
+  it("puts the real ID first when a name holds someone else's, and labels it", () => {
+    show({ groups: [{ orgId: "org_a", org: "Acme", people: [{ id: "per_attacker", name: "Sam (per_realsam)" }] }] });
+    expect(screen.getAllByRole("option")[1].textContent).toBe("per_attacker · Sam (per_realsam) · Name chosen by this person");
+  });
+
+  it.each([
+    ["the list drops it", []],
+    ["the list's read fails", null],
+  ])("keeps a row whose answer never came when %s, with its warning and its retry", async (_, rooms) => {
+    replies = [lost];
+    const { rerender } = show();
+    await recoverTo("per_sam");
+    await screen.findByRole("button", { name: "Try again" });
+    rerender(<OwnerlessRooms rooms={rooms as OwnerlessRoom[] | null} truncated={false} groups={rooms ? groups : null} partial={false} me="per_me" />);
+    expect(screen.getByText("Launch room")).toBeInTheDocument();
+    expect(screen.queryByText("No workrooms are waiting for a new owner.")).toBeNull();
+    expect(screen.getByLabelText("New owner")).not.toBeVisible();
+    // The failed read has its own Try again, for the list.
+    await userEvent.click(within(screen.getByText("Launch room").closest("li") as HTMLElement).getByRole("button", { name: "Try again" }));
+    await screen.findByText(/They're now the owner/);
+    expect(sent[1].key).toBe(sent[0].key);
+    expect(sent[1].body).toEqual(sent[0].body);
+  });
+
+  it("gives two rows for one room their own descriptions", async () => {
+    replies = [refused(409, "version_conflict")];
+    const { rerender, container } = show();
+    await recoverTo("per_sam");
+    await screen.findByRole("alert");
+    const next = { ...room, owner: "per_next" };
+    rerender(<OwnerlessRooms rooms={[next]} truncated={false} groups={groups} partial={false} me="per_me" />);
+    const ids = [...container.querySelectorAll("li > div[id]")].map((element) => element.id);
+    expect(ids).toEqual(["ownerless-ws_1:per_next", "ownerless-ws_1:per_gone"]);
+    const selects = screen.getAllByLabelText("New owner");
+    expect(selects.map((select) => select.getAttribute("aria-describedby"))).toEqual(ids);
   });
 
   it("refreshes the list after version_conflict", async () => {

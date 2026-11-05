@@ -41,7 +41,7 @@ describe("workroom settings' ownership section", () => {
   it("offers only human admins in the workroom's organization, by name and ID", async () => {
     await show();
     const offered = screen.getAllByRole("option").map((option) => option.textContent);
-    expect(offered).toEqual(["Choose an admin", "Heir (per_heir)"]);
+    expect(offered).toEqual(["Choose an admin", "per_heir · Heir"]);
   });
 
   it("shows IDs if the names can't be read", async () => {

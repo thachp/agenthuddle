@@ -78,7 +78,7 @@ export function TransferOwnership({ roomId, name, policyVersion, archived, isOwn
             label="Transfer ownership"
             disabled={!to || retrying}
             title={<>Transfer “{room}”?</>}
-            description={`${person ? personChoice(person) : ""} becomes the owner straight away, and doesn't have to accept. You become an admin of this workroom, so you can't appoint admins or transfer it back unless they do. It's recorded, and everyone in the workroom is told.`}
+            description={`New owner: ${person ? personChoice(person) : ""}. They become the owner straight away, and don't have to accept. You become an admin of this workroom, so you can't appoint admins or transfer it back unless they do. It's recorded, and everyone in the workroom is told.`}
             confirm="Transfer ownership"
             focusAfter={noticeRef}
             action={() =>
