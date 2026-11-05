@@ -9,7 +9,7 @@
 // journey's requests for staging here, so the driver and the test sign-up meet with their real gates on.
 import { spawn, spawnSync } from "node:child_process";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -164,7 +164,16 @@ try {
   if (testPeople) {
     const redirect = ["--import", join(here, "rehearse-fetch.mjs")];
     const rehearsal = { PODSTER_E2E_REHEARSE_PORT: String(port), PODSTER_E2E_SIGNUP_SECRET: signupSecret, PODSTER_E2E_COOKIE_A: "", PODSTER_E2E_COOKIE_B: "" };
+    const resultFiles = () => (existsSync(join(here, "results")) ? readdirSync(join(here, "results")) : []);
+    const before = new Set(resultFiles());
     code = await child("journey.mjs", ["--base-url", `https://${STAGING_HOST}`, ...passOn], rehearsal, redirect);
+    // docs/m0-gate.md records passes from these files, so a rehearsal's must never pass for a deployed run's.
+    const written = resultFiles().filter((name) => !before.has(name));
+    const kind = written.length === 1 ? JSON.parse(readFileSync(join(here, "results", written[0]), "utf8")).kind : undefined;
+    if (kind !== "rehearsal" || !written[0].startsWith("rehearsal-")) {
+      console.error(`A rehearsal has to write one result marked as one. It wrote ${written.join(", ") || "none"}, of kind ${kind}.`);
+      code = 1;
+    }
     if (code !== 0) console.error(`\n--- last of the stack's log ---\n${log.join("").slice(-4000)}`);
     stop();
     process.exit(code);

@@ -111,7 +111,7 @@ cd e2e && node run-local.mjs
 
 This builds the API's release build, starts it and the gateway under `wrangler dev` with throwaway keys and empty databases, then runs the journey and the probe. CI runs the same thing. A check marked `GAP` is something the product doesn't do yet. It doesn't fail the run unless you pass `--strict`.
 
-`--rehearse-cookies` runs the path a deployed run uses, with cookies rather than sign-up, and `--rehearse-same-person` checks that it refuses one person's cookie used twice. `--rehearse-test-people` runs [the test-people path](#with-test-people) with staging's URLs, `APP_URL` and gates, on a local stack and throwaway secret. It reaches nothing remote, and CI runs it too. It's still not a deployed run: Cloudflare's real routing, limits and D1 aren't in it.
+`--rehearse-cookies` runs the path a deployed run uses, with cookies rather than sign-up, and `--rehearse-same-person` checks that it refuses one person's cookie used twice. `--rehearse-test-people` runs [the test-people path](#with-test-people) with staging's URLs, `APP_URL` and gates, on a local stack and throwaway secret. It reaches nothing remote, and CI runs it too. It's still not a deployed run: Cloudflare's real routing, limits and D1 aren't in it. So its file is `e2e/results/rehearsal-<host>-<time>.json`, with `"kind": "rehearsal"`, and never counts toward a status.
 
 ## Running it on staging
 
@@ -167,7 +167,13 @@ Steps 2 and 3 above are replaced by this. Paste the secret when it waits:
 read -rs PODSTER_E2E_SIGNUP_SECRET && export PODSTER_E2E_SIGNUP_SECRET
 ```
 
-Then do steps 1, 4, 5 and 6. If a run is killed outright, its sessions end by themselves within two hours, and step 7 isn't needed.
+Then do steps 1, 4, 5 and 6, and check the results file says `"kind": "deployment"`. If a run is killed outright, its sessions end by themselves within two hours, because a test session's expiry never moves, and step 7 isn't needed.
+
+Finish by turning the route off, as soon as the run's result is recorded, from `apps/gateway`. Whether it passed or not, the route shouldn't wait on staging for the next run, which can set a new secret.
+
+```bash
+npx wrangler secret delete E2E_SIGNUP_SECRET --env staging
+```
 
 **A run this way used test people, so it doesn't prove:**
 

@@ -310,6 +310,16 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
     advanced: { database: { validateSchema: false, ...(testPeople ? { generateId: ({ model }: { model: string }) => `${model === "user" ? TEST_ID_PREFIX : ""}${crypto.randomUUID().replaceAll("-", "")}` } : {}) } },
     socialProviders: social,
     databaseHooks: {
+      session: {
+        update: {
+          // Refreshing moves a session's expiry a full term out, and any route that reads a session can do it. A test
+          // session keeps the end it started with, on every instance, so a killed run's session really does end.
+          before: async (_session, ctx) => {
+            const current = ctx?.context.session as { session: { expiresAt: Date }; user: { id: string } } | null | undefined;
+            return current?.user.id.startsWith(TEST_ID_PREFIX) ? { data: { expiresAt: current.session.expiresAt } } : undefined;
+          },
+        },
+      },
       user: {
         create: {
           // An unverified email could claim someone else's address and lock out its real owner.

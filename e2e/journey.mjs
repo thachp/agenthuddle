@@ -714,9 +714,11 @@ for (const suite of [kernel, acceptance]) {
 const sessionsEnded = await endSessions();
 
 const counts = report.counts();
-const summary = { target: new URL(base).origin, kind: isLocal ? "local" : "deployment", started, finished: new Date().toISOString(), persons_distinct: personA.id !== personB.id, people: signupSecret ? "test_signup" : process.env.PODSTER_E2E_COOKIE_A ? "session_cookies" : "local_signup", counts, results: report.results };
+// A rehearsal's target says staging, but nothing left this machine, so it must never read like a deployed run.
+const rehearsal = Boolean(process.env.PODSTER_E2E_REHEARSE_PORT);
+const summary = { target: new URL(base).origin, kind: rehearsal ? "rehearsal" : isLocal ? "local" : "deployment", started, finished: new Date().toISOString(), persons_distinct: personA.id !== personB.id, people: signupSecret ? "test_signup" : process.env.PODSTER_E2E_COOKIE_A ? "session_cookies" : "local_signup", counts, results: report.results };
 mkdirSync(join(here, "results"), { recursive: true });
-const file = join(here, "results", `${host}-${started.replaceAll(":", "-").slice(0, 19)}.json`);
+const file = join(here, "results", `${rehearsal ? "rehearsal-" : ""}${host}-${started.replaceAll(":", "-").slice(0, 19)}.json`);
 writeFileSync(file, `${JSON.stringify(summary, null, 2)}\n`);
 console.log(`\n${counts.pass} passed, ${counts.fail} failed, ${counts.gap} gaps. Results: ${file}`);
 process.exit(counts.fail > 0 || crashed || !sessionsEnded || (strict && counts.gap > 0) ? 1 : 0);

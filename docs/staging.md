@@ -150,13 +150,13 @@ To turn it on, from `apps/gateway`, once a build with the route is deployed. Pas
 npx wrangler secret put E2E_SIGNUP_SECRET --env staging
 ```
 
-To turn it off, which takes effect at once:
+Turn it off as soon as a run's result is recorded, and set a new secret for the next run. This takes effect at once:
 
 ```bash
 npx wrangler secret delete E2E_SIGNUP_SECRET --env staging
 ```
 
-`POST /api/auth/sign-up/e2e` takes no input. Each use makes a new person and answers with their session cookie, which lasts two hours. It's limited to 6 people a minute and 40 a day across all clients, and wrong guesses count under the limit per client that other sign-up routes have. Password sign-in stays off for everything else, and nobody ever sees a test person's password, so they can't be signed in to again, and no request can name, sign in as or link to anyone else.
+`POST /api/auth/sign-up/e2e` takes no input. Each use makes a new person and answers with their session cookie. The session ends after two hours, and refreshing doesn't move that. It's limited to 6 people a minute and 40 a day across all clients, and wrong guesses count under the limit per client that other sign-up routes have. Password sign-in stays off for everything else, and nobody ever sees a test person's password, so they can't be signed in to again, and no request can name, sign in as or link to anyone else.
 
 Test people are easy to tell apart, and only this route can make them:
 

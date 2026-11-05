@@ -2575,6 +2575,55 @@ describe("staging's test sign-up", () => {
     expect(await peopleCount()).toBe(before);
   });
 
+  it("stops at 40 people a day, whatever the minute's count is", async () => {
+    const live = { ...staging, STRICT_COUNTER: e.STRICT_COUNTER };
+    const stub = e.STRICT_COUNTER.get(e.STRICT_COUNTER.idFromName("e2e-signup"));
+    await runInDurableObject(stub, async (_counter, state) => {
+      const now = Date.now();
+      await state.storage.put("count", { minuteStart: now, minute: 0, dayStart: now, day: 39 });
+    });
+    expect((await signUpAs(live)).status).toBe(200);
+    const over = await signUpAs(live);
+    expect(over.status).toBe(429);
+    // Until the day ends, not the minute.
+    expect(Number(over.headers.get("retry-after"))).toBeGreaterThan(3600);
+    await runInDurableObject(stub, async (_counter, state) => state.storage.deleteAll());
+  });
+
+  describe("a test session's expiry never moves", () => {
+    const expiry = async (cookie: string) => {
+      const token = decodeURIComponent(cookie.match(/session_token=([^;]+)/)![1]).split(".")[0];
+      return (await e.DB.prepare(`SELECT expiresAt FROM session WHERE token = ?`).bind(token).first<{ expiresAt: string }>())!.expiresAt;
+    };
+    const getSession = (cookie: string, env: object = staging) => send(`${GATEWAY}/api/auth/get-session`, { headers: { cookie } }, env);
+
+    it("stays two hours through the public route that slides sessions", async () => {
+      const { cookie } = await testPerson();
+      const before = await expiry(cookie);
+      for (const env of [staging, { ...staging, ENABLE_E2E_SIGNUP: undefined, E2E_SIGNUP_SECRET: undefined }]) {
+        const res = await getSession(cookie, env);
+        expect(res.status).toBe(200);
+        expect((await res.json<any>()).user.email.endsWith("@e2e.podster.invalid")).toBe(true);
+        expect(await expiry(cookie)).toBe(before);
+      }
+      expect(new Date(before).getTime() - Date.now()).toBeLessThanOrEqual(2 * 60 * 60 * 1000);
+      expect((await send(`${GATEWAY}/api/orgs`, { headers: { cookie } })).status).toBe(200);
+    });
+
+    it("still slides everyone else's", async () => {
+      const email = `${unique("p")}@example.test`;
+      const res = await post("/api/auth/sign-up/email", { email, password: "local-test-password-123", name: "Real" });
+      const cookie = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
+      const signed = await call("/api/auth/get-session", { headers: { cookie } });
+      const { session } = await signed.json<any>();
+      const soon = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      await e.DB.prepare(`UPDATE session SET expiresAt = ? WHERE id = ?`).bind(soon, session.id).run();
+      expect((await call("/api/auth/get-session", { headers: { cookie } })).status).toBe(200);
+      const after = (await e.DB.prepare(`SELECT expiresAt FROM session WHERE id = ?`).bind(session.id).first<{ expiresAt: string }>())!.expiresAt;
+      expect(new Date(after).getTime() - Date.now()).toBeGreaterThan(24 * 60 * 60 * 1000);
+    });
+  });
+
   it("wrong guesses count under the route's limit per client, like other sign-up routes", () => {
     expect(sensitiveRoute("POST", "/api/auth/sign-up/e2e")).toBe("auth");
   });
