@@ -46,6 +46,11 @@ ALTER TABLE workspace ADD COLUMN owner_left_at INTEGER;
 ALTER TABLE workspace ADD COLUMN owner_since INTEGER;
 ", "
 CREATE TABLE org_revocation (org_id TEXT PRIMARY KEY, revoked_at INTEGER NOT NULL);
+", "
+CREATE TABLE denial (day INTEGER NOT NULL, actor_id TEXT NOT NULL, actor_kind TEXT NOT NULL, action TEXT NOT NULL, code TEXT NOT NULL,
+  count INTEGER NOT NULL, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, first_actor_id TEXT NOT NULL, last_actor_id TEXT NOT NULL,
+  PRIMARY KEY (day, actor_id, actor_kind, action, code));
+CREATE INDEX denial_last_at ON denial (last_at);
 "];
 
 pub fn int(value: &Value) -> i64 {
