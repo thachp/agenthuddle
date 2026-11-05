@@ -12,6 +12,8 @@ BASE_URL=http://localhost:8787
 
 This only stops the redirect. A working local run also needs `AUTH_SECRET` and `ASSERTION_SIGNING_JWK` there, local D1 migrations, and the API Worker running with a matching `ASSERTION_KEYS`.
 
+An OAuth client's redirect URI can't be on the gateway's own hostname, whatever the port, so a gateway on `http://localhost:8787` refuses `http://localhost:*` redirects. Use `http://127.0.0.1:<port>` for a local client.
+
 ## Before you start
 
 - Node, and `npm ci` in `apps/gateway` and `apps/api`.

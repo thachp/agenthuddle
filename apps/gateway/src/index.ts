@@ -703,7 +703,8 @@ function namesOurHost(env: Env, redirectUri: unknown, ...others: string[]) {
   try {
     return [env.BASE_URL, env.APP_URL, ...others].some((ours) => ours && hostOf(ours) === hostOf(redirectUri));
   } catch {
-    return false;
+    // What this can't read, it can't say is somewhere else.
+    return true;
   }
 }
 

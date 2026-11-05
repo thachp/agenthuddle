@@ -316,7 +316,7 @@ describe("email sign-in", () => {
       const { client_id } = await res.json<{ client_id: string }>();
       return new URLSearchParams({ response_type: "code", client_id, redirect_uri: redirect, scope: "mcp", code_challenge: "x".repeat(43), code_challenge_method: "S256", state: "s" }).toString();
     }
-    const owned = [`${APP}/api/auth/magic-link/verify?token=t&callbackURL=%2F`, `${GATEWAY}/cb`, "https://APP.test/cb", "https://app.test./cb", "https://app.test:8443/cb", "https://user@app.test/cb"];
+    const owned = [`${APP}/api/auth/magic-link/verify?token=t&callbackURL=%2F`, `${GATEWAY}/cb`, "https://APP.test/cb", "https://app.test./cb", "https://app.test:8443/cb", "https://user@app.test/cb", "http://app.test/cb", `http://gateway.test/cb`, "not a url"];
 
     for (const redirect of owned) {
       it(`can't be registered: ${redirect}`, async () => {
@@ -325,6 +325,22 @@ describe("email sign-in", () => {
         expect((await res.json<any>()).error).toBe("invalid_redirect_uri");
       });
     }
+
+    it("goes by the real host, so a name before an @ is only a name", async () => {
+      const s = stack();
+      const register = (redirect: string) => s.fetch(`${GATEWAY}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: [redirect], client_name: "x", token_endpoint_auth_method: "none" }) });
+      // Whoever refuses it, it isn't this check: the real host is elsewhere.
+      expect((await (await register("https://app.test@evil.test/cb")).json<any>()).error_description).not.toBe("redirect_uri_on_our_host");
+      expect((await (await register("https://evil.test@app.test/cb")).json<any>()).error_description).toBe("redirect_uri_on_our_host");
+    });
+
+    it("on a local gateway, refuses every localhost port but not 127.0.0.1", async () => {
+      const local = "http://localhost:8787";
+      const s = stack({ BASE_URL: local, APP_URL: undefined });
+      const register = (redirect: string) => s.fetch(`${local}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: [redirect], client_name: "x", token_endpoint_auth_method: "none" }) });
+      expect((await register("http://localhost:3000/cb")).status).toBe(400);
+      expect((await register("http://127.0.0.1:3000/cb")).status).toBe(201);
+    });
 
     it("still registers anyone else's", async () => {
       const res = await stack().fetch(`${GATEWAY}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.test/cb?a=1", "https://app.test.evil.test/cb"], client_name: "x", token_endpoint_auth_method: "none" }) });
