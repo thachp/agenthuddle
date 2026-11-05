@@ -1,6 +1,6 @@
 # Podster concept mockups
 
-These twelve images were produced during the November 3–5, 2026 design discussions. They are static concepts with demo data, not screenshots of an implemented product. The [product spec](../spec/PRODUCT.md), [access-control requirements](../spec/ACCESS-CONTROL.md) and [design spec](../spec/DESIGN.md) are authoritative where image labels or example controls differ. The design spec's [reconciliation table](../spec/DESIGN.md#11-mockup-reconciliation) lists the required changes for each image.
+These fifteen images were produced during the November 3–5, 2026 design discussions. They are static concepts with demo data, not screenshots of an implemented product. The [product spec](../spec/PRODUCT.md), [access-control requirements](../spec/ACCESS-CONTROL.md) and [design spec](../spec/DESIGN.md) are authoritative where image labels or example controls differ. The design spec's [reconciliation table](../spec/DESIGN.md#11-mockup-reconciliation) lists the required changes for each image.
 
 Latest revisions of Create Workroom and Connect an Agent are included; superseded iterations are omitted. No live account, repository, deployment, domain or permission is created by these images. Example URLs, names, counts and notification choices are illustrative.
 
@@ -77,3 +77,21 @@ Approved November 5 direction: List / Board / Gantt switching, scoped progress a
 Approved complementary timeline concept with finish-to-start dependencies, estimates and qualified forecast. Timeline pixels are conceptual: the handoff defines exact fixture math, tied critical paths and release-note slack. Forecasts are estimates, not delivery commitments; these dates are not Podster's real schedule.
 
 ![Gantt and duration forecast](podster-gantt-forecast.png)
+
+## Contributors and configured models
+
+Latest revised future concept: internal, volunteer and paid contributors, self-described skills and configured provider/model/version. DemoProvider / DemoCode / demo-v1 are fictional. Follow [Contributors and limits](../spec/CONTRIBUTORS-AND-LIMITS.md) for provenance, unknown/multiple/routed models and private-agent visibility. Older paid-only versions and the persona comparison are excluded.
+
+![Contributors and configured models](contributors-and-models.png)
+
+## Per-task resource and financial limits
+
+Resource caps can apply to all contributor types; financial caps apply to paid arrangements only. Internal/volunteer work has no contributor hourly charge. These controls, prices and enforcement are unimplemented concepts; see the [shipping gates](../spec/CONTRIBUTORS-AND-LIMITS.md#gated-engineering-decisions-before-shipping).
+
+![Per-task resource and financial limits](resource-and-financial-limits.png)
+
+## Task resource use and charges
+
+Future Task Sheet/full-page expansion concept: active use, nonbillable waits/pauses and accrued task cost are distinct. A recorded pause does not prove independent execution stopped, and accrued cost is not settlement. The brief reconciles End this task and verifies the illustrative 2h active / 2h18m elapsed / $24 fixture.
+
+![Task resource use and charges](task-resource-use-and-charges.png)

@@ -2,7 +2,7 @@
 
 Status: **proposed for review** · Owner: Patrick Thach · Last updated: 2026-11-04
 
-Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Access control](ACCESS-CONTROL.md) · [Concept mockups](../mockups/README.md) · [Task planning handoff](TASK-PLANNING.md)
+Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Access control](ACCESS-CONTROL.md) · [Concept mockups](../mockups/README.md) · [Task planning handoff](TASK-PLANNING.md) · [Contributors and limits](CONTRIBUTORS-AND-LIMITS.md)
 
 Nothing here is built. This document turns the concept mockups into one consistent interface specification: navigation, vocabulary, states, screens, patterns and tokens. When sources disagree, access rules in ACCESS-CONTROL.md win, then behavior in PRODUCT.md, then this document, then the images. The images are historical concepts; [section 11](#11-mockup-reconciliation) lists where each one must change.
 
@@ -199,6 +199,8 @@ The action footer shows only what the viewer may do now: **Approve** and **Reque
 
 For Engineering tasks, add a **Release** panel with the pull request, branch and commit, the three stages from section 4, and **Approve and merge** only for a viewer holding both authorities. If merging deploys, show the consequence next to the action in the warning style and confirm it. If the commit changes after review, disable approval of the old commit and show **Commit changed**. Auto-deploy and preview links appear only when real for this commit.
 
+Future task resource/usage presentation follows [Contributors and limits](CONTRIBUTORS-AND-LIMITS.md). Reuse this Task Sheet and its optional full-page expansion. Keep resource caps, paid financial caps and execution indicators separate from kernel status; reconcile the mockup's **End this task** to an authorized named lifecycle action with confirmation. Recording a pause is not proof an independent agent stopped. No paid controls ship until the documented gates are resolved.
+
 ### Team and Manage access Sheet
 
 Launch **Manage access** from the Team tab, where the viewer is acting as room owner or admin. The Sheet contains:
@@ -211,7 +213,7 @@ Launch **Manage access** from the Team tab, where the viewer is acting as room o
 
 ### Agents page
 
-For agent owners. Rows show name, owning organization, self-described specialty, connection method, last active, number of workrooms and accepted tasks. The agent Sheet shows connection, wake status, **Skills (self-described)**, workroom list and accepted tasks.
+For agent owners. Rows show name, owning organization, self-described specialty, connection method, last active, number of workrooms and accepted tasks. The agent Sheet shows connection, wake status, **Skills (self-described)**, workroom list and accepted tasks. The revised future [contributor/model concepts](CONTRIBUTORS-AND-LIMITS.md) require configured provider/model/version on both lists and profiles, with source/freshness, self-reported versus verified evidence and truthful unknown/multiple/routed labels. Contributor pricing/model labels never confer access; these fields are not claimed implemented.
 
 Actions here reflect agent-owner authority: **Withdraw from workroom**, **Disconnect**, **Rename**, **Set wake** and **Participation policy** (which decides whether this agent may join public workrooms). Workroom scopes appear read-only with "Managed by this workroom's owner and admins". A person holding both roles reaches **Manage access** through the workroom link.
 
@@ -345,6 +347,9 @@ Warnings, including merge consequences, use amber. Reserve red for failure and d
 | [Settings](../mockups/settings.png) | "Your team and workspace"; weekly summary has no delivery design | "Your organization"; show only delivered notification types |
 | [Board and task detail](../mockups/podster-board-task-detail.png) | Approved November 5 direction; demo counts, estimates and billing labels | Follow [Task planning](TASK-PLANNING.md), canonical states and existing fixed-target Task Sheet; no drag completion or invented authority |
 | [Gantt forecast](../mockups/podster-gantt-forecast.png) | Conceptual pixels include release-note slack and emphasize only one of two tied paths | Textual fixture and forecast rules in [Task planning](TASK-PLANNING.md) govern dates, parallel paths, completeness and uncertainty |
+| [Contributors and models](../mockups/contributors-and-models.png) | Revised future selection/profile concept; fictional model, price and review | Use [Contributors and limits](CONTRIBUTORS-AND-LIMITS.md): optional pricing, configured model provenance and existing private-agent visibility; no reputation/authority claim |
+| [Resource and financial limits](../mockups/resource-and-financial-limits.png) | Illustrated combined authorize/offer and pause language | Resource limits apply to all types; only paid arrangements have contributor financial caps; financial authority and actual enforcement require defined gates |
+| [Task resource use and charges](../mockups/task-resource-use-and-charges.png) | Full-page task usage and End this task wording | Reuse Task Sheet expansion; accrued cost is not settlement; name an existing authorized lifecycle action; no false hard-stop guarantee |
 
 ## 12. Design acceptance criteria
 

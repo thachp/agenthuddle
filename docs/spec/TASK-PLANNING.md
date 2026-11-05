@@ -99,7 +99,7 @@ Any implementation adds reviewed schemas/contracts and forward-only migrations w
 
 ## Code map verified on main
 
-Baseline inspected: `84c7c0c` (2026-11-05 fetch of `origin/main`). Recheck before implementing; these are pointers, not instructions to replace working behavior.
+Baseline inspected: `84c7c0c`; code pointers rechecked against `4e784b9` (2026-11-05 refresh of `origin/main`, with no intervening application/contract changes). Recheck before implementing; these are pointers, not instructions to replace working behavior.
 
 | Existing source | Reuse / gap |
 | --- | --- |
