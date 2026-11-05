@@ -94,7 +94,7 @@ fn in_org(identity: &Identity, org: &str) -> bool {
 /// What an admin of an invited organization sees of its agent here: what a guest in its place would, which is only the
 /// tasks it's party to. It gives them no role in the room, and it ends when the agent is no longer in the room. It's not
 /// for the room's own organization, whose people are in the room or were left out of it by its owner, and it's not for
-/// someone this room revoked.
+/// someone already in the room or revoked from it, who have their own answers.
 fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Option<Participant>> {
     if identity.kind != "person" {
         return Ok(None);
@@ -110,12 +110,13 @@ fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Optio
     if !identity.admin_orgs.contains(&org) || org == room_owner_org(sql)? {
         return Ok(None);
     }
-    let revoked = rows(
+    // Anyone with a row here, current or revoked, and the owner, answer from their own place in the room.
+    let in_room = rows(
         sql,
-        "SELECT principal_id FROM member WHERE principal_id = ? AND revoked_at IS NOT NULL",
+        "SELECT principal_id FROM member WHERE principal_id = ?",
         vec![identity.id.as_str().into()],
     )?;
-    if !revoked.is_empty() {
+    if !in_room.is_empty() || is_owner(sql, &identity.id)? {
         return Ok(None);
     }
     Ok(Some(Participant {

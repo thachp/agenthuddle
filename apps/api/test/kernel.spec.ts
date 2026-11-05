@@ -3035,6 +3035,14 @@ describe("an organization's oversight of its own agent", () => {
     expect((await seen(overseer(), id, agent)).status).toBe(200);
     // The owner has their own routes, and it isn't one of them.
     expect((await seen(OWNER, id, LEAD)).code).toBe("not_allowed");
+    // Someone in the room who also administers the invited agent's organization has the room's normal reads instead.
+    const member: Who = { id: "per_in_room_too", kind: "person", org: "org_a", orgs: ["org_a", BOB.org], adminOrgs: [BOB.org] };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: member.id, kind: "person", org_id: "org_a", role: "member" })).status).toBe(200);
+    expect((await seen(member, id, agent)).code).toBe("not_allowed");
+    expect((await api(member, "GET", `/v1/workspaces/${id}/tasks`)).status).toBe(200);
+    // So does the owner, even as that organization's admin.
+    const ownerToo: Who = { ...OWNER, orgs: ["org_a", BOB.org], adminOrgs: ["org_a", BOB.org] };
+    expect((await seen(ownerToo, id, agent)).code).toBe("not_allowed");
   });
 
   it("ends when the organization is revoked from the room", async () => {
