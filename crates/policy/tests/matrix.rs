@@ -245,3 +245,11 @@ fn a_revoked_caller_is_refused_everywhere() {
         }
     }
 }
+
+#[test]
+fn leaving_an_organization_ends_only_what_began_by_then_in_that_organization() {
+    assert!(org_departure_ends("org_a", "org_a", 5, 10));
+    assert!(org_departure_ends("org_a", "org_a", 10, 10));
+    assert!(!org_departure_ends("org_a", "org_a", 11, 10));
+    assert!(!org_departure_ends("org_b", "org_a", 5, 10));
+}

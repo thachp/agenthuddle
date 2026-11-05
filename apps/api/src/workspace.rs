@@ -18,7 +18,7 @@ use podster_core::{
 };
 use podster_policy::{
     authorize_reviewer_change, authorize_task, authorize_workroom, can_review, can_see_task,
-    Caller, PrincipalKind, Role, TaskAction, Verdict, WorkroomAction,
+    org_departure_ends, Caller, PrincipalKind, Role, TaskAction, Verdict, WorkroomAction,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1734,7 +1734,85 @@ impl Workspace {
         Ok(json!({ "id": identity.workspace_id, "owner": identity.id }))
     }
 
+    /// Applies a person's departure from an organization, from this room's own state. Repeating it changes nothing.
+    fn org_departure(&self, body: &Value) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Ok(json!({ "applied": false }));
+        }
+        let person = required(body, "person")?;
+        let org = required(body, "org")?;
+        let actor_id = required(body, "actor")?;
+        let left_at = body["left_at"]
+            .as_i64()
+            .ok_or_else(ApiError::invalid_argument)?;
+        transaction_sync(&self.state, move || {
+            let now = now_ms();
+            let actor = Caller {
+                id: actor_id.clone(),
+                kind: PrincipalKind::Person,
+                role: Role::None,
+                guest_can_create: false,
+            };
+            let found = rows(&sql, "SELECT org_id, added_at FROM member WHERE principal_id = ? AND kind = 'person' AND revoked_at IS NULL", vec![person.as_str().into()])?;
+            if let Some(member) = found.first() {
+                let held = text(&member["org_id"]).unwrap_or_default();
+                if org_departure_ends(&held, &org, int(&member["added_at"]), left_at) {
+                    remove_member(&sql, &actor, "person", &person, "org_departure", now)?;
+                }
+            }
+            let room_org = room_owner_org(&sql)?;
+            let invitations = rows(
+                &sql,
+                "SELECT id, created_at FROM invitation WHERE created_by = ? AND status = 'pending'",
+                vec![person.as_str().into()],
+            )?;
+            for invitation in &invitations {
+                if org_departure_ends(&room_org, &org, int(&invitation["created_at"]), left_at) {
+                    let id = text(&invitation["id"]).unwrap_or_default();
+                    exec(
+                        &sql,
+                        "UPDATE invitation SET status = 'withdrawn' WHERE id = ?",
+                        vec![id.as_str().into()],
+                    )?;
+                    let reason = json!({ "reason": "org_departure" }).to_string();
+                    audit(
+                        &sql,
+                        &actor,
+                        "invitation.withdrawn",
+                        &id,
+                        None,
+                        Some(reason),
+                        now,
+                    )?;
+                }
+            }
+            // The room keeps its owner, because nobody else can hold it yet. Its log says they left, once per departure.
+            if is_owner(&sql, &person)? && room_org == org {
+                let note = json!({ "org_id": org, "left_at": left_at }).to_string();
+                let noted = rows(&sql, "SELECT id FROM audit_event WHERE action = 'owner.left_organization' AND new_json = ?", vec![note.as_str().into()])?;
+                if noted.is_empty() {
+                    audit(
+                        &sql,
+                        &actor,
+                        "owner.left_organization",
+                        &person,
+                        None,
+                        Some(note),
+                        now,
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+        Ok(json!({ "applied": true }))
+    }
+
     async fn dispatch(&self, mut req: Request) -> R<Value> {
+        if req.path() == "/internal/org-departure" {
+            let body: Value = req.json().await?;
+            return self.org_departure(&body);
+        }
         if req.path() == "/internal/revoke" {
             let body: Value = req.json().await?;
             return self.fence(

@@ -43,6 +43,16 @@ const WAKE_QUEUE_MAX_DELAY_SECS: i64 = 12 * 60 * 60;
 // If a queued wake is lost, the next event can queue another after this long.
 const WAKE_QUEUE_STALE_MS: i64 = 60 * 60 * 1000;
 
+/// Departures from an organization still being carried to the person's rooms.
+const DEPARTURE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS org_departure (org_id TEXT NOT NULL, left_at INTEGER NOT NULL, person_id TEXT NOT NULL, actor_id TEXT NOT NULL,
+  sweeps_left INTEGER NOT NULL, next_sweep_at INTEGER NOT NULL, PRIMARY KEY (org_id, left_at));
+";
+/// The room index lags behind commits, so a room joined just before a removal can be missing from the first sweep.
+const DEPARTURE_SWEEPS: i64 = 3;
+const DEPARTURE_SWEEP_GAP_SECS: u64 = 60;
+const DEPARTURE_ROOMS_PER_SWEEP: i32 = 500;
+
 const REMOVAL_NOTICE: &str = "member.revoked";
 const INBOX_CAPACITY: i64 = 10_000;
 const UNREAD_KEPT_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -622,6 +632,16 @@ pub async fn register_room(env: &Env, agent: &str, org: &str, workspace_id: &str
     Ok(int(&body["generation"]) as u64)
 }
 
+/// Hands a departure to the person's Principal, which carries it to their rooms until each has answered.
+pub async fn record_org_departure(
+    env: &Env,
+    departure: &podster_assertion::Departure,
+    actor: &str,
+) -> R<Response> {
+    let body = json!({ "person": departure.person, "org": departure.org, "left_at": departure.left_at, "actor": actor });
+    internal(env, &departure.person, "/internal/org-departure", &body).await
+}
+
 async fn internal(env: &Env, agent: &str, path: &str, body: &Value) -> R<Response> {
     let stub = env
         .durable_object("PRINCIPAL")?
@@ -782,10 +802,134 @@ impl Principal {
         Ok(())
     }
 
+    /// Sweeps each departure that's due: asks every room the index lists to apply it. A room that doesn't answer is
+    /// retried soon. Once all have answered, the sweep counts, and the last one ends the departure.
+    async fn sweep_departures(&self) -> R<()> {
+        let sql = self.state.storage().sql();
+        exec(&sql, DEPARTURE_SCHEMA, vec![])?;
+        let now = now_ms();
+        let due = rows(
+            &sql,
+            "SELECT org_id, left_at, person_id, actor_id, sweeps_left FROM org_departure WHERE next_sweep_at <= ?",
+            vec![now.into()],
+        )?;
+        if due.is_empty() {
+            return self.arm_next_sweep(false).await;
+        }
+        // Armed before the first await, so an eviction mid-way still retries.
+        self.state
+            .storage()
+            .set_alarm(Duration::from_secs(RETRY_SECS))
+            .await?;
+        let mut failed = false;
+        for departure in &due {
+            let (org, left_at, person, actor) = (
+                text(&departure["org_id"]).unwrap_or_default(),
+                int(&departure["left_at"]),
+                text(&departure["person_id"]).unwrap_or_default(),
+                text(&departure["actor_id"]).unwrap_or_default(),
+            );
+            let rooms = self
+                .env
+                .d1("DB")?
+                .prepare("SELECT workspace_id FROM membership_index WHERE principal_id = ? AND org_id = ? AND removed = 0 LIMIT ?")
+                .bind(&[person.as_str().into(), org.as_str().into(), DEPARTURE_ROOMS_PER_SWEEP.into()])?
+                .all()
+                .await?
+                .results::<Value>()?;
+            let body = json!({ "person": person, "org": org, "left_at": left_at, "actor": actor });
+            let mut all_answered = true;
+            for room in &rooms {
+                let workspace_id = room["workspace_id"].as_str().unwrap_or_default();
+                if !self.room_applied(workspace_id, &body).await {
+                    all_answered = false;
+                }
+            }
+            if !all_answered {
+                failed = true;
+                continue;
+            }
+            let key = vec![org.as_str().into(), left_at.into()];
+            if int(&departure["sweeps_left"]) <= 1 {
+                exec(
+                    &sql,
+                    "DELETE FROM org_departure WHERE org_id = ? AND left_at = ?",
+                    key,
+                )?;
+            } else {
+                let next = now + (DEPARTURE_SWEEP_GAP_SECS as i64) * 1000;
+                exec(&sql, "UPDATE org_departure SET sweeps_left = sweeps_left - 1, next_sweep_at = ? WHERE org_id = ? AND left_at = ?",
+                    vec![next.into(), org.as_str().into(), left_at.into()])?;
+            }
+        }
+        self.arm_next_sweep(failed).await
+    }
+
+    async fn room_applied(&self, workspace_id: &str, body: &Value) -> bool {
+        #[cfg(feature = "failpoints")]
+        if workspace_id == "ws_fail_departure" {
+            return false;
+        }
+        let Ok(namespace) = self.env.durable_object("WORKSPACE") else {
+            return false;
+        };
+        let Ok(stub) = namespace
+            .id_from_name(workspace_id)
+            .and_then(|id| id.get_stub())
+        else {
+            return false;
+        };
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_body(Some(body.to_string().into()));
+        let Ok(request) = Request::new_with_init("https://workspace/internal/org-departure", &init)
+        else {
+            return false;
+        };
+        matches!(
+            stub.fetch_with_request(request)
+                .await
+                .map(|r| r.status_code()),
+            Ok(200)
+        )
+    }
+
+    async fn arm_next_sweep(&self, soon: bool) -> R<()> {
+        let sql = self.state.storage().sql();
+        if rows(&sql, "SELECT org_id FROM org_departure LIMIT 1", vec![])?.is_empty() {
+            self.state.storage().delete_alarm().await?;
+            return Ok(());
+        }
+        let wait = if soon {
+            RETRY_SECS
+        } else {
+            DEPARTURE_SWEEP_GAP_SECS
+        };
+        self.state
+            .storage()
+            .set_alarm(Duration::from_secs(wait))
+            .await?;
+        Ok(())
+    }
+
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         let sql = self.state.storage().sql();
         let path = req.path();
         match path.as_str() {
+            "/internal/org-departure" => {
+                let body: Value = req.json().await?;
+                exec(&sql, DEPARTURE_SCHEMA, vec![])?;
+                // A retry of one the gateway already sent changes nothing, because rooms ignore what they've applied.
+                exec(&sql, "INSERT OR IGNORE INTO org_departure (org_id, left_at, person_id, actor_id, sweeps_left, next_sweep_at) VALUES (?, ?, ?, ?, ?, 0)", vec![
+                    body["org"].as_str().unwrap_or_default().into(),
+                    body["left_at"].as_i64().ok_or_else(ApiError::invalid_argument)?.into(),
+                    body["person"].as_str().unwrap_or_default().into(),
+                    body["actor"].as_str().unwrap_or_default().into(),
+                    DEPARTURE_SWEEPS.into(),
+                ])?;
+                self.sweep_departures().await?;
+                return Ok(json!({ "recorded": true }));
+            }
             "/internal/check" => {
                 let body: Value = req.json().await?;
                 let conn = connection(&sql)?.ok_or_else(ApiError::agent_disconnected)?;
@@ -1059,8 +1203,15 @@ impl DurableObject for Principal {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        if let Err(error) = self.fan_out().await {
-            console_error!("fan-out failed: {:?}", error);
+        // A person has departures and an agent has a fan-out, so neither clears the other's alarm.
+        let sql = self.state.storage().sql();
+        let outcome = if matches!(connection(&sql), Ok(Some(_))) {
+            self.fan_out().await
+        } else {
+            self.sweep_departures().await
+        };
+        if let Err(error) = outcome {
+            console_error!("alarm failed: {:?}", error);
             self.state
                 .storage()
                 .set_alarm(Duration::from_secs(RETRY_SECS))

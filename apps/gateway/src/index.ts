@@ -6,7 +6,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { betterAuth } from "better-auth";
 import { APIError } from "better-auth/api";
 import { calculateJwkThumbprint, decodeJwt, type JWK } from "jose";
-import { handleOrgPeople } from "./organizations";
+import { handleOrgPeople, retryDepartures } from "./organizations";
 import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
 
@@ -427,7 +427,7 @@ const sameOrigin = (request: Request, env: Env) => request.headers.get("origin")
 export function allowedPassthrough(path: string) {
   // Something between here and the API may collapse a double slash, which would slip past the prefix checks below.
   if (!path.startsWith("/v1/") || path.includes("//")) return false;
-  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox");
+  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox") && !path.startsWith("/v1/org-departures");
 }
 
 /**
@@ -1192,7 +1192,7 @@ function insecureRequest(request: Request, env: Env): Response | null {
 export default {
   // The resource URL comes from the environment, so the provider is built per deployment rather than at import.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(cleanUp(env));
+    ctx.waitUntil(Promise.all([cleanUp(env), retryDepartures(env)]));
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const insecure = insecureRequest(request, env);

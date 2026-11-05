@@ -1,7 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { resolveAgent, type Env } from "../src/index";
-import { handleOrgPeople } from "../src/organizations";
+import { allowedPassthrough, resolveAgent, type Env } from "../src/index";
+import { handleOrgPeople, retryDepartures } from "../src/organizations";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; API_DB: D1Database };
@@ -485,6 +485,110 @@ describe("leaving an organization", () => {
     // A demotion alone leaves a credential alone.
     await dash(owner, "PUT", `/orgs/${org}/members/${stays.id}`, { role: "member" });
     expect(await resolveAgent(e, "mcp_oauth", `kept-${agentId}`)).toMatchObject({ id: agentId });
+  });
+});
+
+describe("a departure reaching the person's rooms", () => {
+  const room = async (owner: Person, org: string) => (await dash(owner, "POST", "/v1/workspaces", { name: "Room" }, { "x-podster-org": org })).body.id as string;
+  async function member(owner: Person, id: string, org: string, role = "admin") {
+    const person = await joined(owner, org);
+    const version = (await dash(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    expect((await dash(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: person.id, kind: "person", org_id: org, role, policy_version: version })).status).toBe(200);
+    return person;
+  }
+  const inRoom = async (owner: Person, id: string, person: Person) => (await dash(owner, "GET", `/v1/workspaces/${id}`)).body.members.some((m: any) => m.principal_id === person.id);
+  const waitForIndex = async (workspace: string, person: Person) => {
+    for (let tries = 0; tries < 50; tries++) {
+      if (await e.API_DB.prepare("SELECT 1 FROM membership_index WHERE workspace_id = ? AND principal_id = ? AND removed = 0").bind(workspace, person.id).first()) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("the index never listed the room");
+  };
+  const waiting = async () => (await e.DB.prepare("SELECT COUNT(*) AS n FROM org_departure_outbox").first<{ n: number }>())!.n;
+
+  it("removes them from the room, ends their room invitation and leaves nothing waiting", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const id = await room(owner, org);
+    const person = await member(owner, id, org);
+    await waitForIndex(id, person);
+    const before = await waiting();
+    const version = (await dash(person, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const roomLink = await dash(person, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: version });
+    expect(roomLink.status).toBe(200);
+    expect((await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`)).status).toBe(200);
+    expect(await inRoom(owner, id, person)).toBe(false);
+    expect(await waiting()).toBe(before);
+    const log = (await dash(owner, "GET", `/v1/workspaces/${id}/audit`)).body.audit;
+    expect(log.filter((row: any) => row.action === "member.revoked" && row.target_id === person.id)).toHaveLength(1);
+    expect(log.filter((row: any) => row.action === "invitation.withdrawn" && row.target_id === roomLink.body.id)).toHaveLength(1);
+    const accept2 = await dash(person, "POST", "/v1/invitations/accept", { token: roomLink.body.token, org_id: person.personal, agents: [] });
+    expect(accept2.code).toBe("invitation_not_found");
+  });
+
+  it("stops new events reaching their inbox", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const id = await room(owner, org);
+    const person = await member(owner, id, org, "member");
+    await waitForIndex(id, person);
+    const task = await dash(owner, "POST", `/v1/workspaces/${id}/tasks`, { title: "Task", instructions: "x", acceptance_criteria: "y", reviewer: person.id });
+    expect(task.status).toBe(200);
+    expect((await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`)).status).toBe(200);
+    const after = await dash(owner, "GET", `/v1/workspaces/${id}/tasks/${task.body.id}`);
+    expect(after.body.task.reviewer).not.toBe(person.id);
+    const unread = async () => (await dash(person, "GET", "/v1/me")).body.inbox_unread as number;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const counted = await unread();
+    const version = after.body.task.version;
+    expect((await dash(owner, "POST", `/v1/workspaces/${id}/tasks/${task.body.id}/messages`, { body: "After they left", version })).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await unread()).toBe(counted);
+  });
+
+  it("is delivered later if the API can't be reached, and removal still answers", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const id = await room(owner, org);
+    const person = await member(owner, id, org);
+    await waitForIndex(id, person);
+    const before = await waiting();
+    const down = { ...e, API: { fetch: async () => { throw new Error("unreachable"); } } } as unknown as Env;
+    const request = new Request(`${BASE}/api/orgs/${org}/members/${person.id}`, { method: "DELETE" });
+    const answer = (await handleOrgPeople(request, down, owner.id, `/api/orgs/${org}/members/${person.id}`))!;
+    expect(answer.status).toBe(200);
+    expect(await roleIn(person, org)).toBeUndefined();
+    expect(await waiting()).toBe(before + 1);
+    expect(await inRoom(owner, id, person)).toBe(true);
+    await retryDepartures(down);
+    expect(await waiting()).toBe(before + 1);
+    await retryDepartures(e);
+    expect(await waiting()).toBe(0);
+    expect(await inRoom(owner, id, person)).toBe(false);
+  });
+
+  it("can't be requested from the dashboard", async () => {
+    const person = await signUp();
+    expect(allowedPassthrough("/v1/org-departures")).toBe(false);
+    expect((await dash(person, "POST", "/v1/org-departures", { person: person.id, org: person.personal, left_at: Date.now(), departure: { person: person.id } })).status).toBe(404);
+  });
+
+  it("doesn't take away a role they've since been given again", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const id = await room(owner, org);
+    const person = await member(owner, id, org);
+    await waitForIndex(id, person);
+    const down = { ...e, API: { fetch: async () => { throw new Error("unreachable"); } } } as unknown as Env;
+    const request = new Request(`${BASE}/api/orgs/${org}/members/${person.id}`, { method: "DELETE" });
+    expect((await handleOrgPeople(request, down, owner.id, `/api/orgs/${org}/members/${person.id}`))!.status).toBe(200);
+    expect((await accept(person, (await invite(owner, org)).token)).status).toBe(200);
+    const version = (await dash(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    expect((await dash(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: person.id, kind: "person", org_id: org, role: "member", policy_version: version })).status).toBe(200);
+    await retryDepartures(e);
+    expect(await inRoom(owner, id, person)).toBe(true);
+    expect((await dash(person, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
   });
 });
 

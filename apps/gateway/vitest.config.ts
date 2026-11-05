@@ -23,7 +23,7 @@ export default defineConfig({
           STRICT_PER_DAY: "1000000",
           GITHUB_CLIENT_ID: "test-client-id",
           GITHUB_CLIENT_SECRET: "test-client-secret",
-          TEST_DIRECTORY_SCHEMA: read("./migrations/0001_directory.sql") + read("./migrations/0003_one_personal_org.sql") + read("./migrations/0004_org_invitations.sql"),
+          TEST_DIRECTORY_SCHEMA: read("./migrations/0001_directory.sql") + read("./migrations/0003_one_personal_org.sql") + read("./migrations/0004_org_invitations.sql") + read("./migrations/0005_org_departure.sql"),
           TEST_AUTH_SCHEMA: read("./migrations/0002_auth.sql"),
           TEST_API_SCHEMA: read("../api/migrations/0001_membership_index.sql"),
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),

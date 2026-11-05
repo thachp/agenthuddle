@@ -1,4 +1,4 @@
-import { denied, json, newId, rateLimited, sha256Hex, withinLimit, type Env } from "./index";
+import { callApi, denied, json, newId, rateLimited, sha256Hex, withinLimit, type Env } from "./index";
 
 /**
  * People in an organization. Organizations are the gateway's own directory, so these commands decide from its current
@@ -71,15 +71,44 @@ async function withdrawInvitation(env: Env, org: string, person: string, id: str
 /** Refuses to leave an organization without an admin. The check is in the statement, so two at once can't both pass. */
 const LEAVES_AN_ADMIN = `(m.role <> 'admin' OR (SELECT COUNT(*) FROM org_member a WHERE a.org_id = m.org_id AND a.role = 'admin') > 1)`;
 
+const MAX_DEPARTURES_RETRIED = 50;
+
+type DepartureRow = { id: string; person_id: string; org_id: string; left_at: number; actor_id: string };
+
+/**
+ * Tells the API someone left, so their rooms can apply it. Only this assertion carries `departure`, so a dashboard
+ * request can't claim one. The row stays until the API has taken it, so an outage can't lose a departure.
+ */
+async function deliverDeparture(env: Env, row: DepartureRow) {
+  const identity = { kind: "person" as const, id: row.actor_id, org: row.org_id, orgs: [], adminOrgs: [], orgSince: {}, departure: { person: row.person_id, org: row.org_id, left_at: row.left_at } };
+  const response = await callApi(env, identity, { method: "POST", path: "/v1/org-departures", body: "{}" });
+  await response.body?.cancel();
+  if (response.status === 200) await env.DB.prepare(`DELETE FROM org_departure_outbox WHERE id = ?`).bind(row.id).run();
+  else console.error("departure not delivered", row.id, response.status);
+}
+
+/** Run by the cron, for whatever the removal itself couldn't deliver. One failure doesn't stop the rest. */
+export async function retryDepartures(env: Env) {
+  const { results } = await env.DB.prepare(`SELECT id, person_id, org_id, left_at, actor_id FROM org_departure_outbox ORDER BY left_at LIMIT ?`).bind(MAX_DEPARTURES_RETRIED).all<DepartureRow>();
+  for (const row of results) await deliverDeparture(env, row).catch(() => console.error("departure not delivered", row.id));
+  return results.length;
+}
+
 async function removeMember(env: Env, org: string, actor: string, target: string) {
   const where = `m.org_id = ? AND m.person_id = ? AND ${LEAVES_AN_ADMIN}`;
   const now = Date.now();
-  const [audited] = await env.DB.batch([
+  const departure = newId("odp");
+  const [recorded] = await env.DB.batch([
+    env.DB.prepare(`INSERT INTO org_departure_outbox (id, person_id, org_id, left_at, actor_id) SELECT ?, m.person_id, m.org_id, ?, ? FROM org_member m WHERE ${where}`).bind(departure, now, actor, org, target),
     env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT ?, m.org_id, ?, 'member.removed', m.person_id, m.role, ? FROM org_member m WHERE ${where}`).bind(newId("oau"), actor, now, org, target),
     ...endInvitationsOf(env, org, actor, target, where, [org, target], now),
     env.DB.prepare(`DELETE FROM org_member AS m WHERE ${where}`).bind(org, target),
   ]);
-  if (audited.meta.changes) return json({ person_id: target, status: "removed" });
+  if (recorded.meta.changes) {
+    // Their authority ended with the delete. If this fails, the cron delivers it later.
+    await deliverDeparture(env, { id: departure, person_id: target, org_id: org, left_at: now, actor_id: actor }).catch(() => console.error("departure not delivered", departure));
+    return json({ person_id: target, status: "removed" });
+  }
   return (await membershipOf(env, org, target)) ? denied("last_admin", 409) : denied("not_found", 404);
 }
 

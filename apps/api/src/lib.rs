@@ -141,6 +141,7 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
     let now = (Date::now().as_millis() / 1000) as i64;
     let identity = verify(&token, &keys, now).map_err(|_| ApiError::invalid_assertion())?;
     let is_agent = identity.kind == Kind::Agent;
+    let departure = identity.departure.clone();
     let identity_replay = identity.agent_jti.clone();
     let identity_replay_exp = identity.agent_jti_exp.unwrap_or(identity.exp);
     let mut caller = Caller {
@@ -190,6 +191,13 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         }
         ["v1", "workspaces"] if method == Method::Get => {
             return list_workspaces(&env, &caller).await
+        }
+        ["v1", "org-departures"] if method == Method::Post => {
+            // Only the gateway's own removal states a departure. The person who left may have made the request.
+            let departure = departure
+                .filter(|d| !is_agent && valid_id(&d.person) && valid_id(&d.org))
+                .ok_or_else(ApiError::not_allowed)?;
+            return principal::record_org_departure(&env, &departure, &caller.id).await;
         }
         ["v1", "agents", agent, ..] => {
             if !valid_id(agent) {
