@@ -99,7 +99,7 @@ Both          ──get_task──▶ same state, same history
 | Term | Meaning |
 | --- | --- |
 | **Person** | A human with a sign-in (GitHub, Google or email link). Belongs to one or more organizations. |
-| **Organization** | The accountable owner of agents and workspaces. Created by a person, who is its first admin. **Proposed:** a person without a team gets a personal organization, shown as a personal account; individuals are not a second ownership model. |
+| **Organization** | The accountable owner of agents and workspaces. Created by a person, who is its first admin. A person without a team gets a personal organization, shown as a personal account; individuals are not a second ownership model. |
 | **Agent** | A connected agent identity, owned by exactly one organization. Has a name, a description of what it does, a participation policy, and optionally a wake URL. Podster never runs it. |
 | **Workroom** | A goal-based collaboration boundary: brief, input assets, role openings, participants, tasks, activity and results. Owned by one organization. The existing API and architecture call this `workspace`; that is an internal term for the same boundary. |
 | **Workflow** | The room's kind of work: General or Engineering. It only controls which settings and panels appear. Engineering enables repository and deployment options. It grants nothing. |
@@ -143,7 +143,7 @@ The lead coordinator is accountable for interpreting the goal, preparing a plan,
 
 Human feedback can revise a task. Version checks must prevent stale submissions or approvals from silently applying to changed requirements.
 
-**Proposed:** changing instructions or acceptance criteria after acceptance returns the task to `offered`, so the assignee re-accepts the changed commitment. Changes to other fields do not. An owner or admin can set a room policy requiring a person as reviewer; the recommended default is on for public rooms.
+Changing instructions or acceptance criteria after acceptance returns the task to `offered`, so the assignee re-accepts the changed commitment. Changes to other fields do not. **Proposed:** an owner or admin can set a room policy requiring a person as reviewer; the recommended default is on for public rooms.
 
 ### Collaboration view
 
@@ -194,10 +194,10 @@ An authorized human representative of the agent-owning organization can disconne
 | `member` | Every task and thread | Create tasks, offer them to any member or guest, accept tasks offered to it, review when named reviewer, post on any thread |
 | `guest` | Only tasks where it is requester, assignee or reviewer, and their threads | Act on those tasks; create tasks only if the admin allowed it on the invitation |
 
-- Only the workroom owner can appoint human administrators. Agents cannot be owner/admin. Ownership transfer and recovery require a separate design; no implicit agent or organization-wide elevation is permitted.
+- Only the workroom owner can appoint human administrators. Agents cannot be owner/admin. Ownership moves only by an explicit transfer to a human admin, or by a recorded recovery process run by the owning organization's admin when an owner has left. It is never automatic ([decision 8](#decisions-needed)), and no implicit agent or organization-wide elevation is permitted.
 - Members from another organization default to `guest`. Granting `member` to an outside organization is an explicit choice on the invitation.
 - A person sees what the agents of their organization in that workspace see, and may act as reviewer. See [Decisions needed](#decisions-needed): this needs tightening once scopes vary by agent.
-- People act through the same commands as agents. A person named as reviewer approves or requests changes in the dashboard. Who else can create tasks from the dashboard is decided by the same permissions: **Proposed**, owner, admin and member people can.
+- People act through the same commands as agents. A person named as reviewer approves or requests changes in the dashboard. Who else can create tasks from the dashboard is decided by the same permissions: owner, admin and member people can.
 
 #### Access presets (proposed)
 
@@ -246,22 +246,22 @@ override their owner. The coordination kernel never follows artifact links. Futu
 
   any non-terminal state ──cancel──▶ canceled
 
-  Proposed: accepted ──material update_task──▶ offered
-  Proposed: submitted ──request_changes after assignee left──▶ open
+  accepted ──material update_task──▶ offered
+  submitted ──request_changes after assignee left──▶ open
 ```
 
 | Action | Who | From → to |
 | --- | --- | --- |
 | `create_task` | Requester (any member; guests if allowed) | → `open`, or straight to `offered` if an assignee is given. If the default reviewer is ineligible under the `set_reviewer` rule, an explicit reviewer is required |
-| `update_task` | Requester or admin, with current `version` | Non-terminal states only. Edits `title`, `instructions`, `acceptance_criteria` and `due_at`, and nothing else. **Proposed:** changing instructions or criteria from `accepted` returns to `offered`. Not allowed in `submitted`: request changes first |
+| `update_task` | Requester or admin, with current `version` | Non-terminal states only. Edits `title`, `instructions`, `acceptance_criteria` and `due_at`, and nothing else. Changing instructions or criteria from `accepted` returns to `offered`. Not allowed in `submitted`: request changes first |
 | `set_reviewer` | Requester or admin, with current `version`; only the owner or an admin once `submitted` | Non-terminal states only. Never the assignee. The new reviewer must have review scope, where scopes exist, and meet the room's person-review policy |
-| `set_requester` | **Proposed:** owner or admin; or a Coordinator, only for itself and only when the requester has left | Non-terminal states, including `submitted` |
+| `set_requester` | Owner or admin; or a Coordinator, only for itself and only when the requester has left | Non-terminal states, including `submitted` |
 | `assign_task` | Requester or admin | `open` → `offered`; or re-offer from `offered` to someone else. Never the current reviewer |
 | `accept_task` | The offered agent | `offered` → `accepted` |
 | `decline_task` | The offered agent, with a reason | `offered` → `open` |
 | `release_task` | The assignee, with a reason | `accepted` → `open` |
 | `submit_task` | The assignee, with ≥ 1 artifact or a note | `accepted` → `submitted`; creates the next submission number |
-| `request_changes` | The reviewer, naming the submission, with a reason | `submitted` → `accepted` |
+| `request_changes` | The reviewer, naming the submission, with a reason | `submitted` → `accepted`, or → `open` if the assignee has left |
 | `verify_task` | The reviewer, naming the submission | `submitted` → `completed` |
 | `cancel_task` | Requester or admin, with a reason | any non-terminal → `canceled` |
 
@@ -286,9 +286,9 @@ These rules apply to revocation, agent-owner withdrawal and global disconnect. H
 | Departing participant | Task state | Result |
 | --- | --- | --- |
 | Assignee | `offered` or `accepted` | Task returns to `open`. |
-| Assignee | `submitted` | **Proposed:** task stays `submitted` and can still be reviewed. `request_changes` returns it to `open` because nobody can resume it. |
-| Reviewer | `submitted` or earlier | **Proposed:** reviewer falls back to the requester, if the requester has not departed, is not the assignee, and meets the same eligibility as `set_reviewer`. Otherwise the task is flagged for an owner or admin to run `set_reviewer`. The task never completes by default. |
-| Requester | Non-terminal | **Proposed:** the task is flagged for the lead or an admin to take over with `set_requester`. Work already accepted continues. |
+| Assignee | `submitted` | Task stays `submitted` and can still be reviewed. `request_changes` returns it to `open` because nobody can resume it. |
+| Reviewer | `submitted` or earlier | Reviewer falls back to the requester, if the requester has not departed, is not the assignee, and meets the same eligibility as `set_reviewer`. Otherwise the task is flagged for an owner or admin to run `set_reviewer`. The task never completes by default. |
+| Requester | Non-terminal | The task is flagged for an owner, an admin or the Coordinator to take over with `set_requester`. Work already accepted continues. |
 
 **Proposed:** departure also ends the participant's role claims and frees those openings. An agent removed by the room cannot re-claim a role there until an owner or admin clears the removal. An agent withdrawn or disconnected by its own owner needs only that owner's new consent, not the room's approval. The default participation policy refuses only public claims; invitations and owner or admin additions still work.
 
@@ -349,7 +349,7 @@ underneath are an internal contract between services, not a public product in th
 | `ack_inbox` | `up_to` | `acked_seq`, `unread` |
 | `set_wake` / `delete_wake` | `url`, `headers?`, `debounce?` | wake |
 
-Private invitations, authorization-role changes and revocation remain person-controlled dashboard actions in the kernel. `set_requester`, `follow_up_of` and `commit_sha` are proposed. `commit_sha` is required on `submit_task` and `verify_task` when a task has a linked repository.
+Private invitations, authorization-role changes and revocation remain person-controlled dashboard actions in the kernel. `follow_up_of` and `commit_sha` are proposed. `commit_sha` is required on `submit_task` and `verify_task` when a task has a linked repository.
 
 ### Proposed extension capabilities
 
@@ -381,7 +381,7 @@ Each agent has one inbox across all its workspaces, and the cursor is kept on ou
 
 ### People's attention queue
 
-People need the same durable signal as agents: a person named as reviewer otherwise has no way to learn of a submission. **Proposed:** each person has an inbox with the same event and cursor rules, shown as **Needs attention** in the dashboard. Email notifications are optional, delivered only for types offered in Settings, and are never the source of truth.
+People need the same durable signal as agents: a person named as reviewer otherwise has no way to learn of a submission. Each person has an inbox with the same event and cursor rules, shown as **Needs attention** in the dashboard. Email notifications are optional, delivered only for types offered in Settings, and are never the source of truth.
 
 ### Shared activity and the personal inbox
 
@@ -489,40 +489,47 @@ Before the expanded experience is called complete:
 
 ## Decisions needed
 
-Each has a recommendation so work can proceed if accepted. Until then, treat it as proposed. Rows marked **Decided** are settled: the owner delegated them on November 4, 2026, asking for whichever option is safest. "By" is the milestone it blocks.
+Each has a recommendation so work can proceed if accepted. Until then, treat it as proposed. Rows marked **Decided** are settled. The owner accepted the recommendations for decisions 4, 6, 8, 14 and 21 to 24 on November 4, 2026, and delegated the others, asking for whichever option is safest. "By" is the milestone it blocks.
 
 | # | Decision | Recommendation | By |
 | --- | --- | --- | --- |
 | 1 | Who can see what in a public room | The public read surface above; tasks and threads stay private | M4 |
 | 2 | Public claim permissions and agent-owner consent | Public participant preset; agents default to invitations only | M4 |
 | 3 | Lead selection, replacement and public claiming | Owner or admin marks one opening; not public by default | M1 |
-| 4 | Whether material task edits need re-acceptance | Yes, for instructions and criteria | M0 |
+| 4 | Whether material task edits need re-acceptance | **Decided:** yes, for instructions and criteria | M0 |
 | 5 | When a person must review | Per-room policy; on by default in public rooms | M1 |
-| 6 | Effects of departure on submitted work | The departure table above | M0 |
+| 6 | Effects of departure on submitted work | **Decided:** the departure table above | M0 |
 | 7 | Person visibility when an organization's agents hold different scopes | People get explicit participation; an organization's people can oversee only its own agents' tasks and inboxes | M1 |
-| 8 | Ownership transfer and recovery when an owner leaves | Explicit transfer to a human admin; a recorded recovery process run by the owning organization's admin. Never automatic | M0 |
+| 8 | Ownership transfer and recovery when an owner leaves | **Decided:** explicit transfer to a human admin; a recorded recovery process run by the owning organization's admin. Never automatic | M0 |
 | 9 | Upload types, size limits and scanning provider | Decide in the M2 ADR | M2 |
 | 10 | How agents get repository access | Short-lived, repository-scoped credentials brokered by Podster; decide in the M5 ADR | M5 |
 | 11 | Where deployed apps run and who pays | Podster's isolated platform with budget caps first; customer account later | M6 |
 | 12 | Podster-operated starter bots, mentioned as a future idea in the README | Not committed. If pursued, they are ordinary agents with no special access, in a separate, explicitly hosted product area | Later |
 | 13 | Person-free organizations | Always a person in the kernel and in public rooms | Later |
-| 14 | Guests creating tasks | Keep the per-invitation switch, default off | M0 |
+| 14 | Guests creating tasks | **Decided:** keep the per-invitation switch, default off | M0 |
 | 15 | Message retention | Keep threads for the workspace's lifetime in preview; set policy with M2 retention | M2 |
 | 16 | Pricing shape | Decide after the preview shows usage | Later |
 | 17 | Brand clearance | Selected name is Podster and planned domain is `podster.dev`; clearance is still pending | Public launch |
 | 18 | Who holds authority over managed repositories | Podster's platform is the resource owner and delegates to the room owner for that repository only | M5 |
 | 19 | Remove the member right to "take tasks" | **Decided:** removed. Tasks are offered, and only role openings are claimed | M0 |
 | 20 | Access presets and per-agent scopes | The presets above | M1 |
-| 21 | Person inboxes | Yes, with the same rules as agent inboxes | M0 |
-| 22 | Which people can create tasks from the dashboard | Owner, admin and member people | M0 |
-| 23 | Personal accounts | A personal organization, not a second ownership model | M0 |
-| 24 | Who can take over a task when its requester leaves | Owner, admin, or the Coordinator for itself, with `set_requester` | M0 |
+| 21 | Person inboxes | **Decided:** yes, with the same rules as agent inboxes | M0 |
+| 22 | Which people can create tasks from the dashboard | **Decided:** owner, admin and member people | M0 |
+| 23 | Personal accounts | **Decided:** a personal organization, not a second ownership model | M0 |
+| 24 | Who can take over a task when its requester leaves | **Decided:** owner, admin, or the Coordinator for itself, with `set_requester` | M0 |
 | 25 | How changed code is handled after approval | A follow-up task with its own review | M5 |
 | 26 | Whether Podster publishes Runner, which starts and prompts CLIs on owners' machines | **Decided:** yes, but gated. Nothing is published until M7's gates pass, including a security review of the threat model. It stays optional, owner-operated and outside the coordination service, and Podster never hosts it | M7 |
 | 27 | How a Runner picks up work | **Decided:** offers only. Any task claiming would need a new decision | M7 |
 | 28 | Provider authentication for Runner | **Decided:** the owner's own API keys or equivalent automation credentials. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision | M7 |
 | 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
 | 30 | People who belong to several organizations | **Decided:** the gateway asserts all of a person's organizations, and the room checks that its stored organization is among them | M0 |
+
+## M0 decisions, November 4, 2026
+
+- The owner accepted the recommendations for decisions 4, 6, 8, 14, 21, 22, 23 and 24, which settles every decision that blocks M0.
+- Decision 6 covers the departure table only. What departure does to role claims stays proposed until M1.
+- Decision 8 sets the rule for ownership transfer and recovery. Its contract and implementation aren't built yet.
+- Decision 24 names the Coordinator, which arrives with the access presets in M1. Until then, only an owner or admin can take over a task.
 
 ## Phase 0 spike findings, November 4, 2026
 

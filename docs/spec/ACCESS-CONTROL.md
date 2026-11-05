@@ -20,12 +20,12 @@ These rules apply to every entry path: dashboard, hosted MCP, Agent Auth and A2A
 
 ## Proposed permission matrix
 
-This matrix makes the approved model testable. [Access presets](PRODUCT.md#access-presets-proposed) propose the fine-grained scopes, and ownership transfer and recovery is an open [product decision](PRODUCT.md#decisions-needed). Until defined, unsupported grants are denied.
+This matrix makes the approved model testable. [Access presets](PRODUCT.md#access-presets-proposed) propose the fine-grained scopes, and [decision 8](PRODUCT.md#decisions-needed) sets the rule for ownership transfer and recovery, which aren't built yet. Until they are, unsupported grants are denied.
 
 | Action | Required authority | Boundary |
 | --- | --- | --- |
 | Create a workroom | Authenticated person allowed to create in the owning organization | Creator becomes the workroom owner atomically. No client-supplied owner override. |
-| Appoint/remove workroom administrators | Workroom owner | Human principals only; ordinary admins cannot create further admins. Ownership transfer is a separate, not-yet-defined operation. |
+| Appoint/remove workroom administrators | Workroom owner | Human principals only; ordinary admins cannot create further admins. Ownership transfer is a separate operation under decision 8, and isn't built yet. |
 | Invite, admit, scope or revoke an agent in a private workroom | Workroom owner or appointed administrator | Agent-owner connection/consent is also required; a room admin cannot override it. |
 | Configure public participation and work-role scopes | Workroom owner or appointed administrator | Only approved local permission scopes; no admin, external-provider or credential grant via a work-role definition. |
 | Claim an available public work role | Connected, authenticated agent whose owner's participation policy allows public claims (proposed default: invitations only) | Uses the workroom owner/admin-configured policy and available capacity. Does not edit policy or require the workroom owner's manual approval for each public claim. |
@@ -65,7 +65,7 @@ A workroom revocation and an agent-owner withdrawal must prevent new authorized 
 
 The existing D1/global-disconnect plus short-lived assertion design leaves an in-flight authorization window to resolve. Proposed launch gate: security-relevant commands must verify current revocation authority or a fenced generation before committing; tests must exercise an assertion minted before disconnect. [ARCHITECTURE.md](ARCHITECTURE.md#global-disconnect-fence) proposes the fence: a global disconnect is reported complete only after every room acknowledges it. Do not claim immediate global revocation from a gateway check alone.
 
-Queued inbox deliveries, retries and delayed release jobs must recheck relevant authority before disclosing content or making an external change. Already-completed external actions cannot be undone by revocation; preserve their history and report that boundary. Agent withdrawal uses the same [departure rules](PRODUCT.md#when-a-participant-leaves) as revocation, which preserve submitted artifacts and audit history. Their handling of reviewable submissions is proposed and must be confirmed before implementation.
+Queued inbox deliveries, retries and delayed release jobs must recheck relevant authority before disclosing content or making an external change. Already-completed external actions cannot be undone by revocation; preserve their history and report that boundary. Agent withdrawal uses the same [departure rules](PRODUCT.md#when-a-participant-leaves) as revocation, which preserve submitted artifacts and audit history. Their handling of reviewable submissions is settled by [decision 6](PRODUCT.md#decisions-needed).
 
 A shared identity across workrooms does not share permissions, session context, assets or credentials. An A2A message or collaboration-map edge is not a grant. Cross-room requests require independent authorization in each affected room.
 
