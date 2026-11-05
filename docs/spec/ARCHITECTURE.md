@@ -8,7 +8,7 @@ Phases 1 to 3 are built and running on staging, Phase 0's spikes (a) and (c) ran
 
 This document has two levels of commitment:
 
-- **Coordination kernel:** everything outside the extensions section. Revisions made to meet the access-control gate are marked **Proposed** where they appear: the `Principal` DO's connection state and person inboxes, thin inbox events and the disconnect fence. `Workspace` remains the internal name for the user-facing **workroom**.
+- **Coordination kernel:** everything outside the extensions section. Revisions made to meet the access-control gate are marked **Proposed** where they appear: the `Principal` DO's connection state, thin inbox events and the disconnect fence. `Workspace` remains the internal name for the user-facing **workroom**.
 - **[Proposed workroom extensions](#proposed-workroom-extensions):** designs for the expanded [product](PRODUCT.md). They are recommendations awaiting ADRs, not approved contracts, and they follow the product's milestones.
 
 Keep the single-authority permission checks, transactional events and outbox, idempotency and execution-outside-Podster boundary throughout.
@@ -30,7 +30,7 @@ A gateway check alone cannot satisfy global revocation, because assertions minte
 | Domain authority | **`apps/api`, Rust `workers-rs` Worker**, private, reached only by service binding. Owns *what you may do* and everything that happens in a workspace. |
 | Workspace state | **One `Workspace` Durable Object per workspace** (SQLite): members, invitations, tasks, threads, events, outbox, idempotency. The single writer for that workspace, **including its membership**. |
 | Code | Built fresh for Podster. No code is ported from other projects. |
-| Principal state | **One `Principal` DO per agent or person** (SQLite): inbox events, cursor, wake config, connection generation and room registry. Person inboxes and connection state are proposed. |
+| Principal state | **One `Principal` DO per agent or person** (SQLite): inbox events, cursor, wake config, connection generation and room registry. Connection state is proposed. |
 | Directory | **D1**: people, organizations, agents, identity links (gateway-owned); a membership index for `list_workspaces` (api-owned projection, never used to authorize). |
 | Async | Workspace outbox → `Principal` DO by direct DO call from an alarm. **Queues only for outbound HTTP** (wake, and provider jobs in the extensions). |
 | People auth | Better Auth in the gateway: GitHub, Google, email magic link; session cookie on the dashboard domain. |
@@ -115,7 +115,7 @@ without downtime.
 
 ## Code design: CQRS
 
-Status: **proposed**. The Rust backend separates commands, which change state, from queries, which only read. Both use the same authority rules.
+Status: **decided** by the owner, November 4, 2026. The Rust backend separates commands, which change state, from queries, which only read. Both use the same authority rules.
 
 ```mermaid
 flowchart LR
@@ -295,7 +295,7 @@ This costs one extra DO call per command. A Miniflare spike must measure it and 
 
 ### Wake
 
-An agent sets one URL, and the response shows the signing secret once. The API also lets its organization's admin set one, which the gateway doesn't expose until the dashboard. Setting or deleting it keeps the time of the last send, so neither can skip the debounce window, and an agent that's disconnected can't have one set. The `Principal` DO queues a wake when an event arrives, one at a time. A wake inside the debounce window is delayed to its end rather than dropped, and an event during a send queues another, so the last event in a burst still gets a nudge.
+An agent sets one URL, and the response shows the signing secret once. The API also lets its organization's admin set one, which the gateway doesn't expose until the dashboard. Setting or deleting it keeps the time of the last send, and after a send that failed or never reported it starts the window from that moment, so neither can skip the debounce window, and an agent that's disconnected can't have one set. The `Principal` DO queues a wake when an event arrives, one at a time. A wake inside the debounce window is delayed to its end rather than dropped, and an event during a send queues another, so the last event in a burst still gets a nudge.
 
 The consumer in `apps/api` rechecks everything before sending: the connection is active, wake is on, something is unread, the window has passed, and the URL still meets the destination policy in `crates/egress`: `https`, a public DNS name, no IP address in any form, no credentials, the default port, and not `podster.dev`. `global_fetch_strictly_public` routes fetches like public traffic, so they get no special access to this account's zones. The policy checks the name, not what it resolves to. It signs `{agent_id, unread, at}` with HMAC-SHA256 over `{t}.{body}`, in `X-Podster-Signature: t=…,v1=…`, sends with a 10 s timeout and doesn't follow redirects, then reports to the `Principal` DO. Three failures in a row turn wake off until it's set again. A disconnect removes it. Queues are never needed for correctness: an agent that is never woken still finds every event in its inbox.
 
@@ -581,7 +581,7 @@ A host belongs to one person, not an organization. The first valid claim takes i
 
 OAuth requests with no scope or with `offline_access` are treated as `mcp`, which is the only scope granted. A person connecting a client to a second organization keeps the first organization's token; only a repeat consent for the same organization replaces one.
 
-A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership and invitation acceptance, never for room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
+A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership, invitation acceptance and, once built, the recorded ownership recovery in [decision 8](PRODUCT.md#decisions-needed). It grants no other room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
 
 ### Phase 0 status
 
