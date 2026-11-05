@@ -9,7 +9,7 @@ import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
-import worker, { cleanUp, clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import worker, { resolveAgent, cleanUp, clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string; TEST_WRANGLER: string };
@@ -1722,6 +1722,62 @@ describe("sign-in and claim pages", () => {
     const working = await execute(replacement, "get_identity");
     expect([working.status, working.data?.id]).toEqual([200, agent.id]);
     expect((await execute(agent, "get_identity")).status).toBe(403);
+  });
+
+  it("doesn't bring an Agent Auth credential back when its admin rejoins, and a new one takes over", async () => {
+    const stays = await signUp();
+    const team = (await dash(stays, "POST", "/orgs", { name: "Team" })).body.id as string;
+    const invite = async (role: string) => (await dash(stays, "POST", `/orgs/${team}/invitations`, { role })).body.token as string;
+    const person = await signUp();
+    const join = async (role: string) => expect((await dash(person, "POST", "/org-invitations/accept", { token: await invite(role) })).status).toBe(200);
+    const personId = (await dash(person, "GET", "/v1/me")).body.id as string;
+    await join("admin");
+    const inTeam = { ...person, org: team };
+    const agent = await claimedAgent(inTeam);
+    expect((await execute(agent, "get_identity")).status).toBe(200);
+    const leftBehind = async () => (await dash(stays, "GET", "/agents")).body.agents.find((a: any) => a.id === agent.id).credentials_owner_left;
+    expect((await dash(stays, "DELETE", `/orgs/${team}/members/${personId}`)).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await join("member");
+    const refused = await execute(agent, "get_identity");
+    expect([refused.status, refused.code]).toEqual([403, "credential_owner_left"]);
+    expect(await leftBehind()).toBe(1);
+    // Neither becoming an admin again nor repeating the claim revives this key.
+    expect((await claim(inTeam, agent)).status).toBe(403);
+    expect((await dash(stays, "PUT", `/orgs/${team}/members/${personId}`, { role: "admin" })).status).toBe(200);
+    expect((await claim(inTeam, agent)).status).toBe(403);
+    expect((await execute(agent, "get_identity")).status).toBe(403);
+    const replacement = await registerAgent();
+    expect((await claim(inTeam, replacement, { link_agent_id: agent.id })).status).toBe(200);
+    const working = await execute(replacement, "get_identity");
+    expect([working.status, working.data?.id]).toEqual([200, agent.id]);
+  });
+
+  it("keeps an MCP credential off for a rejoined member, and renews it when they consent again as an admin", async () => {
+    const stays = await signUp();
+    const team = (await dash(stays, "POST", "/orgs", { name: "Team" })).body.id as string;
+    const person = await signUp();
+    const invite = async () => (await dash(stays, "POST", `/orgs/${team}/invitations`, { role: "admin" })).body.token as string;
+    const personId = (await dash(person, "GET", "/v1/me")).body.id as string;
+    expect((await dash(person, "POST", "/org-invitations/accept", { token: await invite() })).status).toBe(200);
+    const inTeam = { ...person, org: team };
+    const client = await authorizeQuery();
+    const first = await mcpAgent(inTeam, {}, client);
+    const externalId = (await e.DB.prepare("SELECT external_id FROM identity_link WHERE agent_id = ?").bind(first.id).first<{ external_id: string }>())!.external_id;
+    expect((await dash(stays, "DELETE", `/orgs/${team}/members/${personId}`)).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    expect((await dash(person, "POST", "/org-invitations/accept", { token: await invite() })).status).toBe(200);
+    await expect(resolveAgent(e, "mcp_oauth", externalId)).rejects.toThrow("credential_owner_left");
+    // A member can't consent, so it stays off until an admin does.
+    expect((await dash(stays, "PUT", `/orgs/${team}/members/${personId}`, { role: "member" })).status).toBe(200);
+    expect((await approve(inTeam, client.query, {})).status).toBe(403);
+    await expect(resolveAgent(e, "mcp_oauth", externalId)).rejects.toThrow("credential_owner_left");
+    expect((await dash(stays, "PUT", `/orgs/${team}/members/${personId}`, { role: "admin" })).status).toBe(200);
+    const again = await approve(inTeam, client.query, {});
+    expect(again.status).toBe(302);
+    expect(await resolveAgent(e, "mcp_oauth", externalId)).toMatchObject({ id: first.id, org: team });
+    const entries = (await dash(stays, "GET", `/orgs/${team}/audit`)).body.entries.filter((row: any) => row.action === "credential.reconnected");
+    expect(entries.map((row: any) => [row.actor_id, row.target_id])).toEqual([[personId, first.id]]);
   });
 
   it("only offers organizations the person administers", async () => {

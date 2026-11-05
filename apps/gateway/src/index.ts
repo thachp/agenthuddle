@@ -246,11 +246,12 @@ class AgentRefused extends Error {}
 /** Resolves a verified credential to one agent, and refuses unclaimed or disconnected ones before minting anything. */
 export async function resolveAgent(env: Env, provider: "agent_auth" | "mcp_oauth", externalId: string): Promise<Identity> {
   const row = await env.DB.prepare(
-    `SELECT a.id, a.org_id, a.generation, a.revoked_at, EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id) AS linker_present FROM identity_link l JOIN podster_agent a ON a.id = l.agent_id WHERE l.provider = ? AND l.external_id = ?`,
+    `SELECT a.id, a.org_id, a.generation, a.revoked_at, EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id AND m.created_at <= l.created_at) AS linker_present FROM identity_link l JOIN podster_agent a ON a.id = l.agent_id WHERE l.provider = ? AND l.external_id = ?`,
   ).bind(provider, externalId).first<{ id: string; org_id: string; generation: number; revoked_at: number | null; linker_present: number }>();
   if (!row) throw new AgentRefused("agent_unclaimed");
   if (row.revoked_at) throw new AgentRefused("agent_disconnected");
-  // A credential someone connected ends when they leave the organization. An admin can connect a new one to this agent.
+  // A credential ends when whoever connected it leaves the organization, and rejoining doesn't bring it back, so it must
+  // be newer than their current membership. An admin can connect a new one to this agent.
   if (!row.linker_present) throw new AgentRefused("credential_owner_left");
   return { kind: "agent", id: row.id, org: row.org_id, generation: row.generation };
 }
@@ -468,7 +469,7 @@ const MAX_LISTED_AGENTS = 500;
  */
 async function listAgents(env: Env, orgs: string[]): Promise<Response> {
   const placeholders = orgs.map(() => "?").join(",");
-  const { results } = await env.DB.prepare(`SELECT a.id, a.org_id, a.name, a.description, a.created_at, a.revoked_at, (SELECT COUNT(*) FROM identity_link l WHERE l.agent_id = a.id AND NOT EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id)) AS credentials_owner_left FROM podster_agent a WHERE a.org_id IN (${placeholders}) ORDER BY a.created_at DESC LIMIT ?`).bind(...orgs, MAX_LISTED_AGENTS + 1).all();
+  const { results } = await env.DB.prepare(`SELECT a.id, a.org_id, a.name, a.description, a.created_at, a.revoked_at, (SELECT COUNT(*) FROM identity_link l WHERE l.agent_id = a.id AND NOT EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id AND m.created_at <= l.created_at)) AS credentials_owner_left FROM podster_agent a WHERE a.org_id IN (${placeholders}) ORDER BY a.created_at DESC LIMIT ?`).bind(...orgs, MAX_LISTED_AGENTS + 1).all();
   // Newest first. There's no paging yet, so a longer list says it was cut.
   return json({ agents: results.slice(0, MAX_LISTED_AGENTS), truncated: results.length > MAX_LISTED_AGENTS });
 }
@@ -489,6 +490,22 @@ async function createAgent(env: Env, org: string, name: string, provider: LinkPr
   await env.DB.batch([
     env.DB.prepare(`INSERT OR IGNORE INTO podster_agent (id, org_id, name, created_at) VALUES (?, ?, ?, ?)`).bind(agentId, org, name, now),
     linkStatement(env, provider, externalId, agentId, person, now),
+  ]);
+}
+
+/**
+ * An MCP consent reuses one credential per person, client and organization. If that credential is from an earlier
+ * membership it stopped working, and a current admin consenting again is what starts it. Only a link older than the
+ * membership changes, and the organization's audit log records it. An Agent Auth key can't be claimed twice, so its
+ * way back is a new key linked to the agent.
+ */
+async function renewLink(env: Env, externalId: string, person: string, org: string) {
+  const now = Date.now();
+  const stale = `l.provider = 'mcp_oauth' AND l.external_id = ? AND l.person_id = ? AND l.created_at < (SELECT m.created_at FROM org_member m WHERE m.org_id = ? AND m.person_id = l.person_id)`;
+  const binds = [externalId, person, org];
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT ?, ?, ?, 'credential.reconnected', l.agent_id, NULL, ? FROM identity_link l WHERE ${stale}`).bind(newId("oau"), org, person, now, ...binds),
+    env.DB.prepare(`UPDATE identity_link AS l SET created_at = MAX(?, (SELECT m.created_at FROM org_member m WHERE m.org_id = ? AND m.person_id = l.person_id)) WHERE ${stale}`).bind(now, org, ...binds),
   ]);
 }
 
@@ -704,6 +721,7 @@ async function approveConsent(request: Request, env: Env, gatewayUrl: string, us
   } else if (linkAgent && linkAgent !== existing.agent_id) {
     return denied("already_linked", 409);
   }
+  await renewLink(env, externalId, person, org);
   // The provider's own cleanup covers every grant for this person and client, which would end this client's agents in
   // other organizations. Only the grant being replaced goes.
   const replaced = await grantIds(env, person, externalId);

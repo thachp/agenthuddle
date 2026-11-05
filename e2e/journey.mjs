@@ -312,7 +312,7 @@ async function acceptance() {
     eq((await personA.audit(room)).filter((e) => e.target_id === personB.id), [], "audit entries for a refused add");
   });
 
-  await check("AC-02+", "a real second person joins by a link, acts as a room admin, and loses it all when removed", async () => {
+  await check("AC-02+", "a real second person joins by a link, acts as a room admin, and loses the room when removed", async () => {
     // Reused between runs, because organizations can't be deleted. A run that died midway may have left Person B in it.
     const orgs = (await personA.must("GET", "/orgs")).organizations;
     const team = orgs.find((o) => o.name === "Podster e2e team") ?? (await personA.must("POST", "/orgs", { name: "Podster e2e team" }));

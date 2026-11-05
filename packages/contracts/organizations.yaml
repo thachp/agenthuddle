@@ -25,7 +25,7 @@ paths:
     delete:
       operationId: removeOrgMember
       tags: [commands]
-      summary: Admin, or the person themselves. Takes effect on their next request, ends the invitations they made and the credentials they connected, and ends their room roles unless they're the room's owner. Answers 409 `last_admin` if the organization would have no admin
+      summary: Admin, or the person themselves. Takes effect on their next request, ends the invitations they made and the credentials they connected, and ends their room roles unless they're the room's owner. Rejoining restores none of those, except a room they own. Answers 409 `last_admin` if the organization would have no admin
       responses: { "200": { description: OK } }
   /api/orgs/{org}/invitations:
     parameters: [{ $ref: "#/components/parameters/org" }]
@@ -42,6 +42,8 @@ paths:
   /api/orgs/{org}/audit:
     parameters: [{ $ref: "#/components/parameters/org" }]
     get: { operationId: listOrgAudit, tags: [queries], summary: "Admin. The newest 200 entries, IDs only", responses: { "200": { description: OK } } }
+  /api/agents:
+    get: { operationId: listOrgAgents, tags: [queries], summary: "Agents of the person's organizations. `credentials_owner_left` counts credentials that were refused with `credential_owner_left`, because whoever connected them left, including anyone who has since rejoined. An admin can link a new credential to the agent. A rejoined admin repeating an MCP consent renews theirs, and `credential.reconnected` records that in the audit log", responses: { "200": { description: OK } } }
   /api/org-invitations/preview:
     post:
       operationId: previewOrgInvitation

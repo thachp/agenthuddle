@@ -1,6 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { resolveAgent, type Env } from "../src/index";
+import { handleOrgPeople } from "../src/organizations";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; API_DB: D1Database };
@@ -175,6 +176,33 @@ describe("inviting a person to an organization", () => {
     expect((await dash(admin, "GET", `/orgs/${org}/invitations`)).body.invitations).toHaveLength(1);
     expect((await auditActions(admin, org)).filter(([action]: string[]) => action === "member.joined")).toHaveLength(1);
     expect(await roleIn(person, org)).toBe(answers.find((a) => a.status === 200)?.body.role);
+  });
+
+  it("keeps the second link when someone joins between its check and its write", async () => {
+    const admin = await signUp();
+    const org = await newOrg(admin);
+    const person = await signUp();
+    const [first, second] = [await invite(admin, org, "admin"), await invite(admin, org, "member")];
+    expect((await accept(person, first.token)).status).toBe(200);
+    // The early membership check looks like it ran just before the first link landed, so only the write can refuse.
+    let hidden = false;
+    const db = new Proxy(e.DB, {
+      get(target, name) {
+        if (name !== "prepare") return (target as any)[name]?.bind?.(target) ?? (target as any)[name];
+        return (sql: string) => {
+          if (hidden || !sql.startsWith("SELECT m.role, o.personal")) return target.prepare(sql);
+          hidden = true;
+          return { bind: () => ({ first: async () => null }) };
+        };
+      },
+    });
+    const request = new Request(`${BASE}/api/org-invitations/accept`, { method: "POST", body: JSON.stringify({ token: second.token }) });
+    const answer = (await handleOrgPeople(request, { ...e, DB: db }, person.id, "/api/org-invitations/accept"))!;
+    expect(hidden).toBe(true);
+    expect([answer.status, (await answer.json<any>()).error.code]).toEqual([409, "already_member"]);
+    expect((await dash(admin, "GET", `/orgs/${org}/invitations`)).body.invitations.map((i: any) => i.id)).toEqual([second.id]);
+    expect((await auditActions(admin, org)).filter(([action]: string[]) => action === "member.joined")).toHaveLength(1);
+    expect(await roleIn(person, org)).toBe("admin");
   });
 
   it("limits how many invitations can wait", async () => {
