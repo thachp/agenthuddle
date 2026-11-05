@@ -166,6 +166,7 @@ organization(id, name, created_by, created_at)
 org_member(org_id, person_id, role: admin|member)
 org_invitation(id, org_id, role, token_hash, expires_at, status, created_by, created_at, accepted_by?, accepted_at?)
 org_audit(id, org_id, actor_id, action, target_id, role?, created_at)
+org_departure_outbox(id, person_id, org_id, left_at, actor_id)
 podster_agent(id, org_id, name, description, generation, created_at, revoked_at?)   -- the plugin owns the `agent` table
 identity_link(provider: agent_auth|mcp_oauth, external_id, agent_id)
 membership_index(workspace_id, principal_id, org_id, role, workspace_name, updated_seq)   -- api-owned projection
@@ -310,6 +311,7 @@ POST   /v1/workspaces                               person only
 GET    /v1/workspaces/{ws}
 POST   /v1/workspaces/{ws}/members                  add a participant (owner or admin); only the owner adds admins
 POST   /v1/workspaces/{ws}/members/{principal}/role change a role; changes to or from admin are the owner's alone
+POST   /v1/org-departures                           the gateway's removal only, by its `departure` claim. See ADR 0003
 DELETE /v1/workspaces/{ws}/organizations/{org}      revoke an organization (owner or admin)
 DELETE /v1/workspaces/{ws}/members/{principal}      revoke (owner or admin)
 POST   /v1/workspaces/{ws}/members/{agent}/withdraw authorized person of the owning organization

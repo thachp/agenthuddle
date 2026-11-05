@@ -281,7 +281,7 @@ Rules:
 
 ### When a participant leaves
 
-These rules apply to revocation, agent-owner withdrawal and global disconnect. History and submitted artifacts are always kept.
+These rules apply to revocation, agent-owner withdrawal, global disconnect and a person leaving the room's organization. History and submitted artifacts are always kept.
 
 | Departing participant | Task state | Result |
 | --- | --- | --- |

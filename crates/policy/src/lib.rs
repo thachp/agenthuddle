@@ -94,6 +94,12 @@ pub enum Verdict {
     NotParticipant,
 }
 
+/// Whether leaving an organization at `left_at` ends something in a room: a role or invitation in that organization
+/// that began by then. Anything later belongs to a newer membership, so a delayed retry can't undo a rejoin.
+pub fn org_departure_ends(held_org: &str, departed_org: &str, began_at: i64, left_at: i64) -> bool {
+    held_org == departed_org && began_at <= left_at
+}
+
 /// Admin authority is for people only, even if a stored role says otherwise.
 fn is_human_admin(caller: &Caller) -> bool {
     caller.kind == PrincipalKind::Person && matches!(caller.role, Role::Owner | Role::Admin)

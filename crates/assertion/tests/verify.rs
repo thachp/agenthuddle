@@ -213,4 +213,15 @@ fn a_target_member_claim_is_read_and_is_optional() {
         })
     );
     assert_eq!(with.org_since.get("org_y"), Some(&7));
+    assert_eq!(with.departure, None);
+    body["departure"] = json!({ "person": "per_x", "org": "org_y", "left_at": 9 });
+    let leaving = verify(&sign(&body), &keys(), NOW).unwrap();
+    assert_eq!(
+        leaving.departure,
+        Some(Departure {
+            person: "per_x".into(),
+            org: "org_y".into(),
+            left_at: 9
+        })
+    );
 }

@@ -25,6 +25,15 @@ pub struct TargetMember {
     pub orgs: HashMap<String, i64>,
 }
 
+/// A fact from the gateway's directory: this person left this organization at this time, in milliseconds.
+/// Only the gateway's own removal writes it. The dashboard's forwarding can't add it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Departure {
+    pub person: String,
+    pub org: String,
+    pub left_at: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Identity {
     pub sub: String,
@@ -45,6 +54,9 @@ pub struct Identity {
     /// The API can't read the directory, and this grants nothing by itself.
     #[serde(default)]
     pub target_member: Option<TargetMember>,
+    /// Present only when the gateway reports that someone left an organization.
+    #[serde(default)]
+    pub departure: Option<Departure>,
     /// An agent token this request spends, so it can't be replayed. Absent for callers without one, such as MCP.
     #[serde(default)]
     pub agent_jti: Option<String>,

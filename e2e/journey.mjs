@@ -355,6 +355,16 @@ async function acceptance() {
     refused(await personB.dash("GET", `/v1/workspaces/${teamRoom}`, undefined, inTeam), "not_allowed", "acting in the organization after removal");
     refused(await personB.dash("GET", `/v1/workspaces/${teamRoom}`), "workspace_not_found", "reading the room after removal");
     ok(!(await listed()).includes(teamRoom), "the room left Person B's list when they were removed");
+    // The room applies a departure moments after the removal answers.
+    let stillThere = true;
+    for (let tries = 0; tries < 20 && stillThere; tries++) {
+      stillThere = (await personA.must("GET", `/v1/workspaces/${teamRoom}`)).members.some((m) => m.principal_id === personB.id);
+      if (stillThere) await sleep(isLocal ? 200 : 1000);
+    }
+    ok(!stillThere, "the room removed Person B");
+    refused(await personB.dash("POST", "/v1/invitations/accept", { token: invite.token, org_id: personB.org, agents: [] }), "invitation_not_found", "the room invitation they made, after they left");
+    const revoked = (await personA.audit(teamRoom)).filter((e) => e.action === "member.revoked" && e.target_id === personB.id);
+    eq(revoked.map((e) => JSON.parse(e.prior_json).reason), ["org_departure"], "the room's record of the departure");
     return "an admin appointing a real third person runs in the gateway's tests, because this run has two people";
   });
 

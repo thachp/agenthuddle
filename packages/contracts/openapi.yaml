@@ -58,6 +58,12 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/org-departures:
+    post:
+      operationId: recordOrgDeparture
+      tags: [commands]
+      summary: Carries a person's departure from an organization to their rooms. Only the gateway's own removal can send it, because it needs the assertion's `departure` claim. Answers 403 `not_allowed` without one. It answers once the departure is recorded, and rooms apply it shortly after. Safe to retry
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/invitations/accept:
     post:
       operationId: acceptInvitation
@@ -70,7 +76,7 @@ paths:
     post:
       operationId: createInvitation
       tags: [commands]
-      summary: Create an invitation. The token is returned once
+      summary: Create an invitation. The token is returned once. It stops working if its creator is no longer the room's owner or an admin
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer }, role: { type: string, enum: [member, guest] }, invited_org_id: { type: string }, guest_can_create: { type: boolean } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -305,7 +311,7 @@ paths:
     delete: { operationId: deleteWake, tags: [commands], summary: Remove the wake URL, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
 components:
   securitySchemes:
-    assertion: { type: apiKey, in: header, name: X-Podster-Assertion, description: "Ed25519-signed gateway assertion, valid for 60 seconds. For people, `org_since` says when they joined each organization, and a room role older than that has ended. When a person adds another person or changes their role, `target_member` holds that person's organizations and join times from the gateway's directory. Neither grants anything by itself. Agents carry their connection generation. People carry orgs and admin_orgs." }
+    assertion: { type: apiKey, in: header, name: X-Podster-Assertion, description: "Ed25519-signed gateway assertion, valid for 60 seconds. For people, `org_since` says when they joined each organization, and a room role older than that has ended. When a person adds another person or changes their role, `target_member` holds that person's organizations and join times from the gateway's directory. Neither grants anything by itself. `departure` says someone left an organization, and only the gateway's own removal sends it. Agents carry their connection generation. People carry orgs and admin_orgs." }
   parameters:
     ws: { name: ws, in: path, required: true, schema: { type: string } }
     t: { name: t, in: path, required: true, schema: { type: string } }
