@@ -1659,7 +1659,11 @@ describe("sign-in and claim pages", () => {
 
 describe("the application host", () => {
   const APP = "https://app.test";
-  const onApp = (path: string, init: RequestInit = {}) => SELF.fetch(APP + path, { redirect: "manual", ...init });
+  const ctx = { waitUntil() {}, passThroughOnException() {} } as never;
+  /** Every other test runs with APP_URL unset, which is what proves that path hasn't changed. */
+  const withAppUrl = (url: string, init: RequestInit = {}) => worker.fetch(new Request(url, { redirect: "manual", ...init }), { ...e, APP_URL: APP } as never, ctx);
+  const onApp = (path: string, init: RequestInit = {}) => withAppUrl(APP + path, init);
+  const onGateway = (path: string, init: RequestInit = {}) => withAppUrl(BASE + path, init);
   const appPost = (path: string, body: unknown, headers: Record<string, string> = {}) => onApp(path, { method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json", origin: APP, ...headers } });
 
   it("keeps the session on that host alone, and checks origin against it", async () => {
@@ -1676,17 +1680,233 @@ describe("the application host", () => {
     expect((await onApp("/api/orgs", { method: "POST", headers: { ...headers, origin: APP }, body })).status).toBe(200);
     // Each host trusts only itself.
     expect((await onApp("/api/orgs", { method: "POST", headers: { ...headers, origin: BASE }, body })).status).toBe(403);
-    expect((await call("/api/orgs", { method: "POST", headers: { ...headers, origin: APP }, body })).status).toBe(403);
+    expect((await onGateway("/api/orgs", { method: "POST", headers: { ...headers, origin: APP }, body })).status).toBe(403);
   });
 
   it("brings a provider's sign-in back to that host, and leaves agents on the gateway's", async () => {
     const res = await appPost("/api/auth/sign-in/social", { provider: "github", callbackURL: "/attention" });
     const { url } = await res.json<{ url: string }>();
     expect(new URL(url).searchParams.get("redirect_uri")).toBe(`${APP}/api/auth/callback/github`);
-    const direct = await post("/api/auth/sign-in/social", { provider: "github", callbackURL: "/signed-in" });
-    expect(new URL((await direct.json<{ url: string }>()).url).searchParams.get("redirect_uri")).toBe(`${BASE}/api/auth/callback/github`);
-    const discovery = await (await call("/.well-known/agent-configuration")).json<any>();
+    const discovery = await (await onGateway("/.well-known/agent-configuration")).json<any>();
     expect(JSON.stringify(discovery)).not.toContain(APP);
+    const oauth = await (await onGateway("/.well-known/oauth-authorization-server")).json<any>();
+    expect(oauth.authorization_endpoint).toBe(`${BASE}/authorize`);
+    expect(oauth.issuer).toBe(BASE);
+  });
+
+  describe("redirects from the gateway's host", () => {
+    it("sends a valid authorization request on, signed in or not, with its query intact", async () => {
+      const { query } = await authorizeQuery();
+      const res = await onGateway(`/authorize${query}`);
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe(`${APP}/oauth/consent${query}`);
+    });
+
+    it("answers a bad authorization request itself, and never sends anyone on with it", async () => {
+      const { client_id, query } = await authorizeQuery();
+      for (const bad of ["?client_id=nope", query.replace(encodeURIComponent("https://client.test/cb"), encodeURIComponent("https://evil.test/cb")), query.replace("scope=mcp", "scope=mcp+admin"), query.replace(/code_challenge=[^&]*&?/, ""), query.replace(/code_challenge=[^&]*&?/, "").replace(/code_challenge_method=[^&]*&?/, ""), `?response_type=code&client_id=${client_id}`]) {
+        const res = await onGateway(`/authorize${bad}`);
+        expect(res.status, bad).toBe(400);
+        expect(res.headers.get("location"), bad).toBeNull();
+      }
+    });
+
+    it("sends an agent's approval link on with its code", async () => {
+      const res = await onGateway("/claim?agent_id=a&code=b");
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe(`${APP}/claim?agent_id=a&code=b`);
+    });
+
+    it("sends sign-in on, translating where it returns to and dropping anything else", async () => {
+      const location = async (path: string) => (await onGateway(path)).headers.get("location");
+      expect(await location(`/sign-in?next=${encodeURIComponent("/authorize?client_id=x&state=y")}`)).toBe(`${APP}/sign-in?next=${encodeURIComponent("/oauth/consent?client_id=x&state=y")}`);
+      expect(await location(`/sign-in?next=${encodeURIComponent("/claim?agent_id=a&code=b")}`)).toBe(`${APP}/sign-in?next=${encodeURIComponent("/claim?agent_id=a&code=b")}`);
+      expect(await location("/sign-in")).toBe(`${APP}/sign-in`);
+      for (const next of ["https://evil.test/authorize", "//evil.test/claim", "/api/v1/me"]) expect(await location(`/sign-in?next=${encodeURIComponent(next)}`), next).toBe(`${APP}/sign-in`);
+      expect(await location(`/sign-in?error=${encodeURIComponent("<b>call 555-0100</b>")}`)).toBe(`${APP}/sign-in?error=1`);
+      const started = await onGateway("/sign-in", { method: "POST", headers: { origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ provider: "github", next: "/claim" }) });
+      expect(started.status).toBe(303);
+      expect(started.headers.get("location")).toBe(`${APP}/sign-in`);
+    });
+
+    it("can't register a client with a private-use redirect, because none is allowed yet", async () => {
+      const reg = await onGateway("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["com.example.app:/cb"], client_name: "Desktop", token_endpoint_auth_method: "none" }) });
+      expect(reg.status).toBe(400);
+    });
+
+    it("starts no session on this host, and leaves agents' routes and an existing session's routes alone", async () => {
+      const send = (path: string, body: unknown) => onGateway(`/api/auth${path}`, { method: "POST", headers: { "content-type": "application/json", origin: BASE }, body: JSON.stringify(body) });
+      for (const res of [await send("/sign-in/social", { provider: "github", callbackURL: "/signed-in" }), await send("/sign-in/email", { email: "x@example.test", password: "local-test-password-123" }), await send("/sign-up/email", { email: `${unique("p")}@example.test`, password: "local-test-password-123", name: "x" }), await onGateway("/api/auth/callback/github?code=c&state=s")]) {
+        expect(res.status).toBe(404);
+        expect(res.headers.get("set-cookie")).toBeNull();
+      }
+      const a = await signUp();
+      expect((await onGateway("/api/auth/get-session?disableRefresh=true", { headers: { cookie: a.cookie } })).status).toBe(200);
+      expect((await onGateway("/api/auth/agent-configuration")).status).toBe(200);
+      const agent = await registerAgent();
+      expect(agent.registered.approval.verification_uri_complete).toContain(`${BASE}/claim`);
+    });
+
+    it("keeps the POSTs a session cookie can use, checking origin against this host and not the application's", async () => {
+      const a = await signUp();
+      const consent = async (origin: string) => {
+        const { query } = await authorizeQuery();
+        return onGateway("/authorize", { method: "POST", headers: { cookie: a.cookie, origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ oauth_query: query, org_id: a.org }) });
+      };
+      const approved = await consent(BASE);
+      expect(approved.status).toBe(302);
+      const code = new URL(approved.headers.get("location")!);
+      expect(code.searchParams.get("code")).toBeTruthy();
+      expect(code.searchParams.get("iss")).toBe(BASE);
+      expect((await consent(APP)).status).toBe(403);
+
+      const agent = await registerAgent();
+      const claimAs = (origin: string) => onGateway("/claim", { method: "POST", headers: { cookie: a.cookie, origin, "content-type": "application/json" }, body: JSON.stringify({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: a.org }) });
+      expect((await claimAs(APP)).status).toBe(403);
+      expect((await claimAs(BASE)).status).toBe(200);
+    });
+
+    it("keeps the application host's routes off the gateway's host", async () => {
+      const a = await signUp();
+      for (const path of ["/api/consent", "/api/claim"]) {
+        expect((await onGateway(path, { headers: { cookie: a.cookie } })).status, path).toBe(404);
+        expect((await call(path, { headers: { cookie: a.cookie } })).status, `${path} with APP_URL unset`).toBe(404);
+      }
+    });
+
+    it("changes nothing with APP_URL unset", async () => {
+      const { query } = await authorizeQuery();
+      expect((await call(`/authorize${query}`)).headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent(`/authorize${query}`)}`);
+      expect((await call("/claim?agent_id=a&code=b")).headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent("/claim?agent_id=a&code=b")}`);
+      expect((await call("/sign-in")).headers.get("content-type")).toContain("text/html");
+    });
+  });
+
+  describe("consent over the binding", () => {
+    const read = (who: Person | null, query: string) => onApp(`/api/consent${query}`, { headers: who ? { cookie: who.cookie } : {} });
+    const decide = (who: Person, body: unknown, origin = APP) => onApp("/api/consent", { method: "POST", headers: { cookie: who.cookie, origin, "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    it("reads the choices, with the client's name as data", async () => {
+      const a = await signUp();
+      const existing = await claimedAgent(a);
+      const { query } = await authorizeQuery(`<script>alert(1)</script>`);
+      const res = await read(a, query);
+      expect(res.status).toBe(200);
+      const body = await res.json<any>();
+      expect(body.client_name).toBe(`<script>alert(1)</script>`);
+      expect(body.redirect_hosts).toEqual(["client.test"]);
+      expect(body.oauth_query).toBe(query);
+      expect(body.orgs.map((o: { id: string }) => o.id)).toEqual([a.org]);
+      expect(body.agents.map((row: { id: string }) => row.id)).toContain(existing.id);
+    });
+
+    it("refuses a read that's signed out, or for a bad request", async () => {
+      const a = await signUp();
+      const { query } = await authorizeQuery();
+      expect((await read(null, query)).status).toBe(401);
+      expect((await read(a, "?client_id=nope")).status).toBe(400);
+      expect((await read(a, query.replace(encodeURIComponent("https://client.test/cb"), encodeURIComponent("https://evil.test/cb")))).status).toBe(400);
+    });
+
+    it("finishes a client's whole flow: approved here, then tokens and tools on the gateway's host", async () => {
+      const a = await signUp();
+      const { client_id, query } = await authorizeQuery();
+      const res = await decide(a, { decision: "approve", oauth_query: query, org_id: a.org, agent_name: "From the app" });
+      expect(res.status).toBe(200);
+      const redirect = new URL((await res.json<any>()).redirect_to);
+      expect(redirect.origin + redirect.pathname).toBe("https://client.test/cb");
+      expect(redirect.searchParams.get("state")).toBe("s");
+      // The client compares this with the issuer it discovered, which is the gateway.
+      expect(redirect.searchParams.get("iss")).toBe(BASE);
+      const tok = await onGateway("/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code: redirect.searchParams.get("code")!, redirect_uri: "https://client.test/cb", client_id, code_verifier: VERIFIER }) });
+      expect(tok.status).toBe(200);
+      const { access_token } = await tok.json<{ access_token: string }>();
+      const mcp = await onGateway("/mcp", { method: "POST", headers: { authorization: `Bearer ${access_token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_identity", arguments: {} } }) });
+      const identity = JSON.parse((await mcp.json<any>()).result.content[0].text);
+      expect(identity.id).toMatch(/^agt_/);
+      const agents = await (await onApp("/api/agents", { headers: { cookie: a.cookie } })).json<any>();
+      expect(agents.agents.find((row: { id: string }) => row.id === identity.id)?.name).toBe("From the app");
+    });
+
+    it("only connects on an explicit approval, from this host, for an organization the person runs", async () => {
+      const [a, b] = [await signUp(), await signUp()];
+      const { query } = await authorizeQuery();
+      const before = await (await onApp("/api/agents", { headers: { cookie: a.cookie } })).json<any>();
+      expect((await decide(a, { decision: "approve", oauth_query: query, org_id: a.org }, BASE)).status).toBe(403);
+      expect((await decide(a, { decision: "approve", oauth_query: query, org_id: a.org }, "https://evil.test")).status).toBe(403);
+      expect((await decide(a, { oauth_query: query, org_id: a.org })).status).toBe(400);
+      expect((await decide(a, { decision: "yes", oauth_query: query, org_id: a.org })).status).toBe(400);
+      expect((await decide(a, { decision: "approve", oauth_query: query })).status).toBe(400);
+      expect((await decide(a, { decision: "approve", oauth_query: "/../evil", org_id: a.org })).status).toBe(400);
+      expect((await decide(a, { decision: "approve", oauth_query: "?client_id=nope", org_id: a.org })).status).toBe(400);
+      expect((await decide(a, { decision: "approve", oauth_query: query, org_id: b.org })).status).toBe(403);
+      expect((await decide(a, { decision: "approve", oauth_query: query, org_id: a.org, agent_name: "x".repeat(201) })).status).toBe(400);
+      expect((await onApp("/api/consent", { method: "POST", headers: { origin: APP, "content-type": "application/json" }, body: "{}" })).status).toBe(401);
+      const after = await (await onApp("/api/agents", { headers: { cookie: a.cookie } })).json<any>();
+      expect(after.agents).toEqual(before.agents);
+    });
+
+    it("tells the client a person declined, and connects nothing", async () => {
+      const a = await signUp();
+      const { query } = await authorizeQuery();
+      const res = await decide(a, { decision: "decline", oauth_query: query });
+      expect(res.status).toBe(200);
+      const redirect = new URL((await res.json<any>()).redirect_to);
+      expect(redirect.origin + redirect.pathname).toBe("https://client.test/cb");
+      expect(redirect.searchParams.get("error")).toBe("access_denied");
+      expect(redirect.searchParams.get("state")).toBe("s");
+      expect(redirect.searchParams.get("iss")).toBe(BASE);
+      expect(redirect.searchParams.get("code")).toBeNull();
+      expect((await (await onApp("/api/agents", { headers: { cookie: a.cookie } })).json<any>()).agents).toEqual([]);
+      // A declined answer still only ever goes to a registered address.
+      expect((await decide(a, { decision: "decline", oauth_query: query.replace(encodeURIComponent("https://client.test/cb"), encodeURIComponent("https://evil.test/cb")) })).status).toBe(400);
+    });
+  });
+
+  describe("claims over the binding", () => {
+    const read = (who: Person, agentId: string, code: string) => onApp(`/api/claim?agent_id=${encodeURIComponent(agentId)}&code=${encodeURIComponent(code)}`, { headers: { cookie: who.cookie } });
+    const decide = (who: Person, body: unknown, origin = APP) => onApp("/api/claim", { method: "POST", headers: { cookie: who.cookie, origin, "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    it("reveals nothing about an agent until the code is right", async () => {
+      const a = await signUp();
+      const agent = await registerAgent();
+      const wrong = await read(a, agent.pluginId, "AAAA-AAAA");
+      expect(wrong.status).toBe(404);
+      const missing = await read(a, "agent_missing", "AAAA-AAAA");
+      expect(missing.status).toBe(404);
+      expect(await wrong.text()).toBe(await missing.text());
+      const right = await read(a, agent.pluginId, agent.userCode);
+      expect(right.status).toBe(200);
+      expect(await right.json<any>()).toMatchObject({ agent_id: agent.pluginId, agent_name: "agent", code: agent.userCode, orgs: [{ id: a.org }] });
+    });
+
+    it("connects only from this host, with the right code", async () => {
+      const a = await signUp();
+      const agent = await registerAgent();
+      const fields = { agent_id: agent.pluginId, user_code: agent.userCode, org_id: a.org, name: "From the app" };
+      expect((await decide(a, fields, BASE)).status).toBe(403);
+      expect((await decide(a, { ...fields, user_code: "AAAA-AAAA" })).status).toBe(403);
+      expect((await onApp("/api/claim", { method: "POST", headers: { origin: APP, "content-type": "application/json" }, body: JSON.stringify(fields) })).status).toBe(401);
+      const res = await decide(a, fields);
+      expect(res.status).toBe(200);
+      const { agent_id } = await res.json<{ agent_id: string }>();
+      const { agents } = await (await onApp("/api/agents", { headers: { cookie: a.cookie } })).json<any>();
+      expect(agents.find((row: { id: string }) => row.id === agent_id)?.name).toBe("From the app");
+      // Its link is spent, so the page can't show it again.
+      expect((await read(a, agent.pluginId, agent.userCode)).status).toBe(404);
+      const after = await execute(agent, "get_identity");
+      expect(after.status).toBe(200);
+    });
+
+    it("counts reads and decisions against the same limit on guessing", async () => {
+      const a = await signUp();
+      const keys: string[] = [];
+      const fake: RateLimit = { limit: async ({ key }) => (keys.push(key), { success: !key.startsWith("claim:") }) };
+      const limited = (init: RequestInit) => worker.fetch(new Request(`${APP}/api/claim?agent_id=a&code=b`, { redirect: "manual", ...init }), { ...e, APP_URL: APP, RL_SENSITIVE: fake } as never, ctx);
+      expect((await limited({ headers: { cookie: a.cookie } })).status).toBe(429);
+      expect((await limited({ method: "POST", headers: { cookie: a.cookie, origin: APP, "content-type": "application/json" }, body: "{}" })).status).toBe(429);
+      expect(keys.filter((key) => key.startsWith("claim:")).length).toBe(2);
+    });
   });
 });
 
