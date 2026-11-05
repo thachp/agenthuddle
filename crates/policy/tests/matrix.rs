@@ -298,7 +298,7 @@ fn only_a_lack_of_authority_counts_as_a_denial() {
         "workspace_not_found",
         "self_sign_off",
     ] {
-        assert!(is_authority_refusal(code), "{code}");
+        assert!(is_authority_refusal("task.accept", code), "{code}");
     }
     for code in [
         "invalid_argument",
@@ -306,7 +306,11 @@ fn only_a_lack_of_authority_counts_as_a_denial() {
         "idempotency_mismatch",
         "workspace_archived",
         "internal_error",
+        "not_in_organization",
+        "not_found",
     ] {
-        assert!(!is_authority_refusal(code), "{code}");
+        assert!(!is_authority_refusal("task.accept", code), "{code}");
     }
+    assert!(is_authority_refusal("member.withdraw", "not_found"));
+    assert!(is_authority_refusal("member.owner_consent", "not_found"));
 }

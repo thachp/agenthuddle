@@ -129,20 +129,22 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
     })
 }
 
-/// Whether a refusal means someone lacked the authority for a change. A malformed request or a stale form doesn't.
-pub fn is_authority_refusal(code: &str) -> bool {
-    matches!(
-        code,
+/// Whether a refusal means someone lacked the authority for this change. A malformed request or a stale form doesn't,
+/// and neither does naming someone outside the organization, because that caller has the authority and the request is
+/// wrong. An agent's owner routes answer `not_found` to someone in the room with no authority over the agent.
+pub fn is_authority_refusal(action: &str, code: &str) -> bool {
+    match code {
         "not_allowed"
-            | "not_a_participant"
-            | "access_revoked"
-            | "agent_disconnected"
-            | "workspace_not_found"
-            | "task_not_found"
-            | "self_sign_off"
-            | "invitation_required"
-            | "invitation_not_found"
-    )
+        | "access_revoked"
+        | "agent_disconnected"
+        | "workspace_not_found"
+        | "task_not_found"
+        | "self_sign_off"
+        | "invitation_required"
+        | "invitation_not_found" => true,
+        "not_found" => matches!(action, "member.withdraw" | "member.owner_consent"),
+        _ => false,
+    }
 }
 
 /// Whether leaving an organization at `left_at` ends something in a room: a role or invitation in that organization

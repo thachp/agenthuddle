@@ -633,9 +633,15 @@ async function acceptance() {
     ok(before.every((e) => !/token|secret/i.test(`${e.prior_json} ${e.new_json}`)), "an audit entry holds a secret");
     // Denied changes have their own record, for the owner and admins.
     refused(await personB.dash("POST", `/v1/workspaces/${room}/archive`, { policy_version: 1 }), "workspace_not_found", "a stranger archiving the room");
-    const denials = (await personA.must("GET", `/v1/workspaces/${room}/denials`)).denials;
-    ok(denials.some((d) => d.action === "room.archive" && d.actor_id === "outsider" && d.code === "workspace_not_found"), "the refused change isn't in the denial record");
-    ok(!/SECRET/.test(JSON.stringify(denials)), "the denial record holds content");
+    // A refusal is written a few seconds after it's answered.
+    let found;
+    for (let tries = 0; tries < 40 && !found; tries++) {
+      found = (await personA.must("GET", `/v1/workspaces/${room}/denials`)).denials.find((d) => d.action === "room.archive" && d.actor_id === "outsider");
+      if (!found) await sleep(500);
+    }
+    ok(found, "the refused change isn't in the denial record");
+    eq([found.code, found.last_actor_id], ["workspace_not_found", personB.id], "the denial record's code and latest actor");
+    eq(Object.keys(found).sort(), ["action", "actor_id", "actor_kind", "code", "count", "day_start", "first_actor_id", "first_at", "last_actor_id", "last_at"], "the denial record's fields");
     refused(await personB.dash("GET", `/v1/workspaces/${room}/denials`), "workspace_not_found", "someone outside reading the denial record");
     for (const method of ["POST", "PUT", "DELETE"]) eq((await personA.dash(method, `/v1/workspaces/${room}/denials`, {})).status, 404, `owner ${method} on the denial record`);
     return "a member or agent reading it is apps/api's test: no public route lets an agent ask";
