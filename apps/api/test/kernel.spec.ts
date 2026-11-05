@@ -2025,6 +2025,35 @@ describe("wake", () => {
     const waits = await consume(bob);
     expect(waits[0]).toBeGreaterThan(3000);
     expect(await hookLog(again)).toEqual([]);
+    // Deleting first doesn't skip it either, and a deleted wake looks like none.
+    expect((await api(bob, "DELETE", "/v1/inbox/wake", {}, { key: null })).status).toBe(200);
+    expect((await api(bob, "GET", "/v1/me")).body.wake).toBeNull();
+    const third = unique();
+    await setWake(bob, `https://hooks.example.com${third}`, { debounce: 3600 });
+    await deliver(bob, 3);
+    expect((await consume(bob))[0]).toBeGreaterThan(3000);
+    expect(await hookLog(third)).toEqual([]);
+  });
+
+  it("shortening the window applies to a wake already waiting", async () => {
+    const bob = await fresh();
+    await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 3600 });
+    await deliver(bob);
+    await consume(bob);
+    await deliver(bob, 2);
+    const waiting = (await wakeRow(bob)).queued_until;
+    expect(waiting).toBeGreaterThan(Date.now() + 3_000_000);
+    // The same setting leaves it alone, and a new one clears it, so the next event queues for the new window.
+    await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 3600 });
+    expect((await wakeRow(bob)).queued_until).toBe(waiting);
+    await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 60 });
+    expect((await wakeRow(bob)).queued_until).toBeNull();
+    await deliver(bob, 3);
+    expect((await wakeRow(bob)).queued_until).toBeLessThan(waiting);
+  });
+
+  it("the consumer config stays within what a Worker can hold open", () => {
+    expect(BINDINGS.TEST_WRANGLER.match(/"max_batch_size": (\d+)/g)).toEqual(['"max_batch_size": 6', '"max_batch_size": 6']);
   });
 
   describe("around a send", () => {
@@ -2055,7 +2084,11 @@ describe("wake", () => {
       await deliver(bob);
       const first: any = await internalCall(bob, "wake-claim");
       expect(first.send).toBe(true);
-      expect(await internalCall(bob, "wake-claim")).toEqual({ send: false, reason: "sending" });
+      // The second waits rather than being dropped, in case the first crashed.
+      const second: any = await internalCall(bob, "wake-claim");
+      expect(second).toMatchObject({ send: false, reason: "sending" });
+      expect(second.retry_after).toBeGreaterThan(0);
+      expect(second.retry_after).toBeLessThanOrEqual(31);
       // A crash mid-send only delays the next: the lease runs out.
       await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET sending_until = ?", Date.now() - 1));
       expect((await internalCall(bob, "wake-claim") as any).send).toBe(true);
@@ -2074,6 +2107,30 @@ describe("wake", () => {
       expect((await wakeRow(bob)).consecutive_failures).toBe(0);
       await internalCall(bob, "wake-report", { ok: true, secret: claim.secret, last_seq: claim.last_seq });
       expect((await wakeRow(bob)).last_sent_at).toBeNull();
+    });
+
+    it("replacing a URL during a send doesn't silence the new one", async () => {
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`);
+      await deliver(bob);
+      const claim: any = await internalCall(bob, "wake-claim");
+      const fresher = unique();
+      await setWake(bob, `https://hooks.example.com${fresher}`);
+      const report: any = await internalCall(bob, "wake-report", { ok: true, secret: claim.secret, last_seq: claim.last_seq });
+      expect(report.requeue).toBe(true);
+      const row = await wakeRow(bob);
+      expect(row.sending_until).toBeNull();
+      expect(row.queued_until).toBeGreaterThan(Date.now());
+      await consume(bob);
+      expect(await hookLog(fresher)).toHaveLength(1);
+      // With nothing unread, an old report queues nothing.
+      const read = await fresh();
+      await setWake(read, `https://hooks.example.com${unique()}`);
+      await deliver(read);
+      const old: any = await internalCall(read, "wake-claim");
+      await setWake(read, `https://hooks.example.com${unique()}`);
+      await api(read, "GET", "/v1/inbox?ack=true");
+      expect((await internalCall(read, "wake-report", { ok: true, secret: old.secret, last_seq: old.last_seq }) as any).requeue).toBe(false);
     });
   });
 

@@ -308,7 +308,9 @@ fn wake_row(sql: &SqlStorage) -> R<Option<Value>> {
     {
         return Ok(None);
     }
-    Ok(rows(sql, "SELECT * FROM wake", vec![])?.into_iter().next())
+    Ok(rows(sql, "SELECT * FROM wake WHERE url != ''", vec![])?
+        .into_iter()
+        .next())
 }
 
 /// What identity shows. The secret never appears here.
@@ -343,15 +345,22 @@ fn set_wake(sql: &SqlStorage, body: &Value) -> R<Value> {
     exec(
         sql,
         "INSERT INTO wake (id, url, secret, debounce_s, enabled) VALUES (1, ?, ?, ?, 1)
-          ON CONFLICT (id) DO UPDATE SET url = excluded.url, secret = excluded.secret, debounce_s = excluded.debounce_s, enabled = 1, consecutive_failures = 0",
+          ON CONFLICT (id) DO UPDATE SET url = excluded.url, secret = excluded.secret, debounce_s = excluded.debounce_s, enabled = 1, consecutive_failures = 0,
+            queued_until = CASE WHEN debounce_s = excluded.debounce_s THEN queued_until ELSE NULL END",
         vec![url.as_str().into(), secret.as_str().into(), debounce.into()],
     )?;
     Ok(json!({ "url": url, "debounce": debounce, "enabled": true, "secret": secret }))
 }
 
+/// Blanks the row rather than deleting it, so the time of the last send survives and deleting then setting a URL can't
+/// skip the debounce window.
 fn delete_wake(sql: &SqlStorage) -> R<Value> {
     if wake_row(sql)?.is_some() {
-        exec(sql, "DELETE FROM wake", vec![])?;
+        exec(
+            sql,
+            "UPDATE wake SET url = '', secret = '', enabled = 0, consecutive_failures = 0, queued_until = NULL, sending_until = NULL",
+            vec![],
+        )?;
     }
     Ok(json!({ "deleted": true }))
 }
@@ -422,11 +431,11 @@ fn claim_wake(sql: &SqlStorage, now: i64) -> R<Value> {
             json!({ "send": false, "reason": "debounce", "retry_after": ((due - now) / 1000 + 1).min(WAKE_QUEUE_MAX_DELAY_SECS) }),
         );
     }
-    if wake["sending_until"]
-        .as_i64()
-        .is_some_and(|until| until > now)
-    {
-        return Ok(skip("sending"));
+    // Waits rather than being dropped: if that send crashed, this message is the only one left.
+    if let Some(until) = wake["sending_until"].as_i64().filter(|until| *until > now) {
+        return Ok(
+            json!({ "send": false, "reason": "sending", "retry_after": (until - now) / 1000 + 1 }),
+        );
     }
     exec(
         sql,
@@ -446,7 +455,14 @@ fn report_wake(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         return Ok(ignored);
     };
     if body["secret"].as_str() != wake["secret"].as_str() {
-        return Ok(ignored);
+        // Its message is finished, so the flags it left would keep the new URL quiet.
+        exec(
+            sql,
+            "UPDATE wake SET queued_until = NULL, sending_until = NULL",
+            vec![],
+        )?;
+        let (acked, _, _) = inbox_state(sql)?;
+        return Ok(json!({ "retry": false, "requeue": unread_count(sql, acked, now)? > 0 }));
     }
     if body["ok"].as_bool().unwrap_or(false) {
         exec(

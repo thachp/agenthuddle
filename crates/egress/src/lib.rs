@@ -140,6 +140,7 @@ mod tests {
             // A public name that only ends like a private one.
             ("https://notlocal.com/", "https://notlocal.com/"),
             ("https://mylocalhost.org/", "https://mylocalhost.org/"),
+            ("https://notpodster.dev/", "https://notpodster.dev/"),
         ] {
             assert_eq!(check_wake_url(given).as_deref(), Ok(stored), "{given}");
         }

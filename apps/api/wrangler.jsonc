@@ -19,7 +19,7 @@
   // ASSERTION_KEYS is a secret: a JSON object of kid to base64url Ed25519 public key.
   ,"queues": {
     "producers": [{ "binding": "WAKE", "queue": "podster-wake" }],
-    "consumers": [{ "queue": "podster-wake", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5 }]
+    "consumers": [{ "queue": "podster-wake", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5 }]
   },
   "env": {
     "staging": {
@@ -27,7 +27,7 @@
       "preview_urls": false,
       "queues": {
         "producers": [{ "binding": "WAKE", "queue": "podster-wake-staging" }],
-        "consumers": [{ "queue": "podster-wake-staging", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5 }]
+        "consumers": [{ "queue": "podster-wake-staging", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5 }]
       },
       "durable_objects": { "bindings": [
         { "name": "WORKSPACE", "class_name": "Workspace" },
