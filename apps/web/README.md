@@ -34,6 +34,10 @@ Open <http://app.localhost:3000> and choose **Create test account**. If `rustc` 
 npm run typecheck && npm test
 ```
 
+`npm start` builds first. A `wrangler dev` left running across a separate `npm run build` keeps serving the old server build against new client chunks, so restart it after building.
+
+`GATEWAY_URL` in `wrangler.jsonc` is the gateway's public address, shown in the connection Sheet. It's set per environment, and never called from here.
+
 ## Adding a screen
 
 Nothing shared needs editing. In particular, there's no route table, no API client to extend, and no Sheet registry.
@@ -52,7 +56,7 @@ Nothing shared needs editing. In particular, there's no route table, no API clie
 | --- | --- |
 | Review | `app/(shell)/attention/`, `app/(shell)/w/[id]/tasks/` |
 | Access | `app/(shell)/w/[id]/team/`, `app/(shell)/w/[id]/settings/` |
-| Agents | `app/(shell)/agents/` |
+| Agents | `app/(shell)/agents/`, `app/(shell)/settings/` |
 
 These are shared, so change them only with a reason: `components/sheet/`, `components/agent-content/`, `components/shell/`, `lib/gateway/`, `app/globals.css`. If a screen needs a gateway route that doesn't exist, that's a gateway change rather than something to work around here.
 
@@ -111,9 +115,13 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | --- | --- |
 | Agents: **Set wake** | A person setting an agent's wake. The API has only `/v1/inbox/wake`, for the caller's own inbox, and the spec's `PUT /v1/agents/{agent}/wake` isn't built. |
 | Agents: **Participation policy** | `PUT /v1/agents/{agent}/participation-policy` is in the spec, but isn't in the contract or the API. |
-| Agents: **Rename**, last active, workroom count | No route. `GET /api/agents` returns only the gateway's directory fields, so connection state takes a `getAgent` per row. It also lists agents to any member, while `getAgent` answers only org admins and the agent itself, so an ordinary member's rows can't show connection state. |
+| Agents: **Rename**, connection method, last active, workroom count, accepted tasks | No route. `GET /api/agents` returns only the gateway's directory fields, so connection state takes a `getAgent` per row, capped at 12. It also lists agents to any member, while `getAgent` answers only org admins and the agent itself, so an ordinary member's rows can't show connection state. |
+| Agents: an agent's workrooms | No route lists them, though the agent's Principal holds them in `room_registry`. The Sheet joins the person's own rooms, at most 10, with the rooms in the agent's oldest 50 and newest inbox events, and says the list may be incomplete. Inbox reads go oldest first with no way to ask for the newest, so it estimates where they start. A room the owner isn't in shows only if those events mention it. Any other such room, even with events further along the inbox, can't be withdrawn from except by a full disconnect. |
+| Connect: **Connected** | No event says a connection arrived. The Sheet polls `GET /api/agents` every 10 seconds, only while it's open and visible. |
 | Any screen showing a name | Tasks and members carry principal IDs. Nothing turns them into names and organizations, which attribution needs (UI-07). Messages do carry `external`. |
 | Needs attention | No query across rooms for reviews assigned to me. The person inbox has events only, so reviews must be derived from them or a new read model. |
-| Settings: Organization | No route adds a person to an organization. |
+| Settings: Profile | Forwarding doesn't include Better Auth's update route, so name and email are read-only. |
+| Settings: Organization | No route adds a person to an organization, or lists its members. |
+| Settings: Notifications | Podster delivers no email, so there are no choices to offer. |
 | Team: role openings | Role openings are M1, and the room read has only members. |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |

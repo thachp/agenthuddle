@@ -14,14 +14,14 @@
   },
   "services": [{ "binding": "GATEWAY", "service": "podster-gateway" }],
   // Local run only. Password sign-in also needs ENABLE_PASSWORD_SIGNIN on the gateway, which refuses it on a real hostname.
-  "vars": { "APP_URL": "http://app.localhost:3000", "SIGN_IN_PROVIDERS": "", "LOCAL_PASSWORD_SIGNIN": "true" },
+  "vars": { "APP_URL": "http://app.localhost:3000", "GATEWAY_URL": "http://localhost:8787", "SIGN_IN_PROVIDERS": "", "LOCAL_PASSWORD_SIGNIN": "true" },
   "env": {
     // Nothing here exists yet. docs/adr/0001 lists what staging needs, and the route waits on that decision.
     "staging": {
       "workers_dev": false,
       "preview_urls": false,
       "services": [{ "binding": "GATEWAY", "service": "podster-gateway-staging" }],
-      "vars": { "APP_URL": "https://app-staging.podster.dev", "SIGN_IN_PROVIDERS": "github", "LOCAL_PASSWORD_SIGNIN": "false" }
+      "vars": { "APP_URL": "https://app-staging.podster.dev", "GATEWAY_URL": "https://gateway-staging.podster.dev", "SIGN_IN_PROVIDERS": "github", "LOCAL_PASSWORD_SIGNIN": "false" }
     }
   }
 }
