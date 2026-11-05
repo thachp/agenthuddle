@@ -77,9 +77,17 @@ Today nobody can manage its access or take over its tasks. Recovery fixes this, 
 
 An organization can't lose its last admin, because the gateway refuses that. So a room in a team organization has someone who can run recovery, once a departure reaches it. The person's `Principal` looks for their rooms for about 30 days, further and further apart, so an index write that fails for a while doesn't lose it. A refused request never records a departure, because a denied request changes nothing.
 
-**What's still stuck:** a room the departure never reaches, whether or not its owner rejoins. That takes index writes failing for more than 30 days, or an owner removed before departures existed, which only staging's test data can have. The room still treats them as its owner: a rejoined owner gets not-found, nobody can recover the room, and it still counts toward the 20. Until a departure arrives, the room also keeps them as a participant, and pending invitations they made still work. The only way out is a change by hand.
+**If no departure has reached a room,** nobody can recover it yet. If its owner is in the organization, an organization admin can remove them again. That writes a new departure, which reaches the room if it has an index row, and recovery can then name anyone in the organization, including that person once they've rejoined. This also works for an old room made within clock skew of its owner's membership, whose `owner_since` comes from when it was made, on a different clock, so an owner who never left can be refused. New rooms take it from the assertion and can't hit this. An organization's last admin can't be removed, so another admin has to exist first.
 
-**An old room made within clock skew of its owner's membership** is a separate case. It takes `owner_since` from when it was made, from a different clock, so an owner who never left could be refused, with nothing to recover from. New rooms take it from the assertion and can't hit this. Only staging has rooms that old.
+**What's truly stuck:**
+
+- A room whose owner is out of the organization and doesn't rejoin, where the departure was lost. That takes index writes failing for more than 30 days, or an owner removed before departures existed, which only staging's test data can have.
+- Any room with no index row, because a departure finds rooms from the index.
+- An old room in a personal organization, made within clock skew, because removal is refused there. Only staging has rooms that old.
+
+Nobody can recover these rooms, they still count toward the 20, and the only way out is a change by hand.
+
+**Until a departure arrives,** the room still treats its owner as a participant, and pending invitations they made still work. An owner who has rejoined gets not-found from the room but still sees it on their list, including later renames. That's brief when a departure is on its way, and lasts indefinitely in the stuck cases.
 
 ### What's built, and what isn't
 
@@ -112,5 +120,6 @@ These aren't in the acceptance tests yet, so they become a new AC:
 - A personal organization's room never reaches recovery.
 - A departure reaches a room whose listing appears only after the first sweeps.
 - A rejoined owner being refused changes nothing in the room, and the room learns only from a departure.
+- Removing a rejoined owner again reaches a room the first departure missed, and recovery can then name them once they've rejoined.
 - A departed owner who rejoins doesn't see the room in their list until recovery names them.
 - Each case leaves one audit entry, one event and nothing partial when a command fails partway.

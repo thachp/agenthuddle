@@ -493,6 +493,36 @@ describe("leaving an organization", () => {
     }, { timeout: 10000 });
   });
 
+  it("recovers a room the first departure missed, by removing the rejoined owner again", async () => {
+    const admin = await signUp();
+    const org = await newOrg(admin);
+    const founder = await joined(admin, org, "admin");
+    const id = await room(founder, org);
+    await vi.waitFor(async () => expect(await listed(founder)).toContain(id), { timeout: 5000 });
+    const ownerless = async () => ((await dash(admin, "GET", "/v1/oversight/ownerless")).body.rooms as any[]).filter((r) => r.workspace_id === id);
+    // The listing can't be found under this organization, so the departure finds no room.
+    const row = e.API_DB.prepare("UPDATE membership_index SET org_id = ? WHERE workspace_id = ? AND principal_id = ?");
+    await row.bind("org_hidden", id, founder.id).run();
+    await dash(admin, "DELETE", `/orgs/${org}/members/${founder.id}`);
+    expect((await accept(founder, (await invite(admin, org)).token)).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    // They're refused, and the room doesn't know why, so nobody can recover it.
+    expect((await dash(founder, "GET", `/v1/workspaces/${id}`)).code).toBe("workspace_not_found");
+    expect(await ownerless()).toEqual([]);
+    expect((await dash(admin, "POST", `/v1/workspaces/${id}/owner/recover`, { to: admin.id, expected_owner: founder.id })).code).toBe("workspace_not_found");
+    // Removing them again is a new departure, which finds the room now the listing is back.
+    await row.bind(org, id, founder.id).run();
+    expect((await dash(admin, "DELETE", `/orgs/${org}/members/${founder.id}`)).status).toBe(200);
+    await vi.waitFor(async () => expect((await ownerless()).map((r) => r.owner)).toEqual([founder.id]), { timeout: 10000 });
+    // Naming them takes rejoining first, because recovery names someone in the organization now.
+    const recover = () => dash(admin, "POST", `/v1/workspaces/${id}/owner/recover`, { to: founder.id, expected_owner: founder.id });
+    expect((await recover()).code).toBe("not_in_organization");
+    expect((await accept(founder, (await invite(admin, org)).token)).status).toBe(200);
+    expect((await recover()).status).toBe(200);
+    expect((await dash(founder, "GET", `/v1/workspaces/${id}`)).body.owner).toBe(founder.id);
+    await vi.waitFor(async () => expect(await ownerless()).toEqual([]), { timeout: 10000 });
+  });
+
   it("transfers a room to an admin in the organization, and refuses one who has left", async () => {
     const owner = await signUp();
     const org = await newOrg(owner);
