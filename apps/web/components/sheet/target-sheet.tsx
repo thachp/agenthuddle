@@ -18,9 +18,16 @@ export type SheetApi<T> = {
   binding: SheetBinding;
   dirty: boolean;
   setDirty: (dirty: boolean) => void;
+  /** A draft that doesn't answer to a version, such as a new message. It holds the Sheet open like an edit, and leaves version checks and `dirty` alone. */
+  setUnsaved: (unsaved: boolean) => void;
   saving: boolean;
-  /** Runs a command for this Sheet's own target. Never optimistic: on success the Sheet reloads and shows the server's state. */
-  run: <R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>) => Promise<GatewayResult<R> | null>;
+  /**
+   * Runs a command for this Sheet's own target. Never optimistic: on success the Sheet reloads and shows the server's state.
+   * `explain` words a failure for this command, and a lost response or server error reaches it as code "unknown".
+   */
+  run: <R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string) => Promise<GatewayResult<R> | null>;
+  /** Reads the target again, for a command that doesn't go through `run`. */
+  refresh: () => void;
   close: () => void;
 };
 
@@ -154,6 +161,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   const [loaded, setLoaded] = useState<Loaded<T>>({ phase: "loading" });
   const [reloads, setReloads] = useState(0);
   const [dirty, setDirtyState] = useState(false);
+  const [unsaved, setUnsaved] = useState(false);
   // The version a draft was read at. A reload can show newer data, but the draft still answers to this one, so saving it conflicts instead of overwriting.
   const draftVersion = useRef<number | null>(null);
   const [saving, setSaving] = useState(false);
@@ -161,6 +169,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   // A save that failed after the URL moved on. The Sheet holds until the person has seen it.
   const [heldFailure, setHeldFailure] = useState(false);
   const [failedCode, setFailedCode] = useState<string | null>(null);
+  const [failedText, setFailedText] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
   const [closing, setClosing] = useState(false);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -207,15 +216,16 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     };
   }, [target, reloads]);
 
-  const busy = dirty || saving || heldFailure;
+  const hasDraft = dirty || unsaved;
+  const busy = hasDraft || saving || heldFailure;
   useEffect(() => {
     onBusyChange(busy);
   }, [busy, onBusyChange]);
 
   // The URL moved away, by Back or a link, while this Sheet was busy. A save finishes first; edits need an answer.
   useEffect(() => {
-    if (selected !== target && dirty && !saving) setAsking(true);
-  }, [selected, target, dirty, saving]);
+    if (selected !== target && hasDraft && !saving) setAsking(true);
+  }, [selected, target, hasDraft, saving]);
 
   const finish = () => {
     setClosing(true);
@@ -225,7 +235,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
 
   const requestClose = () => {
     if (saving) return;
-    if (dirty) setAsking(true);
+    if (hasDraft) setAsking(true);
     // The URL has already moved on, so closing this goes there.
     else if (selected !== target) setHeldFailure(false);
     else finish();
@@ -235,6 +245,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     setAsking(false);
     setHeldFailure(false);
     setDirty(false);
+    setUnsaved(false);
     // Moves on to whatever the URL now says, or closes.
     if (selected === target) finish();
     else onBusyChange(false);
@@ -254,13 +265,14 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     setDirtyState(next);
   }
 
-  async function run<R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>): Promise<GatewayResult<R> | null> {
+  async function run<R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string): Promise<GatewayResult<R> | null> {
     // A second click can't send a second command while the first is out.
     if (savingRef.current) return null;
     savingRef.current = true;
     setSaving(true);
     setConflict(false);
     setFailedCode(null);
+    setFailedText(null);
     setHeldFailure(false);
     try {
       const result = await command(binding);
@@ -272,13 +284,18 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
         setReloads((count) => count + 1);
       } else {
         if (result.code === "version_conflict") setConflict(true);
-        else setFailedCode(result.status >= 500 ? "unknown" : result.code);
+        else {
+          const code = result.status >= 500 ? "unknown" : result.code;
+          setFailedCode(code);
+          setFailedText(explain?.(code, result.status) ?? null);
+        }
         if (selectedRef.current !== target) setHeldFailure(true);
       }
       return result;
     } catch {
       if (alive.current) {
         setFailedCode("unknown");
+        setFailedText(explain?.("unknown", 0) ?? null);
         if (selectedRef.current !== target) setHeldFailure(true);
       }
       return null;
@@ -312,7 +329,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
               {heading}
             </SheetTitle>
             <SheetDescription className="break-words">{data !== null ? description(data) : "\u00a0"}</SheetDescription>
-            {dirty ? <p role="status">Unsaved changes</p> : null}
+            {hasDraft ? <p role="status">Unsaved changes</p> : null}
           </SheetHeader>
           <div className="flex-1 space-y-4 px-4 pb-4">
             {loaded.phase === "loading" ? (
@@ -347,10 +364,10 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
             ) : null}
             {failedCode ? (
               <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-                {failedCode === "unknown" ? "We can't tell whether this saved. Refresh before trying again." : "That didn't save, and nothing changed. You may no longer be allowed to do this."}
+                {failedText ?? (failedCode === "unknown" ? "We can't tell whether this saved. Refresh before trying again." : "That didn't save, and nothing changed. You may no longer be allowed to do this.")}
               </p>
             ) : null}
-            {data !== null ? children({ data, binding, dirty, setDirty, saving, run, close: requestClose }) : null}
+            {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, saving, run, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
           </div>
         </SheetContent>
       </Sheet>

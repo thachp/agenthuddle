@@ -1,31 +1,260 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { plainName } from "@/components/agent-content/text";
 import type { SheetApi } from "@/components/sheet/target-sheet";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { FIELD_CLASS } from "./task-bits";
-import { asConflict, textNameOf, viewerActions, type Names } from "./task-model";
+import { asConflict, changedSince, changeProblem, draftOf, flagged, LIMITS, newRequesterChoices, newReviewerChoices, rebaseDraft, reoffers, taskPatch, textNameOf, tooLong, viewerActions, type Names, type Task, type TaskDraft } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
 
 type Props = { api: SheetApi<LoadedTask>; me: string; names: Names; role: string | undefined; onNotice: (notice: string | null) => void };
 
+/** An edit in progress, and the task it was started from. */
+export type SavedEdit = { readAt: Task; draft: TaskDraft };
+
 const PRIMARY = "min-h-11 sm:min-h-9";
 
 /** Only what this viewer may do now. It's rebuilt for each task version, so nothing here can outlive what it was read against. */
-export function TaskActions({ api, me, names, role, onNotice }: Props) {
+export function TaskActions({ api, me, names, role, onNotice, savedEdit }: Props & { savedEdit: RefObject<SavedEdit | null> }) {
   const { task } = api.data;
   const can = viewerActions(task, me, role);
-  if (!can.review && !can.cancel && !can.assign) return <Waiting api={api} me={me} names={names} />;
+  const [editing, setEditing] = useState(() => savedEdit.current !== null && can.edit);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
+  // The form has gone, and focus shouldn't go with it. The button only exists again after this render.
+  useEffect(() => {
+    if (!editing && returnFocus.current) editButton.current?.focus();
+    returnFocus.current = false;
+  }, [editing]);
+
+  if (editing) {
+    return (
+      <section aria-label="Actions" className="space-y-3 border-t pt-4">
+        <EditTask
+          api={api}
+          me={me}
+          names={names}
+          savedEdit={savedEdit}
+          onDone={() => {
+            returnFocus.current = true;
+            setEditing(false);
+          }}
+          onNotice={onNotice}
+        />
+      </section>
+    );
+  }
+  if (!can.review && !can.cancel && !can.assign && !can.edit && !can.setReviewer && !can.setRequester) {
+    return (
+      <>
+        {savedEdit.current ? <UnsavableEdit savedEdit={savedEdit} /> : null}
+        <Waiting api={api} me={me} names={names} />
+      </>
+    );
+  }
   return (
     <section aria-label="Actions" className="space-y-3 border-t pt-4">
+      {savedEdit.current && !can.edit ? <UnsavableEdit savedEdit={savedEdit} /> : null}
       {can.review ? <ReviewActions api={api} onNotice={onNotice} /> : <Waiting api={api} me={me} names={names} />}
       {can.assign ? <OfferTask api={api} me={me} names={names} role={role} onNotice={onNotice} /> : null}
+      {can.edit ? (
+        <Button
+          ref={editButton}
+          variant="outline"
+          className={PRIMARY}
+          disabled={api.saving}
+          onClick={() => {
+            onNotice(null);
+            setEditing(true);
+          }}
+        >
+          Edit task
+        </Button>
+      ) : null}
+      {/* Saving either one starts these controls afresh, and a draft shouldn't vanish because of it. */}
+      {(can.setReviewer || can.setRequester) && !api.dirty ? <ChangePeople api={api} me={me} names={names} role={role} onNotice={onNotice} /> : null}
+      {task.status === "submitted" && (task.requester === me || role === "owner" || role === "admin") ? <p className="text-sm text-muted-foreground">Submitted work can't be edited. Request changes first.</p> : null}
       {can.cancel ? <CancelTask api={api} onNotice={onNotice} /> : null}
     </section>
+  );
+}
+
+/** The task moved to a state that can't be edited, so all that's left is to give the person their words back. */
+function UnsavableEdit({ savedEdit }: { savedEdit: RefObject<SavedEdit | null> }) {
+  const [, setDismissed] = useState(false);
+  const saved = savedEdit.current;
+  if (!saved) return null;
+  return (
+    <div className="space-y-2 rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
+      <p>This task can't be edited now, so your edit wasn't saved. Here's what you wrote, to copy.</p>
+      <p className="break-words whitespace-pre-wrap">{saved.draft.title}</p>
+      <p className="break-words whitespace-pre-wrap">{saved.draft.instructions}</p>
+      {saved.draft.criteria ? <p className="break-words whitespace-pre-wrap">{saved.draft.criteria}</p> : null}
+      <Button
+        variant="outline"
+        className={PRIMARY}
+        onClick={() => {
+          savedEdit.current = null;
+          setDismissed(true);
+        }}
+      >
+        Dismiss
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Edits go out as only what changed, against the version the person read. The warning about re-acceptance shows from the
+ * start, so it's not a surprise, and the button repeats it once this edit would actually do that.
+ */
+function EditTask({ api, me, names, savedEdit, onDone, onNotice }: Pick<Props, "api" | "me" | "names" | "onNotice"> & { savedEdit: RefObject<SavedEdit | null>; onDone: () => void }) {
+  const { data, run, saving, setDirty } = api;
+  const { task } = data;
+  const earlier = useRef(savedEdit.current);
+  const [draft, setDraftState] = useState<TaskDraft>(() => (earlier.current ? rebaseDraft(earlier.current.draft, earlier.current.readAt, task) : draftOf(task)));
+  const titleRef = useRef<HTMLInputElement>(null);
+  const patch = taskPatch(task, draft);
+  const changed = Object.keys(patch).length > 0;
+  const body = JSON.stringify(patch);
+  const key = useIntentKey(`update:${task.version}:${body}`);
+  const backToOffered = reoffers(task, patch);
+  const assignee = task.assignee ? textNameOf(task.assignee, me, names) : "the assignee";
+  const invalid = draft.title.trim() === "" || draft.instructions.trim() === "" || tooLong(draft.title, LIMITS.title) || tooLong(draft.instructions, LIMITS.instructions) || tooLong(draft.criteria, LIMITS.criteria);
+  const movedOn = earlier.current ? changedSince(earlier.current.readAt, task) : [];
+
+  useEffect(() => titleRef.current?.focus(), []);
+  useEffect(() => {
+    setDirty(changed);
+    // Only when that answer changes. `setDirty` is new each render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [changed]);
+
+  const setField = (name: keyof TaskDraft, value: string) => {
+    const next = { ...draft, [name]: value };
+    setDraftState(next);
+    savedEdit.current = { readAt: task, draft: next };
+  };
+
+  const finish = () => {
+    savedEdit.current = null;
+    setDirty(false);
+    onDone();
+  };
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!changed || invalid) return;
+    onNotice(null);
+    const result = await run(async (binding) => asConflict(await clientCommand<Task>(taskPath(data, "update"), { version: binding.version, ...patch }, { idempotencyKey: key })), (code, status) => changeProblem("edit", code, status));
+    if (!result?.ok) return;
+    // Says what the server did, not what this form expected.
+    onNotice(task.status === "accepted" && result.data.status === "offered" ? `Saved. ${assignee} has to accept this task again before working on it.` : "Saved your edit.");
+    finish();
+  };
+
+  return (
+    <form onSubmit={save} aria-label="Edit task" className="space-y-3">
+      <h3 className="font-medium">Edit task</h3>
+      {movedOn.length > 0 ? (
+        <p className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
+          Your text is still here, on top of the latest version. Since you started, this changed: {movedOn.join(", ")}. Check it above before saving.
+        </p>
+      ) : null}
+      {task.status === "accepted" ? (
+        <p className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
+          {backToOffered ? `This edit sends the task back to Awaiting acceptance. ${assignee} has to accept it again before working on it.` : `Changing the instructions or criteria sends this task back to Awaiting acceptance, and ${assignee} has to accept it again. The title and due date don't.`}
+        </p>
+      ) : null}
+      <div className="space-y-1">
+        <Label htmlFor="edit-title">Title</Label>
+        <Input ref={titleRef} id="edit-title" required value={draft.title} onChange={(event) => setField("title", event.target.value)} />
+      </div>
+      <div className="space-y-1">
+        <Label htmlFor="edit-instructions">Instructions</Label>
+        <textarea id="edit-instructions" required rows={6} className={FIELD_CLASS} value={draft.instructions} onChange={(event) => setField("instructions", event.target.value)} />
+      </div>
+      <div className="space-y-1">
+        <Label htmlFor="edit-criteria">Acceptance criteria (optional)</Label>
+        <textarea id="edit-criteria" rows={3} className={FIELD_CLASS} value={draft.criteria} onChange={(event) => setField("criteria", event.target.value)} />
+      </div>
+      <div className="space-y-1">
+        <Label htmlFor="edit-due">Due (informational)</Label>
+        <Input id="edit-due" type="datetime-local" value={draft.due} onChange={(event) => setField("due", event.target.value)} aria-describedby={task.due_at !== null ? "edit-due-hint" : undefined} />
+        {task.due_at !== null ? (
+          <p id="edit-due-hint" className="text-xs text-muted-foreground">
+            A due date can be changed but not removed yet. Leaving this empty keeps it.
+          </p>
+        ) : null}
+      </div>
+      {tooLong(draft.title, LIMITS.title) || tooLong(draft.instructions, LIMITS.instructions) || tooLong(draft.criteria, LIMITS.criteria) ? <p className="text-sm text-status-danger">That's too long. Titles can be 500 bytes, instructions 64 KB and criteria 16 KB.</p> : null}
+      <div className="flex flex-wrap gap-2">
+        <Button type="submit" className={PRIMARY} disabled={saving || !changed || invalid}>
+          {saving ? "Saving…" : backToOffered ? "Save and ask for acceptance again" : "Save edit"}
+        </Button>
+        <Button type="button" variant="outline" className={PRIMARY} disabled={saving} onClick={finish}>
+          {changed ? "Discard changes" : "Cancel"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/** Tucked away until the task needs it, because most tasks never do. */
+function ChangePeople({ api, me, names, role, onNotice }: Props) {
+  const { task, room } = api.data;
+  const can = viewerActions(task, me, role);
+  const need = flagged(task, room, role);
+  return (
+    <details open={task.needs_attention} className="rounded-lg border p-3">
+      <summary className="min-h-6 cursor-pointer text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring">{can.setRequester && can.setReviewer ? "Change reviewer or requester" : can.setRequester ? "Change requester" : "Change reviewer"}</summary>
+      <div className="mt-3 space-y-3">
+        {can.setReviewer ? <ChangePerson api={api} me={me} names={names} onNotice={onNotice} which="reviewer" choices={newReviewerChoices(room, task, role)} current={task.reviewer} departed={need.reviewer} /> : null}
+        {can.setRequester ? <ChangePerson api={api} me={me} names={names} onNotice={onNotice} which="requester" choices={newRequesterChoices(room, task, role)} current={task.requester} departed={need.requester} /> : null}
+      </div>
+    </details>
+  );
+}
+
+function ChangePerson({ api, me, names, onNotice, which, choices, current, departed }: Pick<Props, "api" | "me" | "names" | "onNotice"> & { which: "reviewer" | "requester"; choices: string[]; current: string; departed: boolean }) {
+  const { data, run, saving } = api;
+  const [person, setPerson] = useState("");
+  const key = useIntentKey(`${which}:${data.task.version}:${person}`);
+  const id = `change-${which}`;
+
+  if (choices.length === 0) return <p className="text-sm text-muted-foreground">Nobody else in this workroom can be the {which}.</p>;
+
+  const change = async () => {
+    if (!person) return;
+    onNotice(null);
+    const named = textNameOf(person, me, names);
+    const result = await run(async (binding) => asConflict(await clientCommand(taskPath(data, `set-${which}`), { version: binding.version, [which]: person }, { idempotencyKey: key })), (code, status) => changeProblem(which, code, status));
+    if (result?.ok) onNotice(person === me ? `You're now the ${which}.` : `${named} is now the ${which}.`);
+  };
+
+  return (
+    <div className="flex flex-wrap items-end gap-2">
+      <div className="min-w-0 flex-1 basis-56 space-y-1">
+        <Label htmlFor={id}>{departed ? `New ${which}` : `Change ${which}`}</Label>
+        <select id={id} className={FIELD_CLASS} value={person} onChange={(event) => setPerson(event.target.value)}>
+          <option value="">Choose someone</option>
+          {choices.map((choice) => (
+            <option key={choice} value={choice}>
+              {textNameOf(choice, me, names)}
+              {choice === current ? " (current)" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+      <Button variant="outline" className={PRIMARY} disabled={saving || !person} onClick={change}>
+        {saving ? "Saving…" : `Set ${which}`}
+      </Button>
+    </div>
   );
 }
 
@@ -40,10 +269,10 @@ function Waiting({ api, me, names }: Pick<Props, "api" | "me" | "names">) {
 }
 
 /** A command's path, from the task this Sheet instance loaded, never from what's selected by the time it runs. */
-const taskPath = (data: LoadedTask, action: string) => `/api/v1/workspaces/${encodeURIComponent(data.workspace)}/tasks/${encodeURIComponent(data.task.id)}/${action}`;
+export const taskPath = (data: LoadedTask, action: string) => `/api/v1/workspaces/${encodeURIComponent(data.workspace)}/tasks/${encodeURIComponent(data.task.id)}/${action}`;
 
 /** One key per intent, so retrying after a lost response can't act twice. Changing what's being asked starts a new intent. */
-function useIntentKey(intent: string) {
+export function useIntentKey(intent: string) {
   const key = useRef({ intent, value: crypto.randomUUID() });
   if (key.current.intent !== intent) key.current = { intent, value: crypto.randomUUID() };
   return key.current.value;

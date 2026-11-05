@@ -517,4 +517,63 @@ describe("TargetSheet", () => {
     await expect(act(async () => new Promise((resolve) => setTimeout(resolve, 0)))).rejects.toThrow("A Sheet can't open another Sheet");
     error.mockRestore();
   });
+
+  it("words a failure with the command's own explanation, and a thrown command as unknown", async () => {
+    const user = userEvent.setup();
+    setUrl("/a?agent=a");
+    let attempt = 0;
+    render(
+      <TargetSheet<Item> param="agent" load={resolved} title={(data) => data.title} description={() => "Room"} version={(data) => data.version}>
+        {({ run }) => (
+          <Button
+            onClick={() =>
+              void run(
+                async () => {
+                  attempt += 1;
+                  if (attempt === 2) throw new TypeError("network");
+                  return { ok: false, status: 422, code: "self_sign_off" };
+                },
+                (code, status) => `Explained ${code} ${status}`,
+              )
+            }
+          >
+            Do it
+          </Button>
+        )}
+      </TargetSheet>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Do it" }));
+    expect(await screen.findByText("Explained self_sign_off 422")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Do it" }));
+    expect(await screen.findByText("Explained unknown 0")).toBeInTheDocument();
+  });
+
+  it("holds the Sheet open for an unversioned draft without pinning the version, and refresh reads again", async () => {
+    const user = userEvent.setup();
+    setUrl("/a?agent=a");
+    const load = vi.fn(resolved);
+    const seen: (number | null)[] = [];
+    render(
+      <TargetSheet<Item> param="agent" load={load} title={(data) => data.title} description={() => "Room"} version={(data) => data.version}>
+        {({ setUnsaved, refresh, binding, dirty }) => {
+          seen.push(binding.version);
+          return (
+            <>
+              <Button onClick={() => setUnsaved(true)}>Type</Button>
+              <Button onClick={refresh}>Read again</Button>
+              <span>{dirty ? "dirty" : "clean"}</span>
+            </>
+          );
+        }}
+      </TargetSheet>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Type" }));
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    expect(screen.getByText("clean")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Read again" }));
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    await user.keyboard("{Escape}");
+    expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
+    expect(new Set(seen)).toEqual(new Set([3]));
+  });
 });
