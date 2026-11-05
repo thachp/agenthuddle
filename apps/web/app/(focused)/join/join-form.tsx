@@ -4,8 +4,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { Button } from "@/components/ui/button";
-import { clientCommand } from "@/lib/gateway/client";
-import { signInHref, takeToken, forgetToken } from "./token";
+import { clientCommand, clientQuery } from "@/lib/gateway/client";
+import { signInHref, takeToken, forgetToken } from "@/lib/join-token";
 
 const PRIMARY = "max-md:h-11 max-md:px-4";
 
@@ -35,6 +35,8 @@ function explainAccept(code: string, status: number) {
 export function JoinForm({ viewer }: { viewer: { name: string; email: string } | null }) {
   const [state, setState] = useState<State>({ step: "reading" });
   const resultRef = useRef<HTMLDivElement>(null);
+  // An attempt may have landed with no answer. An accepted link answers as a dead one, so a retry has to look at the result.
+  const unconfirmed = useRef(false);
 
   const load = useCallback(async (token: string) => {
     setState({ step: "reading" });
@@ -42,11 +44,10 @@ export function JoinForm({ viewer }: { viewer: { name: string; email: string } |
       const result = await clientCommand<Preview>("/api/org-invitations/preview", { token });
       if (result.ok) setState({ step: "offer", token, preview: result.data, problem: null, pending: false });
       else if (result.status === 401) setState({ step: "sign-in", kept: true });
-      else if (result.status === 429 || result.status >= 500) setState({ step: "unavailable" });
-      else {
+      else if (result.status === 404) {
         forgetToken();
         setState({ step: "dead" });
-      }
+      } else setState({ step: "unavailable" });
     } catch {
       setState({ step: "unavailable" });
     }
@@ -87,10 +88,25 @@ export function JoinForm({ viewer }: { viewer: { name: string; email: string } |
           forgetToken();
           setState({ step: "already", preview });
         } else if (result.code === "invitation_not_found") {
+          if (unconfirmed.current) {
+            const mine = await clientQuery<{ organizations: { id: string; role: string }[] }>("/api/orgs");
+            if (!mine.ok) {
+              setState({ ...state, problem: "We can't tell whether you joined. Check your organizations in Settings before trying again.", pending: false });
+              return;
+            }
+            const joined = mine.data.organizations.find((org) => org.id === preview.org_id);
+            forgetToken();
+            setState(joined ? { step: "joined", preview: { ...preview, role: joined.role } } : { step: "dead" });
+            return;
+          }
           forgetToken();
           setState({ step: "dead" });
-        } else setState({ ...state, problem: explainAccept(result.code, result.status), pending: false });
+        } else {
+          if (result.status >= 500) unconfirmed.current = true;
+          setState({ ...state, problem: explainAccept(result.code, result.status), pending: false });
+        }
       } catch {
+        unconfirmed.current = true;
         setState({ ...state, problem: "We couldn't reach Podster, so this may not have saved. It's safe to try again.", pending: false });
       }
     };
@@ -124,7 +140,8 @@ export function JoinForm({ viewer }: { viewer: { name: string; email: string } |
             {pending ? "Joining…" : "Join organization"}
           </Button>
           <Button asChild variant="outline" className={PRIMARY}>
-            <Link href="/workrooms" prefetch={false}>
+            {/* They still have the link, and whoever uses this tab next shouldn't see the offer. */}
+            <Link href="/workrooms" prefetch={false} onClick={forgetToken}>
               Not now
             </Link>
           </Button>

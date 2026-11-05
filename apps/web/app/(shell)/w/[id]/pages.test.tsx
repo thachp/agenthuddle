@@ -73,6 +73,29 @@ describe("Activity", () => {
     const links = screen.getAllByRole("link", { name: "Design the API" });
     expect(links[0]).toHaveAttribute("title", "tsk_1");
     expect(links[0]).toHaveAttribute("href", "/w/ws_1/tasks?task=tsk_1");
+    expect(screen.getAllByText("Org A").length).toBe(4);
+  });
+
+  it("says who's an agent, so one named like a person can't pass for them, and labels names that sound like authority", async () => {
+    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "agt_sam", "task.message"), event(2, "per_sam", "task.message"), event(3, "agt_boss", "task.message"), event(4, "per_you", "task.message"), event(5, "per_me", "task.message")] } });
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_sam", name: "Sam" }, { id: "agt_boss", name: "Podster Admin" }] } });
+    replies.set("/api/orgs/org_a/members", { ok: true, data: { members: [{ person_id: "per_sam", name: "Sam" }, { person_id: "per_you", name: "You" }] } });
+    render(await Activity({ params, searchParams }));
+    const row = (id: string) => screen.getByTitle(id);
+    expect(row("agt_sam")).toHaveTextContent("Agent");
+    expect(row("per_sam")).toHaveTextContent("Person");
+    expect(row("per_sam")).not.toHaveTextContent("Name chosen");
+    expect(row("agt_boss")).toHaveTextContent("Name chosen by this agent");
+    expect(row("per_you")).toHaveTextContent("Name chosen by this person");
+    expect(row("per_me")).not.toHaveTextContent("Name chosen");
+  });
+
+  it("reads no tasks when no event on the page has one", async () => {
+    let read = false;
+    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "per_me", "workspace.created")] } });
+    replies.set("/api/v1/workspaces/ws_1/tasks", { get ok() { read = true; return true; }, data: { tasks: [], next_cursor: null } } as never);
+    render(await Activity({ params, searchParams }));
+    expect(read).toBe(false);
   });
 
   it("still shows the events, by ID, when names can't be read", async () => {

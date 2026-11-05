@@ -56,11 +56,11 @@ function TaskRow({ task, me, names }: { task: Task; me: string; names: Names }) 
       <TaskStatusBadge status={task.status} />
       <div className="min-w-0 text-sm">
         <span className="text-xs text-muted-foreground">Assignee</span>
-        {task.assignee ? <PrincipalName id={task.assignee} label={nameOf(task.assignee, me, names)} /> : <span className="block text-muted-foreground">Nobody yet</span>}
+        {task.assignee ? <PrincipalName id={task.assignee} label={nameOf(task.assignee, me, names)} me={me} /> : <span className="block text-muted-foreground">Nobody yet</span>}
       </div>
       <div className="min-w-0 text-sm">
         <span className="text-xs text-muted-foreground">Reviewer</span>
-        <PrincipalName id={task.reviewer} label={nameOf(task.reviewer, me, names)} />
+        <PrincipalName id={task.reviewer} label={nameOf(task.reviewer, me, names)} me={me} />
       </div>
     </li>
   );

@@ -20,7 +20,7 @@ export default async function OrganizationSettings({ searchParams }: { searchPar
     ? await Promise.all([
         gatewayQuery<{ members: OrgMember[] }>(`/api/orgs/${encodeURIComponent(selected.id)}/members`),
         admin && !selected.personal ? gatewayQuery<{ invitations: OrgInvitation[] }>(`/api/orgs/${encodeURIComponent(selected.id)}/invitations`) : null,
-        admin ? gatewayQuery<{ agents: AgentRow[] }>("/api/agents") : null,
+        admin ? gatewayQuery<{ agents: AgentRow[]; truncated?: boolean }>("/api/agents") : null,
       ])
     : [null, null, null];
   return (
@@ -59,6 +59,7 @@ export default async function OrganizationSettings({ searchParams }: { searchPar
           org={{ id: selected.id, name: selected.name, personal: Boolean(selected.personal), admin }}
           me={identity.data.id}
           members={members.data.members}
+          lostCredentialsPartial={agents?.ok === true && agents.data.truncated === true}
           invitations={invitations?.ok ? invitations.data.invitations : null}
           lostCredentials={agents?.ok ? agents.data.agents.filter((agent) => agent.org_id === selected.id && agent.revoked_at === null && (agent.credentials_owner_left ?? 0) > 0).map((agent) => ({ id: agent.id, name: agent.name, count: agent.credentials_owner_left ?? 0 })) : null}
         />

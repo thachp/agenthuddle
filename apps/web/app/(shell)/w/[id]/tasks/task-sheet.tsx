@@ -80,13 +80,13 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
         </dd>
         <dt className="text-muted-foreground">Requester</dt>
         <dd>
-          <PrincipalName id={task.requester} label={label(task.requester)} />
+          <PrincipalName id={task.requester} label={label(task.requester)} me={me} />
         </dd>
         <dt className="text-muted-foreground">Assignee</dt>
-        <dd>{task.assignee ? <PrincipalName id={task.assignee} label={label(task.assignee)} /> : "Nobody yet"}</dd>
+        <dd>{task.assignee ? <PrincipalName id={task.assignee} label={label(task.assignee)} me={me} /> : "Nobody yet"}</dd>
         <dt className="text-muted-foreground">Reviewer</dt>
         <dd>
-          <PrincipalName id={task.reviewer} label={label(task.reviewer)} />
+          <PrincipalName id={task.reviewer} label={label(task.reviewer)} me={me} />
         </dd>
         <dt className="text-muted-foreground">Task</dt>
         <dd className="truncate" title={task.id}>
@@ -131,12 +131,12 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
 
 type SectionProps = { data: LoadedTask; me: string; names: Names; orgNames: Names };
 
-const author = (from: From, me: string, names: Names, orgNames: Names) => ({ name: nameOf(from.id, me, names), kind: kindOf(from.id), organization: orgNames[from.org] ?? from.org });
+const author = (from: From, me: string, names: Names, orgNames: Names) => ({ name: nameOf(from.id, me, names), kind: kindOf(from.id), organization: orgNames[from.org] ?? from.org, viewer: from.id === me });
 
 function Details({ data, me, names, orgNames }: SectionProps) {
   const { task } = data;
   const brief = briefAuthor(data);
-  const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org ? (orgNames[brief.org] ?? brief.org) : undefined };
+  const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org ? (orgNames[brief.org] ?? brief.org) : undefined, viewer: brief.id === me };
   return (
     <>
       <section className="space-y-2">

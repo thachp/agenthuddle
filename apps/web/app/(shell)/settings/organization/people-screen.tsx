@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
-import { plainName } from "@/components/agent-content/text";
+import { authoritySoundingName, chosenNameLabel, plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { clientCommand } from "@/lib/gateway/client";
 import type { GatewayResult } from "@/lib/gateway/result";
+import { textNameOf } from "../../w/[id]/tasks/task-model";
 import { ConfirmAction } from "../../w/[id]/team/confirm-action";
 import { FIELD, MOBILE_TARGET } from "../../w/[id]/team/field";
 import { explainOrgRefusal, joinLink, orgRoleLabel, type LostCredentials, type OrgInvitation, type OrgMember } from "./model";
@@ -22,6 +23,8 @@ export type PeopleProps = {
   invitations: OrgInvitation[] | null;
   /** Null if that read failed. */
   lostCredentials: LostCredentials[] | null;
+  /** The agent read stopped at its limit, so that list may be missing some. */
+  lostCredentialsPartial?: boolean;
 };
 
 type Notice = { ok: boolean; text: string } | null;
@@ -70,7 +73,7 @@ function RemovalEffects({ who }: { who: "they" | "you" }) {
   );
 }
 
-export function PeopleScreen({ org, me, members, invitations, lostCredentials }: PeopleProps) {
+export function PeopleScreen({ org, me, members, invitations, lostCredentials, lostCredentialsPartial = false }: PeopleProps) {
   const router = useRouter();
   const { notice, noticeRef, send } = useCommands();
   const orgName = plainName(org.name);
@@ -104,7 +107,10 @@ export function PeopleScreen({ org, me, members, invitations, lostCredentials }:
             return (
               <li key={member.person_id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
                 <div id={nameId} className="min-w-0 flex-1 basis-56 space-y-0.5">
-                  <p className="font-medium break-words">{name}</p>
+                  <p className="flex flex-wrap items-center gap-x-2 gap-y-1 font-medium break-words">
+                    <span className="min-w-0 break-words">{name}</span>
+                    {!self && authoritySoundingName(name) ? <Badge variant="outline">{chosenNameLabel("person")}</Badge> : null}
+                  </p>
                   {/* Team adds a person by this ID, so it stays where people can copy it. */}
                   <p className="text-xs break-all text-muted-foreground">
                     {member.person_id} · Joined {dateOf(member.created_at)}
@@ -173,7 +179,7 @@ export function PeopleScreen({ org, me, members, invitations, lostCredentials }:
       </section>
 
       {canManage ? <InviteSection base={base} members={members} me={me} invitations={invitations} send={send} focusAfter={noticeRef} /> : null}
-      {org.admin ? <LostCredentialsSection agents={lostCredentials} /> : null}
+      {org.admin ? <LostCredentialsSection agents={lostCredentials} partial={lostCredentialsPartial} /> : null}
     </div>
   );
 }
@@ -184,7 +190,8 @@ type Created = { id: string; token: string; role: string; expires_at: number };
 function InviteSection({ base, members, me, invitations, send, focusAfter }: { base: string; members: OrgMember[]; me: string; invitations: OrgInvitation[] | null; send: Send; focusAfter: RefObject<HTMLElement | null> }) {
   const [role, setRole] = useState<"member" | "admin">("member");
   const [pending, setPending] = useState(false);
-  const [link, setLink] = useState<string | null>(null);
+  const [link, setLink] = useState<{ id: string; url: string } | null>(null);
+  const names = Object.fromEntries(members.flatMap((member) => (member.name ? [[member.person_id, member.name]] : [])));
   const [copied, setCopied] = useState(false);
   const linkRef = useRef<HTMLInputElement>(null);
 
@@ -199,7 +206,7 @@ function InviteSection({ base, members, me, invitations, send, focusAfter }: { b
     setLink(null);
     setCopied(false);
     const result = await send<Created>(`${base}/invitations`, { role }, "Invitation created. Copy its link now: it's shown only once.");
-    if (result?.ok) setLink(joinLink(window.location.origin, result.data.token));
+    if (result?.ok) setLink({ id: result.data.id, url: joinLink(window.location.origin, result.data.token) });
     // Refused or lost: nothing to copy, and focus should be on why.
     else focusAfter.current?.focus();
     setPending(false);
@@ -227,7 +234,7 @@ function InviteSection({ base, members, me, invitations, send, focusAfter }: { b
         <div className="space-y-2 rounded-lg border bg-status-amber-surface p-3 text-status-amber">
           <label className="block space-y-1 text-sm">
             <span className="font-medium">Invitation link. It's shown only once, so copy it now.</span>
-            <Input ref={linkRef} readOnly value={link} onFocus={(event) => event.target.select()} className="bg-background text-foreground" />
+            <Input ref={linkRef} readOnly value={link.url} onFocus={(event) => event.target.select()} className="bg-background text-foreground" />
           </label>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" size="sm" className={MOBILE_TARGET} onClick={copy}>
@@ -266,7 +273,7 @@ function InviteSection({ base, members, me, invitations, send, focusAfter }: { b
                 <div id={invitation.id} className="min-w-0 flex-1 basis-56 space-y-0.5">
                   <p className="font-medium">{orgRoleLabel(invitation.role)} invitation</p>
                   <p className="break-words text-muted-foreground">
-                    Created by {personLabel(members.find((member) => member.person_id === invitation.created_by), invitation.created_by, me)} · Expires {new Date(invitation.expires_at).toUTCString()}
+                    Created by {textNameOf(invitation.created_by, me, names)} · Expires {new Date(invitation.expires_at).toUTCString()}
                   </p>
                 </div>
                 <ConfirmAction
@@ -277,7 +284,11 @@ function InviteSection({ base, members, me, invitations, send, focusAfter }: { b
                   confirm="Withdraw invitation"
                   destructive
                   focusAfter={focusAfter}
-                  action={() => send(`${base}/invitations/${encodeURIComponent(invitation.id)}`, undefined, "Invitation withdrawn. Its link no longer works.", "DELETE")}
+                  action={async () => {
+                    const result = await send(`${base}/invitations/${encodeURIComponent(invitation.id)}`, undefined, "Invitation withdrawn. Its link no longer works.", "DELETE");
+                    // A link that no longer works shouldn't still ask to be copied.
+                    if (result?.ok && link?.id === invitation.id) setLink(null);
+                  }}
                 />
               </li>
             ))}
@@ -288,8 +299,8 @@ function InviteSection({ base, members, me, invitations, send, focusAfter }: { b
   );
 }
 
-function LostCredentialsSection({ agents }: { agents: LostCredentials[] | null }) {
-  if (agents?.length === 0) return null;
+function LostCredentialsSection({ agents, partial }: { agents: LostCredentials[] | null; partial: boolean }) {
+  if (agents?.length === 0 && !partial) return null;
   return (
     <section aria-labelledby="org-lost-credentials" className="space-y-2">
       <h2 id="org-lost-credentials" className="text-lg font-medium">
@@ -300,7 +311,8 @@ function LostCredentialsSection({ agents }: { agents: LostCredentials[] | null }
       ) : (
         <>
           <p className="text-sm text-muted-foreground">Whoever connected these left the organization, so these credentials are refused. Link a new credential to an agent to bring it back.</p>
-          <ul className="divide-y rounded-lg border">
+          {partial ? <p role="status" className="text-sm">Your organizations have more agents than we can read here, so some may be missing from this list.</p> : null}
+          <ul className="divide-y rounded-lg border empty:hidden">
             {agents.map((agent) => (
               <li key={agent.id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
                 <span className="min-w-0 break-words font-medium">{plainName(agent.name)}</span>

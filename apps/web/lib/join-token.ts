@@ -1,4 +1,4 @@
-/** For this tab only, and only until it's used. Sign-in leaves this page, and the token never goes in a URL it would send. */
+/** For this tab only, until it's used, declined or the person logs out. Sign-in leaves the page, and the token never goes in a URL it would send. */
 const STORAGE_KEY = "podster-org-invitation";
 const MAX_TOKEN = 200;
 

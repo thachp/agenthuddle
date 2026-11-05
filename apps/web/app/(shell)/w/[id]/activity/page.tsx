@@ -1,10 +1,11 @@
 import Link from "next/link";
+import { AuthorLine } from "@/components/agent-content/agent-content";
 import { plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { loadWorkroom } from "@/lib/workroom";
-import { loadNames, loadTasks, orgRows } from "../tasks/load-tasks";
-import { textNameOf } from "../tasks/task-model";
+import { loadNames, loadTasks, orgNamesOf, orgRows } from "../tasks/load-tasks";
+import { kindOf, nameOf } from "../tasks/task-model";
 import { eventVerb, pageAfter } from "./model";
 import { Time } from "./time";
 
@@ -20,8 +21,11 @@ export default async function Activity({ params, searchParams }: { params: Promi
   const now = Date.now();
   const [identity, organizations] = await Promise.all([getIdentity(), getOrganizations()]);
   const me = identity.ok ? identity.data.id : "";
-  // Names only make rows readable, so a failure leaves IDs. It's one read per organization and at most 4 task pages, whatever the page holds, and anything past them stays an ID.
-  const [names, tasks] = events.ok && events.data.events.length > 0 ? await Promise.all([loadNames(gatewayQuery, orgRows(organizations)), loadTasks(gatewayQuery, id)]) : [{}, null];
+  const orgs = orgRows(organizations);
+  const orgNames = orgNamesOf(orgs);
+  const rows = events.ok ? events.data.events : [];
+  // Names only make rows readable, so a failure leaves IDs. See "Reads per render" in the README for what this spends.
+  const [names, tasks] = await Promise.all([rows.length > 0 ? loadNames(gatewayQuery, orgs) : {}, rows.some((event) => event.task_id) ? loadTasks(gatewayQuery, id) : null]);
   const titles = new Map(tasks?.ok ? tasks.data.tasks.map((task) => [task.id, task.title]) : []);
   return (
     <section className="max-w-3xl space-y-3">
@@ -34,10 +38,11 @@ export default async function Activity({ params, searchParams }: { params: Promi
               const title = event.task_id ? titles.get(event.task_id) : undefined;
               return (
                 <li key={event.seq} className="space-y-0.5 p-3 text-sm">
+                  {/* The name, whether it's a person or an agent, and any label on it, the same as a task's history. */}
+                  <div title={event.actor_id}>
+                    <AuthorLine author={{ name: nameOf(event.actor_id, me, names), kind: kindOf(event.actor_id), organization: event.actor_org ? (orgNames[event.actor_org] ?? event.actor_org) : undefined, viewer: event.actor_id === me }} />
+                  </div>
                   <p className="break-words">
-                    <span className="break-words font-medium" title={event.actor_id}>
-                      {textNameOf(event.actor_id, me, names)}
-                    </span>{" "}
                     {eventVerb(event.type)}
                     {event.task_id ? (
                       <>

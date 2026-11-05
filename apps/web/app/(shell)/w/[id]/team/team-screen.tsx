@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { clientCommand } from "@/lib/gateway/client";
 import type { GatewayResult } from "@/lib/gateway/result";
+import { textNameOf } from "../tasks/task-model";
 import { ConfirmAction } from "./confirm-action";
 import { AccessSheet } from "./access-sheet";
 import { FIELD, MOBILE_TARGET } from "./field";
@@ -111,7 +112,7 @@ export function TeamScreen(props: TeamProps) {
         <ul className="divide-y rounded-lg border">
           <li className="flex flex-wrap items-center justify-between gap-2 p-3">
             <div className="min-w-0">
-              <AuthorLine author={{ name: label(owner), kind: "person" }} />
+              <AuthorLine author={{ name: label(owner), kind: "person", viewer: isOwner }} />
             </div>
             <Badge variant="secondary">Owner</Badge>
           </li>
@@ -122,7 +123,7 @@ export function TeamScreen(props: TeamProps) {
             return (
               <li key={member.principal_id} className="flex flex-wrap items-center justify-between gap-2 p-3">
                 <div id={nameId} className="min-w-0 flex-1 basis-56">
-                  <AuthorLine author={{ name, kind: member.kind, organization: orgLabel(member.org_id) }} external={isExternal(member.org_id, viewer)} />
+                  <AuthorLine author={{ name, kind: member.kind, organization: orgLabel(member.org_id), viewer: self }} external={isExternal(member.org_id, viewer)} />
                 </div>
                 <Badge variant="secondary">{roleLabel(member.role)}</Badge>
                 <div className="flex flex-wrap gap-2">
@@ -179,7 +180,7 @@ export function TeamScreen(props: TeamProps) {
       </section>
 
       {canManage ? <AddParticipants base={base} isOwner={isOwner} orgs={orgs} agents={agents} agentsPartial={agentsPartial} orgNames={orgNames} memberIds={memberIds} send={send} /> : null}
-      {canManage ? <Invitations base={base} room={room} invitations={invitations} orgLabel={orgLabel} label={label} send={send} focusAfter={noticeRef} /> : null}
+      {canManage ? <Invitations base={base} room={room} invitations={invitations} orgLabel={orgLabel} label={(id) => textNameOf(id, viewer.id, names)} send={send} focusAfter={noticeRef} /> : null}
 
       <AccessSheet roomId={roomId} roomName={roomName} viewer={viewer} names={names} orgNames={orgNames} />
     </section>

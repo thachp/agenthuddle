@@ -51,6 +51,14 @@ describe("AppShell", () => {
     expect(routerCalls.refresh).toBe(before + 1);
   });
 
+  it("logging out forgets an invitation kept in this tab", async () => {
+    sessionStorage.setItem("podster-org-invitation", "oin_1.secret");
+    shell();
+    await userEvent.click(screen.getByRole("button", { name: "Profile menu" }));
+    await userEvent.click(await screen.findByText("Log out"));
+    expect(sessionStorage.getItem("podster-org-invitation")).toBeNull();
+  });
+
   it("switching organization only sets a selector", async () => {
     shell();
     await userEvent.click(screen.getByRole("button", { name: "Profile menu" }));

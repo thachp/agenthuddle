@@ -125,6 +125,45 @@ describe("people in an organization", () => {
     expect(within(screen.getByRole("region", { name: "Credentials that stopped working" })).getByRole("alert")).toBeInTheDocument();
   });
 
+  it("clears the link when its own invitation is withdrawn, and not for another", async () => {
+    const user = userEvent.setup();
+    reply = { status: 200, body: { id: "oin_new", token: "oin_new.secret", role: "member", expires_at: 1 } };
+    const withdraw = async (name: RegExp) => {
+      await user.click(within(row(name)).getByRole("button", { name: "Withdraw" }));
+      await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Withdraw invitation" }));
+      await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    };
+    render(<PeopleScreen {...props} invitations={[props.invitations![0], { ...props.invitations![0], id: "oin_new", created_by: "per_me" }]} />);
+    await user.click(screen.getByRole("button", { name: "Create invitation link" }));
+    await screen.findByLabelText(/shown only once/);
+    reply = { status: 200, body: {} };
+    await withdraw(/Created by Sam/);
+    expect(screen.getByLabelText(/shown only once/)).toBeInTheDocument();
+    await withdraw(/Created by You/);
+    expect(screen.queryByLabelText(/shown only once/)).toBeNull();
+  });
+
+  it("labels a person whose name could pass for an authority or the viewer, but not the viewer", () => {
+    render(<PeopleScreen {...props} members={[{ person_id: "per_me", role: "admin", created_at: 0, name: "Admin Pat" }, { person_id: "per_x", role: "member", created_at: 0, name: "You" }]} invitations={[{ ...props.invitations![0], created_by: "per_x" }]} />);
+    expect(screen.getByText(/per_x/).closest("li")).toHaveTextContent("Name chosen by this person");
+    expect(screen.getByText(/per_me/).closest("li")).not.toHaveTextContent("Name chosen");
+    expect(screen.getByText(/Created by You \(name chosen by this person\)/)).toBeInTheDocument();
+  });
+
+  it("doesn't blame the other person when a viewer's own access may be what ended", async () => {
+    const user = userEvent.setup();
+    reply = { status: 404, body: { error: { code: "not_found" } } };
+    render(<PeopleScreen {...props} />);
+    await user.click(screen.getByRole("button", { name: "Create invitation link" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("you may no longer be in this organization");
+  });
+
+  it("says the credentials list may be incomplete, even when it's empty", () => {
+    render(<PeopleScreen {...props} lostCredentialsPartial />);
+    expect(screen.getByText(/some may be missing from this list/)).toBeInTheDocument();
+  });
+
   it("doesn't claim nothing changed after a server error", () => {
     expect(explainOrgRefusal("anything", 503)).toMatch(/can't tell/);
     expect(joinLink("https://a.test", "t")).toBe("https://a.test/join#t");

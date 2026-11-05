@@ -140,6 +140,14 @@ describe("what the Sheet shows", () => {
     expect(within(screen.getByRole("tabpanel")).queryByText("External")).toBeNull();
   });
 
+  it("labels a person whose name could pass for the viewer, and not the viewer", async () => {
+    answer = () => json(200, detail({ requester: "per_me", reviewer: "per_r" }));
+    render(<TaskSheet me="per_me" names={{ per_r: "You" }} room={ROOM} resolve={(target) => ({ workspace: ROOM.id, task: target })} />);
+    await screen.findByRole("heading", { name: "Design the API" });
+    expect(screen.getByTitle("per_r").parentElement).toHaveTextContent("Name chosen by this person");
+    expect(screen.getByTitle("per_me").parentElement).not.toHaveTextContent("Name chosen");
+  });
+
   it("labels an agent whose name could pass for the viewer or an authority, everywhere it's named", async () => {
     render(<TaskSheet me="per_me" names={{ agt_a: "You", agt_b: "Owner" }} room={ROOM} resolve={(target) => ({ workspace: ROOM.id, task: target })} />);
     await screen.findByRole("heading", { name: "Design the API" });

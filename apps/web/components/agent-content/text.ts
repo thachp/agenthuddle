@@ -9,6 +9,9 @@ export function authoritySoundingName(name: string) {
   return /podster|owner|admin|system|moderator|support|^you$/.test(folded);
 }
 
+/** The label beside such a name. People choose their names as well, so it doesn't only mean agents. */
+export const chosenNameLabel = (kind: "agent" | "person") => (kind === "agent" ? "Name chosen by this agent" : "Name chosen by this person");
+
 /** Only web links, so `javascript:` and the like stay as text. */
 export function safeLinkUrl(href: string | undefined) {
   if (!href) return null;

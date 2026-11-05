@@ -20,7 +20,7 @@ beforeEach(() => {
   calls = [];
   answer = (url) => (url.endsWith("preview") ? json(200, PREVIEW) : json(200, { org_id: "org_a", role: "member" }));
   vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
-    calls.push({ url, body: JSON.parse(String(init.body)) });
+    calls.push({ url, body: init.body ? JSON.parse(String(init.body)) : undefined });
     return answer(url);
   });
 });
@@ -92,6 +92,67 @@ describe("joining from a link", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Join organization" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("safe to try again");
     expect(screen.getByRole("button", { name: "Join organization" })).toBeEnabled();
+  });
+
+  const failThenAnswer = (joinedOrgs: unknown) => {
+    let tries = 0;
+    answer = (url) => {
+      if (url.endsWith("preview")) return json(200, PREVIEW);
+      if (url === "/api/orgs") return joinedOrgs === null ? refused(503, "error") : json(200, { organizations: joinedOrgs });
+      tries += 1;
+      return tries === 1 ? refused(500, "error") : refused(404, "invitation_not_found");
+    };
+  };
+  const tryTwice = async () => {
+    open("#oin_1.secret");
+    render(<JoinForm viewer={VIEWER} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Join organization" }));
+    await screen.findByText(/safe to try again/);
+    await userEvent.click(screen.getByRole("button", { name: "Join organization" }));
+  };
+
+  it("says they joined when a retry finds the first attempt landed", async () => {
+    failThenAnswer([{ id: "org_a", role: "admin" }]);
+    await tryTwice();
+    expect(await screen.findByRole("status")).toHaveTextContent("You joined Acme as an admin.");
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it("says the link is dead when a retry finds they aren't in", async () => {
+    failThenAnswer([{ id: "org_other", role: "member" }]);
+    await tryTwice();
+    expect(await screen.findByRole("alert")).toHaveTextContent("isn't valid any more");
+  });
+
+  it("keeps the token when a retry can't find out", async () => {
+    failThenAnswer(null);
+    await tryTwice();
+    expect(await screen.findByRole("alert")).toHaveTextContent("can't tell whether you joined");
+    expect(sessionStorage.length).toBe(1);
+  });
+
+  it("doesn't look anything up when a first attempt finds the link dead", async () => {
+    answer = (url) => (url.endsWith("preview") ? json(200, PREVIEW) : refused(404, "invitation_not_found"));
+    open("#oin_1.secret");
+    render(<JoinForm viewer={VIEWER} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Join organization" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("isn't valid any more");
+    expect(calls.some((call) => call.url === "/api/orgs")).toBe(false);
+  });
+
+  it.each([400, 403])("doesn't destroy the token on a %i preview", async (status) => {
+    answer = () => refused(status, "not_allowed");
+    open("#oin_1.secret");
+    render(<JoinForm viewer={VIEWER} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("couldn't load");
+    expect(sessionStorage.length).toBe(1);
+  });
+
+  it("forgets the token on Not now", async () => {
+    open("#oin_1.secret");
+    render(<JoinForm viewer={VIEWER} />);
+    await userEvent.click(await screen.findByRole("link", { name: "Not now" }));
+    expect(sessionStorage.length).toBe(0);
   });
 
   it("loads another link opened from this page, which only changes the fragment", async () => {

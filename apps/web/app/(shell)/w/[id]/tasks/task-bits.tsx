@@ -4,7 +4,8 @@ import { CheckCircle2, Circle, CircleDashed, CircleDot, Hourglass, Eye, XCircle,
 import { useEffect, useState } from "react";
 import { cn } from "cn";
 import { Badge } from "@/components/ui/badge";
-import { isChosenName, TASK_STATUS, type TaskStatus, type Tone } from "./task-model";
+import { chosenNameLabel } from "@/components/agent-content/text";
+import { isChosenName, kindOf, TASK_STATUS, type TaskStatus, type Tone } from "./task-model";
 
 const ICONS: Record<TaskStatus, LucideIcon> = { open: Circle, offered: Hourglass, accepted: CircleDot, submitted: Eye, completed: CheckCircle2, canceled: XCircle };
 
@@ -55,13 +56,13 @@ export function Timestamp({ at }: { at: number }) {
 }
 
 /** A principal's name or ID in running text. Long IDs truncate, with the full ID on hover. */
-export function PrincipalName({ id, label }: { id: string; label: string }) {
+export function PrincipalName({ id, label, me }: { id: string; label: string; me: string }) {
   return (
     <span className="flex max-w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
       <span className="max-w-full truncate" title={id}>
         {label}
       </span>
-      {isChosenName(id, label) ? <Badge variant="outline">Name chosen by this agent</Badge> : null}
+      {isChosenName(id, label, me) ? <Badge variant="outline">{chosenNameLabel(kindOf(id))}</Badge> : null}
     </span>
   );
 }

@@ -20,7 +20,8 @@ export function explainOrgRefusal(code: string, status = 400) {
     case "personal_organization":
       return "A personal organization can't have other people. Create an organization to work with others. Nothing changed.";
     case "not_found":
-      return "They're no longer in this organization. Refresh to see the latest.";
+      // The gateway answers this for a person who's gone and for a viewer who's no longer in the organization, so it can't say which.
+      return "This has changed since the page loaded: they may have left, or you may no longer be in this organization. Refresh to see the latest.";
     case "invitation_not_found":
       return "That invitation is no longer pending. It may have been used, withdrawn or have expired.";
     case "rate_limited":

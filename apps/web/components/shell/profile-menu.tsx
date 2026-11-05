@@ -7,6 +7,7 @@ import { useState } from "react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar";
 import { ORG_COOKIE } from "@/lib/gateway/forward";
+import { forgetToken } from "@/lib/join-token";
 
 export type ProfileMenuProps = {
   name: string;
@@ -31,6 +32,8 @@ export function ProfileMenu({ name, email, organizations, currentOrg }: ProfileM
 
   async function logOut() {
     setLeaving(true);
+    // Whoever uses this tab next shouldn't be offered this person's invitation.
+    forgetToken();
     await fetch("/api/auth/sign-out", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => undefined);
     // A full load, so nothing from this session stays in the router's cache.
     location.assign("/sign-in");
