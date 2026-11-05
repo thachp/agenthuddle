@@ -272,8 +272,8 @@ describe("the agent's workrooms", () => {
   it("a room the viewer is in opens as itself, and another organization's offers read-only tasks", async () => {
     render(<Screen />);
     await opened();
-    expect(screen.getByRole("link", { name: "Open Platform" })).toHaveAttribute("href", "/w/ws_mine/overview");
-    expect(screen.getByRole("link", { name: "View this agent's tasks in Their room, read-only" })).toHaveAttribute("href", "/oversight/ws_other/agt_1");
+    expect(screen.getByRole("link", { name: "Open workroom: Platform" })).toHaveAttribute("href", "/w/ws_mine/overview");
+    expect(screen.getByRole("link", { name: "View its tasks, read-only: Their room" })).toHaveAttribute("href", "/oversight/ws_other/agt_1");
     expect(screen.getByText(/that you're not in shows as not found/)).toBeInTheDocument();
   });
 
@@ -349,12 +349,12 @@ describe("the agent's workrooms", () => {
     special = (url) => (url === "/api/v1/workspaces" ? new Response("{}", { status: 503 }) : undefined);
     render(<Screen />);
     await opened();
-    expect(screen.queryByRole("link", { name: /Open Platform|read-only/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /Open workroom|read-only/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Withdraw from Platform" })).toBeEnabled();
     expect(screen.getByRole("alert")).toHaveTextContent("so their links are hidden");
     special = () => undefined;
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("link", { name: "Open Platform" })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "Open workroom: Platform" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 

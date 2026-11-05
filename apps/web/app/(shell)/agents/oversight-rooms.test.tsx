@@ -19,8 +19,8 @@ beforeEach(() => {
 describe("your agents' workrooms", () => {
   it("states the scope, and links another organization's room to oversight and the viewer's own to itself", async () => {
     render(<OversightRooms agents={{ agt_1: "Code Agent" }} />);
-    expect(await screen.findByRole("link", { name: "View tasks in Their room, read-only" })).toHaveAttribute("href", "/oversight/ws_theirs/agt_1");
-    expect(screen.getByRole("link", { name: "Open Mine" })).toHaveAttribute("href", "/w/ws_mine/overview");
+    expect(await screen.findByRole("link", { name: "View tasks, read-only: Their room" })).toHaveAttribute("href", "/oversight/ws_theirs/agt_1");
+    expect(screen.getByRole("link", { name: "Open workroom: Mine" })).toHaveAttribute("href", "/w/ws_mine/overview");
     expect(screen.getByText(/because you administer its organization/)).toBeInTheDocument();
     expect(screen.getByText(/that you're not in shows as not found/)).toBeInTheDocument();
     expect(screen.getAllByText("Code Agent")).toHaveLength(2);
@@ -33,7 +33,7 @@ describe("your agents' workrooms", () => {
     expect(screen.queryByRole("link")).toBeNull();
     answers.own = own("ws_mine");
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("link", { name: "Open Mine" })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "Open workroom: Mine" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 

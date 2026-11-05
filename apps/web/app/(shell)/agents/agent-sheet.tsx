@@ -254,7 +254,7 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
                       {room.role}
                     </p>
                     {agent.ownRooms === null ? null : (
-                      <Link href={mine ? `/w/${encodeURIComponent(room.workspace_id)}/overview` : oversightPath(room.workspace_id, agent.id)} prefetch={false} className="text-xs text-primary underline" aria-label={mine ? `Open ${roomLabel(room)}` : `View this agent's tasks in ${roomLabel(room)}, read-only`}>
+                      <Link href={mine ? `/w/${encodeURIComponent(room.workspace_id)}/overview` : oversightPath(room.workspace_id, agent.id)} prefetch={false} className="text-xs text-primary underline" aria-label={mine ? `Open workroom: ${roomLabel(room)}` : `View its tasks, read-only: ${roomLabel(room)}`}>
                         {mine ? "Open workroom" : "View its tasks, read-only"}
                       </Link>
                     )}

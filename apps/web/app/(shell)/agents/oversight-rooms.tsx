@@ -74,7 +74,7 @@ export function OversightRooms({ agents }: { agents: Record<string, string> }) {
                 <AuthorLine author={{ name: agents[room.agent_id] ?? room.agent_id, kind: "agent" }} />
               </div>
               {loaded.own === null ? null : (
-                <Link href={mine ? `/w/${encodeURIComponent(room.workspace_id)}/overview` : oversightPath(room.workspace_id, room.agent_id)} prefetch={false} className="text-primary underline" aria-label={mine ? `Open ${label}` : `View tasks in ${label}, read-only`}>
+                <Link href={mine ? `/w/${encodeURIComponent(room.workspace_id)}/overview` : oversightPath(room.workspace_id, room.agent_id)} prefetch={false} className="text-primary underline" aria-label={mine ? `Open workroom: ${label}` : `View tasks, read-only: ${label}`}>
                   {mine ? "Open workroom" : "View tasks, read-only"}
                 </Link>
               )}
