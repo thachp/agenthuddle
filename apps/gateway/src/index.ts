@@ -246,10 +246,12 @@ class AgentRefused extends Error {}
 /** Resolves a verified credential to one agent, and refuses unclaimed or disconnected ones before minting anything. */
 export async function resolveAgent(env: Env, provider: "agent_auth" | "mcp_oauth", externalId: string): Promise<Identity> {
   const row = await env.DB.prepare(
-    `SELECT a.id, a.org_id, a.generation, a.revoked_at FROM identity_link l JOIN podster_agent a ON a.id = l.agent_id WHERE l.provider = ? AND l.external_id = ?`,
-  ).bind(provider, externalId).first<{ id: string; org_id: string; generation: number; revoked_at: number | null }>();
+    `SELECT a.id, a.org_id, a.generation, a.revoked_at, EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id) AS linker_present FROM identity_link l JOIN podster_agent a ON a.id = l.agent_id WHERE l.provider = ? AND l.external_id = ?`,
+  ).bind(provider, externalId).first<{ id: string; org_id: string; generation: number; revoked_at: number | null; linker_present: number }>();
   if (!row) throw new AgentRefused("agent_unclaimed");
   if (row.revoked_at) throw new AgentRefused("agent_disconnected");
+  // A credential someone connected ends when they leave the organization. An admin can connect a new one to this agent.
+  if (!row.linker_present) throw new AgentRefused("credential_owner_left");
   return { kind: "agent", id: row.id, org: row.org_id, generation: row.generation };
 }
 
@@ -356,7 +358,7 @@ export function createAuth(env: Env) {
   });
 }
 
-type Memberships = { orgs: string[]; adminOrgs: string[]; defaultOrg: string | null };
+type Memberships = { orgs: string[]; adminOrgs: string[]; defaultOrg: string | null; orgSince: Record<string, number> };
 
 /**
  * Writes the person's personal organization and their admin membership if either is missing. It's safe to repeat, and
@@ -379,7 +381,7 @@ async function ensurePersonalOrg(env: Env, person: string) {
 }
 
 const membershipRows = async (env: Env, person: string) =>
-  (await env.DB.prepare(`SELECT m.org_id, m.role, o.personal, o.created_by FROM org_member m JOIN organization o ON o.id = m.org_id WHERE m.person_id = ? ORDER BY m.created_at, o.personal DESC`).bind(person).all<{ org_id: string; role: string; personal: number; created_by: string }>()).results;
+  (await env.DB.prepare(`SELECT m.org_id, m.role, m.created_at, o.personal, o.created_by FROM org_member m JOIN organization o ON o.id = m.org_id WHERE m.person_id = ? ORDER BY m.created_at, o.personal DESC`).bind(person).all<{ org_id: string; role: string; created_at: number; personal: number; created_by: string }>()).results;
 
 /**
  * The person's organizations, restoring their personal one first if a failed sign-up left it unwritten. The default is
@@ -397,16 +399,17 @@ async function memberships(env: Env, person: string): Promise<Memberships> {
     orgs: results.map((r) => r.org_id),
     adminOrgs: results.filter((r) => r.role === "admin").map((r) => r.org_id),
     defaultOrg: results[0]?.org_id ?? null,
+    orgSince: Object.fromEntries(results.map((r) => [r.org_id, r.created_at])),
   };
 }
 
 /** A signed-in person, acting in the organization they choose among their own. */
 async function personIdentity(env: Env, request: Request, userId: string): Promise<Identity | null> {
   const person = personId(userId);
-  const { orgs, adminOrgs, defaultOrg } = await memberships(env, person);
+  const { orgs, adminOrgs, defaultOrg, orgSince } = await memberships(env, person);
   const org = request.headers.get("x-podster-org") ?? defaultOrg;
   if (!org || !orgs.includes(org)) return null;
-  return { kind: "person", id: person, org, orgs, adminOrgs };
+  return { kind: "person", id: person, org, orgs, adminOrgs, orgSince };
 }
 
 /**
@@ -441,25 +444,31 @@ function allowedInbox(method: string, path: string, search: URLSearchParams) {
  * It's a fact from our own rows, present only if true. The API decides what follows from it.
  */
 async function withTargetMember(env: Env, identity: Identity, method: string, path: string, body: string | undefined): Promise<Identity> {
-  if (identity.kind !== "person" || method !== "POST" || !/^\/v1\/workspaces\/[^/]+\/members$/.test(path) || !body) return identity;
-  const target = (() => {
-    try {
-      return JSON.parse(body) as { kind?: unknown; principal_id?: unknown; org_id?: unknown };
-    } catch {
-      return null;
-    }
-  })();
-  if (target?.kind !== "person" || typeof target.principal_id !== "string" || typeof target.org_id !== "string") return identity;
-  const member = await env.DB.prepare(`SELECT 1 FROM org_member WHERE org_id = ? AND person_id = ?`).bind(target.org_id, target.principal_id).first();
-  return member ? { ...identity, targetMember: { person: target.principal_id, org: target.org_id } } : identity;
+  if (identity.kind !== "person" || method !== "POST") return identity;
+  const person = /^\/v1\/workspaces\/[^/]+\/members$/.test(path) ? addedPerson(body) : path.match(/^\/v1\/workspaces\/[^/]+\/members\/(per_[\w-]+)\/role$/)?.[1];
+  if (!person) return identity;
+  const { results } = await env.DB.prepare(`SELECT org_id, created_at FROM org_member WHERE person_id = ?`).bind(person).all<{ org_id: string; created_at: number }>();
+  return results.length ? { ...identity, targetMember: { person, orgs: Object.fromEntries(results.map((r) => [r.org_id, r.created_at])) } } : identity;
+}
+
+function addedPerson(body: string | undefined) {
+  try {
+    const target = JSON.parse(body ?? "") as { kind?: unknown; principal_id?: unknown };
+    return target?.kind === "person" && typeof target.principal_id === "string" ? target.principal_id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const MAX_LISTED_AGENTS = 500;
 
-/** Agents the person's organizations own. The directory is the gateway's own, and this reads only their memberships. */
+/**
+ * Agents the person's organizations own. The directory is the gateway's own, and this reads only their memberships.
+ * `credentials_owner_left` counts credentials that stopped working because whoever connected them left.
+ */
 async function listAgents(env: Env, orgs: string[]): Promise<Response> {
   const placeholders = orgs.map(() => "?").join(",");
-  const { results } = await env.DB.prepare(`SELECT id, org_id, name, description, created_at, revoked_at FROM podster_agent WHERE org_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`).bind(...orgs, MAX_LISTED_AGENTS + 1).all();
+  const { results } = await env.DB.prepare(`SELECT a.id, a.org_id, a.name, a.description, a.created_at, a.revoked_at, (SELECT COUNT(*) FROM identity_link l WHERE l.agent_id = a.id AND NOT EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id)) AS credentials_owner_left FROM podster_agent a WHERE a.org_id IN (${placeholders}) ORDER BY a.created_at DESC LIMIT ?`).bind(...orgs, MAX_LISTED_AGENTS + 1).all();
   // Newest first. There's no paging yet, so a longer list says it was cut.
   return json({ agents: results.slice(0, MAX_LISTED_AGENTS), truncated: results.length > MAX_LISTED_AGENTS });
 }

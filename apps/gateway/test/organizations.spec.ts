@@ -1,6 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { Env } from "../src/index";
+import { resolveAgent, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; API_DB: D1Database };
@@ -133,7 +133,7 @@ describe("inviting a person to an organization", () => {
     expect((await accept(await signUp(), token)).status).toBe(200);
   });
 
-  it("ends an admin's invitations when they're no longer an admin", async () => {
+  it("ends an admin's invitations for good when they're no longer an admin", async () => {
     const owner = await signUp();
     const org = await newOrg(owner);
     const leaving = await joined(owner, org, "admin");
@@ -146,6 +146,35 @@ describe("inviting a person to an organization", () => {
     expect((await accept(person, fromLeaving.token)).code).toBe("invitation_not_found");
     expect((await dash(person, "POST", "/org-invitations/preview", { token: fromDemoted.token })).code).toBe("invitation_not_found");
     expect((await dash(owner, "GET", `/orgs/${org}/invitations`)).body.invitations).toEqual([]);
+    // Promoting them again doesn't bring a link back.
+    expect((await dash(owner, "PUT", `/orgs/${org}/members/${demoted.id}`, { role: "admin" })).status).toBe(200);
+    expect((await accept(person, fromDemoted.token)).code).toBe("invitation_not_found");
+    const ended = (await auditActions(owner, org)).filter(([action]: string[]) => action === "invitation.ended");
+    expect(ended.map(([, actor, target]: string[]) => [actor, target]).sort()).toEqual([[owner.id, fromDemoted.id], [owner.id, fromLeaving.id]].sort());
+  });
+
+  it("doesn't count ended invitations toward the limit", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const other = await joined(owner, org, "admin");
+    for (let i = 0; i < 50; i++) await invite(other, org);
+    expect((await dash(owner, "POST", `/orgs/${org}/invitations`, { role: "member" })).code).toBe("limit_exceeded");
+    await dash(owner, "PUT", `/orgs/${org}/members/${other.id}`, { role: "member" });
+    expect((await dash(owner, "GET", `/orgs/${org}/invitations`)).body.invitations).toEqual([]);
+    expect((await dash(owner, "POST", `/orgs/${org}/invitations`, { role: "member" })).status).toBe(200);
+  });
+
+  it("uses one link when one person accepts two at the same moment", async () => {
+    const admin = await signUp();
+    const org = await newOrg(admin);
+    const links = [await invite(admin, org, "admin"), await invite(admin, org, "member")];
+    const person = await signUp();
+    const answers = await Promise.all(links.map((l) => accept(person, l.token)));
+    expect(answers.map((a) => a.status).sort()).toEqual([200, 409]);
+    expect(answers.find((a) => a.status === 409)?.code).toBe("already_member");
+    expect((await dash(admin, "GET", `/orgs/${org}/invitations`)).body.invitations).toHaveLength(1);
+    expect((await auditActions(admin, org)).filter(([action]: string[]) => action === "member.joined")).toHaveLength(1);
+    expect(await roleIn(person, org)).toBe(answers.find((a) => a.status === 200)?.body.role);
   });
 
   it("limits how many invitations can wait", async () => {
@@ -307,7 +336,7 @@ describe("adding a person to a room", () => {
     const seen = await dash(person, "GET", `/v1/workspaces/${room}`, undefined, inOrg);
     expect(seen.status).toBe(200);
     // Admins are only the owner's to appoint, whoever asks.
-    expect((await add(person, room, org, owner.id)).status).not.toBe(200);
+    expect((await add(person, room, org, owner.id)).code).toBe("invalid_argument");
     const third = await joined(owner, org);
     expect((await add(person, room, org, third.id)).code).toBe("not_allowed");
     expect((await add(person, room, org, third.id, "member")).status).toBe(200);
@@ -324,6 +353,110 @@ describe("adding a person to a room", () => {
     const person = await joined(owner, org);
     await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`);
     expect((await add(owner, room, org, person.id)).code).toBe("not_in_organization");
+  });
+});
+
+describe("leaving an organization", () => {
+  const room = async (owner: Person, org: string) => (await dash(owner, "POST", "/v1/workspaces", { name: "Room" }, { "x-podster-org": org })).body.id as string;
+  const addPerson = async (actor: Person, id: string, org: string, principal: string, role: string, headers: Record<string, string> = {}) => {
+    const version = (await dash(actor, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    return dash(actor, "POST", `/v1/workspaces/${id}/members`, { principal_id: principal, kind: "person", org_id: org, role, policy_version: version }, headers);
+  };
+  const setRole = async (actor: Person, id: string, principal: string, role: string) => {
+    const version = (await dash(actor, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    return dash(actor, "POST", `/v1/workspaces/${id}/members/${principal}/role`, { role, policy_version: version });
+  };
+  const listed = async (who: Person) => (await dash(who, "GET", "/v1/workspaces")).body.workspaces.map((w: any) => w.workspace_id);
+  async function eventually(check: () => Promise<boolean>) {
+    for (let tries = 0; tries < 40; tries++) {
+      if (await check()) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("never happened");
+  }
+
+  it("takes the organization's rooms out of the person's list", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const id = await room(owner, org);
+    const person = await joined(owner, org);
+    expect((await addPerson(owner, id, org, person.id, "member")).status).toBe(200);
+    await eventually(async () => (await listed(person)).includes(id));
+    await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`);
+    expect(await listed(person)).not.toContain(id);
+    expect(await listed(owner)).toContain(id);
+  });
+
+  it("doesn't restore a room role by rejoining, until the owner adds them again", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const id = await room(owner, org);
+    const person = await joined(owner, org);
+    expect((await addPerson(owner, id, org, person.id, "admin")).status).toBe(200);
+    await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`);
+    expect((await setRole(owner, id, person.id, "member")).code).toBe("not_in_organization");
+    expect((await accept(person, (await invite(owner, org)).token)).status).toBe(200);
+    expect((await dash(person, "GET", `/v1/workspaces/${id}`)).code).toBe("workspace_not_found");
+    expect((await setRole(owner, id, person.id, "member")).code).toBe("not_in_organization");
+    expect((await addPerson(owner, id, org, person.id, "member")).status).toBe(200);
+    const back = await dash(person, "GET", `/v1/workspaces/${id}`);
+    expect(back.status).toBe(200);
+    expect(back.body.members.find((m: any) => m.principal_id === person.id).role).toBe("member");
+    expect((await setRole(owner, id, person.id, "guest")).status).toBe(200);
+  });
+
+  it("gives a room's owner their room back when they rejoin, because rooms have no other owner yet", async () => {
+    const admin = await signUp();
+    const org = await newOrg(admin);
+    const founder = await joined(admin, org);
+    const id = await room(founder, org);
+    await dash(admin, "DELETE", `/orgs/${org}/members/${founder.id}`);
+    expect((await dash(founder, "GET", `/v1/workspaces/${id}`)).code).toBe("workspace_not_found");
+    expect(await listed(founder)).not.toContain(id);
+    expect((await accept(founder, (await invite(admin, org)).token)).status).toBe(200);
+    expect((await dash(founder, "GET", `/v1/workspaces/${id}`)).body.owner).toBe(founder.id);
+    // Both joins are on record, which is the only trace of how the room came back to them.
+    expect((await auditActions(admin, org)).filter(([action, , target]: string[]) => action === "member.joined" && target === founder.id)).toHaveLength(2);
+  });
+
+  it("lets a refused add's idempotency key work once the person has joined", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const id = await room(owner, org);
+    const person = await signUp();
+    const version = (await dash(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const send = () => dash(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: person.id, kind: "person", org_id: org, role: "member", policy_version: version }, { "idempotency-key": "same-key" });
+    expect((await send()).code).toBe("not_in_organization");
+    expect((await accept(person, (await invite(owner, org)).token)).status).toBe(200);
+    const added = await send();
+    expect(added.status).toBe(200);
+    expect((await send()).body).toEqual(added.body);
+    const log = (await dash(owner, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((row: any) => row.action === "member.added" && row.target_id === person.id);
+    expect(log).toHaveLength(1);
+  });
+
+  it("ends only the credentials they connected, and only when they leave", async () => {
+    const owner = await signUp();
+    const org = await newOrg(owner);
+    const leaving = await joined(owner, org, "admin");
+    const stays = await joined(owner, org, "admin");
+    const agentId = `agt_${unique("a").replaceAll("-", "")}`;
+    const now = Date.now();
+    await e.DB.batch([
+      e.DB.prepare("INSERT INTO podster_agent (id, org_id, name, created_at) VALUES (?, ?, 'Agent', ?)").bind(agentId, org, now),
+      e.DB.prepare("INSERT INTO identity_link (provider, external_id, agent_id, person_id, created_at) VALUES ('mcp_oauth', ?, ?, ?, ?)").bind(`old-${agentId}`, agentId, leaving.id, now),
+      e.DB.prepare("INSERT INTO identity_link (provider, external_id, agent_id, person_id, created_at) VALUES ('mcp_oauth', ?, ?, ?, ?)").bind(`kept-${agentId}`, agentId, stays.id, now),
+    ]);
+    expect(await resolveAgent(e, "mcp_oauth", `old-${agentId}`)).toMatchObject({ id: agentId, org });
+    const row = async () => (await dash(owner, "GET", "/agents")).body.agents.find((a: any) => a.id === agentId);
+    expect((await row()).credentials_owner_left).toBe(0);
+    await dash(owner, "DELETE", `/orgs/${org}/members/${leaving.id}`);
+    await expect(resolveAgent(e, "mcp_oauth", `old-${agentId}`)).rejects.toThrow("credential_owner_left");
+    expect(await resolveAgent(e, "mcp_oauth", `kept-${agentId}`)).toMatchObject({ id: agentId, org });
+    expect((await row()).credentials_owner_left).toBe(1);
+    // A demotion alone leaves a credential alone.
+    await dash(owner, "PUT", `/orgs/${org}/members/${stays.id}`, { role: "member" });
+    expect(await resolveAgent(e, "mcp_oauth", `kept-${agentId}`)).toMatchObject({ id: agentId });
   });
 });
 

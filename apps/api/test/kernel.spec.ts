@@ -38,8 +38,9 @@ async function assertion(who: Who, opts: { iss?: string; aud?: string; ttl?: num
 async function api(who: Who, method: string, path: string, body?: unknown, opts: { key?: string | null; fail?: boolean; token?: string; rawAccess?: boolean; notInDirectory?: boolean } = {}) {
   const b = body as any;
   // The gateway states this when its directory says the person being added belongs to the organization.
-  const inDirectory = method === "POST" && /\/members$/.test(path) && b?.kind === "person" && !opts.notInDirectory;
-  const claims = inDirectory ? { target_member: { person: b.principal_id, org: b.org_id } } : {};
+  const roleOf = method === "POST" ? path.match(/\/members\/(per_[^/]+)\/role$/)?.[1] : undefined;
+  const added = method === "POST" && /\/members$/.test(path) && b?.kind === "person" ? b.principal_id : undefined;
+  const claims = (added || roleOf) && !opts.notInDirectory ? { target_member: { person: added ?? roleOf, orgs: { [b?.org_id ?? "org_a"]: 1 } } } : {};
   const headers: Record<string, string> = { "x-podster-assertion": opts.token ?? (await assertion(who, { claims })), "content-type": "application/json" };
   const isCommand = method !== "GET";
   if (method === "POST" && /\/members$/.test(path) && b?.kind === "agent" && !opts.rawAccess && b.principal_id?.startsWith("agt_") && b.org_id === "org_a") await register({ id: b.principal_id, org: b.org_id }).catch(() => {});
@@ -292,7 +293,7 @@ describe("access management", () => {
     const refused = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, person, { notInDirectory: true });
     expect([refused.status, refused.code]).toEqual([400, "not_in_organization"]);
     // A statement about someone else, or another organization, doesn't count.
-    for (const target_member of [{ person: "per_other", org: OWNER.org }, { person: "per_new", org: "org_other" }]) {
+    for (const target_member of [{ person: "per_other", orgs: { [OWNER.org]: 1 } }, { person: "per_new", orgs: { org_other: 1 } }]) {
       const token = await assertion(OWNER, { claims: { target_member } });
       const wrong = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, person, { token });
       expect([wrong.status, wrong.code]).toEqual([400, "not_in_organization"]);
@@ -301,6 +302,43 @@ describe("access management", () => {
     expect(seen.body.members.map((m: any) => m.principal_id)).not.toContain("per_new");
     const added = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, person);
     expect(added.status).toBe(200);
+  });
+
+  it("ends a room role when the person's membership is newer than it, until they're added again", async () => {
+    const { id } = await room();
+    const members = `/v1/workspaces/${id}/members`;
+    const later = Date.now() + 60_000;
+    const rejoined = (who: Who) => assertion(who, { claims: { org_since: { org_a: later } } });
+    for (const [method, path, body] of [["GET", `/v1/workspaces/${id}`, undefined], ["POST", `/v1/workspaces/${id}/tasks`, { title: "x" }], ["POST", members, { principal_id: "per_z", kind: "person", org_id: "org_a", role: "guest" }]] as const) {
+      const res = await api(ADMIN, method, path, body, { token: await rejoined(ADMIN) });
+      expect([path, res.code]).toEqual([path, "workspace_not_found"]);
+    }
+    // A role that started within this membership keeps working, and the owner isn't a member row.
+    const current = await api(ADMIN, "GET", `/v1/workspaces/${id}`, undefined, { token: await assertion(ADMIN, { claims: { org_since: { org_a: 1 } } }) });
+    expect(current.status).toBe(200);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`, undefined, { token: await rejoined(OWNER) })).status).toBe(200);
+    // Changing the ended role is refused, and adding them again is the recorded way back.
+    const target_member = { person: ADMIN.id, orgs: { org_a: later } };
+    const role = await api(OWNER, "POST", `${members}/${ADMIN.id}/role`, { role: "member" }, { token: await assertion(OWNER, { claims: { target_member } }) });
+    expect(role.code).toBe("not_in_organization");
+    const back = await api(OWNER, "POST", members, { principal_id: ADMIN.id, kind: "person", org_id: "org_a", role: "member" }, { token: await assertion(OWNER, { claims: { target_member } }) });
+    expect(back.status).toBe(200);
+    const after = await api(ADMIN, "GET", `/v1/workspaces/${id}`, undefined, { token: await rejoined(ADMIN) });
+    expect(after.status).toBe(200);
+    expect(after.body.members.find((m: any) => m.principal_id === ADMIN.id).role).toBe("member");
+    const log = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((e: any) => e.action === "member.added" && e.target_id === ADMIN.id);
+    expect(JSON.parse(log.at(-1).prior_json)).toMatchObject({ role: "admin", revoked: false });
+    // A second add in the same membership is still refused.
+    const again = await api(OWNER, "POST", members, { principal_id: ADMIN.id, kind: "person", org_id: "org_a", role: "member" }, { token: await assertion(OWNER, { claims: { target_member } }) });
+    expect(again.code).toBe("already_member");
+  });
+
+  it("refuses a role change for a person the directory doesn't place in the organization", async () => {
+    const { id } = await room();
+    const refused = await api(OWNER, "POST", `/v1/workspaces/${id}/members/${ADMIN.id}/role`, { role: "member" }, { notInDirectory: true });
+    expect([refused.status, refused.code]).toEqual([400, "not_in_organization"]);
+    const elsewhere = await assertion(OWNER, { claims: { target_member: { person: ADMIN.id, orgs: { org_other: 1 } } } });
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${ADMIN.id}/role`, { role: "member" }, { token: elsewhere })).code).toBe("not_in_organization");
   });
 
   it("only the owner appoints admins, and agents can't be admins", async () => {

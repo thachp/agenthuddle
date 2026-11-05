@@ -32,7 +32,7 @@ paths:
     post:
       operationId: addMember
       tags: [commands]
-      summary: Add a participant. Owner or admin, and only the owner appoints admins. A person must be in the room's organization, which the assertion's `target_member` states from the gateway's directory
+      summary: Add a participant. Owner or admin, and only the owner appoints admins. A person must be in the room's organization, which the assertion's `target_member` states from the gateway's directory. Someone whose role predates their current membership is added again
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody:
         required: true

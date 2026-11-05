@@ -202,13 +202,15 @@ fn a_target_member_claim_is_read_and_is_optional() {
     let without = verify(&sign(&claims()), &keys(), NOW).unwrap();
     assert_eq!(without.target_member, None);
     let mut body = claims();
-    body["target_member"] = json!({ "person": "per_x", "org": "org_y" });
+    body["target_member"] = json!({ "person": "per_x", "orgs": { "org_y": 5 } });
+    body["org_since"] = json!({ "org_y": 7 });
     let with = verify(&sign(&body), &keys(), NOW).unwrap();
     assert_eq!(
         with.target_member,
         Some(TargetMember {
             person: "per_x".into(),
-            org: "org_y".into()
+            orgs: [("org_y".to_string(), 5)].into()
         })
     );
+    assert_eq!(with.org_since.get("org_y"), Some(&7));
 }

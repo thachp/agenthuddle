@@ -921,7 +921,7 @@ describe("after a disconnect", () => {
   describe("when the API's answer to the state check is unusual", () => {
     const identityOf = async (who: Person) => {
       const me = await person(who);
-      return { kind: "person" as const, id: me.id, org: who.org, orgs: me.orgs, adminOrgs: me.admin_orgs };
+      return { kind: "person" as const, id: me.id, org: who.org, orgs: me.orgs, adminOrgs: me.admin_orgs, orgSince: {} };
     };
     const stubbed = (answer: (method: string) => Response, seen: string[]) => ({ ...e, API: { fetch: async (request: Request) => (seen.push(request.method), answer(request.method)) } as unknown as Fetcher });
 
@@ -1052,7 +1052,7 @@ describe("consent across organizations and clients", () => {
 });
 
 describe("resilience and schema", () => {
-  const someone = { kind: "person" as const, id: "per_x", org: "o", orgs: ["o"], adminOrgs: [] };
+  const someone = { kind: "person" as const, id: "per_x", org: "o", orgs: ["o"], adminOrgs: [], orgSince: {} };
 
   it("answers when the API hangs, and says so differently when it fails", async () => {
     const hanging = { ...e, API: { fetch: (request: Request) => new Promise((_, reject) => request.signal.addEventListener("abort", () => reject(request.signal.reason))) } as unknown as Fetcher };
@@ -1705,6 +1705,25 @@ describe("sign-in and claim pages", () => {
     expect((await form({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org }, { cookie: owner.cookie, origin: "https://evil.test" }, "/claim")).status).toBe(403);
   });
 
+  it("refuses a credential whose connecting admin left, and another admin can connect a new one to the agent", async () => {
+    const stays = await signUp();
+    const team = (await dash(stays, "POST", "/orgs", { name: "Team" })).body.id as string;
+    const link = (await dash(stays, "POST", `/orgs/${team}/invitations`, { role: "admin" })).body.token as string;
+    const leaving = await signUp();
+    expect((await dash(leaving, "POST", "/org-invitations/accept", { token: link })).status).toBe(200);
+    const agent = await claimedAgent({ ...leaving, org: team });
+    expect((await execute(agent, "get_identity")).status).toBe(200);
+    expect((await dash(stays, "DELETE", `/orgs/${team}/members/${(await dash(leaving, "GET", "/v1/me")).body.id}`)).status).toBe(200);
+    const refused = await execute(agent, "get_identity");
+    expect([refused.status, refused.code]).toEqual([403, "credential_owner_left"]);
+    expect((await dash(stays, "GET", "/agents")).body.agents.find((a: any) => a.id === agent.id).credentials_owner_left).toBe(1);
+    const replacement = await registerAgent();
+    expect((await claim({ ...stays, org: team }, replacement, { link_agent_id: agent.id })).status).toBe(200);
+    const working = await execute(replacement, "get_identity");
+    expect([working.status, working.data?.id]).toEqual([200, agent.id]);
+    expect((await execute(agent, "get_identity")).status).toBe(403);
+  });
+
   it("only offers organizations the person administers", async () => {
     const [a, member] = [await signUp(), await signUp()];
     const me = await (await dashboard(member, "GET", "/v1/me")).json<any>();
@@ -2120,7 +2139,7 @@ describe("spending agent tokens", () => {
   it("sends the token to the API in the assertion, for agents only", async () => {
     const claims = decodeJwt(await mintAssertion({ kind: "agent", id: "agt_x", org: "o", generation: 1, spends: { key: "plugin:a", expiresAt: 123 } }, e.ASSERTION_SIGNING_JWK));
     expect(claims).toMatchObject({ agent_jti: "plugin:a", agent_jti_exp: 123 });
-    const person = decodeJwt(await mintAssertion({ kind: "person", id: "per_x", org: "o", orgs: ["o"], adminOrgs: [] }, e.ASSERTION_SIGNING_JWK));
+    const person = decodeJwt(await mintAssertion({ kind: "person", id: "per_x", org: "o", orgs: ["o"], adminOrgs: [], orgSince: {} }, e.ASSERTION_SIGNING_JWK));
     expect(person).not.toHaveProperty("agent_jti");
   });
 });

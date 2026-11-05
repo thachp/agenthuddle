@@ -102,13 +102,22 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
             org: text(&room["owner_org_id"]).unwrap_or_default(),
         });
     }
-    let member = rows(sql, "SELECT kind, org_id, role, guest_can_create, revoked_at FROM member WHERE principal_id = ?", vec![identity.id.as_str().into()])?;
+    let member = rows(sql, "SELECT kind, org_id, role, guest_can_create, revoked_at, added_at FROM member WHERE principal_id = ?", vec![identity.id.as_str().into()])?;
     let Some(member) = member.first() else {
         return Err(ApiError::workspace_not_found());
     };
     // An identity that doesn't match the stored one learns nothing, including whether it was revoked.
     let org = text(&member["org_id"]).unwrap_or_default();
     if member["kind"].as_str() != Some(identity.kind.as_str()) || !in_org(identity, &org) {
+        return Err(ApiError::workspace_not_found());
+    }
+    // A role given before the person's current membership began ended when they left. Rejoining doesn't restore it.
+    if kind == PrincipalKind::Person
+        && identity
+            .org_since
+            .get(&org)
+            .is_some_and(|since| *since > int(&member["added_at"]))
+    {
         return Err(ApiError::workspace_not_found());
     }
     // The fence is checked in the room's own transaction, so it orders against every command here.
@@ -570,9 +579,18 @@ fn write_member(
     queue_index(sql, principal, org, Some(role), now)
 }
 
+/// When the directory says this person joined this organization, or a refusal if it doesn't place them there.
+fn joined_org(target: Option<&TargetMember>, person: &str, org: &str) -> R<i64> {
+    target
+        .filter(|target| target.person == person)
+        .and_then(|target| target.orgs.get(org).copied())
+        .ok_or_else(ApiError::not_in_organization)
+}
+
 /// Adds a participant from the room owner's organization. Other organizations join through an invitation.
 /// For an agent, `registered` holds its generation and organization from its Principal. For a person, `target_member`
 /// is what the gateway's directory says about them, because someone outside the organization couldn't act on the role.
+/// Someone whose role here predates their current membership is added again, because that role has already ended.
 fn handle_add_member(
     sql: &SqlStorage,
     caller: &Caller,
@@ -616,15 +634,16 @@ fn handle_add_member(
         }
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
     }
-    if kind == "person"
-        && !target_member.is_some_and(|target| target.person == principal && target.org == org)
-    {
-        return Err(ApiError::not_in_organization());
-    }
-    let existing = rows(sql, "SELECT kind, org_id, role, revoked_at, revocation_reason, owner_consented_at FROM member WHERE principal_id = ?", vec![principal.as_str().into()])?;
+    let joined = if kind == "person" {
+        Some(joined_org(target_member.as_ref(), &principal, &org)?)
+    } else {
+        None
+    };
+    let existing = rows(sql, "SELECT kind, org_id, role, revoked_at, revocation_reason, owner_consented_at, added_at FROM member WHERE principal_id = ?", vec![principal.as_str().into()])?;
     let prior = existing.first();
     if let Some(prior) = prior {
-        if prior["revoked_at"].is_null() {
+        let ended = joined.is_some_and(|since| since > int(&prior["added_at"]));
+        if prior["revoked_at"].is_null() && !ended {
             return Err(ApiError::already_member());
         }
         // Correcting a revoked participant's identity is the owner's alone, so an admin can't re-add someone as someone else.
@@ -658,10 +677,11 @@ fn handle_add_member(
         &role,
         guest_can_create,
         generation,
-        now,
+        // The gateway's clock may be ahead, and this must not look older than the membership it belongs to.
+        joined.map_or(now, |since| now.max(since)),
     )?;
     let prior_json = prior.map(|p| {
-        json!({ "role": p["role"], "kind": p["kind"], "org_id": p["org_id"], "revoked": true })
+        json!({ "role": p["role"], "kind": p["kind"], "org_id": p["org_id"], "revoked": !p["revoked_at"].is_null() })
             .to_string()
     });
     audit(sql, caller, "member.added", &principal, prior_json, Some(json!({ "role": role, "kind": kind, "org_id": org, "guest_can_create": guest_can_create }).to_string()), now)?;
@@ -787,6 +807,7 @@ fn handle_change_role(
     caller: &Caller,
     principal: &str,
     body: &Value,
+    target_member: Option<TargetMember>,
     now: i64,
 ) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
@@ -795,13 +816,20 @@ fn handle_change_role(
     if !["admin", "member", "guest"].contains(&role.as_str()) {
         return Err(ApiError::invalid_argument());
     }
-    let found = rows(sql, "SELECT kind, role, guest_can_create FROM member WHERE principal_id = ? AND revoked_at IS NULL", vec![principal.into()])?;
+    let found = rows(sql, "SELECT kind, role, guest_can_create, org_id, added_at FROM member WHERE principal_id = ? AND revoked_at IS NULL", vec![principal.into()])?;
     let member = found.first().ok_or_else(ApiError::invalid_argument)?;
     if role == "admin" && member["kind"].as_str() != Some("person") {
         return Err(ApiError::invalid_argument());
     }
     if role == "admin" || member["role"].as_str() == Some("admin") {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
+    }
+    // A role can't be changed for someone who can't act on it. They've left, or this role predates their membership.
+    if member["kind"].as_str() == Some("person") {
+        let org = text(&member["org_id"]).unwrap_or_default();
+        if joined_org(target_member.as_ref(), principal, &org)? > int(&member["added_at"]) {
+            return Err(ApiError::not_in_organization());
+        }
     }
     let guest_can_create = match body.get("guest_can_create") {
         None => int(&member["guest_can_create"]) != 0,
@@ -1873,8 +1901,9 @@ impl Workspace {
                 })
             }
             (Method::Post, ["members", _, "role"]) => {
+                let target_member = identity.target_member.clone();
                 self.command(&identity, key, hash, test_fail, move |sql, who, now| {
-                    handle_change_role(sql, &who.caller, &target, &body, now)
+                    handle_change_role(sql, &who.caller, &target, &body, target_member, now)
                 })
             }
             (Method::Delete, ["members", _]) => {

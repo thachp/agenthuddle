@@ -17,8 +17,20 @@ type Membership = { role: string; personal: number };
 const membershipOf = (env: Env, org: string, person: string) =>
   env.DB.prepare(`SELECT m.role, o.personal FROM org_member m JOIN organization o ON o.id = m.org_id WHERE m.org_id = ? AND m.person_id = ?`).bind(org, person).first<Membership>();
 
-/** An invitation can be used while it's pending and unexpired, and while the admin who made it still is one. */
-const LIVE = `i.status = 'pending' AND i.expires_at > ? AND EXISTS (SELECT 1 FROM org_member c WHERE c.org_id = i.org_id AND c.person_id = i.created_by AND c.role = 'admin')`;
+/** An invitation can be used while it's pending and unexpired. It ends for good when its creator stops being an admin. */
+const LIVE = `i.status = 'pending' AND i.expires_at > ?`;
+
+/**
+ * Ends what `creator` invited, if `where` still holds. Goes in the same batch as the change that costs them their admin
+ * role, so an invitation can't come back if they're promoted again.
+ */
+function endInvitationsOf(env: Env, org: string, actor: string, creator: string, where: string, binds: unknown[], now: number) {
+  const pending = `org_id = ? AND created_by = ? AND status = 'pending' AND EXISTS (SELECT 1 FROM org_member m WHERE ${where})`;
+  return [
+    env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT 'oau_' || lower(hex(randomblob(16))), org_id, ?, 'invitation.ended', id, role, ? FROM org_invitation WHERE ${pending}`).bind(actor, now, org, creator, ...binds),
+    env.DB.prepare(`UPDATE org_invitation SET status = 'ended' WHERE ${pending}`).bind(org, creator, ...binds),
+  ];
+}
 
 const randomSecret = () => [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("");
 
@@ -38,11 +50,11 @@ async function createInvitation(request: Request, env: Env, org: string, person:
   const secret = randomSecret();
   const expiresAt = now + INVITATION_TTL_MS;
   const [created] = await env.DB.batch([
-    env.DB.prepare(`INSERT INTO org_invitation (id, org_id, role, token_hash, expires_at, status, created_by, created_at) SELECT ?, ?, ?, ?, ?, 'pending', ?, ? WHERE (SELECT COUNT(*) FROM org_invitation WHERE org_id = ? AND status = 'pending' AND expires_at > ?) < ?`)
-      .bind(id, org, role, await sha256Hex(secret), expiresAt, person, now, org, now, MAX_PENDING_INVITATIONS),
+    env.DB.prepare(`INSERT INTO org_invitation (id, org_id, role, token_hash, expires_at, status, created_by, created_at) SELECT ?, ?, ?, ?, ?, 'pending', ?, ? WHERE (SELECT COUNT(*) FROM org_invitation WHERE org_id = ? AND status = 'pending' AND expires_at > ?) < ? AND EXISTS (SELECT 1 FROM org_member WHERE org_id = ? AND person_id = ? AND role = 'admin')`)
+      .bind(id, org, role, await sha256Hex(secret), expiresAt, person, now, org, now, MAX_PENDING_INVITATIONS, org, person),
     env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT ?, ?, ?, 'invitation.created', id, role, ? FROM org_invitation WHERE id = ?`).bind(newId("oau"), org, person, now, id),
   ]);
-  if (!created.meta.changes) return denied("limit_exceeded", 409);
+  if (!created.meta.changes) return (await membershipOf(env, org, person))?.role === "admin" ? denied("limit_exceeded", 409) : denied("not_allowed", 403);
   // The token is shown once, and the admin sends the link themselves.
   return json({ id, token: `${id}.${secret}`, role, expires_at: expiresAt });
 }
@@ -61,8 +73,10 @@ const LEAVES_AN_ADMIN = `(m.role <> 'admin' OR (SELECT COUNT(*) FROM org_member 
 
 async function removeMember(env: Env, org: string, actor: string, target: string) {
   const where = `m.org_id = ? AND m.person_id = ? AND ${LEAVES_AN_ADMIN}`;
+  const now = Date.now();
   const [audited] = await env.DB.batch([
-    env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT ?, m.org_id, ?, 'member.removed', m.person_id, m.role, ? FROM org_member m WHERE ${where}`).bind(newId("oau"), actor, Date.now(), org, target),
+    env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT ?, m.org_id, ?, 'member.removed', m.person_id, m.role, ? FROM org_member m WHERE ${where}`).bind(newId("oau"), actor, now, org, target),
+    ...endInvitationsOf(env, org, actor, target, where, [org, target], now),
     env.DB.prepare(`DELETE FROM org_member AS m WHERE ${where}`).bind(org, target),
   ]);
   if (audited.meta.changes) return json({ person_id: target, status: "removed" });
@@ -73,8 +87,10 @@ async function changeRole(request: Request, env: Env, org: string, actor: string
   const role = (await bodyOf(request))?.role;
   if (typeof role !== "string" || !ROLES.includes(role)) return denied("invalid_argument", 400);
   const where = `m.org_id = ? AND m.person_id = ? AND m.role <> ? AND (? = 'admin' OR ${LEAVES_AN_ADMIN})`;
+  const now = Date.now();
   const [audited] = await env.DB.batch([
-    env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT ?, m.org_id, ?, 'member.role_changed', m.person_id, ?, ? FROM org_member m WHERE ${where}`).bind(newId("oau"), actor, role, Date.now(), org, target, role, role),
+    env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT ?, m.org_id, ?, 'member.role_changed', m.person_id, ?, ? FROM org_member m WHERE ${where}`).bind(newId("oau"), actor, role, now, org, target, role, role),
+    ...(role === "admin" ? [] : endInvitationsOf(env, org, actor, target, where, [org, target, role, role], now)),
     env.DB.prepare(`UPDATE org_member AS m SET role = ? WHERE ${where}`).bind(role, org, target, role, role),
   ]);
   if (audited.meta.changes) return json({ person_id: target, role });
@@ -116,12 +132,14 @@ async function acceptInvitation(request: Request, env: Env, person: string) {
   if (await membershipOf(env, invitation.org_id, person)) return denied("already_member", 409);
   const now = Date.now();
   const [accepted] = await env.DB.batch([
-    env.DB.prepare(`UPDATE org_invitation AS i SET status = 'accepted', accepted_by = ?, accepted_at = ? WHERE i.id = ? AND i.token_hash = ? AND ${LIVE} AND (SELECT COUNT(*) FROM org_member WHERE org_id = i.org_id) < ?`)
-      .bind(person, now, invitation.id, invitation.token_hash, now, MAX_ORG_MEMBERS),
+    env.DB.prepare(`UPDATE org_invitation AS i SET status = 'accepted', accepted_by = ?, accepted_at = ? WHERE i.id = ? AND i.token_hash = ? AND ${LIVE} AND (SELECT COUNT(*) FROM org_member WHERE org_id = i.org_id) < ? AND NOT EXISTS (SELECT 1 FROM org_member x WHERE x.org_id = i.org_id AND x.person_id = ?)`)
+      .bind(person, now, invitation.id, invitation.token_hash, now, MAX_ORG_MEMBERS, person),
     env.DB.prepare(`INSERT OR IGNORE INTO org_member (org_id, person_id, role, created_at) SELECT org_id, ?, role, ? FROM org_invitation WHERE id = ? AND status = 'accepted' AND accepted_by = ? AND accepted_at = ?`).bind(person, now, invitation.id, person, now),
     env.DB.prepare(`INSERT INTO org_audit (id, org_id, actor_id, action, target_id, role, created_at) SELECT ?, org_id, ?, 'member.joined', ?, role, ? FROM org_invitation WHERE id = ? AND status = 'accepted' AND accepted_by = ? AND accepted_at = ?`).bind(newId("oau"), person, person, now, invitation.id, person, now),
   ]);
   if (accepted.meta.changes) return json({ org_id: invitation.org_id, role: invitation.role });
+  // They may have joined by another link just now, which leaves this one unused.
+  if (await membershipOf(env, invitation.org_id, person)) return denied("already_member", 409);
   // Still usable means the organization is full. Otherwise someone else got there first, or it ended meanwhile.
   return (await liveInvitation(env, token)) ? denied("limit_exceeded", 409) : denied("invitation_not_found", 404);
 }

@@ -18,11 +18,11 @@ pub enum Kind {
     Person,
 }
 
-/// A fact from the gateway's directory: this person belongs to this organization.
+/// A fact from the gateway's directory: the organizations this person belongs to, and when they joined each.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TargetMember {
     pub person: String,
-    pub org: String,
+    pub orgs: HashMap<String, i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -37,7 +37,11 @@ pub struct Identity {
     /// The organizations this person administers, as recorded by the gateway.
     #[serde(default)]
     pub admin_orgs: Vec<String>,
-    /// Present when a person adds another person to a room and the directory confirms that person's membership.
+    /// When this person joined each of their organizations, in milliseconds. A room role older than that was given
+    /// during an earlier membership.
+    #[serde(default)]
+    pub org_since: HashMap<String, i64>,
+    /// Present when a person changes another person's room access and the directory has them in an organization.
     /// The API can't read the directory, and this grants nothing by itself.
     #[serde(default)]
     pub target_member: Option<TargetMember>,

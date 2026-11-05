@@ -19,13 +19,13 @@ paths:
     put:
       operationId: changeOrgMemberRole
       tags: [commands]
-      summary: Admin. Answers 409 `last_admin` if the organization would have no admin
-      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RoleBody" } } } }
+      summary: Admin. Answers 409 `last_admin` if the organization would have no admin. Losing admin ends the invitations they made
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RequiredRoleBody" } } } }
       responses: { "200": { description: OK } }
     delete:
       operationId: removeOrgMember
       tags: [commands]
-      summary: Admin, or the person themselves. Takes effect on their next request. Answers 409 `last_admin` if the organization would have no admin
+      summary: Admin, or the person themselves. Takes effect on their next request, ends the invitations they made and the credentials they connected, and ends their room roles unless they're the room's owner. Answers 409 `last_admin` if the organization would have no admin
       responses: { "200": { description: OK } }
   /api/orgs/{org}/invitations:
     parameters: [{ $ref: "#/components/parameters/org" }]
@@ -33,7 +33,7 @@ paths:
     post:
       operationId: createOrgInvitation
       tags: [commands]
-      summary: Admin. Returns the token once. Expires in 7 days, and ends if its creator stops being an admin. At most 50 can wait, then 409 `limit_exceeded`
+      summary: Admin. Returns the token once. Expires in 7 days, and ends for good if its creator stops being an admin. At most 50 can wait, then 409 `limit_exceeded`
       requestBody: { required: false, content: { application/json: { schema: { $ref: "#/components/schemas/RoleBody" } } } }
       responses: { "200": { description: "id, token, role, expires_at" } }
   /api/orgs/{org}/invitations/{invitation}:
@@ -53,7 +53,7 @@ paths:
     post:
       operationId: acceptOrgInvitation
       tags: [commands]
-      summary: The signed-in person joins in the invited role. Every bad link answers 404 `invitation_not_found`. Someone already in the organization gets 409 `already_member`, and the link stays usable
+      summary: The signed-in person joins in the invited role. Every bad link answers 404 `invitation_not_found`. Someone already in the organization gets 409 `already_member`, and the link stays usable. A full organization answers 409 `limit_exceeded`
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/TokenBody" } } } }
       responses: { "200": { description: "org_id, role" } }
 components:
@@ -61,4 +61,5 @@ components:
     org: { name: org, in: path, required: true, schema: { type: string } }
   schemas:
     RoleBody: { type: object, properties: { role: { type: string, enum: [admin, member], default: member } } }
+    RequiredRoleBody: { type: object, required: [role], properties: { role: { type: string, enum: [admin, member] } } }
     TokenBody: { type: object, required: [token], properties: { token: { type: string } } }

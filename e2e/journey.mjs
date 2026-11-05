@@ -313,9 +313,11 @@ async function acceptance() {
   });
 
   await check("AC-02+", "a real second person joins by a link, acts as a room admin, and loses it all when removed", async () => {
-    // Reused between runs, because organizations can't be deleted. Each run removes Person B at the end.
+    // Reused between runs, because organizations can't be deleted. A run that died midway may have left Person B in it.
     const orgs = (await personA.must("GET", "/orgs")).organizations;
     const team = orgs.find((o) => o.name === "Podster e2e team") ?? (await personA.must("POST", "/orgs", { name: "Podster e2e team" }));
+    const leftover = await personA.dash("DELETE", `/orgs/${team.id}/members/${personB.id}`);
+    ok(leftover.ok || leftover.code === "not_found", `clearing an earlier run: HTTP ${leftover.status} ${leftover.code ?? ""}`);
     const teamRoom = (await personA.must("POST", "/v1/workspaces", { name: roomName("team") }, { org: team.id })).id;
     const inTeam = { org: team.id };
     const teamMembers = `/v1/workspaces/${teamRoom}/members`;
@@ -336,6 +338,14 @@ async function acceptance() {
 
     await personA.must("POST", teamMembers, { principal_id: personB.id, kind: "person", org_id: team.id, role: "admin", policy_version: await version() }, inTeam);
     const asB = await personB.must("GET", `/v1/workspaces/${teamRoom}`, undefined, inTeam);
+    const listed = async () => (await personB.must("GET", "/v1/workspaces")).workspaces.map((w) => w.workspace_id);
+    // The listing is a read model that follows shortly after the room commits.
+    let inList = false;
+    for (let tries = 0; tries < 20 && !inList; tries++) {
+      inList = (await listed()).includes(teamRoom);
+      if (!inList) await sleep(isLocal ? 200 : 1000);
+    }
+    ok(inList, "the room is in Person B's list while they're in the organization");
     refused(await personB.dash("POST", teamMembers, { principal_id: "per_nobody", kind: "person", org_id: team.id, role: "admin", policy_version: asB.policy_version }, inTeam), "not_allowed", "an admin appointing another");
     const invite = await personB.must("POST", `/v1/workspaces/${teamRoom}/invitations`, { role: "guest", policy_version: asB.policy_version }, inTeam);
     ok(invite.token, "an admin invites to the room");
@@ -344,6 +354,7 @@ async function acceptance() {
     await personA.must("DELETE", `/orgs/${team.id}/members/${personB.id}`);
     refused(await personB.dash("GET", `/v1/workspaces/${teamRoom}`, undefined, inTeam), "not_allowed", "acting in the organization after removal");
     refused(await personB.dash("GET", `/v1/workspaces/${teamRoom}`), "workspace_not_found", "reading the room after removal");
+    ok(!(await listed()).includes(teamRoom), "the room left Person B's list when they were removed");
     return "an admin appointing a real third person runs in the gateway's tests, because this run has two people";
   });
 
