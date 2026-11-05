@@ -22,8 +22,8 @@ const SENTENCES: Record<string, string> = {
   "task.changes_requested": "requested changes",
   "task.completed": "approved a task",
   "task.canceled": "canceled a task",
-  "task.assignee_departed": "left, and a task lost its assignee",
-  "task.needs_attention": "left, and a task needs a new reviewer or requester",
+  "task.assignee_departed": "recorded that a task lost its assignee",
+  "task.needs_attention": "recorded that someone left, so a task needs a new reviewer or requester",
   "task.message": "posted a message",
 };
 

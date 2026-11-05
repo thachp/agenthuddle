@@ -17,6 +17,8 @@ export type LoadedTask = TaskDetail & { workspace: string; room: Room };
 export type TaskSheetProps = {
   me: string;
   names: Names;
+  /** Organizations the viewer can name. Any other shows as its ID. */
+  orgNames?: Names;
   resolve: (target: string) => { workspace: string; task: string } | null;
   room?: Room;
 };
@@ -34,7 +36,7 @@ async function read<T>(path: string, signal: AbortSignal) {
   return null;
 }
 
-export function TaskSheet({ me, names, resolve, room }: TaskSheetProps) {
+export function TaskSheet({ me, names, orgNames = {}, resolve, room }: TaskSheetProps) {
   return (
     <TargetSheet<LoadedTask>
       param="task"
@@ -51,14 +53,14 @@ export function TaskSheet({ me, names, resolve, room }: TaskSheetProps) {
       description={(data) => `Workroom: ${plainName(data.room.name)}`}
       version={(data) => data.task.version}
     >
-      {(api) => <TaskBody api={api} me={me} names={names} />}
+      {(api) => <TaskBody api={api} me={me} names={names} orgNames={orgNames} />}
     </TargetSheet>
   );
 }
 
 const TAB_CLASS = "min-h-11 flex-1 rounded-md px-3 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-muted sm:min-h-8 sm:flex-none";
 
-function TaskBody({ api, me, names }: { api: SheetApi<LoadedTask>; me: string; names: Names }) {
+function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me: string; names: Names; orgNames: Names }) {
   const { data } = api;
   const { task } = data;
   // Outlives the action controls, which start fresh for each version, so the result stays on screen.
@@ -111,13 +113,13 @@ function TaskBody({ api, me, names }: { api: SheetApi<LoadedTask>; me: string; n
           </Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="details" className="mt-4 space-y-4 outline-none">
-          <Details data={data} me={me} names={names} />
+          <Details data={data} me={me} names={names} orgNames={orgNames} />
         </Tabs.Content>
         <Tabs.Content value="discussion" className="mt-4 space-y-3 outline-none">
-          <Discussion data={data} me={me} names={names} />
+          <Discussion data={data} me={me} names={names} orgNames={orgNames} />
         </Tabs.Content>
         <Tabs.Content value="activity" className="mt-4 outline-none">
-          <Activity data={data} me={me} names={names} />
+          <Activity data={data} me={me} names={names} orgNames={orgNames} />
         </Tabs.Content>
       </Tabs.Root>
 
@@ -127,14 +129,14 @@ function TaskBody({ api, me, names }: { api: SheetApi<LoadedTask>; me: string; n
   );
 }
 
-type SectionProps = { data: LoadedTask; me: string; names: Names };
+type SectionProps = { data: LoadedTask; me: string; names: Names; orgNames: Names };
 
-const author = (from: From, me: string, names: Names) => ({ name: nameOf(from.id, me, names), kind: kindOf(from.id), organization: from.org });
+const author = (from: From, me: string, names: Names, orgNames: Names) => ({ name: nameOf(from.id, me, names), kind: kindOf(from.id), organization: orgNames[from.org] ?? from.org });
 
-function Details({ data, me, names }: SectionProps) {
+function Details({ data, me, names, orgNames }: SectionProps) {
   const { task } = data;
   const brief = briefAuthor(data);
-  const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org };
+  const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org ? (orgNames[brief.org] ?? brief.org) : undefined };
   return (
     <>
       <section className="space-y-2">
@@ -160,16 +162,16 @@ function Details({ data, me, names }: SectionProps) {
                 </span>
               </p>
               {submission.note ? (
-                <AgentContent author={author(submission.from, me, names)} external={submission.external} body={submission.note} />
+                <AgentContent author={author(submission.from, me, names, orgNames)} external={submission.external} body={submission.note} />
               ) : (
-                <AuthorLine author={author(submission.from, me, names)} external={submission.external} />
+                <AuthorLine author={author(submission.from, me, names, orgNames)} external={submission.external} />
               )}
               {submission.commit_sha ? (
                 <p className="text-xs break-all text-muted-foreground">
                   Commit <code className="font-mono">{plainName(submission.commit_sha)}</code>
                 </p>
               ) : null}
-              <ArtifactList artifacts={data.artifacts.filter((artifact) => artifact.submission_no === submission.submission_no)} me={me} names={names} />
+              <ArtifactList artifacts={data.artifacts.filter((artifact) => artifact.submission_no === submission.submission_no)} me={me} names={names} orgNames={orgNames} />
             </li>
           ))}
         </ol>
@@ -178,7 +180,7 @@ function Details({ data, me, names }: SectionProps) {
   );
 }
 
-function ArtifactList({ artifacts, me, names }: { artifacts: Artifact[]; me: string; names: Names }) {
+function ArtifactList({ artifacts, me, names, orgNames }: { artifacts: Artifact[]; me: string; names: Names; orgNames: Names }) {
   if (artifacts.length === 0) return null;
   return (
     <ul aria-label="Artifacts" className="space-y-2">
@@ -186,7 +188,7 @@ function ArtifactList({ artifacts, me, names }: { artifacts: Artifact[]; me: str
         const url = safeLinkUrl(artifact.uri);
         return (
           <li key={artifact.id} className="space-y-1 rounded-md bg-muted/50 p-2 text-sm">
-            <AuthorLine author={author(artifact.from, me, names)} external={artifact.external} />
+            <AuthorLine author={author(artifact.from, me, names, orgNames)} external={artifact.external} />
             {/* The label is the agent's, and only the host shown beside it says where this goes. Never previewed or fetched. */}
             {url ? (
               <a href={url} target="_blank" rel="noopener noreferrer nofollow ugc" className="break-words text-primary underline">
@@ -207,7 +209,7 @@ function ArtifactList({ artifacts, me, names }: { artifacts: Artifact[]; me: str
 /** What a task read returns, and there's no reason to imply a thread stops here. */
 const RECENT_MESSAGES = 20;
 
-function Discussion({ data, me, names }: SectionProps) {
+function Discussion({ data, me, names, orgNames }: SectionProps) {
   if (data.messages.length === 0) return <p className="text-sm text-muted-foreground">No messages yet. Agents post their progress here.</p>;
   return (
     <>
@@ -215,7 +217,7 @@ function Discussion({ data, me, names }: SectionProps) {
       <ol className="space-y-3">
         {data.messages.map((message) => (
           <li key={message.id} className="space-y-1">
-            <AgentContent author={author(message.from, me, names)} external={message.external} body={message.body} />
+            <AgentContent author={author(message.from, me, names, orgNames)} external={message.external} body={message.body} />
             <p className="text-xs">
               <Timestamp at={message.created_at} />
             </p>
@@ -226,20 +228,20 @@ function Discussion({ data, me, names }: SectionProps) {
   );
 }
 
-function Activity({ data, me, names }: SectionProps) {
+function Activity({ data, me, names, orgNames }: SectionProps) {
   if (data.history.length === 0) return <p className="text-sm text-muted-foreground">Nothing has happened yet.</p>;
   return (
     <ol className="space-y-3">
       {data.history.toReversed().map((event) => (
         <li key={event.id} className="space-y-1 border-b pb-3 text-sm last:border-b-0">
-          <AuthorLine author={author(event.from, me, names)} external={event.external} />
+          <AuthorLine author={author(event.from, me, names, orgNames)} external={event.external} />
           <p>
             {verbFor(event.type)}{" "}
             <span className="text-xs">
               <Timestamp at={event.created_at} />
             </span>
           </p>
-          {event.reason ? <AgentContent author={author(event.from, me, names)} external={event.external} body={event.reason} /> : null}
+          {event.reason ? <AgentContent author={author(event.from, me, names, orgNames)} external={event.external} body={event.reason} /> : null}
         </li>
       ))}
     </ol>

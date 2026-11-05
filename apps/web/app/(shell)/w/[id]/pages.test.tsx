@@ -7,10 +7,12 @@ import { NotFoundSignal, setUrl } from "@/test/next-navigation";
 const replies = new Map<string, GatewayResult<unknown>>();
 let identity: GatewayResult<unknown>;
 let room: Record<string, unknown>;
+let organizations: GatewayResult<unknown>;
 
 vi.mock("@/lib/gateway/server", () => ({
   gatewayQuery: async (path: string) => replies.get(path.split("?")[0]) ?? { ok: false, status: 404, code: "not_found" },
   getIdentity: async () => identity,
+  getOrganizations: async () => organizations,
 }));
 vi.mock("@/lib/workroom", () => ({ loadWorkroom: async () => room, canManageWorkroom: (r: { policy_version: number | null }) => r.policy_version !== null }));
 
@@ -29,6 +31,7 @@ beforeEach(() => {
   setUrl("/w/ws_1/overview");
   replies.clear();
   identity = ME;
+  organizations = { ok: true, data: { organizations: [{ id: "org_a", name: "Org A", personal: 0, role: "member" }, { id: "org_p", name: "Mine", personal: 1, role: "admin" }] } };
   room = { id: "ws_1", name: "Launch room", owner: "per_owner", status: "active", policy_version: 3, members: [] };
 });
 
@@ -55,6 +58,30 @@ describe("Overview", () => {
 });
 
 describe("Activity", () => {
+  const event = (seq: number, actor_id: string, type: string, task_id: string | null = null) => ({ seq, id: `evt_${seq}`, type, actor_id, actor_org: "org_a", task_id, created_at: 0 });
+
+  it("names people, agents and tasks it can, keeps IDs for the rest, and reads once per organization", async () => {
+    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "per_me", "workspace.created"), event(2, "agt_1", "task.accepted", "tsk_1"), event(3, "per_sam", "task.message", "tsk_1"), event(4, "agt_other", "task.declined", "tsk_gone")] } });
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_1", name: "Builder" }] } });
+    replies.set("/api/orgs/org_a/members", { ok: true, data: { members: [{ person_id: "per_sam", name: "Sam" }] } });
+    replies.set("/api/v1/workspaces/ws_1/tasks", { ok: true, data: { tasks: [{ id: "tsk_1", title: "Design the API" }], next_cursor: null } });
+    render(await Activity({ params, searchParams }));
+    for (const text of ["You", "Builder", "Sam", "agt_other", "tsk_gone"]) expect(screen.getByText(text)).toBeInTheDocument();
+    expect(screen.queryByText("per_me")).toBeNull();
+    expect(screen.queryByText("tsk_1")).toBeNull();
+    const links = screen.getAllByRole("link", { name: "Design the API" });
+    expect(links[0]).toHaveAttribute("title", "tsk_1");
+    expect(links[0]).toHaveAttribute("href", "/w/ws_1/tasks?task=tsk_1");
+  });
+
+  it("still shows the events, by ID, when names can't be read", async () => {
+    organizations = failed(503);
+    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "agt_1", "task.accepted", "tsk_1")] } });
+    render(await Activity({ params, searchParams }));
+    expect(screen.getByText("agt_1")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "tsk_1" })).toBeInTheDocument();
+  });
+
   it("explains the limit to someone the API refuses", async () => {
     replies.set("/api/v1/workspaces/ws_1/events", failed(403, "not_allowed"));
     render(await Activity({ params, searchParams }));

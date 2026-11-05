@@ -31,7 +31,7 @@ export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Art
 export type Member = { principal_id: string; kind: string; org_id: string; role: string };
 export type Room = { id: string; name: string; owner: string; members?: Member[] };
 
-/** IDs, and what we know to call them. Only a person's own agents have names so far, so everyone else shows as an ID. */
+/** IDs, and what we know to call them. Only the viewer's own organizations have names so far, so everyone else shows as an ID. */
 export type Names = Record<string, string>;
 
 export type Tone = "neutral" | "amber" | "blue" | "violet" | "green";
@@ -77,8 +77,9 @@ const VERBS: Record<string, string> = {
   "task.changes_requested": "requested changes",
   "task.completed": "approved",
   "task.canceled": "canceled",
-  "task.assignee_departed": "left, and the task lost its assignee",
-  "task.needs_attention": "left, and the task needs a new reviewer or requester",
+  // The actor of these two is whoever removed the person, or the person themselves, so neither says the actor left.
+  "task.assignee_departed": "recorded that the assignee left",
+  "task.needs_attention": "recorded that someone left, so the task needs a new reviewer or requester",
   "task.message": "posted a message",
 };
 

@@ -103,6 +103,7 @@ Browser → `/api/*` on this host ([`app/api/[...path]/route.ts`](app/api/[...pa
 | `getAgent` | `GET /api/agents/{agent}` |
 | `disconnectAgent`, `reconnectAgent` | `POST /api/agents/{agent}/{disconnect,reconnect}` |
 | `registerAgent` | Not exposed, and shouldn't be. The gateway calls it itself when a person claims or consents. |
+| Organization people: `listOrgMembers`, `changeOrgMemberRole`, `removeOrgMember`, `listOrgInvitations`, `createOrgInvitation`, `withdrawOrgInvitation`, `previewOrgInvitation`, `acceptOrgInvitation` | `/api/orgs/{org}/...` and `/api/org-invitations/{preview,accept}`. The page is `/join`, and a link holds its token after `#`, so it reaches neither this Worker nor a log. It stays in the tab's `sessionStorage` through sign-in. |
 | MCP consent, Agent Auth claim | `GET` and `POST` on `/api/consent` and `/api/claim`. They're dashboard-only gateway routes that answer only for this host, and the pages are `/oauth/consent` and `/claim`. See [ADR 0001](../../docs/adr/0001-application-host-and-session-cookie.md). |
 
 Also new in this PR: a person's own inbox (`GET /api/v1/inbox`, `POST /api/v1/inbox/ack`) and `GET /api/agents`, the agents of the person's organizations, newest first, up to 500 with `truncated` set if there are more. Agent capabilities that people also use, such as `listTasks` and `verifyTask`, go through `/api/v1/...` too.
@@ -118,11 +119,12 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Agents: **Rename**, connection method, last active, workroom count, accepted tasks | No route. `GET /api/agents` returns only the gateway's directory fields, so connection state takes a `getAgent` per row, capped at 12. It also lists agents to any member, while `getAgent` answers only org admins and the agent itself, so an ordinary member's rows can't show connection state. |
 | Agents: an agent's workrooms | No route lists them, though the agent's Principal holds them in `room_registry`. The Sheet joins the person's own rooms, at most 10, with the rooms in the agent's oldest 50 and newest inbox events, and says the list may be incomplete. Inbox reads go oldest first with no way to ask for the newest, so it estimates where they start. A room the owner isn't in shows only if those events mention it. Any other such room, even with events further along the inbox, can't be withdrawn from except by a full disconnect. |
 | Connect: **Connected** | No event says a connection arrived. The Sheet polls `GET /api/agents` every 10 seconds, only while it's open and visible. |
-| Any screen showing a name | Tasks and members carry principal IDs. Nothing turns them into names and organizations, which attribution needs (UI-07). Messages do carry `external`. |
+| Any screen showing a name | Tasks and members carry principal IDs, and only the viewer's own organizations can be named: `loadNames` reads their agents and, once per shared organization (5 at most), their people. Other organizations' principals, and anyone who has since left, stay IDs (UI-07). Messages do carry `external`. |
 | Needs attention | No query across rooms for reviews assigned to me, so the screen asks up to 20 rooms per render. Nothing lists a person's role invitations or their agents' wake and connection problems. |
 | Tasks | Tasks have no creation or update time, so rows can't show age. A task read returns only the latest 20 messages. |
 | Settings: Profile | Forwarding doesn't include Better Auth's update route, so name and email are read-only. |
-| Settings: Organization | The routes now exist, and the screens don't: `/api/orgs/{org}/members`, `/invitations`, `/audit`, and `/api/org-invitations/{preview,accept}`. See `packages/contracts/organizations.yaml`. `GET /api/agents` now has `credentials_owner_left`, and nothing shows it yet. |
+| Settings: Organization | The audit list (`/api/orgs/{org}/audit`) has no screen and isn't forwarded. No route says which workrooms a person owns, so the removal warning can't name them, and nothing transfers one. |
+| Team: adding | The room read has no `owner_org`, so Team reads it from the room's `workspace.created` event, one extra call per render. |
 | Settings: Notifications | Podster delivers no email, so there are no choices to offer. |
 | Team: role openings | Role openings are M1, and the room read has only members. |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |

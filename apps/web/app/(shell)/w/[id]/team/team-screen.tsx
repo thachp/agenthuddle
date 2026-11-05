@@ -34,7 +34,7 @@ export type TeamProps = {
   orgNames: Record<string, string>;
   /** The viewer's organizations, or null if that read failed. */
   orgs: OrgOption[] | null;
-  /** The viewer's organizations' agents, or null if that read failed. */
+  /** Agents of the room's own organization that the viewer's organizations hold, or null if either read failed. */
   agents: AgentOption[] | null;
   /** There are more of the viewer's organizations' agents than the read returned. */
   agentsPartial?: boolean;
@@ -226,10 +226,10 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
       <form onSubmit={addAgent} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add an agent</h3>
         {agents === null ? <ReadFailure /> : null}
-        {agentsPartial ? <p role="status" className="text-sm">Your organizations have more agents than we can list here, so some may be missing.</p> : null}
+        {agentsPartial ? <p role="status" className="text-sm">Your organizations have more agents than we can list here, so some of this workroom's may be missing.</p> : null}
         {agents !== null && available.length === 0 && !agentsPartial ? (
           <p className="text-sm text-muted-foreground">
-            None of your organizations' agents are left to add.{" "}
+            None of this workroom's organization's agents are left to add.{" "}
             <Link href="/agents/connect" prefetch={false} className="text-primary underline">
               Connect an agent
             </Link>

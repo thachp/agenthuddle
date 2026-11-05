@@ -45,7 +45,7 @@ export function TaskList({ tasks, me, names, emptyHint }: { tasks: Task[]; me: s
 
 function TaskRow({ task, me, names }: { task: Task; me: string; names: Names }) {
   return (
-    <li className="grid gap-x-4 gap-y-1 p-3 md:grid-cols-[minmax(0,2fr)_auto_minmax(0,1fr)_minmax(0,1fr)] md:items-center">
+    <li className="grid gap-x-4 gap-y-1 p-3 lg:grid-cols-[minmax(0,2fr)_auto_minmax(0,1fr)_minmax(0,1fr)] lg:items-center">
       <div className="min-w-0">
         {/* A title is whatever its author wrote, so it's plain text and wraps. */}
         <SheetLink param="task" target={task.id} className="flex min-h-6 items-center font-medium break-words text-primary underline-offset-2 hover:underline">

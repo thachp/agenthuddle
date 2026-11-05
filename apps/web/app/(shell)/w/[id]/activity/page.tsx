@@ -1,7 +1,10 @@
 import Link from "next/link";
+import { plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
-import { gatewayQuery } from "@/lib/gateway/server";
+import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { loadWorkroom } from "@/lib/workroom";
+import { loadNames, loadTasks, orgRows } from "../tasks/load-tasks";
+import { textNameOf } from "../tasks/task-model";
 import { eventVerb, pageAfter } from "./model";
 import { Time } from "./time";
 
@@ -15,6 +18,11 @@ export default async function Activity({ params, searchParams }: { params: Promi
   const after = pageAfter(query.after);
   const events = await gatewayQuery<{ events: RoomEvent[] }>(`/api/v1/workspaces/${id}/events?after=${after}`);
   const now = Date.now();
+  const [identity, organizations] = await Promise.all([getIdentity(), getOrganizations()]);
+  const me = identity.ok ? identity.data.id : "";
+  // Names only make rows readable, so a failure leaves IDs. It's one read per organization and at most 4 task pages, whatever the page holds, and anything past them stays an ID.
+  const [names, tasks] = events.ok && events.data.events.length > 0 ? await Promise.all([loadNames(gatewayQuery, orgRows(organizations)), loadTasks(gatewayQuery, id)]) : [{}, null];
+  const titles = new Map(tasks?.ok ? tasks.data.tasks.map((task) => [task.id, task.title]) : []);
   return (
     <section className="max-w-3xl space-y-3">
       <h1 className="text-2xl font-semibold">Activity</h1>
@@ -22,24 +30,30 @@ export default async function Activity({ params, searchParams }: { params: Promi
         <>
           {events.data.events.length === 0 ? <p className="text-muted-foreground">{after > 0 ? "Nothing after this point." : "Nothing has happened here yet."}</p> : null}
           <ol className="divide-y rounded-lg border empty:hidden">
-            {events.data.events.map((event) => (
-              <li key={event.seq} className="space-y-0.5 p-3 text-sm">
-                <p className="break-words">
-                  <span className="break-all font-medium">{event.actor_id}</span> {eventVerb(event.type)}
-                  {event.task_id ? (
-                    <>
-                      {" "}
-                      <Link href={`/w/${id}/tasks?task=${encodeURIComponent(event.task_id)}`} prefetch={false} className="break-all text-primary underline">
-                        {event.task_id}
-                      </Link>
-                    </>
-                  ) : null}
-                </p>
-                <p className="text-muted-foreground">
-                  <Time at={event.created_at} now={now} />
-                </p>
-              </li>
-            ))}
+            {events.data.events.map((event) => {
+              const title = event.task_id ? titles.get(event.task_id) : undefined;
+              return (
+                <li key={event.seq} className="space-y-0.5 p-3 text-sm">
+                  <p className="break-words">
+                    <span className="break-words font-medium" title={event.actor_id}>
+                      {textNameOf(event.actor_id, me, names)}
+                    </span>{" "}
+                    {eventVerb(event.type)}
+                    {event.task_id ? (
+                      <>
+                        {" "}
+                        <Link href={`/w/${id}/tasks?task=${encodeURIComponent(event.task_id)}`} prefetch={false} title={event.task_id} className="break-words text-primary underline">
+                          {title ? plainName(title) : event.task_id}
+                        </Link>
+                      </>
+                    ) : null}
+                  </p>
+                  <p className="text-muted-foreground">
+                    <Time at={event.created_at} now={now} />
+                  </p>
+                </li>
+              );
+            })}
           </ol>
           <div className="flex flex-wrap gap-4">
             {after > 0 ? (
