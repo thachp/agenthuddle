@@ -531,7 +531,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 36 | Whether recovery waits before taking effect | **Decided:** no waiting period in M0. This accepts a known risk: under decision 34, one organization admin can remove a room's owner and make themselves owner, with no second person involved | M0 |
 | 37 | Whether a new owner must accept a transfer | **Decided:** no, in M0 | M0 |
 | 38 | Who recovery can make the owner | **Decided:** any person currently in the room's organization, including the admin running it. Never an agent | M0 |
-| 39 | What the former owner becomes after a transfer | **Decided:** a room admin, who can leave or be removed like anyone else | M0 |
+| 39 | What the former owner becomes after a transfer | **Decided:** a room admin | M0 |
 
 ## M0 decisions, November 5, 2026
 

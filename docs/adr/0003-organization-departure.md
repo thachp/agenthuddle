@@ -22,12 +22,12 @@ The gateway tells the API, and each room decides from its own state.
 
 ## Departed room owners
 
-A room's owner isn't a member row, and nobody else can own the room until decision 8's transfer exists. So the owner stays the owner, and the room records their departure in `owner_left_at`, with `owner.left_organization` in its log. While that's set:
+A room's owner isn't a member row, and nobody else can own the room until [ADR 0005](0005-ownership-transfer-and-recovery.md)'s recovery ships. So the owner stays the owner, and the room records their departure in `owner_left_at`, with `owner.left_organization` in its log. While that's set:
 
 - They aren't a participant. Their tasks follow the departure table, nothing more reaches their inbox, and they can't be given work. Their pending invitations are withdrawn.
-- If the room has no admin, nobody can manage its access or take over its tasks until the owner rejoins or gap 2's transfer exists. A task needing attention tells nobody in the meantime.
+- If the room has no admin, nobody can manage its access or take over its tasks until the owner rejoins or ADR 0005's recovery ships. A task needing attention tells nobody in the meantime.
 
-If they rejoin, they get full owner authority back, even from a member invitation. The first command they send in the room clears `owner_left_at` and records `owner.returned`, so a stale form they sent then may need one retry, because that changes the policy version. Reading doesn't record anything. The room keeps the start of their latest membership from their commands, so a departure delayed past their return doesn't take them out again, and an older departure can't lower `owner_left_at`. If the delayed departure arrives before their first command after rejoining, it does take them out until that command. Their old tasks don't return to them. [Decision 32](../spec/PRODUCT.md#decisions-needed) keeps this until ownership transfer exists.
+If they rejoin, they get full owner authority back, even from a member invitation. The first command they send in the room clears `owner_left_at` and records `owner.returned`, so a stale form they sent then may need one retry, because that changes the policy version. Reading doesn't record anything. The room keeps the start of their latest membership from their commands, so a departure delayed past their return doesn't take them out again, and an older departure can't lower `owner_left_at`. If the delayed departure arrives before their first command after rejoining, it does take them out until that command. Their old tasks don't return to them. [Decision 32](../spec/PRODUCT.md#decisions-needed) keeps this until ownership recovery ships, and then [decision 35](../spec/PRODUCT.md#decisions-needed) replaces it.
 
 ## Consequences
 
