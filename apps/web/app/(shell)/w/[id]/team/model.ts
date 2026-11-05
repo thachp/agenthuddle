@@ -1,4 +1,5 @@
 import type { Workroom } from "@/lib/workroom";
+import { authoritySoundingName, chosenNameLabel, plainName } from "@/components/agent-content/text";
 
 /** A row of the room's own read. Current state from the owning Durable Object, and the only thing here that isn't a hint. */
 export type Member = { principal_id: string; kind: "person" | "agent"; org_id: string; role: "admin" | "member" | "guest" };
@@ -63,4 +64,17 @@ export function explainRefusal(code: string, status = 400) {
     default:
       return "That didn't save, and nothing changed. You may no longer be allowed to do this.";
   }
+}
+
+/**
+ * A person as text, for someone choosing who gets authority, where nothing can be taken back by them accepting or waiting.
+ * It always has the ID, and says when a name that sounds like authority is only what they call themselves, because a native
+ * option can't hold a badge.
+ */
+export function personChoice(person: { id: string; name: string | null }, me?: string) {
+  if (person.id === me) return `You (${person.id})`;
+  if (!person.name) return person.id;
+  const name = plainName(person.name);
+  const label = `${name} (${person.id})`;
+  return authoritySoundingName(name) ? `${label} · ${chosenNameLabel("person")}` : label;
 }

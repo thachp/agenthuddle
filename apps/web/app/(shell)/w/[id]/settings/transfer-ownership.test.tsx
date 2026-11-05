@@ -24,7 +24,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-const show = (props: Partial<Parameters<typeof TransferOwnership>[0]> = {}) => render(<TransferOwnership roomId="ws_1" name="Launch room" policyVersion={7} archived={false} isOwner candidates={["per_b", "per_c"]} {...props} />);
+const show = (props: Partial<Parameters<typeof TransferOwnership>[0]> = {}) => render(<TransferOwnership roomId="ws_1" name="Launch room" policyVersion={7} archived={false} isOwner candidates={[{ id: "per_b", name: "Bo" }, { id: "per_c", name: null }]} {...props} />);
 
 async function confirmTo(person: string) {
   await userEvent.selectOptions(screen.getByLabelText("New owner"), person);
@@ -39,7 +39,7 @@ describe("transferring a workroom", () => {
     await userEvent.selectOptions(screen.getByLabelText("New owner"), "per_b");
     await userEvent.click(screen.getByRole("button", { name: "Transfer ownership" }));
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveTextContent("per_b becomes the owner straight away");
+    expect(dialog).toHaveTextContent("Bo (per_b) becomes the owner straight away");
     expect(dialog).toHaveTextContent("You become an admin of this workroom");
     expect(sent).toEqual([]);
     await userEvent.click(within(dialog).getByRole("button", { name: "Transfer ownership" }));
@@ -59,7 +59,20 @@ describe("transferring a workroom", () => {
   it("can't be started until someone is chosen", () => {
     show();
     expect(screen.getByRole("button", { name: "Transfer ownership" })).toBeDisabled();
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose an admin", "per_b", "per_c"]);
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose an admin", "Bo (per_b)", "per_c"]);
+  });
+
+  it("says a name that sounds like authority is only what they call themselves", () => {
+    show({ candidates: [{ id: "per_x", name: "Org Admin" }] });
+    expect(screen.getAllByRole("option")[1]).toHaveTextContent("Org Admin (per_x) · Name chosen by this person");
+  });
+
+  it("drops a choice a refresh took off the list, and can't be started on nobody", async () => {
+    const { rerender } = show();
+    await userEvent.selectOptions(screen.getByLabelText("New owner"), "per_b");
+    expect(screen.getByRole("button", { name: "Transfer ownership" })).toBeEnabled();
+    rerender(<TransferOwnership roomId="ws_1" name="Launch room" policyVersion={7} archived={false} isOwner candidates={[{ id: "per_c", name: null }]} />);
+    expect(screen.getByRole("button", { name: "Transfer ownership" })).toBeDisabled();
   });
 
   it("isn't offered in an archived workroom", () => {

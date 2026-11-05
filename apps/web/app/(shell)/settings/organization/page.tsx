@@ -33,7 +33,7 @@ export default async function OrganizationSettings({ searchParams }: { searchPar
   const ownerless = teams.length > 0 ? await gatewayQuery<{ rooms: OwnerlessRoom[]; truncated: boolean }>("/api/v1/oversight/ownerless") : null;
   const peopleReads = ownerless?.ok && ownerless.data.rooms.length > 0 ? await Promise.all(teams.slice(0, OWNERLESS_PEOPLE_ORGS).map((org) => gatewayQuery<{ members: OrgMember[] }>(`/api/orgs/${encodeURIComponent(org.id)}/members`))) : [];
   const groups: PeopleGroup[] | null = peopleReads.every((read) => read.ok)
-    ? peopleReads.map((read, index) => ({ org: teams[index].name, people: read.ok ? read.data.members.map((member) => ({ id: member.person_id, name: member.name })) : [] }))
+    ? peopleReads.map((read, index) => ({ orgId: teams[index].id, org: teams[index].name, people: read.ok ? read.data.members.map((member) => ({ id: member.person_id, name: member.name })) : [] }))
     : null;
   return (
     <section className="space-y-4">

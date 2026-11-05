@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routerCalls, setUrl } from "@/test/next-navigation";
-import { explainRecoveryRefusal, OwnerlessRooms, type OwnerlessRoom } from "./ownerless-rooms";
+import { explainRecoveryRefusal, OwnerlessRooms, recoveryQuestion, type OwnerlessRoom } from "./ownerless-rooms";
 
 type Sent = { url: string; body: Record<string, unknown>; key: string | null };
 const sent: Sent[] = [];
@@ -14,7 +14,7 @@ const lost = () => {
 };
 
 const room: OwnerlessRoom = { workspace_id: "ws_1", workspace_name: "Launch room", owner: "per_gone", left_at: Date.UTC(2026, 10, 3) };
-const groups = [{ org: "Acme", people: [{ id: "per_me", name: "Pat" }, { id: "per_sam", name: "Sam" }, { id: "per_noname", name: null }] }];
+const groups = [{ orgId: "org_a", org: "Acme", people: [{ id: "per_me", name: "Pat" }, { id: "per_sam", name: "Sam" }, { id: "per_noname", name: null }] }];
 
 beforeEach(() => {
   setUrl("/settings/organization");
@@ -72,10 +72,24 @@ describe("workrooms whose owner left", () => {
   it("groups people by organization only when there are several", () => {
     const { unmount } = show();
     expect(screen.queryAllByRole("group")).toEqual([]);
-    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose someone", "You", "Sam", "per_noname"]);
+    expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose someone", "You (per_me)", "Sam (per_sam)", "per_noname"]);
     unmount();
-    show({ groups: [...groups, { org: "Beta", people: [{ id: "per_b", name: "Bo" }] }] });
+    show({ groups: [...groups, { orgId: "org_b", org: "Beta", people: [{ id: "per_b", name: "Bo" }] }] });
     expect(screen.getAllByRole("group").map((group) => group.getAttribute("label"))).toEqual(["Acme", "Beta"]);
+  });
+
+  it("tells apart two organizations with the same name", () => {
+    show({ groups: [groups[0], { orgId: "org_z", org: "Acme", people: [{ id: "per_z", name: "Zed" }] }] });
+    expect(screen.getAllByRole("group").map((group) => group.getAttribute("label"))).toEqual(["Acme (org_a)", "Acme (org_z)"]);
+  });
+
+  it("shows a name that sounds like authority with its ID, in the choice and the confirmation", async () => {
+    show({ groups: [{ orgId: "org_a", org: "Acme", people: [{ id: "per_x", name: "Org Admin" }] }] });
+    const label = "Org Admin (per_x) · Name chosen by this person";
+    expect(screen.getAllByRole("option")[1]).toHaveTextContent(label);
+    await userEvent.selectOptions(screen.getByLabelText("New owner"), "per_x");
+    await userEvent.click(screen.getByRole("button", { name: /Name new owner/ }));
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent(label);
   });
 });
 
@@ -86,7 +100,8 @@ describe("naming a new owner", () => {
     await userEvent.selectOptions(screen.getByLabelText("New owner"), "per_sam");
     await userEvent.click(screen.getByRole("button", { name: /Name new owner/ }));
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveTextContent("Make Sam the owner of “Launch room”?");
+    expect(dialog).toHaveTextContent("Name a new owner for “Launch room”?");
+    expect(dialog).toHaveTextContent("Sam (per_sam)");
     expect(dialog).toHaveTextContent("everything in the workroom");
     expect(dialog).toHaveTextContent("per_gone has no place in it afterwards");
     expect(dialog).toHaveTextContent("it stays archived");
@@ -98,12 +113,52 @@ describe("naming a new owner", () => {
     expect(routerCalls.refresh).toBe(1);
   });
 
+  it("marks a recovered row, even if a lagging list still has it", async () => {
+    const { rerender } = show();
+    await recoverTo("per_sam");
+    await screen.findByText(/They're now the owner/);
+    rerender(<OwnerlessRooms rooms={[room]} truncated={false} groups={groups} partial={false} me="per_me" />);
+    expect(screen.getAllByText("Launch room")).toHaveLength(1);
+    expect(screen.getByLabelText("New owner")).not.toBeVisible();
+    expect(screen.getByText(/can take a moment to catch up/)).toBeInTheDocument();
+    rerender(<OwnerlessRooms rooms={[]} truncated={false} groups={groups} partial={false} me="per_me" />);
+    expect(screen.getByText(/They're now the owner/)).toBeInTheDocument();
+    expect(screen.queryByText("No workrooms are waiting for a new owner.")).toBeNull();
+  });
+
+  it("drops a choice a refresh took off the list", async () => {
+    const { rerender } = show();
+    await userEvent.selectOptions(screen.getByLabelText("New owner"), "per_sam");
+    expect(screen.getByRole("button", { name: /Name new owner/ })).toBeEnabled();
+    rerender(<OwnerlessRooms rooms={[room]} truncated={false} groups={[{ orgId: "org_a", org: "Acme", people: [{ id: "per_me", name: "Pat" }] }]} partial={false} me="per_me" />);
+    expect(screen.getByRole("button", { name: /Name new owner/ })).toBeDisabled();
+  });
+
+  it("keeps one row's unresolved attempt when another row's choice changes", async () => {
+    const other: OwnerlessRoom = { ...room, workspace_id: "ws_2", workspace_name: "Other room" };
+    replies = [lost];
+    show({ rooms: [room, other] });
+    const rowOf = (name: string) => within(screen.getByText(name).closest("li") as HTMLElement);
+    await userEvent.selectOptions(rowOf("Launch room").getByLabelText("New owner"), "per_sam");
+    await userEvent.click(rowOf("Launch room").getByRole("button", { name: /Name new owner/ }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Name new owner" }));
+    await rowOf("Launch room").findByRole("button", { name: "Try again" });
+    await userEvent.selectOptions(rowOf("Other room").getByLabelText("New owner"), "per_me");
+    await userEvent.click(rowOf("Launch room").getByRole("button", { name: "Try again" }));
+    await screen.findByText(/They're now the owner/);
+    expect(sent[1].key).toBe(sent[0].key);
+  });
+
   it("refreshes the list after version_conflict", async () => {
     replies = [refused(409, "version_conflict")];
     show();
     await recoverTo("per_sam");
     expect(await screen.findByRole("alert")).toHaveTextContent("owner changed since this list loaded");
     expect(routerCalls.refresh).toBe(1);
+    expect(screen.getByLabelText("New owner")).not.toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Review latest" }));
+    expect(routerCalls.refresh).toBe(2);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("explains not_in_organization, and leaves the list so they can choose again", async () => {
@@ -149,6 +204,27 @@ describe("naming a new owner", () => {
     await userEvent.keyboard("{Enter}");
     await screen.findByText(/They're now the owner/);
     await vi.waitFor(() => expect(screen.getByRole("status")).toHaveFocus());
+  });
+});
+
+describe("what recovery asks before it happens", () => {
+  it("says plainly when an admin is taking the workroom themselves", () => {
+    const question = recoveryQuestion(room, "Launch room", "per_me", "per_me");
+    expect(question.title).toBe("Take over “Launch room” yourself?");
+    expect(question.description).toContain("You're making yourself the owner");
+    expect(question.description).toContain("nobody else's approval and no waiting period");
+    expect(question.description).not.toContain("They become");
+  });
+
+  it("doesn't say a rejoined former owner has no place in the workroom", () => {
+    const question = recoveryQuestion(room, "Launch room", "per_gone", "per_me");
+    expect(question.title).toBe("Give “Launch room” back to per_gone?");
+    expect(question.description).toContain("left this organization and rejoined");
+    expect(question.description).not.toContain("no place in it");
+  });
+
+  it("says the former owner loses their place when someone else is named", () => {
+    expect(recoveryQuestion(room, "Launch room", "per_sam", "per_me").description).toContain("per_gone has no place in it afterwards");
   });
 });
 

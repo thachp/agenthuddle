@@ -6,7 +6,7 @@ import { plainName } from "@/components/agent-content/text";
 import { CommandNotice, useCommands } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD } from "../team/field";
-import { explainRefusal } from "../team/model";
+import { explainRefusal, personChoice } from "../team/model";
 
 /** What to say when a transfer is refused. Rust decides every one, and the page may be out of date. */
 export function explainTransferRefusal(code: string, status = 400) {
@@ -27,11 +27,12 @@ export function explainTransferRefusal(code: string, status = 400) {
  * Hands a room to one of its human admins. `candidates` only decides what to offer, and hiding the control only saves a
  * refusal: Rust decides who owns the room and who can be named.
  */
-export function TransferOwnership({ roomId, name, policyVersion, archived, isOwner, candidates }: { roomId: string; name: string; policyVersion: number; archived: boolean; isOwner: boolean; candidates: string[] }) {
+export function TransferOwnership({ roomId, name, policyVersion, archived, isOwner, candidates }: { roomId: string; name: string; policyVersion: number; archived: boolean; isOwner: boolean; candidates: { id: string; name: string | null }[] }) {
   const commands = useCommands(policyVersion);
   const { send, noticeRef, clear, retrying } = commands;
   const [chosen, setChosen] = useState("");
-  const to = candidates.includes(chosen) ? chosen : "";
+  const person = candidates.find((candidate) => candidate.id === chosen);
+  const to = person ? chosen : "";
   const room = plainName(name);
 
   return (
@@ -63,9 +64,9 @@ export function TransferOwnership({ roomId, name, policyVersion, archived, isOwn
               }}
             >
               <option value="">Choose an admin</option>
-              {candidates.map((id) => (
-                <option key={id} value={id}>
-                  {id}
+              {candidates.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {personChoice(candidate)}
                 </option>
               ))}
             </select>
@@ -77,7 +78,7 @@ export function TransferOwnership({ roomId, name, policyVersion, archived, isOwn
             label="Transfer ownership"
             disabled={!to || retrying}
             title={<>Transfer “{room}”?</>}
-            description={`${to} becomes the owner straight away, and doesn't have to accept. You become an admin of this workroom, so you can't appoint admins or transfer it back unless they do. It's recorded, and everyone in the workroom is told.`}
+            description={`${person ? personChoice(person) : ""} becomes the owner straight away, and doesn't have to accept. You become an admin of this workroom, so you can't appoint admins or transfer it back unless they do. It's recorded, and everyone in the workroom is told.`}
             confirm="Transfer ownership"
             focusAfter={noticeRef}
             action={() =>

@@ -382,10 +382,11 @@ async function keyboardPaths(s) {
     const dialog = page.getByRole("alertdialog");
     await dialog.waitFor({ timeout: 15_000 });
     await audit(page, "Recovery confirmation");
-    await tabTo(page, dialog.getByRole("button", { name: "Name new owner" }), "the confirmation's Name new owner");
+    // This admin is naming themselves, so it's the takeover wording.
+    await tabTo(page, dialog.getByRole("button", { name: "Take over" }), "the confirmation's Take over");
     await page.keyboard.press("Enter");
     await dialog.waitFor({ state: "hidden", timeout: 15_000 });
-    await page.getByText("They're now the owner").waitFor({ timeout: 15_000 });
+    await page.getByText("You're now the owner").waitFor({ timeout: 15_000 });
     const status = await page.evaluate(() => (document.activeElement?.closest('[role="status"], [role="alert"]') ? document.activeElement.textContent : null));
     ok(status !== null, `after recovering, focus is on ${await activeText(page)}, not on a status that says what happened`);
     const read = await s.owner.must("GET", `/v1/workspaces/${s.ownerlessRoom}`);

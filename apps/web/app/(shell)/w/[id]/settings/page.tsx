@@ -3,9 +3,10 @@ import { notFound } from "next/navigation";
 import { AuthorLine } from "@/components/agent-content/agent-content";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { Badge } from "@/components/ui/badge";
-import { gatewayQuery, getIdentity } from "@/lib/gateway/server";
+import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { canManageWorkroom, isArchived, loadWorkroom } from "@/lib/workroom";
 import { auditAction, auditTarget, pageAfter } from "../activity/model";
+import { loadPeopleNames } from "../tasks/load-tasks";
 import { Time } from "../activity/time";
 import { membersOf, type AuditRow } from "../team/model";
 import { RoomControls } from "./room-controls";
@@ -30,9 +31,11 @@ export default async function Settings({ params, searchParams }: { params: Promi
   const admins = membersOf(room).filter((member) => member.role === "admin");
   const isOwner = identity.ok && identity.data.id === room.owner;
   // Only what to offer. Rust checks all of this again when asked.
-  const candidates = membersOf(room)
-    .filter((member) => member.role === "admin" && member.kind === "person" && member.org_id === room.owner_org)
-    .map((member) => member.principal_id);
+  const heirs = membersOf(room).filter((member) => member.role === "admin" && member.kind === "person" && member.org_id === room.owner_org);
+  // Names are only worth a read for someone choosing one. A failure leaves IDs.
+  const organizations = isOwner && heirs.length > 0 ? await getOrganizations() : null;
+  const names = organizations?.ok ? await loadPeopleNames(gatewayQuery, organizations.data.organizations) : {};
+  const candidates = heirs.map((member) => ({ id: member.principal_id, name: names[member.principal_id] ?? null }));
   const now = Date.now();
   return (
     <section className="max-w-3xl space-y-6">

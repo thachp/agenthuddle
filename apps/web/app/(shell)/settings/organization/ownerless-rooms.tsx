@@ -4,17 +4,18 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
-import { CommandNotice, useCommands, type Send } from "../../w/[id]/team/commands";
+import { CommandNotice, useCommands } from "../../w/[id]/team/commands";
 import { ConfirmAction } from "../../w/[id]/team/confirm-action";
 import { FIELD } from "../../w/[id]/team/field";
-import { explainRefusal } from "../../w/[id]/team/model";
+import { explainRefusal, personChoice } from "../../w/[id]/team/model";
 
 /** Exactly what decision 40 lets an organization's admins see. Nothing else about the room reaches this screen. */
 export type OwnerlessRoom = { workspace_id: string; workspace_name: string; owner: string; left_at: number };
 /** The people of one organization this person administers. */
-export type PeopleGroup = { org: string; people: { id: string; name: string | null }[] };
+export type PeopleGroup = { orgId: string; org: string; people: { id: string; name: string | null }[] };
 
-const CHANGED = "This workroom is no longer waiting for a new owner, or you're no longer an admin of its organization. The list has been refreshed. Nothing changed.";
+const LAGS = "This list can take a moment to catch up.";
+const CHANGED = `This workroom is no longer waiting for a new owner, or you're no longer an admin of its organization. Nothing changed. ${LAGS}`;
 
 /** What to say when recovery is refused. Rust decides every one, and the list comes from a read model that can lag. */
 export function explainRecoveryRefusal(code: string, status = 400) {
@@ -32,15 +33,46 @@ export function explainRecoveryRefusal(code: string, status = 400) {
   }
 }
 
-const dateOf = (at: number) => new Date(at).toISOString().slice(0, 10);
-const personLabel = (person: { id: string; name: string | null }, me: string) => (person.id === me ? "You" : plainName(person.name || person.id));
+/** What the confirmation has to make plain, which depends on who's being named. Naming yourself is the takeover in decision 36. */
+export function recoveryQuestion(room: OwnerlessRoom, name: string, to: string, me: string) {
+  const self = to === me;
+  const returning = to === room.owner;
+  const title = self ? `Take over “${name}” yourself?` : returning ? `Give “${name}” back to ${room.owner}?` : `Name a new owner for “${name}”?`;
+  const effect = self
+    ? "You're making yourself the owner, straight away, with nobody else's approval and no waiting period. You get everything in the workroom, including what other organizations wrote there."
+    : "They become the owner straight away, and don't have to accept. This gives them everything in the workroom, including what other organizations wrote there.";
+  const former = returning ? (self ? "You left this organization and rejoined, so this gives you back a workroom rejoining didn't." : "They left this organization and rejoined, so this gives them back a workroom rejoining didn't.") : `${room.owner} has no place in it afterwards, and rejoining the organization doesn't give them one.`;
+  return { title, description: `${effect} ${former} If it's archived, it stays archived. It's recorded, and everyone in the workroom is told.` };
+}
 
-function Row({ room, groups, me, send, noticeRef, clear, retrying, refresh }: { room: OwnerlessRoom; groups: PeopleGroup[]; me: string; send: Send; noticeRef: React.RefObject<HTMLDivElement | null>; clear: () => void; retrying: boolean; refresh: () => void }) {
-  const [to, setTo] = useState("");
+const dateOf = (at: number) => new Date(at).toISOString().slice(0, 10);
+
+/** Two organizations can share a name, so the same name gets its ID. */
+function groupLabels(groups: PeopleGroup[]) {
+  return new Map(groups.map((group) => [group.orgId, groups.filter((other) => other.org === group.org).length > 1 ? `${plainName(group.org)} (${group.orgId})` : plainName(group.org)]));
+}
+
+/**
+ * One room, with its own attempt and notice, so another row can't clear a warning or a retry that belongs to this one. A
+ * finished row stays until the page is left: the notice has focus, and the list may not have caught up.
+ */
+function Row({ room, groups, me, finished, finish, reopen, refresh }: { room: OwnerlessRoom; groups: PeopleGroup[]; me: string; finished: boolean; finish: () => void; reopen: () => void; refresh: () => void }) {
+  const commands = useCommands(null);
+  const { send, noticeRef, clear, retrying, review } = commands;
+  const [chosen, setChosen] = useState("");
   const name = plainName(room.workspace_name);
   const nameId = `ownerless-${room.workspace_id}`;
-  const person = groups.flatMap((group) => group.people).find((candidate) => candidate.id === to);
-  const chosen = person ? personLabel(person, me) : "";
+  // A refresh can take the chosen person off the list, so this is worked out each time.
+  const person = groups.flatMap((group) => group.people).find((candidate) => candidate.id === chosen);
+  const to = person ? chosen : "";
+  const labels = groupLabels(groups);
+  const question = recoveryQuestion(room, name, to, me);
+  const options = (group: PeopleGroup) =>
+    group.people.map((candidate) => (
+      <option key={candidate.id} value={candidate.id}>
+        {personChoice(candidate, me)}
+      </option>
+    ));
   return (
     <li className="space-y-2 p-3 text-sm">
       <div id={nameId} className="min-w-0 space-y-0.5">
@@ -49,63 +81,79 @@ function Row({ room, groups, me, send, noticeRef, clear, retrying, refresh }: { 
           Owner {room.owner} left on {dateOf(room.left_at)} · {room.workspace_id}
         </p>
       </div>
-      <div className="flex flex-wrap items-end gap-2">
-        <label className="block min-w-0 flex-1 basis-56 space-y-1">
-          <span className="font-medium">New owner</span>
-          <select
-            className={FIELD}
-            value={to}
-            disabled={retrying}
-            aria-describedby={nameId}
-            onChange={(event) => {
-              // A different person is a different intent, so it can't reuse an unfinished attempt.
-              clear();
-              setTo(event.target.value);
-            }}
-          >
-            <option value="">Choose someone</option>
-            {groups.map((group) =>
-              groups.length > 1 ? (
-                <optgroup key={group.org} label={plainName(group.org)}>
-                  {group.people.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {personLabel(candidate, me)}
-                    </option>
-                  ))}
-                </optgroup>
-              ) : (
-                group.people.map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    {personLabel(candidate, me)}
-                  </option>
-                ))
-              ),
-            )}
-          </select>
-        </label>
-        <ConfirmAction
-          label="Name new owner"
-          describedBy={nameId}
-          disabled={!to || retrying}
-          title={<>Make {chosen} the owner of “{name}”?</>}
-          description={`They become the owner straight away, and don't have to accept. This gives them everything in the workroom, including what other organizations wrote there. ${room.owner} has no place in it afterwards, and rejoining the organization doesn't give them one. If it's archived, it stays archived. It's recorded, and everyone in the workroom is told.`}
-          confirm="Name new owner"
-          focusAfter={noticeRef}
-          action={() =>
-            send(`/api/v1/workspaces/${encodeURIComponent(room.workspace_id)}/owner/recover`, { to, expected_owner: room.owner }, "They're now the owner of that workroom. Nothing else about it changed.", {
-              explain: explainRecoveryRefusal,
-              conflict: "This workroom's owner changed since this list loaded, so nothing was saved. The list has been refreshed.",
-              onDone: (outcome) => {
-                // The list was out of date, so show what's true now.
-                if (outcome.kind === "conflict" || (outcome.kind === "refused" && (outcome.code === "workspace_not_found" || outcome.code === "not_allowed"))) refresh();
-              },
-            })
-          }
-        />
+      <CommandNotice
+        commands={{
+          ...commands,
+          // After a conflict this offers the latest, so the row goes back to being whatever the list now says.
+          review: () => {
+            review();
+            reopen();
+          },
+        }}
+      />
+      {/* Hidden, not removed: the confirmation is still closing, and moves focus to the notice when it has. */}
+      <div hidden={finished}>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="block min-w-0 flex-1 basis-56 space-y-1">
+            <span className="font-medium">New owner</span>
+            <select
+              className={FIELD}
+              value={to}
+              disabled={retrying}
+              aria-describedby={nameId}
+              onChange={(event) => {
+                // A different person is a different intent, so it can't reuse an unfinished attempt.
+                clear();
+                setChosen(event.target.value);
+              }}
+            >
+              <option value="">Choose someone</option>
+              {groups.map((group) =>
+                groups.length > 1 ? (
+                  <optgroup key={group.orgId} label={labels.get(group.orgId)}>
+                    {options(group)}
+                  </optgroup>
+                ) : (
+                  options(group)
+                ),
+              )}
+            </select>
+          </label>
+          <ConfirmAction
+            label="Name new owner"
+            describedBy={nameId}
+            disabled={!to || retrying}
+            title={
+              <>
+                {question.title}
+                {person ? <span className="mt-1 block text-sm font-normal break-words">{personChoice(person, me)}</span> : null}
+              </>
+            }
+            description={question.description}
+            confirm={to === me ? "Take over" : "Name new owner"}
+            focusAfter={noticeRef}
+            action={() =>
+              send(`/api/v1/workspaces/${encodeURIComponent(room.workspace_id)}/owner/recover`, { to, expected_owner: room.owner }, `${to === me ? "You're now the owner of this workroom." : "They're now the owner of this workroom."} Nothing else about it changed. ${LAGS}`, {
+                explain: explainRecoveryRefusal,
+                conflict: `This workroom's owner changed since this list loaded, so nothing was saved. ${LAGS}`,
+                onOk: finish,
+                onDone: (outcome) => {
+                  // The row was out of date, so nothing more can be asked of it, and the list should show what's true now.
+                  if (outcome.kind === "conflict" || (outcome.kind === "refused" && (outcome.code === "workspace_not_found" || outcome.code === "not_allowed"))) {
+                    finish();
+                    refresh();
+                  }
+                },
+              })
+            }
+          />
+        </div>
       </div>
     </li>
   );
 }
+
+const keyOf = (room: OwnerlessRoom) => `${room.workspace_id}:${room.owner}`;
 
 /**
  * Rooms of the organizations this person administers whose owner left, and naming a new owner. It's for organization admins
@@ -114,23 +162,33 @@ function Row({ room, groups, me, send, noticeRef, clear, retrying, refresh }: { 
  */
 export function OwnerlessRooms({ rooms, truncated, groups, partial, me }: { rooms: OwnerlessRoom[] | null; truncated: boolean; groups: PeopleGroup[] | null; partial: boolean; me: string }) {
   const router = useRouter();
-  const commands = useCommands(null);
-  const { send, noticeRef, clear, retrying } = commands;
+  const [finished, setFinished] = useState<OwnerlessRoom[]>([]);
+  const isFinished = (room: OwnerlessRoom) => finished.some((done) => keyOf(done) === keyOf(room));
+  // Rows keep their places, because moving one would lose the focus on its notice. A finished row stays after the list drops
+  // it. Each owner is a new question, so a choice made about the last one doesn't carry over.
+  const listed = groups ? (rooms ?? []) : [];
+  const shown = [...listed.map((room) => ({ room, done: isFinished(room) })), ...finished.filter((room) => !listed.some((other) => keyOf(other) === keyOf(room))).map((room) => ({ room, done: true }))];
   return (
     <section aria-labelledby="org-ownerless" className="space-y-3">
       <h2 id="org-ownerless" className="text-lg font-medium">
         Workrooms whose owner left
       </h2>
       <p className="text-sm text-muted-foreground">An admin of a workroom's organization can name a new owner once its owner has left. This covers every organization you administer, including workrooms you aren't in.</p>
-      <CommandNotice commands={commands} />
-      {rooms === null ? <ReadFailure /> : null}
-      {rooms?.length === 0 ? <p>No workrooms are waiting for a new owner.</p> : null}
-      {rooms?.length && groups === null ? <ReadFailure /> : null}
-      {rooms?.length && groups ? (
+      {rooms === null || (rooms.length > 0 && groups === null) ? <ReadFailure /> : null}
+      {rooms?.length === 0 && finished.length === 0 ? <p>No workrooms are waiting for a new owner.</p> : null}
+      {shown.length > 0 ? (
         <ul className="divide-y rounded-lg border">
-          {rooms.map((room) => (
-            // Each owner is a new question, so a choice made about the last one doesn't carry over.
-            <Row key={`${room.workspace_id}:${room.owner}`} room={room} groups={groups} me={me} send={send} noticeRef={noticeRef} clear={clear} retrying={retrying} refresh={router.refresh} />
+          {shown.map(({ room, done }) => (
+            <Row
+              key={keyOf(room)}
+              room={room}
+              groups={groups ?? []}
+              me={me}
+              finished={done}
+              finish={() => setFinished((current) => (current.some((other) => keyOf(other) === keyOf(room)) ? current : [...current, room]))}
+              reopen={() => setFinished((current) => current.filter((other) => keyOf(other) !== keyOf(room)))}
+              refresh={router.refresh}
+            />
           ))}
         </ul>
       ) : null}
