@@ -352,7 +352,7 @@ export function createAuth(env: Env) {
   });
 }
 
-type Memberships = { orgs: string[]; adminOrgs: string[]; personal: string | null };
+type Memberships = { orgs: string[]; adminOrgs: string[]; defaultOrg: string | null };
 
 /**
  * Writes the person's personal organization and their admin membership if either is missing. It's safe to repeat, and
@@ -366,15 +366,20 @@ async function ensurePersonalOrg(env: Env, person: string) {
       env.DB.prepare(`INSERT OR IGNORE INTO organization (id, name, personal, created_by, created_at) SELECT ?, COALESCE(NULLIF(name, ''), 'Personal'), 1, ?, ? FROM "user" WHERE id = ?`).bind(newId("org"), person, now, person.slice("per_".length)),
       env.DB.prepare(`INSERT OR IGNORE INTO org_member (org_id, person_id, role, created_at) SELECT id, ?, 'admin', ? FROM organization WHERE personal = 1 AND created_by = ?`).bind(person, now, person),
     ]);
-  } catch {
-    console.error("personal organization not written", person);
+  } catch (error) {
+    // The driver's message names the SQL and the failure, and bound values, such as the person's name, aren't in it.
+    console.error("personal organization not written", person, (error as Error)?.message);
   }
 }
 
 const membershipRows = async (env: Env, person: string) =>
-  (await env.DB.prepare(`SELECT m.org_id, m.role, o.personal FROM org_member m JOIN organization o ON o.id = m.org_id WHERE m.person_id = ?`).bind(person).all<{ org_id: string; role: string; personal: number }>()).results;
+  (await env.DB.prepare(`SELECT m.org_id, m.role, o.personal FROM org_member m JOIN organization o ON o.id = m.org_id WHERE m.person_id = ? ORDER BY m.created_at, o.personal DESC`).bind(person).all<{ org_id: string; role: string; personal: number }>()).results;
 
-/** The person's organizations, restoring their personal one first if a failed sign-up left it unwritten. */
+/**
+ * The person's organizations, restoring their personal one first if a failed sign-up left it unwritten. The default is
+ * the one they've belonged to longest, which is normally the personal one. That way a late repair can't move someone's
+ * requests out of a team organization and into a personal one, which has no recovery.
+ */
 async function memberships(env: Env, person: string): Promise<Memberships> {
   let results = await membershipRows(env, person);
   if (!results.some((r) => r.personal)) {
@@ -384,15 +389,15 @@ async function memberships(env: Env, person: string): Promise<Memberships> {
   return {
     orgs: results.map((r) => r.org_id),
     adminOrgs: results.filter((r) => r.role === "admin").map((r) => r.org_id),
-    personal: results.find((r) => r.personal)?.org_id ?? results[0]?.org_id ?? null,
+    defaultOrg: results[0]?.org_id ?? null,
   };
 }
 
 /** A signed-in person, acting in the organization they choose among their own. */
 async function personIdentity(env: Env, request: Request, userId: string): Promise<Identity | null> {
   const person = personId(userId);
-  const { orgs, adminOrgs, personal } = await memberships(env, person);
-  const org = request.headers.get("x-podster-org") ?? personal;
+  const { orgs, adminOrgs, defaultOrg } = await memberships(env, person);
+  const org = request.headers.get("x-podster-org") ?? defaultOrg;
   if (!org || !orgs.includes(org)) return null;
   return { kind: "person", id: person, org, orgs, adminOrgs };
 }

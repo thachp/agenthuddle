@@ -4,7 +4,7 @@ import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { getMigrations } from "better-auth/db/migration";
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
@@ -146,7 +146,7 @@ describe("people and organizations", () => {
       }
     });
 
-    it("makes the restored organization the default for someone who already created a team one", async () => {
+    it("keeps the default on a team organization created before the repair", async () => {
       try {
         const person = await signUpDuringFailure();
         const team = await dash(person, "POST", "/orgs", { name: "Team first" });
@@ -154,10 +154,28 @@ describe("people and organizations", () => {
         expect((await dash(person, "GET", "/v1/me")).body.org_id).toBe(team.body.id);
         await allowPersonalOrgWrites();
         const me = await dash(person, "GET", "/v1/me");
-        expect(me.body.org_id).not.toBe(team.body.id);
-        expect(await personalOrgs(me.body.id)).toEqual([expect.objectContaining({ id: me.body.org_id })]);
+        expect(me.body.org_id).toBe(team.body.id);
+        expect((await dash(person, "GET", "/v1/me")).body.org_id).toBe(team.body.id);
+        expect(await personalOrgs(me.body.id)).toHaveLength(1);
         expect((await dash(person, "GET", "/orgs")).body.organizations).toHaveLength(2);
       } finally {
+        await allowPersonalOrgWrites();
+      }
+    });
+
+    it("logs why the write failed, with no name or email", async () => {
+      const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const person = await signUpDuringFailure();
+        await dash(person, "GET", "/orgs");
+        const lines = log.mock.calls.filter(([first]) => first === "personal organization not written");
+        expect(lines.length).toBeGreaterThan(0);
+        for (const line of lines) {
+          expect(line[2]).toContain("failed for this test");
+          expect(JSON.stringify(line)).not.toMatch(/Hook failure|@example\.test/);
+        }
+      } finally {
+        log.mockRestore();
         await allowPersonalOrgWrites();
       }
     });
@@ -309,7 +327,7 @@ describe("hosted MCP", () => {
 });
 
 describe("gateway refusals that don't rely on the API", () => {
-  const addMember = (org: string, who: Person) => whoAmI(who).then((id) => e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', 0)").bind(org, id).run());
+  const addMember = (org: string, who: Person) => whoAmI(who).then((id) => e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', ?)").bind(org, id, Date.now()).run());
   const whoAmI = async (who: Person) => (await (await dashboard(who, "GET", "/v1/me")).json<any>()).id as string;
 
   it("refuses a disconnected or unlinked agent before minting anything", async () => {
@@ -1690,7 +1708,7 @@ describe("sign-in and claim pages", () => {
   it("only offers organizations the person administers", async () => {
     const [a, member] = [await signUp(), await signUp()];
     const me = await (await dashboard(member, "GET", "/v1/me")).json<any>();
-    await e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', 0)").bind(a.org, me.id).run();
+    await e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', ?)").bind(a.org, me.id, Date.now()).run();
     const agent = await registerAgent();
     const page = () => call(`/claim?agent_id=${agent.pluginId}&code=${agent.userCode}`, { headers: { cookie: member.cookie } });
     const html = await (await page()).text();
