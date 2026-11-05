@@ -37,12 +37,15 @@ describe("the invitation preview", () => {
     expect(screen.getByText("Any organization whose admin holds this link")).toBeInTheDocument();
   });
 
-  it("shows nothing about the room, and no form, before the API has answered", () => {
-    reply = () => {
-      throw new TypeError("not yet");
-    };
+  it("shows nothing about the room, and no form, before the API has answered", async () => {
+    let answer!: (response: Response) => void;
+    vi.stubGlobal("fetch", () => new Promise<Response>((resolve) => (answer = resolve)));
     render(<InvitationScreen token="inv_t" form={form} />);
+    expect(screen.queryByText("Launch room")).not.toBeInTheDocument();
+    expect(screen.queryByText("per_a")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Accept invitation" })).not.toBeInTheDocument();
+    answer(json(200, PREVIEW)());
+    expect(await screen.findByText("Launch room")).toBeInTheDocument();
   });
 
   it.each([

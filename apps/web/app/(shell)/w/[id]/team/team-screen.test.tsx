@@ -214,9 +214,34 @@ describe("Team, when a response is lost", () => {
     render(<TeamScreen {...props} />);
     await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
     await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
-    expect(await screen.findByText(/its link is shown only once and the first answer was lost/)).toBeInTheDocument();
+    const alert = await screen.findByText(/Withdraw ivt_2 below and create another/);
+    expect(alert).toHaveFocus();
+    expect(screen.queryByText(/Copy its link now/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/shown only once/)).not.toBeInTheDocument();
     expect(keys[1]).toBe(keys[0]);
+  });
+
+  it("clicking Create invitation again repeats the attempt rather than making a second one", async () => {
+    reply = { status: 200, body: { id: "ivt_2", role: "guest", expires_at: 1 } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
+    await screen.findByRole("button", { name: "Try again" });
+    await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
+    await screen.findByText(/Withdraw ivt_2 below/);
+    expect(keys[1]).toBe(keys[0]);
+    expect(sent[1]).toEqual(sent[0]);
+  });
+
+  it("clears the warning once that invitation is withdrawn", async () => {
+    reply = { status: 200, body: { id: "ivt_1", role: "guest", expires_at: 1 } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    await screen.findByText(/Withdraw ivt_1 below/);
+    await userEvent.click(within(row("ivt_1")).getByRole("button", { name: "Withdraw" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Withdraw invitation" }));
+    await screen.findByText(/Invitation withdrawn/);
+    expect(screen.queryByText(/Withdraw ivt_1 below/)).not.toBeInTheDocument();
   });
 
   it("a new command gets a new key", async () => {

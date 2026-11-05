@@ -21,8 +21,6 @@ function explain(code: string) {
       return "This organization can't accept this invitation, or an agent you chose may be disconnected. Nothing changed.";
     case "limit_exceeded":
       return "This workroom has reached its limit. Nothing changed.";
-    case "workspace_archived":
-      return "This workroom is archived, so nothing changed. Ask whoever sent this link.";
     case "rate_limited":
       return "Too many requests. Wait a minute and try again.";
     default:
@@ -64,7 +62,8 @@ export function AcceptInvitationForm({ token, organizations, agents, partial = f
         setProblem(UNKNOWN_OUTCOME);
       } else if (result.code === "invitation_not_found") onInvalid();
       else {
-        setUnknown(false);
+        // A rate limit answers before the API looks, so it says nothing about an earlier attempt.
+        if (result.status !== 429) setUnknown(false);
         setProblem(explain(result.code));
       }
     } catch {

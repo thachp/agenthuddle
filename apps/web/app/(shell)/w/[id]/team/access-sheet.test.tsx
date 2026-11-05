@@ -191,6 +191,62 @@ describe("Manage access, after a lost response", () => {
   });
 });
 
+describe("Manage access, after a lost response, when a retry is refused", () => {
+  const lostThen = (later: Reply, path: string) => {
+    let calls = 0;
+    commands[path] = async () => {
+      calls += 1;
+      return calls === 1 ? refusal(502, "bad_gateway") : later;
+    };
+  };
+
+  it.each([
+    [403, "not_allowed", /We still can't tell whether your earlier change saved/],
+    [429, "rate_limited", /We still can't tell whether your earlier change saved/],
+    [401, "sign_in_required", /You've been signed out, so we still can't tell/],
+  ])("a %i doesn't claim nothing changed", async (status, code, text) => {
+    lostThen(refusal(status, code), `POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`);
+    show(owner);
+    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await screen.findByText(/We can't tell whether this saved/);
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText(text)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing changed/)).not.toBeInTheDocument();
+  });
+
+  it("revoking again uses the same key", async () => {
+    const keys: (string | null)[] = [];
+    const original = fetch;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      if (init.method) keys.push(new Headers(init.headers).get("idempotency-key"));
+      return original(url, init);
+    });
+    commands[`DELETE /api/v1/workspaces/${ROOM}/members/${AGENT}`] = refusal(502, "bad_gateway");
+    show(owner);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await userEvent.click(await screen.findByRole("button", { name: "Revoke workroom access" }));
+      await userEvent.click(await screen.findByRole("button", { name: "Revoke access" }));
+      await waitFor(() => expect(keys).toHaveLength(attempt + 1));
+      await screen.findByText(/We can't tell whether this saved/);
+    }
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it("withdrawing again after a lost response doesn't claim nothing changed either", async () => {
+    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: null, members: [agentRow(AGENT, "org_b")] });
+    connections[AGENT] = json(200, { id: AGENT, status: "active", generation: 1 });
+    lostThen(refusal(403, "not_allowed"), `POST /api/v1/workspaces/${ROOM}/members/${AGENT}/withdraw`);
+    show(agentOwner);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await userEvent.click(await screen.findByRole("button", { name: "Withdraw from workroom" }));
+      await userEvent.click(await screen.findByRole("button", { name: "Withdraw agent" }));
+      await waitFor(() => expect(sent).toHaveLength(attempt + 1));
+    }
+    expect(await screen.findByText(/We still can't tell whether your earlier change saved/)).toBeInTheDocument();
+  });
+});
+
 describe("Manage access, after losing authority", () => {
   it("shows a demoted admin the generic not-found, not the result it remembers", async () => {
     show(owner);

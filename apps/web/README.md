@@ -128,7 +128,7 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Reads per render | Against the limit of 120 a minute, at worst, counting the shell's 3: Activity is 15 (room, events, agents, 5 member reads, 4 task pages, and no task pages when no event has a task). Team is 11 for someone who manages access (room, agents, invitations, 5 member reads). |
 | Settings: Notifications | Podster delivers no email, so there are no choices to offer. |
 | Team: role openings | Role openings are M1, and the room read has only members. |
-| Team: removed members; Agents: an agent's workrooms | The routes now exist, and these screens don't use them: the room read's `removed` and `guest_can_create` fields, and `GET /api/agents/{agent}/rooms`. |
+| Team: removed members; Agents: an agent's workrooms | The routes now exist, and these screens don't use them: the room read's `removed` and `guest_can_create` fields, and `GET /api/v1/agents/{agent}/rooms`. |
 | Dashboard for an invited organization | The routes now exist, and no screen uses them: `GET /api/v1/oversight/rooms` and `GET /api/v1/workspaces/{ws}/agents/{agent}/tasks`, `.../tasks/{task}` and `.../tasks/{task}/messages`. |
 | Team: **Revoke organization** | The route now exists, and no screen calls it: `DELETE /api/v1/workspaces/{ws}/organizations/{org}`. |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |

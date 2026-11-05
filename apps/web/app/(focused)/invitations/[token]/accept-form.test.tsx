@@ -86,6 +86,20 @@ describe("accepting an invitation", () => {
     expect(sent[1]).toEqual(sent[0]);
   });
 
+  it("keeps holding the choice when a retry is rate limited, which says nothing about the first attempt", async () => {
+    reply = { status: 502, body: { error: { code: "bad_gateway" } } };
+    render(<AcceptInvitationForm onInvalid={onInvalid} token="inv_t" organizations={orgs} agents={agents} />);
+    await userEvent.selectOptions(screen.getByLabelText(/organization/), "org_a");
+    await userEvent.click(screen.getByLabelText("Agent A"));
+    await userEvent.click(screen.getByRole("button", { name: "Accept invitation" }));
+    await screen.findByRole("alert");
+    reply = { status: 429, body: { error: { code: "rate_limited" } } };
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(/Too many requests/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Agent A")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
   it("doesn't say nothing changed after a server error", async () => {
     reply = { status: 502, body: { error: { code: "bad_gateway" } } };
     render(<AcceptInvitationForm onInvalid={onInvalid} token="inv_t" organizations={orgs} agents={agents} />);

@@ -101,6 +101,51 @@ describe("renaming", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
   });
 
+  it("saving the same name again after an unknown outcome repeats the attempt, not a new one with a stale version", async () => {
+    replies = [lost, json(200, { name: "New name" })];
+    show();
+    await rename("New name");
+    await screen.findByRole("button", { name: "Try again" });
+    await userEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(await screen.findByText(/Renamed\./)).toBeInTheDocument();
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toEqual(sent[0]);
+  });
+
+  it("keeps the first attempt's version, even if the page has read a newer one since", async () => {
+    replies = [lost, json(200, { name: "New name" })];
+    const { rerender } = show();
+    await rename("New name");
+    await screen.findByRole("button", { name: "Try again" });
+    rerender(<RoomControls roomId="ws_1" name="Launch room" policyVersion={8} archived={false} />);
+    await userEvent.click(screen.getByRole("button", { name: "Save name" }));
+    await screen.findByText(/Renamed\./);
+    expect(sent[1]).toEqual(sent[0]);
+  });
+
+  it("locks the name while a retry is out, so a late answer can't wipe what's typed", async () => {
+    let answer!: (response: Response) => void;
+    replies = [lost, () => new Promise<Response>((resolve) => (answer = resolve)) as never];
+    show();
+    await rename("New name");
+    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(screen.getByLabelText("Name")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save name" })).toBeDisabled();
+    answer(new Response(JSON.stringify({ name: "New name" }), { status: 200 }));
+    expect(await screen.findByText(/Renamed\./)).toBeInTheDocument();
+  });
+
+  it("a rate limit on a retry keeps the attempt, so the next try is still the same request", async () => {
+    replies = [lost, refused(429, "rate_limited"), json(200, { name: "New name" })];
+    show();
+    await rename("New name");
+    await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(/we still can't tell whether this saved\. Wait a minute/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(/Renamed\./)).toBeInTheDocument();
+    expect(sent[2]).toEqual(sent[0]);
+  });
+
   it("a different name is a new intent, with a new key and no retry of the old one", async () => {
     replies = [lost];
     show();
@@ -138,6 +183,18 @@ describe("archiving", () => {
     await userEvent.click(screen.getByRole("button", { name: "Archive" }));
     await userEvent.click(await screen.findByRole("button", { name: "Archive workroom" }));
     await userEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(/^Archived\./)).toBeInTheDocument();
+    expect(sent[1]).toEqual(sent[0]);
+  });
+
+  it("archiving again after an unknown outcome repeats the attempt", async () => {
+    replies = [lost, json(200, { status: "archived" })];
+    show();
+    await userEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Archive workroom" }));
+    await screen.findByRole("button", { name: "Try again" });
+    await userEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Archive workroom" }));
     expect(await screen.findByText(/^Archived\./)).toBeInTheDocument();
     expect(sent[1]).toEqual(sent[0]);
   });

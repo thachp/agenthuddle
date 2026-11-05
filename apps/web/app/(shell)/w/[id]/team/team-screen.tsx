@@ -265,7 +265,8 @@ function Invitations({ base, room, archived, invitations, orgLabel, label, send,
   const [pending, setPending] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [lostLink, setLostLink] = useState(false);
+  const [lostLink, setLostLink] = useState<string | null>(null);
+  const lostLinkRef = useRef<HTMLParagraphElement>(null);
   const linkRef = useRef<HTMLInputElement>(null);
 
   // The link is what the person has to act on, and it may be far from the message above.
@@ -273,18 +274,23 @@ function Invitations({ base, room, archived, invitations, orgLabel, label, send,
     if (link) linkRef.current?.focus();
   }, [link]);
 
+  useEffect(() => {
+    if (lostLink) lostLinkRef.current?.focus();
+  }, [lostLink]);
+
   const create = async (event: FormEvent) => {
     event.preventDefault();
     setPending(true);
     setLink(null);
-    setLostLink(false);
+    setLostLink(null);
     setCopied(false);
     const body = { role, ...(invitedOrg.trim() ? { invited_org_id: invitedOrg.trim() } : {}), ...(role === "guest" ? { guest_can_create: guestCanCreate } : {}) };
-    await send<Created>(`${base}/invitations`, body, "Invitation created. Copy its link now: it's shown only once.", {
+    // A retry's stored answer never repeats the secret, so that link can't be shown again and there's nothing to copy.
+    const success = (created: Created) => (created.token ? "Invitation created. Copy its link now: it's shown only once." : null);
+    await send<Created>(`${base}/invitations`, body, success, {
       onOk: (created) => {
-        // A retry's stored answer never repeats the secret, so that link can't be shown again.
         if (created.token) setLink(`${window.location.origin}/invitations/${created.token}`);
-        else setLostLink(true);
+        else setLostLink(created.id);
       },
       onDone: (outcome) => {
         // Refused or unknown: nothing to copy, and focus should be on why. A retry lands here too.
@@ -331,7 +337,11 @@ function Invitations({ base, room, archived, invitations, orgLabel, label, send,
           </div>
         </div>
       ) : null}
-      {lostLink ? <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-status-amber">That invitation was created, but its link is shown only once and the first answer was lost. Withdraw it below and create another.</p> : null}
+      {lostLink ? (
+        <p ref={lostLinkRef} tabIndex={-1} role="alert" className="rounded-lg bg-status-amber-surface p-3 break-words text-status-amber outline-none">
+          The invitation was created, but its link is shown only once and that answer was lost. Withdraw {lostLink} below and create another.
+        </p>
+      ) : null}
       {archived ? (
         <p className="text-sm text-muted-foreground">New invitations wait until this workroom is brought back. Links below can't be used until then, but you can still withdraw them.</p>
       ) : (
@@ -388,7 +398,7 @@ function Invitations({ base, room, archived, invitations, orgLabel, label, send,
                   confirm="Withdraw invitation"
                   destructive
                   focusAfter={focusAfter}
-                  action={() => send(`${base}/invitations/${encodeURIComponent(invitation.id)}`, {}, "Invitation withdrawn. Its link no longer works.", { method: "DELETE" })}
+                  action={() => send(`${base}/invitations/${encodeURIComponent(invitation.id)}`, {}, "Invitation withdrawn. Its link no longer works.", { method: "DELETE", onOk: () => setLostLink((current) => (current === invitation.id ? null : current)) })}
                 />
               </li>
             ))}

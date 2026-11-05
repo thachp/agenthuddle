@@ -13,7 +13,7 @@ const MAX_NAME_BYTES = 200;
 /** Rename, archive and bring back. Shown to those the server says may manage this room, and Rust decides each request. */
 export function RoomControls({ roomId, name, policyVersion, archived }: { roomId: string; name: string; policyVersion: number; archived: boolean }) {
   const commands = useCommands(policyVersion);
-  const { send, noticeRef, clear } = commands;
+  const { send, noticeRef, clear, retrying } = commands;
   // Null until the person edits, so a rename from elsewhere shows after a refresh, and their own text survives a conflict.
   const [draft, setDraft] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -25,7 +25,7 @@ export function RoomControls({ roomId, name, policyVersion, archived }: { roomId
 
   const rename = async (event: FormEvent) => {
     event.preventDefault();
-    if (pending || archived || !trimmed || tooLong || trimmed === name) return;
+    if (pending || retrying || archived || !trimmed || tooLong || trimmed === name) return;
     setPending(true);
     await send(`${base}/name`, { name: trimmed }, "Renamed. Everyone in this workroom sees the new name.", { method: "PUT", focus: true, onOk: () => setDraft(null) });
     setPending(false);
@@ -40,7 +40,8 @@ export function RoomControls({ roomId, name, policyVersion, archived }: { roomId
           <Input
             value={value}
             required
-            disabled={archived}
+            // A late answer would otherwise wipe what's typed, or leave Try again for a name that's no longer there.
+            disabled={archived || pending || retrying}
             aria-invalid={tooLong}
             aria-describedby="room-name-help"
             onChange={(event) => {
@@ -53,7 +54,7 @@ export function RoomControls({ roomId, name, policyVersion, archived }: { roomId
         <p id="room-name-help" className="text-sm text-muted-foreground">
           {archived ? "Bring this workroom back to rename it." : tooLong ? "That's too long. Names can be up to 200 bytes." : "Everyone in this workroom sees it, including other organizations."}
         </p>
-        <Button type="submit" size="sm" className={MOBILE_TARGET} disabled={pending || archived || !trimmed || tooLong || trimmed === name}>
+        <Button type="submit" size="sm" className={MOBILE_TARGET} disabled={pending || retrying || archived || !trimmed || tooLong || trimmed === name}>
           {pending ? "Saving…" : "Save name"}
         </Button>
       </form>
