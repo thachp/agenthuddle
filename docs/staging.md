@@ -2,6 +2,14 @@
 
 Staging runs at `gateway-staging.podster.dev`, on the Cloudflare account that holds `podster.dev`.
 
+## Running locally
+
+The gateway's default `BASE_URL` is the production hostname, and a deployment on HTTPS redirects HTTP to it, so a plain `wrangler dev` would send your browser to production. Put this in `apps/gateway/.dev.vars`, which git ignores, before you start it:
+
+```bash
+BASE_URL=http://localhost:8787
+```
+
 ## Before you start
 
 - Node, and `npm ci` in `apps/gateway` and `apps/api`.

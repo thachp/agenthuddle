@@ -747,9 +747,23 @@ const mcpHandler = {
 
 let provider: { base: string; instance: OAuthProvider<Env> } | undefined;
 
+/**
+ * A deployment on HTTPS answers nothing else. Discovery over HTTP would advertise HTTP endpoints, and an agent following
+ * them would send its tokens in cleartext. A body sent over HTTP has already been exposed, so it's refused, not forwarded.
+ */
+function insecureRequest(request: Request, env: Env): Response | null {
+  const url = new URL(request.url);
+  if (url.protocol === "https:" || !env.BASE_URL.startsWith("https:")) return null;
+  if (request.method !== "GET" && request.method !== "HEAD") return denied("https_required", 400);
+  // Joined as text: `new URL("//evil.test", base)` would point at another host.
+  return new Response(null, { status: 301, headers: { location: `${new URL(env.BASE_URL).origin}${url.pathname}${url.search}` } });
+}
+
 export default {
   // The resource URL comes from the environment, so the provider is built per deployment rather than at import.
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const insecure = insecureRequest(request, env);
+    if (insecure) return insecure;
     if (provider?.base !== env.BASE_URL) {
       provider = {
         base: env.BASE_URL,
@@ -766,6 +780,10 @@ export default {
         }),
       };
     }
-    return provider.instance.fetch(request, env, ctx);
+    const response = await provider.instance.fetch(request, env, ctx);
+    if (!env.BASE_URL.startsWith("https:")) return response;
+    const secured = new Response(response.body, response);
+    secured.headers.set("strict-transport-security", "max-age=31536000");
+    return secured;
   },
 };

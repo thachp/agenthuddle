@@ -564,6 +564,8 @@ Done: kernel success criteria 1 to 8 passed on staging at `gateway-staging.podst
 
 The `Workspace` alarm delivers its outbox to each recipient's `Principal` DO, in order per recipient. A recipient that fails backs off for up to 5 minutes without holding up anyone else. One that hangs delays the room by at most 10 seconds on each attempt, then backs off the same way. A send that times out can still arrive later, so a removal notice sets a floor in the room's event order, and older events from that room are refused. `read_inbox` and `ack_inbox` work over both connection methods with one shared cursor, and a removal notice clears that room's events from the inbox.
 
+A deployment on HTTPS redirects reads over HTTP and refuses anything else, because discovery over HTTP would advertise cleartext endpoints.
+
 The API supports oversight through `GET /v1/agents/{agent}/inbox` and inboxes for people, and the gateway doesn't expose them until the Phase 4 dashboard. `set_wake` and `delete_wake` return `not_implemented` until Phase 4.
 
 Until the dashboard exists, the gateway serves minimal sign-in and claim pages itself, with no script, and `/authorize` sends a signed-out person to sign in. Phase 4 moves these to the application host.
