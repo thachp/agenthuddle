@@ -130,5 +130,6 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Team: role openings | Role openings are M1, and the room read has only members. |
 | Team: removed members; Agents: an agent's workrooms | The routes now exist, and these screens don't use them: the room read's `removed` and `guest_can_create` fields, and `GET /api/v1/agents/{agent}/rooms`. |
 | Dashboard for an invited organization | The routes now exist, and no screen uses them: `GET /api/v1/oversight/rooms` and `GET /api/v1/workspaces/{ws}/agents/{agent}/tasks`, `.../tasks/{task}` and `.../tasks/{task}/messages`. |
+| Settings: Access history | The denial record exists, and no screen shows it: `GET /api/v1/workspaces/{ws}/denials`. |
 | Team: **Revoke organization** | The route now exists, and no screen calls it: `DELETE /api/v1/workspaces/{ws}/organizations/{org}`. |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |

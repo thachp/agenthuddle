@@ -311,6 +311,7 @@ POST   /v1/workspaces                               person only, admin of the or
 GET    /v1/workspaces/{ws}
 PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
 POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access
+GET    /v1/workspaces/{ws}/denials                  refused changes, counted (owner or admin)
 GET    /v1/workspaces/{ws}/invitations              pending, without tokens (owner or admin)
 POST   /v1/invitations/preview                      token in body; person only
 GET    /v1/oversight/rooms                          rooms the person's administered organizations' agents are in; from membership_index, for showing only
