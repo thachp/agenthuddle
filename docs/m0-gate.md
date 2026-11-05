@@ -123,7 +123,7 @@ This needs two people with different GitHub accounts, about five minutes, and th
    npx wrangler deployments list --env staging
    ```
 
-2. **The owner signs in.** Open `https://gateway-staging.podster.dev/sign-in` and continue with GitHub. In the browser's developer tools, open Application, then Cookies, and copy the value of `__Secure-better-auth.session_token`. Then run this and paste `__Secure-better-auth.session_token=<value>` when it waits:
+2. **The owner signs in.** Open `https://gateway-staging.podster.dev/sign-in` and continue with GitHub. Once `APP_URL` is set, that link ends on the application host, so copy the cookie there. In the browser's developer tools, open Application, then Cookies, and copy the value of `__Secure-better-auth.session_token`. Then run this and paste `__Secure-better-auth.session_token=<value>` when it waits:
 
    ```bash
    read -rs PODSTER_E2E_COOKIE_A && export PODSTER_E2E_COOKIE_A

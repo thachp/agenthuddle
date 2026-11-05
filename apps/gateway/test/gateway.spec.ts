@@ -1687,8 +1687,6 @@ describe("the application host", () => {
     const res = await appPost("/api/auth/sign-in/social", { provider: "github", callbackURL: "/attention" });
     const { url } = await res.json<{ url: string }>();
     expect(new URL(url).searchParams.get("redirect_uri")).toBe(`${APP}/api/auth/callback/github`);
-    const direct = await onGateway("/api/auth/sign-in/social", { method: "POST", headers: { "content-type": "application/json", origin: BASE }, body: JSON.stringify({ provider: "github", callbackURL: "/signed-in" }) });
-    expect(new URL((await direct.json<{ url: string }>()).url).searchParams.get("redirect_uri")).toBe(`${BASE}/api/auth/callback/github`);
     const discovery = await (await onGateway("/.well-known/agent-configuration")).json<any>();
     expect(JSON.stringify(discovery)).not.toContain(APP);
     const oauth = await (await onGateway("/.well-known/oauth-authorization-server")).json<any>();
@@ -1706,7 +1704,7 @@ describe("the application host", () => {
 
     it("answers a bad authorization request itself, and never sends anyone on with it", async () => {
       const { client_id, query } = await authorizeQuery();
-      for (const bad of ["?client_id=nope", query.replace(encodeURIComponent("https://client.test/cb"), encodeURIComponent("https://evil.test/cb")), query.replace("scope=mcp", "scope=mcp+admin"), query.replace(/code_challenge=[^&]*&?/, ""), `?response_type=code&client_id=${client_id}`]) {
+      for (const bad of ["?client_id=nope", query.replace(encodeURIComponent("https://client.test/cb"), encodeURIComponent("https://evil.test/cb")), query.replace("scope=mcp", "scope=mcp+admin"), query.replace(/code_challenge=[^&]*&?/, ""), query.replace(/code_challenge=[^&]*&?/, "").replace(/code_challenge_method=[^&]*&?/, ""), `?response_type=code&client_id=${client_id}`]) {
         const res = await onGateway(`/authorize${bad}`);
         expect(res.status, bad).toBe(400);
         expect(res.headers.get("location"), bad).toBeNull();
@@ -1729,6 +1727,43 @@ describe("the application host", () => {
       const started = await onGateway("/sign-in", { method: "POST", headers: { origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ provider: "github", next: "/claim" }) });
       expect(started.status).toBe(303);
       expect(started.headers.get("location")).toBe(`${APP}/sign-in`);
+    });
+
+    it("can't register a client with a private-use redirect, because none is allowed yet", async () => {
+      const reg = await onGateway("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["com.example.app:/cb"], client_name: "Desktop", token_endpoint_auth_method: "none" }) });
+      expect(reg.status).toBe(400);
+    });
+
+    it("starts no session on this host, and leaves agents' routes and an existing session's routes alone", async () => {
+      const send = (path: string, body: unknown) => onGateway(`/api/auth${path}`, { method: "POST", headers: { "content-type": "application/json", origin: BASE }, body: JSON.stringify(body) });
+      for (const res of [await send("/sign-in/social", { provider: "github", callbackURL: "/signed-in" }), await send("/sign-in/email", { email: "x@example.test", password: "local-test-password-123" }), await send("/sign-up/email", { email: `${unique("p")}@example.test`, password: "local-test-password-123", name: "x" }), await onGateway("/api/auth/callback/github?code=c&state=s")]) {
+        expect(res.status).toBe(404);
+        expect(res.headers.get("set-cookie")).toBeNull();
+      }
+      const a = await signUp();
+      expect((await onGateway("/api/auth/get-session?disableRefresh=true", { headers: { cookie: a.cookie } })).status).toBe(200);
+      expect((await onGateway("/api/auth/agent-configuration")).status).toBe(200);
+      const agent = await registerAgent();
+      expect(agent.registered.approval.verification_uri_complete).toContain(`${BASE}/claim`);
+    });
+
+    it("keeps the POSTs a session cookie can use, checking origin against this host and not the application's", async () => {
+      const a = await signUp();
+      const consent = async (origin: string) => {
+        const { query } = await authorizeQuery();
+        return onGateway("/authorize", { method: "POST", headers: { cookie: a.cookie, origin, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ oauth_query: query, org_id: a.org }) });
+      };
+      const approved = await consent(BASE);
+      expect(approved.status).toBe(302);
+      const code = new URL(approved.headers.get("location")!);
+      expect(code.searchParams.get("code")).toBeTruthy();
+      expect(code.searchParams.get("iss")).toBe(BASE);
+      expect((await consent(APP)).status).toBe(403);
+
+      const agent = await registerAgent();
+      const claimAs = (origin: string) => onGateway("/claim", { method: "POST", headers: { cookie: a.cookie, origin, "content-type": "application/json" }, body: JSON.stringify({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: a.org }) });
+      expect((await claimAs(APP)).status).toBe(403);
+      expect((await claimAs(BASE)).status).toBe(200);
     });
 
     it("keeps the application host's routes off the gateway's host", async () => {

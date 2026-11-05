@@ -71,7 +71,8 @@ export function ApprovalFields({ orgs, agents, value, onChange, disabled, newAge
 /** The request is still open, so these say what to do next. Nothing from the failed request is shown. */
 export function approvalFailure(status: number, code: string) {
   if (status === 429) return "Too many tries. Wait a minute, then try again.";
-  // It may have stopped partway. Trying again is safe, because the same request reuses the same agent.
+  // It may have stopped partway, and trying again finishes it. A claim reuses its agent. Consent makes a new ID each try,
+  // so a failure between the API and the directory leaves an agent in the API with no credential. See docs/adr/0001.
   if (status >= 500) return "Something went wrong, and this may not have finished. Please try again.";
   if (code === "invalid_argument") return "Check the name, which can be at most 200 bytes.";
   if (code === "already_linked") return "This app is already connected to a different agent in that organization.";

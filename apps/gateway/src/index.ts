@@ -71,6 +71,9 @@ const PUBLIC_AUTH_ROUTES = [
 ];
 export const isPublicAuthRoute = (path: string) => PUBLIC_AUTH_ROUTES.some((route) => route.test(path));
 
+/** The routes that start a session. With an application host, only it may, so no browser gets a session on the gateway's host. */
+const STARTS_SESSION = /^\/(sign-in\/(social|email)|sign-up\/email|callback\/[\w-]+)$/;
+
 /** A key's `kid` must be its own thumbprint, because the plugin finds hosts by the `kid` a caller supplies. */
 async function honestKey(key: unknown) {
   if (key === undefined) return true;
@@ -708,7 +711,8 @@ async function handleClaimApi(request: Request, env: Env, userId: string): Promi
 
 /**
  * With an application host, a person's pages live there and this host keeps only agents' routes. A form POST to
- * `/authorize` or `/claim` stays, with its origin check: no browser holds a session here, and test clients use it.
+ * `/authorize` or `/claim` stays, with this host's origin check: nothing here can start a browser's session, and the
+ * journey on a deployment uses them with a session cookie it was given.
  */
 async function movedToApplicationHost(request: Request, env: Env, appUrl: string): Promise<Response | null> {
   const url = new URL(request.url);
@@ -917,6 +921,7 @@ const appHandler = {
     if (url.pathname.startsWith("/api/auth/")) {
       const route = url.pathname.slice("/api/auth".length);
       if (!isPublicAuthRoute(route)) return denied("not_found", 404);
+      if (publicEnv.APP_URL && !onApplicationHost && STARTS_SESSION.test(route)) return denied("not_found", 404);
       if (route === "/agent/register" && request.method === "POST") {
         // Read once and passed on, so what we checked is what the plugin parses.
         const text = await request.text();

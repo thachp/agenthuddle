@@ -34,6 +34,10 @@ The web Worker forwards the browser's own `Origin`. The gateway's check keeps it
 | Session on the gateway's host, with the dashboard reading it there | Needs cross-site requests with credentials from the app, which means CORS and weaker `SameSite`. Server components couldn't see the cookie at all. |
 | A session on each host, joined by a one-time code | Two sessions to revoke and a new code exchange to secure, with no gain over a redirect. |
 
+## Known gap
+
+If consent's write to the API succeeds and the directory write after it fails, a retry makes a new agent ID, leaving the first agent in the API with no credential and no directory row. Nobody can act as it, and nothing lists it. A claim doesn't have this, because its ID comes from the plugin's. Using a derived ID for consent isn't a small fix: the directory keeps a disconnected agent's row, so consenting again after a disconnect would land on the revoked agent instead of a new one.
+
 ## Consequences
 
 - The session stays `HttpOnly` and `SameSite=Lax`, with `Secure` and Better Auth's `__Secure-` prefix on HTTPS. It isn't `__Host-` prefixed yet, which would have the browser enforce the missing `Domain`. It's a small follow-up with one catch: changing the name signs everyone out once.
@@ -46,7 +50,8 @@ The web Worker forwards the browser's own `Origin`. The gateway's check keeps it
 
 The code does nothing until `APP_URL` is set on the gateway.
 
-- **Redirects.** On the gateway's host, `GET /authorize` validates the client, redirect URI, scope and PKCE, then redirects to `/oauth/consent` with the same query. A bad request gets a 400 and goes nowhere. `GET /claim` and `/sign-in` redirect too, and sign-in's `next` is translated to the application host's paths. A `POST` to `/sign-in` goes to the application host's sign-in, because finishing it here would use a callback GitHub no longer accepts. A `POST` to `/authorize` or `/claim` stays, with its origin check: browsers have no session here, and test clients with a cookie use it.
+- **Redirects.** On the gateway's host, `GET /authorize` validates the client, redirect URI, scope and PKCE, then redirects to `/oauth/consent` with the same query. A bad request gets a 400 and goes nowhere. `GET /claim` and `/sign-in` redirect too, and sign-in's `next` is translated to the application host's paths. A `POST` to `/sign-in` goes to the application host's sign-in, because finishing it here would use a callback GitHub no longer accepts. A `POST` to `/authorize` or `/claim` stays, with this host's origin check, because the journey on a deployment uses them with a session cookie it was given.
+- **No session starts on the gateway's host.** With `APP_URL` set, `/api/auth/sign-in/*`, `/api/auth/sign-up/email` and `/api/auth/callback/*` answer 404 there, so a browser can't get a session on it. A cookie someone pastes in is still accepted: that host still reads sessions, it just can't issue them.
 - **Read and decision.** `GET` and `POST` on `/api/consent` and `/api/claim` answer only for the application host. A decision answers with JSON naming where to send the browser, because a page's `fetch` can't follow a redirect to another host, and its CSP stops a form doing so. The consent decision must say `approve` or `decline`. There's no default.
 - **`iss`.** The OAuth library takes the `iss` it sends clients from the URL it parses, so consent always parses the request as one to the gateway's host. Clients compare it with the issuer they discovered there.
 - **Claim URL: `/claim?agent_id=…&code=…`.** It's the link the Agent Auth plugin already gives agents, so the redirect only changes the host. A `/claim/:token` URL would need a new stored token or a second encoding of both values, and the code would still be in the URL. Nothing there would be safer, and a person compares the code by eye anyway.
@@ -63,4 +68,6 @@ Nobody has created or changed any of this.
 | GitHub OAuth app | Callback `https://app-staging.podster.dev/api/auth/callback/github` | An OAuth app has one callback host, so sign-in on the gateway's host stops working the moment this changes. Ship it with step 1 above. |
 | Secrets | None on the web Worker | It holds no signing keys or provider secrets. |
 
-Then probe, on staging: `Set-Cookie` has no `Domain`; a real GitHub sign-in ends on the application host; a request to the gateway's host carries no session; `cf-connecting-ip` arrives through the binding with the browser's address; a request with an `app-staging` Host header never reaches the gateway directly.
+If Google sign-in is configured, its authorized redirect URI has to move to the application host too. Desktop clients are a separate limit: the gateway doesn't set `allowPrivateUseRedirectUris`, so `/oauth/register` answers 400 for a private-use redirect such as `com.example.app:/cb`, with or without `APP_URL`, and such a client never reaches `/authorize`. Loopback `http` and `https` work.
+
+Then probe, on staging: `Set-Cookie` has no `Domain`; a real GitHub sign-in ends on the application host; sign-in, sign-up and callback on the gateway's host answer 404, and a browser that signed in on the application host sends no session cookie to the gateway's host; `cf-connecting-ip` arrives through the binding with the browser's address; a request with an `app-staging` Host header never reaches the gateway directly.
