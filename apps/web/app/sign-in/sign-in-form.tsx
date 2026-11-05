@@ -5,14 +5,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-type Props = { next: string; providers: { id: string; name: string }[]; password: boolean };
+type Props = { next: string; providers: { id: string; name: string }[]; email?: boolean; password: boolean };
 
 async function post(path: string, body: unknown) {
   return fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 }
 
-export function SignInForm({ next, providers, password }: Props) {
+export function SignInForm({ next, providers, email = false, password }: Props) {
   const [failed, setFailed] = useState(false);
+  const [linkSent, setLinkSent] = useState(false);
+  const [limited, setLimited] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function withProvider(provider: string) {
@@ -24,6 +26,17 @@ export function SignInForm({ next, providers, password }: Props) {
     if (url) return location.assign(url);
     setBusy(false);
     setFailed(true);
+  }
+
+  async function withEmail(form: FormData) {
+    setBusy(true);
+    setFailed(false);
+    setLimited(false);
+    const response = await post("/api/auth/sign-in/magic-link", { email: form.get("link-email"), next }).catch(() => null);
+    setBusy(false);
+    if (response?.ok) setLinkSent(true);
+    else if (response?.status === 429) setLimited(true);
+    else setFailed(true);
   }
 
   async function withPassword(form: FormData, create: boolean) {
@@ -44,7 +57,30 @@ export function SignInForm({ next, providers, password }: Props) {
           Continue with {provider.name}
         </Button>
       ))}
-      {providers.length === 0 && !password ? <p>Sign-in isn't set up here yet.</p> : null}
+      {email ? (
+        linkSent ? (
+          // The same words whoever asked, because the answer doesn't depend on the address.
+          <p role="status">Check your email. If that address can sign in with a link, one is on its way, and it works for 5 minutes.</p>
+        ) : (
+          <form
+            className="space-y-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void withEmail(new FormData(event.currentTarget));
+            }}
+          >
+            {limited ? <p role="alert">Too many sign-in links were asked for. Please try again later.</p> : null}
+            <div className="space-y-1">
+              <Label htmlFor="link-email">Email</Label>
+              <Input id="link-email" name="link-email" type="email" required autoComplete="email" />
+            </div>
+            <Button type="submit" className="w-full" variant="outline" disabled={busy}>
+              Email me a sign-in link
+            </Button>
+          </form>
+        )
+      ) : null}
+      {providers.length === 0 && !email && !password ? <p>Sign-in isn't set up here yet.</p> : null}
       {password ? (
         <form
           className="space-y-3 rounded-lg border p-4"

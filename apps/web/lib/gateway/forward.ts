@@ -1,5 +1,5 @@
 /** The session paths a browser may use through this host. Agent Auth, capabilities and MCP stay on the gateway's host. */
-const PERSON_AUTH = [/^\/api\/auth\/sign-in\/(social|email)$/, /^\/api\/auth\/sign-up\/email$/, /^\/api\/auth\/sign-out$/, /^\/api\/auth\/callback\/[\w-]+$/, /^\/api\/auth\/get-session$/, /^\/api\/auth\/error$/];
+const PERSON_AUTH = [/^\/api\/auth\/sign-in\/(social|email|magic-link)$/, /^\/api\/auth\/magic-link\/verify$/, /^\/api\/auth\/sign-up\/email$/, /^\/api\/auth\/sign-out$/, /^\/api\/auth\/callback\/[\w-]+$/, /^\/api\/auth\/get-session$/, /^\/api\/auth\/error$/];
 const DASHBOARD = [/^\/api\/v1\//, /^\/api\/orgs$/, /^\/api\/orgs\/org_[\w-]+\/(members|invitations)(\/[\w-]+)?$/, /^\/api\/org-invitations\/(preview|accept)$/, /^\/api\/agents(\/|$)/, /^\/api\/consent$/, /^\/api\/claim$/];
 
 export function isForwardable(path: string) {

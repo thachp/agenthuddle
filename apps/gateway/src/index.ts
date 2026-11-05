@@ -4,11 +4,13 @@ import { authorizationErrorRedirect, OAuthProvider, type OAuthHelpers } from "@c
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { betterAuth } from "better-auth";
+import { magicLink } from "better-auth/plugins/magic-link";
 import { APIError } from "better-auth/api";
 import { calculateJwkThumbprint, decodeJwt, type JWK } from "jose";
 import { handleOrgPeople, retryDepartures } from "./organizations";
 import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
+import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, sendSignInLink, signsInOtherwise, type EmailBinding } from "./email-sign-in";
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
 
 export interface Env {
@@ -33,6 +35,10 @@ export interface Env {
   /** Overrides the counter's limits. Tests only. */
   STRICT_PER_MINUTE?: string;
   STRICT_PER_DAY?: string;
+  /** Email sign-in, off unless all three are set, and only on the application host. See email-sign-in.ts. */
+  ENABLE_EMAIL_SIGNIN?: string;
+  EMAIL?: EmailBinding;
+  EMAIL_FROM?: string;
   /** Test environments only. Never set in staging or production. */
   ENABLE_PASSWORD_SIGNIN?: string;
   /** Staging's test sign-up, set only in env.staging. See test-people.ts. */
@@ -77,7 +83,7 @@ const PUBLIC_AUTH_ROUTES = [
 export const isPublicAuthRoute = (path: string) => PUBLIC_AUTH_ROUTES.some((route) => route.test(path));
 
 /** The routes that start a session. With an application host, only it may, so no browser gets a session on the gateway's host. */
-const STARTS_SESSION = /^\/(sign-in\/(social|email)|sign-up\/email|callback\/[\w-]+)$/;
+const STARTS_SESSION = /^\/(sign-in\/(social|email|magic-link)|magic-link\/verify|sign-up\/email|callback\/[\w-]+)$/;
 
 /** A key's `kid` must be its own thumbprint, because the plugin finds hosts by the `kid` a caller supplies. */
 async function honestKey(key: unknown) {
@@ -233,7 +239,7 @@ export function clientKey(request: Request) {
 
 /** Anonymous routes that start something, each counted separately for each client. */
 export function sensitiveRoute(method: string, path: string) {
-  if (path.startsWith("/api/auth/sign-in/") || path.startsWith("/api/auth/sign-up/") || path.startsWith("/api/auth/callback/")) return "auth";
+  if (path.startsWith("/api/auth/sign-in/") || path.startsWith("/api/auth/sign-up/") || path.startsWith("/api/auth/callback/") || path.startsWith("/api/auth/magic-link/")) return "auth";
   if (method !== "POST") return null;
   return ({ "/sign-in": "sign-in", "/oauth/register": "oauth-register", "/oauth/token": "oauth-token", "/api/auth/agent/register": "agent-register" } as Record<string, string>)[path] ?? null;
 }
@@ -311,6 +317,11 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
     socialProviders: social,
     databaseHooks: {
       session: {
+        create: {
+          // Checked here as well as before sending, because someone can sign up with GitHub while a link is on its way.
+          // A link never signs in to a person who has another way in: see docs/adr/0004-email-sign-in.md.
+          before: async (session, ctx) => (ctx?.path === EMAIL_VERIFY_ROUTE && (await signsInOtherwise(env, "u.id", session.userId)) ? false : undefined),
+        },
         update: {
           // Refreshing moves a session's expiry a full term out, and any route that reads a session can do it. A test
           // session keeps the end it started with, on every instance, so a killed run's session really does end.
@@ -332,6 +343,8 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
       },
     },
     plugins: [
+      // Always loaded, because no route reaches it until appHandler's checks pass.
+      magicLink({ expiresIn: EMAIL_LINK_SECONDS, storeToken: "hashed", sendMagicLink: ({ email, url, token }) => sendSignInLink(env, email, token, new URL(url).searchParams.get("callbackURL")) as Promise<void> }),
       agentAuth({
         providerName: "podster",
         providerDescription: "Podster coordinates work between independently run agents.",
@@ -438,7 +451,7 @@ async function personIdentity(env: Env, request: Request, userId: string): Promi
 const forPublicHost = (request: Request, env: Env): Env => (env.APP_URL && new URL(request.url).origin === new URL(env.APP_URL).origin ? { ...env, BASE_URL: env.APP_URL } : env);
 
 /** Session requests that change something must come from our own origin. */
-const sameOrigin = (request: Request, env: Env) => request.headers.get("origin") === new URL(env.BASE_URL).origin;
+export const sameOrigin = (request: Request, env: Env) => request.headers.get("origin") === new URL(env.BASE_URL).origin;
 
 /** Dashboard routes people may reach through the session. Agent registration and connection have their own handlers. */
 export function allowedPassthrough(path: string) {
@@ -998,7 +1011,7 @@ function publicConfiguration(configuration: any) {
 }
 
 const appHandler = {
-  async fetch(request: Request, publicEnv: Env): Promise<Response> {
+  async fetch(request: Request, publicEnv: Env, ctx: ExecutionContext): Promise<Response> {
     const env = forPublicHost(request, publicEnv);
     const url = new URL(request.url);
     const onApplicationHost = env !== publicEnv;
@@ -1011,6 +1024,12 @@ const appHandler = {
     if (url.pathname.startsWith("/api/auth/")) {
       const route = url.pathname.slice("/api/auth".length);
       if (route === TEST_SIGNUP_ROUTE) return handleTestSignUp(request, publicEnv);
+      if (route === EMAIL_LINK_ROUTE || route === EMAIL_VERIFY_ROUTE) {
+        if (!onApplicationHost || !emailSignInEnabled(publicEnv)) return denied("not_found", 404);
+        if (route === EMAIL_LINK_ROUTE) return request.method === "POST" ? handleEmailLink(request, env, ctx) : denied("not_found", 404);
+        // Without a callback, the plugin would answer with the session's token in its body.
+        return request.method === "GET" && url.searchParams.get("callbackURL") ? createAuth(env).handler(request) : denied("not_found", 404);
+      }
       if (!isPublicAuthRoute(route)) return denied("not_found", 404);
       if (publicEnv.APP_URL && !onApplicationHost && STARTS_SESSION.test(route)) return denied("not_found", 404);
       if (route === "/agent/register" && request.method === "POST") {

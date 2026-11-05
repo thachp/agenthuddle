@@ -136,6 +136,25 @@ npx wrangler deploy --config dist/server/wrangler.json
 
 Deploy in the order API, gateway, web. The gateway's `APP_URL` moves sign-in to the application host, so GitHub's callback has to be `https://app-staging.podster.dev/api/auth/callback/github`. An OAuth app has one callback host, so sign-in fails until the two match.
 
+## Email sign-in
+
+Sign-in links go through Cloudflare Email Service, and [ADR 0004](adr/0004-email-sign-in.md) has the rules. It's off until `ENABLE_EMAIL_SIGNIN`, the `EMAIL` binding, `EMAIL_FROM` and `APP_URL` are all set, which only `env.staging` does. There are no secrets or migrations. The sender is `sign-in@podster.dev`.
+
+Before the first deploy, check these in the Cloudflare dashboard, under Compute, then Email Service:
+
+- `podster.dev` is onboarded on this account. Until a domain is onboarded, mail only reaches verified addresses.
+- Whether Email preview is on. It's on by default for new sending domains, and keeps messages about seven days, including sign-in links that will have expired.
+
+Deploy the gateway before the web Worker, because the web Worker's `SIGN_IN_PROVIDERS` is what shows the option, and asking answers 404 until the gateway has it. Then check on staging, with a mailbox you own:
+
+1. A link arrives, from `sign-in@podster.dev`, and doesn't land in spam.
+2. Its button signs you in on `app-staging.podster.dev`, and you have a personal organization.
+3. The same link used again goes back to the sign-in page with an error.
+4. An address that signs in with GitHub gets the notice, and no link.
+5. `POST https://gateway-staging.podster.dev/api/auth/sign-in/magic-link` answers 404.
+
+To turn it off, remove `email` from the web Worker's `SIGN_IN_PROVIDERS` and `ENABLE_EMAIL_SIGNIN` from the gateway's vars, then deploy both.
+
 ## Test people for the journey
 
 The journey needs two separate people, and staging can make its own when a run has no second human. It's off until all of these hold, and otherwise the route answers like any other private auth route, with a 404:
