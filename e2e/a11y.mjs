@@ -348,10 +348,10 @@ const uniqueFound = new Set(found);
 const knownKeys = new Set(known.axe.map((k) => `${k.screen}|${k.rule}|${k.target}`));
 for (const key of uniqueFound) if (!knownKeys.has(key)) failures.push(`new axe violation: ${key}`);
 for (const key of knownKeys) if (!uniqueFound.has(key)) failures.push(`a11y-known.json lists something that's gone, so remove it: ${key}`);
-const knownKeyboard = new Set(known.keyboard.map((k) => k.path));
-const keyboardFailed = results.filter((r) => r.keyboard && r.status === "fail").map((r) => r.keyboard);
-const unexpected = failures.filter((f) => !keyboardFailed.some((k) => f.startsWith(`keyboard: ${k}`) && knownKeyboard.has(k)));
-for (const path of knownKeyboard) if (!keyboardFailed.includes(path)) unexpected.push(`a11y-known.json lists a keyboard failure that's gone, so remove it: ${path}`);
+// A known keyboard failure is exempt only with its exact message, so any other break on that path still fails the run.
+const knownKeyboard = new Set(known.keyboard.map((k) => `keyboard: ${k.path}: ${k.failure}`));
+const unexpected = failures.filter((f) => !knownKeyboard.has(f));
+for (const entry of knownKeyboard) if (!failures.includes(entry)) unexpected.push(`a11y-known.json lists a keyboard failure that's gone, so remove it: ${entry}`);
 
 mkdirSync(join(here, "results"), { recursive: true });
 const file = join(here, "results", `a11y-${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}.json`);
