@@ -122,7 +122,9 @@ async fn list_oversight_rooms(
             "agent_id": row["principal_id"], "org_id": row["org_id"],
         })));
     }
-    Ok(Response::from_json(&json!({ "rooms": rooms, "truncated": truncated }))?)
+    Ok(Response::from_json(
+        &json!({ "rooms": rooms, "truncated": truncated }),
+    )?)
 }
 
 async fn me(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiError> {
