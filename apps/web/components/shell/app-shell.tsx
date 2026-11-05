@@ -52,7 +52,7 @@ export function AppShell({ unread, profile, staleOrg = false, children }: { unre
                           <span>{item.label}</span>
                         </Link>
                       </SidebarMenuButton>
-                      {item.href === "/attention" && unread ? <SidebarMenuBadge aria-label={`${unread} unread`}>{unread}</SidebarMenuBadge> : null}
+                      {item.href === "/attention" && unread ? <SidebarMenuBadge>{unread}<span className="sr-only"> unread</span></SidebarMenuBadge> : null}
                     </SidebarMenuItem>
                   ))}
                 </SidebarMenu>
