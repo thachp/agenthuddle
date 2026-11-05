@@ -1,6 +1,6 @@
 # ADR 0003: Removing a person from an organization reaches their rooms
 
-**Status:** Built in the PR that adds this file. The behavior for a departed room owner needs the owner's ruling.
+**Status:** Built. [Decision 32](../spec/PRODUCT.md#decisions-needed) settles what a departed room owner gets back.
 
 ## Context
 
@@ -27,7 +27,7 @@ A room's owner isn't a member row, and nobody else can own the room until decisi
 - They aren't a participant. Their tasks follow the departure table, nothing more reaches their inbox, and they can't be given work. Their pending invitations are withdrawn.
 - If the room has no admin, nobody can manage its access or take over its tasks until the owner rejoins or gap 2's transfer exists. A task needing attention tells nobody in the meantime.
 
-If they rejoin, they get full owner authority back, even from a member invitation. The first command they send in the room clears `owner_left_at` and records `owner.returned`, so a stale form they sent then may need one retry, because that changes the policy version. Reading doesn't record anything. The room keeps the start of their latest membership from their commands, so a departure delayed past their return doesn't take them out again, and an older departure can't lower `owner_left_at`. If the delayed departure arrives before their first command after rejoining, it does take them out until that command. Their old tasks don't return to them. **The owner needs to rule on whether a rejoin should restore this,** and it depends on gap 2.
+If they rejoin, they get full owner authority back, even from a member invitation. The first command they send in the room clears `owner_left_at` and records `owner.returned`, so a stale form they sent then may need one retry, because that changes the policy version. Reading doesn't record anything. The room keeps the start of their latest membership from their commands, so a departure delayed past their return doesn't take them out again, and an older departure can't lower `owner_left_at`. If the delayed departure arrives before their first command after rejoining, it does take them out until that command. Their old tasks don't return to them. [Decision 32](../spec/PRODUCT.md#decisions-needed) keeps this until ownership transfer exists.
 
 ## Consequences
 

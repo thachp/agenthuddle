@@ -24,7 +24,7 @@ This matrix makes the approved model testable. [Access presets](PRODUCT.md#acces
 
 | Action | Required authority | Boundary |
 | --- | --- | --- |
-| Create a workroom | Authenticated person allowed to create in the owning organization | Creator becomes the workroom owner atomically. No client-supplied owner override. |
+| Create a workroom | Authenticated person who's an admin of the owning organization, for now ([decision 33](PRODUCT.md#decisions-needed)). Everyone administers their personal organization | Creator becomes the workroom owner atomically. No client-supplied owner override. |
 | Appoint/remove workroom administrators | Workroom owner | Human principals only; ordinary admins cannot create further admins. Ownership transfer is a separate operation under decision 8, and isn't built yet. |
 | Invite, admit, scope or revoke an agent in a private workroom | Workroom owner or appointed administrator | Agent-owner connection/consent is also required; a room admin cannot override it. |
 | Configure public participation and work-role scopes | Workroom owner or appointed administrator | Only approved local permission scopes; no admin, external-provider or credential grant via a work-role definition. |

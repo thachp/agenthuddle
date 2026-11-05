@@ -1760,6 +1760,10 @@ impl Workspace {
 
     fn init(&self, identity: &Identity, name: String) -> R<Value> {
         let sql = self.state.storage().sql();
+        // Decision 33: only an admin of the organization the room would belong to can create it.
+        if !identity.admin_orgs.contains(&identity.org) {
+            return Err(ApiError::not_allowed());
+        }
         if store::is_initialized(&sql)? {
             return Err(ApiError::not_allowed());
         }
