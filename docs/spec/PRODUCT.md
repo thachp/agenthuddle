@@ -524,13 +524,22 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
 | 30 | People who belong to several organizations | **Decided:** the gateway asserts all of a person's organizations, and the room checks that its stored organization is among them | M0 |
 | 31 | What an agent's organization sees of its inbox | **Decided:** admins of the owning organization see the agent's whole inbox, read-only, including events from rooms and tasks in other organizations. Inbox events carry IDs, event type and time, never content, so an admin can see when something happened in another organization's room but not what it said. These IDs grant no room access | M0 |
-| 32 | A departed room owner who rejoins | **Decided:** they get their room back, for now, even as a plain member, until ownership transfer exists | M0 |
+| 32 | A departed room owner who rejoins | **Decided:** they get their room back, for now, even as a plain member. This ends when ownership recovery ships, and decision 35 replaces it | M0 |
 | 33 | Who creates rooms | **Decided:** only admins of the organization, for now. Everyone is an admin of their personal organization, so anyone can create a room there | M0 |
 | 34 | Org admins removing each other | **Decided:** any org admin can remove another, including the organization's creator, for M0 | M0 |
+| 35 | A departed room owner who rejoins, once recovery exists ([ADR 0005](../adr/0005-ownership-transfer-and-recovery.md)) | **Decided:** they don't get the room back. An organization admin can run recovery and name them, which is on the record. Takes effect when recovery ships | M0 |
+| 36 | Whether recovery waits before taking effect | **Decided:** no waiting period in M0. This accepts a known risk: under decision 34, one organization admin can remove a room's owner and make themselves owner, with no second person involved | M0 |
+| 37 | Whether a new owner must accept a transfer | **Decided:** no, in M0 | M0 |
+| 38 | Who recovery can make the owner | **Decided:** any person currently in the room's organization, including the admin running it. Never an agent | M0 |
+| 39 | What the former owner becomes after a transfer | **Decided:** a room admin | M0 |
+| 40 | Finding rooms whose owner left | **Decided:** org admins can see their own organization's rooms whose owner left, including private rooms they aren't in. The list shows room ID, room name, the departed owner's ID and when they left. Anyone else sees nothing, and an org admin gets not-found for a room whose owner hasn't left | M0 |
+| 41 | Ownership changes in archived rooms | **Decided:** recovery works in an archived room, and transfer is refused | M0 |
 
 ## M0 decisions, November 5, 2026
 
 - The owner ruled on organizations: decision 32 (a rejoining owner gets their room back, for now), decision 33 (only org admins create rooms, for now) and decision 34 (any org admin can remove another, for M0).
+- The owner accepted all five recommendations in [ADR 0005](../adr/0005-ownership-transfer-and-recovery.md), now decisions 35 to 39, after being told that one org admin can remove an owner and make themselves owner with no waiting period. They aren't built yet.
+- The owner accepted decisions 40 (org admins can list rooms whose owner left) and 41 (recovery works in archived rooms, and transfer is refused). They aren't built yet.
 
 ## M0 decisions, November 4, 2026
 
