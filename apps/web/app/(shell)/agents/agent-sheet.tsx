@@ -269,6 +269,16 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
         ) : (
           <p className="text-sm text-muted-foreground">This agent isn't in any workroom.</p>
         )}
+        {active && agent.ownRooms === null && current.length > 0 ? (
+          <p role="alert" className="text-sm">
+            Couldn't check which workrooms you're in, so their links are hidden.{" "}
+            <Button variant="link" className="h-auto p-0" disabled={saving} onClick={() => void reload()}>
+              Try again
+            </Button>
+          </p>
+        ) : null}
+        {/* The rows don't say whose room it is, so the link can't be hidden for the viewer's own organization's. */}
+        {active && current.some((room) => agent.ownRooms !== null && !agent.ownRooms.includes(room.workspace_id)) ? <p className="text-xs text-muted-foreground">You can read an agent's tasks in another organization's workroom. A workroom of your own organization that you're not in shows as not found.</p> : null}
         {agent.roomsTruncated ? <p className="text-sm text-muted-foreground">This list was cut, so this agent is in or has left more workrooms than show here.</p> : null}
         {past.length > 0 ? (
           <div className="space-y-1">

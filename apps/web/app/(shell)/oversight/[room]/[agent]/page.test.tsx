@@ -9,8 +9,6 @@ vi.mock("@/lib/gateway/server", () => ({
   gatewayQuery: async (path: string) => {
     state.asked.push(path);
     if (path.endsWith("/tasks")) return state.tasks;
-    if (path === "/api/v1/oversight/rooms") return { ok: true, data: { rooms: [{ workspace_id: "ws_1", workspace_name: "Their room", agent_id: "agt_1" }], truncated: false } };
-    if (path === "/api/agents") return { ok: true, data: { agents: [{ id: "agt_1", name: "Code Agent" }] } };
     return { ok: false, status: 404, code: "not_found" };
   },
   getIdentity: async () => ({ ok: true, data: { id: "per_me" } }),
@@ -20,6 +18,11 @@ vi.mock("@/lib/gateway/server", () => ({
 
 const { default: Oversight } = await import("./page");
 const show = async (room = "ws_1", agent = "agt_1") => render((await Oversight({ params: Promise.resolve({ room, agent }) })) as ReactElement);
+const browser = vi.fn(async (url: string) => {
+  if (url === "/api/v1/oversight/rooms") return Response.json({ rooms: [{ workspace_id: "ws_1", workspace_name: "Their room", agent_id: "agt_1" }], truncated: false });
+  if (url === "/api/agents") return Response.json({ agents: [{ id: "agt_1", name: "Code Agent" }] });
+  return Response.json({ error: { code: "not_found" } }, { status: 404 });
+});
 const refused = (status: number, code: string) => ({ ok: false, status, code });
 
 describe("the oversight page", () => {
@@ -27,13 +30,17 @@ describe("the oversight page", () => {
     setUrl("/oversight/ws_1/agt_1");
     state.asked.length = 0;
     state.tasks = { ok: true, data: { tasks: [], next_cursor: null } };
+    browser.mockClear();
+    vi.stubGlobal("fetch", browser);
   });
 
   it("is labeled read-only, and states the viewer's scope", async () => {
     await show();
-    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Viewing as: Code Agent · read-only oversight");
-    expect(screen.getByText("Workroom: Their room")).toBeInTheDocument();
-    expect(screen.getByText(/You have no role in this workroom/)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 1, name: "Viewing as: Code Agent · read-only oversight" })).toBeInTheDocument();
+    expect(await screen.findByText("Workroom: Their room")).toBeInTheDocument();
+    expect(screen.getByText(/It gives you no role in this workroom/)).toBeInTheDocument();
+    // Only the read that decides. This page runs again on every navigation.
+    expect(state.asked).toEqual(["/api/v1/workspaces/ws_1/agents/agt_1/tasks"]);
   });
 
   it.each([
@@ -57,10 +64,12 @@ describe("the oversight page", () => {
     await expect(show()).rejects.toBeInstanceOf(RedirectSignal);
   });
 
-  it("an outage isn't not-found, and still says what this page is", async () => {
-    state.tasks = refused(503, "error");
-    await show();
+  it.each([429, 503])("a %i isn't not-found, and says nothing about oversight, even for an ID that doesn't exist", async (status) => {
+    state.tasks = refused(status, "error");
+    await show("ws_made_up", "agt_made_up");
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh");
-    expect(screen.getByText(/You have no role in this workroom/)).toBeInTheDocument();
+    expect(screen.queryByText(/oversight|administer|no role/i)).toBeNull();
+    expect(state.asked).toEqual(["/api/v1/workspaces/ws_made_up/agents/agt_made_up/tasks"]);
+    expect(browser).not.toHaveBeenCalled();
   });
 });

@@ -274,6 +274,7 @@ describe("the agent's workrooms", () => {
     await opened();
     expect(screen.getByRole("link", { name: "Open Platform" })).toHaveAttribute("href", "/w/ws_mine/overview");
     expect(screen.getByRole("link", { name: "View this agent's tasks in Their room, read-only" })).toHaveAttribute("href", "/oversight/ws_other/agt_1");
+    expect(screen.getByText(/that you're not in shows as not found/)).toBeInTheDocument();
   });
 
   it("a room it left shows honestly: its old name, no Withdraw, no link, and nothing about the room since", async () => {
@@ -350,6 +351,11 @@ describe("the agent's workrooms", () => {
     await opened();
     expect(screen.queryByRole("link", { name: /Open Platform|read-only/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Withdraw from Platform" })).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("so their links are hidden");
+    special = () => undefined;
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("link", { name: "Open Platform" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("a failed directory read says so rather than hiding the agent's skills", async () => {

@@ -22,7 +22,19 @@ describe("your agents' workrooms", () => {
     expect(await screen.findByRole("link", { name: "View tasks in Their room, read-only" })).toHaveAttribute("href", "/oversight/ws_theirs/agt_1");
     expect(screen.getByRole("link", { name: "Open Mine" })).toHaveAttribute("href", "/w/ws_mine/overview");
     expect(screen.getByText(/because you administer its organization/)).toBeInTheDocument();
+    expect(screen.getByText(/that you're not in shows as not found/)).toBeInTheDocument();
     expect(screen.getAllByText("Code Agent")).toHaveLength(2);
+  });
+
+  it("a failed read of the viewer's own rooms hides links, says so, and Try again brings them back", async () => {
+    answers.own = () => new Response("{}", { status: 503 });
+    render(<OversightRooms agents={{}} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("so their links are hidden");
+    expect(screen.queryByRole("link")).toBeNull();
+    answers.own = own("ws_mine");
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("link", { name: "Open Mine" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("says when the list was cut", async () => {

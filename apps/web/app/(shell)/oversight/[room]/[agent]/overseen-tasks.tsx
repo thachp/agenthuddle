@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { Tabs } from "radix-ui";
 import { useRef, useState } from "react";
 import { AgentContent, AuthorLine } from "@/components/agent-content/agent-content";
@@ -32,12 +33,16 @@ async function read<T>(path: string, signal: AbortSignal) {
   return null;
 }
 
+/** Anything but an outage says something about this viewer's access, and needs the same answer a Sheet's read gets. */
+const isRefusal = (result: { status: number }) => result.status < 500 && result.status !== 429;
+
 export function OverseenTasks({ workspace, agent, workspaceLabel, initial, initialCursor, me, names, orgNames }: Scope & { workspaceLabel: string; initial: Task[]; initialCursor: number | null }) {
   const scope = { workspace, agent, me, names, orgNames };
   const [more, setMore] = useState<Task[]>([]);
   const [cursor, setCursor] = useState(initialCursor);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
+  const router = useRouter();
   const tasks = [...initial, ...more.filter((task) => !initial.some((first) => first.id === task.id))];
 
   async function loadMore() {
@@ -45,6 +50,12 @@ export function OverseenTasks({ workspace, agent, workspaceLabel, initial, initi
     setFailed(false);
     const result = await clientQuery<{ tasks: Task[]; next_cursor: number | null }>(`${tasksPath(scope)}?cursor=${cursor}`).catch(() => null);
     setLoading(false);
+    if (result !== null && !result.ok && isRefusal(result)) {
+      // The same as anywhere else here: a lapsed session signs in, and lost access is the page's one not-found.
+      if (result.status === 401) goToSignIn();
+      else router.refresh();
+      return;
+    }
     if (!result?.ok) return setFailed(true);
     setMore((previous) => [...previous, ...result.data.tasks]);
     setCursor(result.data.next_cursor);
@@ -128,7 +139,7 @@ function OverseenTask({ api, scope }: { api: SheetApi<Overseen>; scope: Scope })
         <Tabs.List aria-label="Task sections" className="flex gap-1 overflow-x-auto border-b">
           {[
             ["details", "Details"],
-            ["thread", `Thread (${data.thread.length})`],
+            ["thread", "Thread"],
             ["activity", "Activity"],
           ].map(([value, label]) => (
             <Tabs.Trigger key={value} value={value} className="border-b-2 border-transparent px-3 py-2 whitespace-nowrap text-muted-foreground focus-visible:ring-[3px] focus-visible:ring-ring focus-visible:outline-none data-[state=active]:border-primary data-[state=active]:font-medium data-[state=active]:text-foreground">
@@ -139,8 +150,9 @@ function OverseenTask({ api, scope }: { api: SheetApi<Overseen>; scope: Scope })
         <Tabs.Content value="details" className="mt-4 space-y-4 outline-none">
           <Details data={data} me={me} names={names} orgNames={orgNames} />
         </Tabs.Content>
-        <Tabs.Content value="thread" className="mt-4 outline-none">
-          <Thread key={task.id} data={data} scope={scope} />
+        {/* Stays mounted, so messages already paged in are still there on coming back. */}
+        <Tabs.Content value="thread" forceMount className="mt-4 outline-none data-[state=inactive]:hidden">
+          <Thread key={task.id} api={api} scope={scope} />
         </Tabs.Content>
         <Tabs.Content value="activity" className="mt-4 outline-none">
           <Activity data={data} me={me} names={names} orgNames={orgNames} />
@@ -150,7 +162,8 @@ function OverseenTask({ api, scope }: { api: SheetApi<Overseen>; scope: Scope })
   );
 }
 
-function Thread({ data, scope }: { data: Overseen; scope: Scope }) {
+function Thread({ api, scope }: { api: SheetApi<Overseen>; scope: Scope }) {
+  const { data, run } = api;
   const { me, names, orgNames } = scope;
   const [more, setMore] = useState<Message[]>([]);
   const [exhausted, setExhausted] = useState(false);
@@ -169,6 +182,12 @@ function Thread({ data, scope }: { data: Overseen; scope: Scope }) {
     const result = await clientQuery<{ messages: Message[] }>(`${tasksPath(scope)}/${encodeURIComponent(data.task.id)}/messages?after=${messages.at(-1)?.seq ?? 0}`).catch(() => null);
     busy.current = false;
     setLoading(false);
+    if (result !== null && !result.ok && isRefusal(result)) {
+      if (result.status === 401) goToSignIn();
+      // Reads the task again, which closes to the one not-found message if access has gone.
+      else await run(async () => ({ ok: true, data: null }));
+      return;
+    }
     if (!result?.ok) return setFailed(true);
     setMore((previous) => [...previous, ...result.data.messages]);
     if (result.data.messages.length < THREAD_PAGE) setExhausted(true);

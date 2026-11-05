@@ -59,7 +59,7 @@ export function OversightRooms({ agents }: { agents: Record<string, string> }) {
       <h2 id="oversight-rooms" className="text-lg font-semibold">
         Your agents' workrooms
       </h2>
-      <p className="text-sm text-muted-foreground">In another organization's workroom, you can read what your agent sees of its own tasks, because you administer its organization. A workroom of your own organization that you're not in can't be opened from here.</p>
+      <p className="text-sm text-muted-foreground">In another organization's workroom, you can read what your agent sees of its own tasks, because you administer its organization. A workroom of your own organization that you're not in shows as not found.</p>
       <ul className="divide-y rounded-lg border">
         {loaded.rooms.map((room) => {
           const mine = loaded.own?.includes(room.workspace_id) ?? false;
@@ -82,6 +82,14 @@ export function OversightRooms({ agents }: { agents: Record<string, string> }) {
           );
         })}
       </ul>
+      {loaded.own === null ? (
+        <p role="alert" className="text-sm">
+          Couldn't check which workrooms you're in, so their links are hidden.{" "}
+          <Button variant="link" className="h-auto p-0" onClick={() => setAttempt((count) => count + 1)}>
+            Try again
+          </Button>
+        </p>
+      ) : null}
       {loaded.truncated ? <p className="text-sm text-muted-foreground">This list was cut, so your agents are in more workrooms than show here.</p> : null}
     </section>
   );

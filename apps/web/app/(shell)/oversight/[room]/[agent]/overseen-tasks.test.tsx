@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { currentUrl, setUrl } from "@/test/next-navigation";
+import { currentUrl, routerCalls, setUrl } from "@/test/next-navigation";
 import type { Task } from "../../../w/[id]/tasks/task-model";
 import { OverseenTasks, THREAD_PAGE } from "./overseen-tasks";
 
@@ -11,11 +11,15 @@ const message = (seq: number, external = true) => ({ id: `msg_${seq}`, seq, from
 const HISTORY = [{ seq: 1, id: "evt_1", type: "task.offered", from: FROM, external: true, reason: null, prior_status: null, new_status: "offered", created_at: 1 }];
 const BASE = "/api/v1/workspaces/ws_1/agents/agt_1/tasks";
 
+const signIn = vi.hoisted(() => vi.fn());
+vi.mock("../../../w/[id]/tasks/go-to-sign-in", () => ({ goToSignIn: signIn }));
+
 const calls: { url: string; method: string }[] = [];
 let answer: (url: string) => Response | undefined;
 
 beforeEach(() => {
   calls.length = 0;
+  signIn.mockClear();
   answer = () => undefined;
   setUrl("/oversight/ws_1/agt_1");
   vi.stubGlobal(
@@ -44,6 +48,21 @@ describe("the oversight list", () => {
   it("says when there are none", () => {
     render(<OverseenTasks workspace="ws_1" agent="agt_1" workspaceLabel="Their room" initial={[]} initialCursor={null} me="per_me" names={{}} orgNames={{}} />);
     expect(screen.getByText(/isn't party to any tasks/)).toBeInTheDocument();
+  });
+
+  it("loading more: a lapsed session signs in, lost access goes to the page's not-found, and an outage says so", async () => {
+    answer = (url) => (url.includes("?cursor=") ? new Response("{}", { status: 401 }) : undefined);
+    render(<Screen cursor={50} />);
+    const more = screen.getByRole("button", { name: "Load more" });
+    await userEvent.click(more);
+    await vi.waitFor(() => expect(signIn).toHaveBeenCalledTimes(1));
+    answer = (url) => (url.includes("?cursor=") ? Response.json({ error: { code: "workspace_not_found" } }, { status: 404 }) : undefined);
+    await userEvent.click(more);
+    await vi.waitFor(() => expect(routerCalls.refresh).toBe(1));
+    expect(screen.queryByText("Couldn't load more.")).toBeNull();
+    answer = (url) => (url.includes("?cursor=") ? new Response("{}", { status: 429 }) : undefined);
+    await userEvent.click(more);
+    expect(await screen.findByText("Couldn't load more.")).toBeInTheDocument();
   });
 
   it("pages through the cursor", async () => {
@@ -80,12 +99,12 @@ describe("the oversight Sheet", () => {
     await open();
     expect(document.querySelector("img")).toBeNull();
     expect(screen.getByText(/Image not loaded/)).toBeInTheDocument();
-    expect(screen.getByText("External")).toBeInTheDocument();
+    expect(screen.getAllByText("External").length).toBeGreaterThan(0);
   });
 
   it("the thread comes from its own route, and marks only what's external", async () => {
     await open();
-    await userEvent.click(screen.getByRole("tab", { name: "Thread (2)" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Thread" }));
     expect(screen.getByText("Message 1").closest("article")).toHaveTextContent("External");
     expect(screen.getByText("Message 2").closest("article")).not.toHaveTextContent("External");
   });
@@ -97,10 +116,39 @@ describe("the oversight Sheet", () => {
       return undefined;
     };
     await open();
-    await userEvent.click(screen.getByRole("tab", { name: `Thread (${THREAD_PAGE})` }));
+    await userEvent.click(screen.getByRole("tab", { name: "Thread" }));
     await userEvent.click(screen.getByRole("button", { name: "Load newer messages" }));
     expect(await screen.findByText(`Message ${THREAD_PAGE + 1}`)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Load newer messages" })).toBeNull();
+  });
+
+  it("messages already paged in are still there after switching tabs, and the label claims no total", async () => {
+    answer = (url) => {
+      if (url === `${BASE}/tsk_1/messages`) return Response.json({ messages: Array.from({ length: THREAD_PAGE }, (_, index) => message(index + 1)) });
+      if (url === `${BASE}/tsk_1/messages?after=${THREAD_PAGE}`) return Response.json({ messages: [message(THREAD_PAGE + 1)] });
+      return undefined;
+    };
+    await open();
+    expect(screen.queryByRole("tab", { name: /\d/ })).toBeNull();
+    await userEvent.click(screen.getByRole("tab", { name: "Thread" }));
+    await userEvent.click(screen.getByRole("button", { name: "Load newer messages" }));
+    await screen.findByText(`Message ${THREAD_PAGE + 1}`);
+    await userEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Thread" }));
+    expect(screen.getByText(`Message ${THREAD_PAGE + 1}`)).toBeInTheDocument();
+    expect(calls.filter((call) => call.url.includes("after=")).length).toBe(1);
+  });
+
+  it("a thread whose access has gone closes to the one not-found message, and a lapsed session signs in", async () => {
+    answer = (url) => (url === `${BASE}/tsk_1/messages` ? Response.json({ messages: Array.from({ length: THREAD_PAGE }, (_, index) => message(index + 1)) }) : url.includes("after=") ? new Response("{}", { status: 401 }) : undefined);
+    await open();
+    await userEvent.click(screen.getByRole("tab", { name: "Thread" }));
+    await userEvent.click(screen.getByRole("button", { name: "Load newer messages" }));
+    await vi.waitFor(() => expect(signIn).toHaveBeenCalledTimes(1));
+    answer = (url) => (url.startsWith(`${BASE}/tsk_1`) ? Response.json({ error: { code: "workspace_not_found" } }, { status: 404 }) : undefined);
+    await userEvent.click(screen.getByRole("button", { name: "Load newer messages" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("We can't find that");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("a task the agent isn't party to gets the one not-found message, and nothing about it", async () => {
