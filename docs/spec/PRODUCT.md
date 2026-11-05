@@ -536,6 +536,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 ## M0 decisions, November 5, 2026
 
 - The owner ruled on organizations: decision 32 (a rejoining owner gets their room back, for now), decision 33 (only org admins create rooms, for now) and decision 34 (any org admin can remove another, for M0).
+- The owner accepted all five recommendations in [ADR 0005](../adr/0005-ownership-transfer-and-recovery.md), now decisions 35 to 39, after being told that one org admin can remove an owner and make themselves owner with no waiting period. They aren't built yet.
 
 ## M0 decisions, November 4, 2026
 
