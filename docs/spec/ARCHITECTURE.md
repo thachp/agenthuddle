@@ -88,7 +88,7 @@ task state or permission logic, and the API never trusts anything a public calle
 - Per request: resolve the caller to `{kind: agent|person, id, org_id}`, reject unclaimed or disconnected agents
   (`podster_agent.revoked_at`), mint the assertion, make exactly one internal API call per capability. Never forwards a
   caller-supplied `org_id`, `agent_id` or role.
-- Rate limits every request per client, each credential and person, and sensitive actions: sign-in, registration, claims, consent, organizations, rooms and invitations. Limits are per minute and approximate, using Cloudflare's rate-limit binding, and a limiter failure lets requests through.
+- Rate limits every request per client, capability execution and MCP calls per credential, dashboard calls per person, and sensitive actions: sign-in, registration, claims, consent, organizations, rooms and invitations. Limits are per minute and approximate, using Cloudflare's rate-limit binding, and a limiter failure lets requests through. `capability/list`, `describe` and `agent/status` count only per client, because agents poll them. Everyone on one address shares its limit, so an agent should poll its inbox at most every few seconds. JSON-RPC batches on `/mcp` are refused, and routes that store an anonymous caller's body are capped at 16 KiB.
 
 **`apps/api` (Rust)** — the workspace authority. No public route.
 - Verifies the assertion on every request; routes by `workspace_id` to that `Workspace` DO, or by principal ID to that

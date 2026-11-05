@@ -108,21 +108,36 @@ function passwordSignInEnabled(env: Env) {
 export type RateLimit = { limit(options: { key: string }): Promise<{ success: boolean }> };
 const RETRY_AFTER_SECONDS = "60";
 
-const rateLimited = () => new Response(JSON.stringify({ error: { code: "rate_limited", message: "rate_limited" } }), { status: 429, headers: { "content-type": "application/json", "retry-after": RETRY_AFTER_SECONDS } });
+/**
+ * In the shape each kind of client reads. OAuth clients need a standard error: the MCP SDK treats anything else as
+ * unrecoverable and starts a new consent, which a headless agent can't complete. The Agent Auth SDK reads `error`.
+ */
+function rateLimited(path = "") {
+  const body = path.startsWith("/oauth/") ? { error: "temporarily_unavailable", error_description: "rate_limited" } : path.startsWith("/api/auth/") ? { error: "rate_limited", message: "rate_limited" } : { error: { code: "rate_limited", message: "rate_limited" } };
+  return new Response(JSON.stringify(body), { status: 429, headers: { "content-type": "application/json", "retry-after": RETRY_AFTER_SECONDS } });
+}
+
+let limiterFailureLogged = false;
 
 /** Limits protect against abuse, so a limiter failure doesn't take the service down. The limits are approximate by design. */
 async function withinLimit(limiter: RateLimit, key: string) {
   try {
     return (await limiter.limit({ key })).success;
   } catch (error) {
-    console.error("rate limiter failed", error);
+    // Once per isolate, so a failing limiter can't be turned into a flood of logs.
+    if (!limiterFailureLogged) console.error("rate limiter failed", error);
+    limiterFailureLogged = true;
     return true;
   }
 }
 
+const WORKER_SUBREQUEST_IP = "2a06:98c0:3600::103";
+
 /** Cloudflare sets this and overwrites any client value. An IPv6 client controls a whole /64, so it counts as one. */
 export function clientKey(request: Request) {
   const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+  // Cloudflare gives every request from another zone's Worker this one address, and names the zone in `cf-worker`.
+  if (ip === WORKER_SUBREQUEST_IP) return `worker:${request.headers.get("cf-worker") ?? "unknown"}`;
   if (!ip.includes(":")) return ip;
   const [head, tail = ""] = ip.toLowerCase().split("::");
   const left = head ? head.split(":") : [];
@@ -242,7 +257,7 @@ export function createAuth(env: Env) {
           const definition = CAPABILITIES.find((c) => c.name === capability);
           if (!definition) throw new APIError("BAD_REQUEST", { message: "unknown_capability" });
           // Before the token is spent, so an agent that was limited can retry with the same one.
-          if (!(await withinLimit(env.RL_ACCOUNT, `agent:${agentSession.agent.id}`))) throw new APIError("TOO_MANY_REQUESTS", { message: "rate_limited" }, { "retry-after": RETRY_AFTER_SECONDS });
+          if (!(await withinLimit(env.RL_ACCOUNT, `agent:${agentSession.agent.id}`))) throw new APIError("TOO_MANY_REQUESTS", { error: "rate_limited", message: "rate_limited" }, { "retry-after": RETRY_AFTER_SECONDS });
           const spends = spentToken(agentSession.agent.id, ctx.headers?.get("authorization"));
           if (!spends) throw new APIError("UNAUTHORIZED", { message: "jwt_replay" });
           let identity: Identity;
@@ -775,6 +790,8 @@ const mcpHandler = {
     if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
     const externalId = ctx.props?.externalId ?? "";
     if (!(await withinLimit(env.RL_ACCOUNT, `mcp:${externalId}`))) return rateLimited();
+    // One batch would run up to 100 calls for one count. The protocol's clients send single messages.
+    if (Array.isArray(await request.clone().json().catch(() => null))) return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "batch requests aren't supported" } }, 400);
     const server = new McpServer({ name: "podster", version: "0.0.0" });
     for (const capability of CAPABILITIES) {
       server.registerTool(capability.name, { description: capability.description, inputSchema: zodShape(capability) as any }, async (args: Record<string, unknown>) => {
@@ -809,10 +826,40 @@ function withHsts(response: Response, env: Env) {
 /** The first check on every request, ahead of any auth or storage work. */
 async function limitByClient(request: Request, env: Env) {
   const client = clientKey(request);
-  if (!(await withinLimit(env.RL_GENERAL, `ip:${client}`))) return rateLimited();
-  const route = sensitiveRoute(request.method, new URL(request.url).pathname);
-  if (route && !(await withinLimit(env.RL_SENSITIVE, `${route}:${client}`))) return rateLimited();
+  const path = new URL(request.url).pathname;
+  if (!(await withinLimit(env.RL_GENERAL, `ip:${client}`))) return rateLimited(path);
+  const route = sensitiveRoute(request.method, path);
+  if (route && !(await withinLimit(env.RL_SENSITIVE, `${route}:${client}`))) return rateLimited(path);
   return null;
+}
+
+/** Routes that store what an anonymous caller sends, so a limit on requests alone would still allow large records. */
+const MAX_STORED_BODY_BYTES = 16 * 1024;
+const storesAnonymousBody = (method: string, path: string) => method === "POST" && (path === "/oauth/register" || path === "/api/auth/agent/register");
+
+/** Reads the stream as well as trusting the header, because a chunked body has no length. */
+async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | null> {
+  if (Number(request.headers.get("content-length") ?? 0) > MAX_STORED_BODY_BYTES) return null;
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = reader ? await reader.read() : { done: true, value: undefined };
+    if (done) break;
+    size += value.length;
+    if (size > MAX_STORED_BODY_BYTES) {
+      await reader?.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return body;
 }
 
 /**
@@ -834,6 +881,11 @@ export default {
     if (insecure) return insecure;
     const limitedResponse = await limitByClient(request, env);
     if (limitedResponse) return withHsts(limitedResponse, env);
+    if (storesAnonymousBody(request.method, new URL(request.url).pathname)) {
+      const body = await boundedBody(request);
+      if (!body) return withHsts(json({ error: "invalid_client_metadata", error_description: "body_too_large", message: "body_too_large" }, 413), env);
+      request = new Request(request, { body });
+    }
     if (provider?.base !== env.BASE_URL) {
       provider = {
         base: env.BASE_URL,

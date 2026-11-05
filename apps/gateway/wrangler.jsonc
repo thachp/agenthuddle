@@ -11,9 +11,9 @@
   "vars": { "BASE_URL": "https://gateway.podster.dev" },
   // Per minute: anything per client, per credential or person, and sensitive actions. Bindings aren't inherited by environments.
   "ratelimits": [
-    { "name": "RL_GENERAL", "namespace_id": "1001", "simple": { "limit": 600, "period": 60 } },
-    { "name": "RL_ACCOUNT", "namespace_id": "1002", "simple": { "limit": 120, "period": 60 } },
-    { "name": "RL_SENSITIVE", "namespace_id": "1003", "simple": { "limit": 20, "period": 60 } }
+    { "name": "RL_GENERAL", "namespace_id": "73101", "simple": { "limit": 600, "period": 60 } },
+    { "name": "RL_ACCOUNT", "namespace_id": "73102", "simple": { "limit": 120, "period": 60 } },
+    { "name": "RL_SENSITIVE", "namespace_id": "73103", "simple": { "limit": 20, "period": 60 } }
   ],
   "env": {
     "staging": {
@@ -26,9 +26,9 @@
       "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "57637530b0404f209d89b9ab00b5ef0c" }],
       "vars": { "BASE_URL": "https://gateway-staging.podster.dev" },
       "ratelimits": [
-        { "name": "RL_GENERAL", "namespace_id": "2001", "simple": { "limit": 600, "period": 60 } },
-        { "name": "RL_ACCOUNT", "namespace_id": "2002", "simple": { "limit": 120, "period": 60 } },
-        { "name": "RL_SENSITIVE", "namespace_id": "2003", "simple": { "limit": 20, "period": 60 } }
+        { "name": "RL_GENERAL", "namespace_id": "73201", "simple": { "limit": 600, "period": 60 } },
+        { "name": "RL_ACCOUNT", "namespace_id": "73202", "simple": { "limit": 120, "period": 60 } },
+        { "name": "RL_SENSITIVE", "namespace_id": "73203", "simple": { "limit": 20, "period": 60 } }
       ]
     }
   }

@@ -1005,6 +1005,15 @@ describe("rate limits", () => {
     expect(res.headers.get("retry-after")).toBe("60");
     expect((await res.json<any>()).error.code).toBe("rate_limited");
   };
+  /** OAuth and Agent Auth clients each read their own error shape. */
+  const expectLimitedFor = async (path: string, res: Response) => {
+    expect(res.status, path).toBe(429);
+    expect(res.headers.get("retry-after"), path).toBe("60");
+    const body = await res.json<any>();
+    if (path.startsWith("/oauth/")) expect(body, path).toEqual({ error: "temporarily_unavailable", error_description: "rate_limited" });
+    else if (path.startsWith("/api/auth/")) expect(body, path).toEqual({ error: "rate_limited", message: "rate_limited" });
+    else expect(body.error.code, path).toBe("rate_limited");
+  };
 
   it("counts each client separately, and an IPv6 network as one client", () => {
     const ip = (value: string) => clientKey(new Request(BASE, { headers: { "cf-connecting-ip": value } }));
@@ -1016,14 +1025,20 @@ describe("rate limits", () => {
     expect(ip("2001:db8::1")).toBe("2001:db8:0:0");
     expect(ip("2001:db8:1:3::1")).not.toBe(ip("2001:db8:1:2::1"));
     expect(clientKey(new Request(BASE))).toBe("unknown");
+    // Requests from other zones' Workers all arrive from one address, so they're told apart by zone.
+    const worker_ = (zone: string) => clientKey(new Request(BASE, { headers: { "cf-connecting-ip": "2a06:98c0:3600::103", "cf-worker": zone } }));
+    expect(worker_("one.example")).toBe("worker:one.example");
+    expect(worker_("two.example")).not.toBe(worker_("one.example"));
+    // Anyone else can send the header, and it changes nothing for them.
+    expect(clientKey(new Request(BASE, { headers: { "cf-connecting-ip": "203.0.113.9", "cf-worker": "spoofed" } }))).toBe("203.0.113.9");
   });
 
   it("refuses a client over its general limit before doing any work, on every route", async () => {
     const general = limiter((key) => key === "ip:203.0.113.9");
-    for (const path of ["/sign-in", "/mcp", "/.well-known/oauth-authorization-server", "/api/v1/me"]) {
+    for (const path of ["/sign-in", "/mcp", "/.well-known/oauth-authorization-server", "/api/v1/me", "/oauth/token", "/api/auth/agent-configuration"]) {
       const res = await send(path, { headers: from("203.0.113.9") }, { RL_GENERAL: general.fake, AUTH_SECRET: "" });
-      await expectLimited(res);
       expect(res.headers.get("strict-transport-security"), path).toBe("max-age=31536000");
+      await expectLimitedFor(path, res);
     }
     expect((await send("/sign-in", { headers: from("203.0.113.10") }, { RL_GENERAL: general.fake })).status).toBe(200);
   });
@@ -1033,7 +1048,7 @@ describe("rate limits", () => {
       expect(sensitiveRoute(method, path), path).toBe(route);
       const sensitive = limiter((key) => key === `${route}:203.0.113.9`);
       const res = await send(path, { method, headers: { ...from("203.0.113.9"), origin: BASE, "content-type": "application/json" }, body: method === "POST" ? "{}" : undefined }, { RL_SENSITIVE: sensitive.fake });
-      await expectLimited(res);
+      await expectLimitedFor(path, res);
     }
     for (const [method, path] of [["GET", "/sign-in"], ["GET", "/oauth/register"], ["POST", "/mcp"], ["GET", "/api/auth/agent-configuration"], ["POST", "/api/auth/capability/execute"]]) expect(sensitiveRoute(method, path), path).toBeNull();
   });
@@ -1047,7 +1062,7 @@ describe("rate limits", () => {
     const limited = await run({ RL_ACCOUNT: account.fake });
     expect(limited.status).toBe(429);
     expect(limited.headers.get("retry-after")).toBe("60");
-    expect((await limited.json<any>()).message).toBe("rate_limited");
+    expect(await limited.json<any>()).toMatchObject({ error: "rate_limited", message: "rate_limited" });
     expect(account.keys).toEqual([`agent:${agent.pluginId}`]);
     expect((await run({})).status).toBe(200);
     expect((await run({})).status).toBe(401);
@@ -1063,6 +1078,30 @@ describe("rate limits", () => {
     expect(account.keys[0]).toMatch(/^mcp:grant_/);
   });
 
+  it("refuses a batch on MCP, so one request can't run many calls", async () => {
+    const owner = await signUp();
+    const agent = await mcpAgent(owner);
+    const call_ = (id: number) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "get_identity", arguments: {} } });
+    const post_ = (body: unknown) => send("/mcp", { method: "POST", headers: { authorization: `Bearer ${agent.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify(body) });
+    const batch = await post_([call_(1), call_(2)]);
+    expect(batch.status).toBe(400);
+    expect(await batch.json<any>()).toMatchObject({ error: { code: -32600 } });
+    const single = await post_(call_(3));
+    expect(single.status).toBe(200);
+  });
+
+  it("caps what an anonymous caller can have stored, even with no declared length", async () => {
+    const big = JSON.stringify({ redirect_uris: ["https://client.test/cb"], client_name: "x".repeat(20_000), token_endpoint_auth_method: "none" });
+    const declared = await send("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: big });
+    expect(declared.status).toBe(413);
+    const stream = new Blob([big]).stream();
+    const chunked = await send("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: stream, duplex: "half" } as RequestInit);
+    expect(chunked.status).toBe(413);
+    expect((await send("/api/auth/agent/register", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer x" }, body: big })).status).toBe(413);
+    // Normal registrations are well under it, and still work.
+    expect((await post("/oauth/register", { redirect_uris: ["https://client.test/cb"], client_name: "normal", token_endpoint_auth_method: "none" })).status).toBe(201);
+  });
+
   it("limits code guessing on the claim page and form, for each person", async () => {
     const owner = await signUp();
     const agent = await registerAgent();
@@ -1070,7 +1109,8 @@ describe("rate limits", () => {
     const limits = { RL_SENSITIVE: sensitive.fake };
     await expectLimited(await send(`/claim?agent_id=${agent.pluginId}&code=${agent.userCode}`, { headers: { cookie: owner.cookie } }, limits));
     await expectLimited(await send("/claim", jsonPost({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org }, { cookie: owner.cookie }), limits));
-    expect(new Set(sensitive.keys).size).toBe(1);
+    const person = (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(owner.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId;
+    expect(sensitive.keys).toEqual([`claim:${person}`, `claim:${person}`]);
     expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ status: "pending" });
   });
 
@@ -1084,8 +1124,8 @@ describe("rate limits", () => {
     await expectLimited(await send("/api/v1/workspaces", jsonPost({ name: "x" }, { cookie: owner.cookie, "idempotency-key": unique("k") }), limits));
     await expectLimited(await send("/api/v1/workspaces/ws_x/invitations", jsonPost({}, { cookie: owner.cookie, "idempotency-key": unique("k") }), limits));
     await expectLimited(await send("/api/v1/invitations/accept", jsonPost({}, { cookie: owner.cookie }), limits));
-    const prefixes = sensitive.keys.map((key) => key.split(":")[0]);
-    expect(new Set(prefixes)).toEqual(new Set(["consent", "create-org", "invite-or-create"]));
+    const person = (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(owner.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId;
+    expect(new Set(sensitive.keys)).toEqual(new Set([`consent:${person}`, `create-org:${person}`, `invite-or-create:${person}`]));
     // Reads and the consent page don't count against these.
     const before = sensitive.keys.length;
     expect((await send("/api/v1/me", { headers: { cookie: owner.cookie } }, limits)).status).toBe(200);
@@ -1102,25 +1142,29 @@ describe("rate limits", () => {
     const account = limiter(() => true);
     await expectLimited(await send("/api/v1/me", { headers: { cookie: owner.cookie } }, { RL_ACCOUNT: account.fake }));
     await expectLimited(await send("/api/orgs", { headers: { cookie: owner.cookie } }, { RL_ACCOUNT: account.fake }));
-    expect(account.keys[0]).toMatch(/^person:/);
+    const person = (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(owner.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId;
+    expect(account.keys[0]).toBe(`person:${person}`);
   });
 
   it("keeps working if a limiter fails", async () => {
     const broken: RateLimit = { limit: async () => { throw new Error("limiter down"); } };
     const quiet = console.error;
-    console.error = () => {};
+    let logged = 0;
+    console.error = () => void logged++;
     try {
-      expect((await send("/sign-in", { headers: from("203.0.113.9") }, { RL_GENERAL: broken, RL_SENSITIVE: broken, RL_ACCOUNT: broken })).status).toBe(200);
+      for (let i = 0; i < 3; i++) expect((await send("/sign-in", { headers: from("203.0.113.9") }, { RL_GENERAL: broken, RL_SENSITIVE: broken, RL_ACCOUNT: broken })).status).toBe(200);
     } finally {
       console.error = quiet;
     }
+    // A failing limiter can't be used to flood the logs.
+    expect(logged).toBeLessThanOrEqual(1);
   });
 
   it("every deployed environment has all three limits, with its own counters", () => {
     const config = JSON.parse(e.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
     const expected = { RL_GENERAL: 600, RL_ACCOUNT: 120, RL_SENSITIVE: 20 };
     const ids = new Set<string>();
-    for (const environment of [config, config.env.staging]) {
+    for (const environment of [config, ...Object.values<any>(config.env)]) {
       const found = Object.fromEntries(environment.ratelimits.map((r: any) => [r.name, r.simple.limit]));
       expect(found).toEqual(expected);
       for (const r of environment.ratelimits) {
@@ -1128,7 +1172,7 @@ describe("rate limits", () => {
         ids.add(r.namespace_id);
       }
     }
-    expect(ids.size).toBe(6);
+    expect(ids.size).toBe(3 * (1 + Object.keys(config.env).length));
   });
 });
 
