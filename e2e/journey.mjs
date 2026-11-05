@@ -566,11 +566,9 @@ async function acceptance() {
     ok(unread > before, `the reviewer's unread count stayed at ${before} after a submission`);
     eq((await personA.must("POST", `/v1/workspaces/${room}/tasks/${offered.id}/verify`, { submission_no: submitted.submission_no })).status, "completed", "a person approving from the dashboard");
     const inbox = await personA.dash("GET", "/v1/inbox");
-    ok(inbox.ok || inbox.status === 404, `a person's inbox answered HTTP ${inbox.status}`);
-    if (!inbox.ok) report.gap("D21+", "people reading their inbox", `GET /api/v1/inbox answers HTTP ${inbox.status}: unread counts show on /v1/me, but the gateway doesn't let a person read or ack their inbox, so decision 21 can't be used yet.`);
+    eq(inbox.status, 200, "a person reading their inbox");
     const oversight = await personB.dash("GET", `/v1/agents/${guest.id}/inbox`);
-    ok(oversight.ok || oversight.status === 404, `oversight of an agent's inbox answered HTTP ${oversight.status}`);
-    if (!oversight.ok) report.gap("D21-o", "an owner looking at its agent's inbox", `GET /api/v1/agents/{agent}/inbox answers HTTP ${oversight.status}: the API has it and the gateway doesn't expose it.`);
+    eq(oversight.status, 200, "an org admin reading its agent's inbox");
   });
 
   await check("AC-26", "a real room and a random ID answer the same to a non-participant", async () => {

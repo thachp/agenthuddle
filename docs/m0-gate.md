@@ -165,7 +165,7 @@ Each was checked against the code by a test that ran or by reading, and the line
 | 6. Departure table | Holds | journey `AC-25`; `crates/core/src/lib.rs:646`; `apps/api/src/workspace.rs:911`. The person-review part of eligibility waits on decision 5 |
 | 8. Ownership transfer and recovery | **Not built** | Gap 2 |
 | 14. Guests creating tasks | Holds | journey `D14`; `apps/api/src/workspace.rs:708`; `crates/policy/src/lib.rs:107` |
-| 21. Person inboxes | **Built, local only** | The API stores and serves them, and people can read and ack them through the gateway (journey `D21`, `D21+`). Org admins have read-only oversight of an agent's inbox (journey `D21-o`, [decision 31](spec/PRODUCT.md#decisions-needed)). The Needs attention screen isn't built yet |
+| 21. Person inboxes | **Built, local only** | The API stores and serves them, and people can read them through the gateway (journey `D21`). Acknowledging through the gateway has a gateway test only. Org admins have read-only oversight of an agent's inbox (journey `D21`, [decision 31](spec/PRODUCT.md#decisions-needed)). The Needs attention screen isn't built yet |
 | 22. Who creates tasks from the dashboard | Holds for owners in the local journey. Admin and member people only in apps/api tests | journey `D22`; `crates/policy/src/lib.rs:107`. Reaching them needs gap 1 |
 | 23. Personal accounts | Holds, with one failure case | journey `D23`; `apps/gateway/src/index.ts:303`. See gap 8 |
 | 24. Taking over a task when its requester leaves | Holds for owner and admin. Coordinator waits for M1 | journey `AC-25`; `crates/policy/src/lib.rs:154`. See gap 9 |
