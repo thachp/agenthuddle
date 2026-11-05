@@ -11,40 +11,10 @@ export type PendingInvitation = { id: string; role: string; invitedOrg: string |
 
 export const membersOf = (room: Pick<Workroom, "members">) => (room.members ?? []) as Member[];
 
-const parse = (json: string | null): Record<string, unknown> => {
-  try {
-    const value: unknown = JSON.parse(json ?? "null");
-    return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-};
+/** A row of the invitation list. Pending only, and it never holds a token. */
+export type InvitationRow = { id: string; invited_org_id: string | null; role: string; created_by: string; created_at: number; expires_at: number };
 
-/** The API's `INVITATION_TTL_MS`. Audit rows don't carry the expiry, so a list route should replace this. */
-const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * The API has no route listing invitations, so this reads them back out of the access audit log, which the same people may
- * read. It only decides what to show: withdrawing one that's already gone gets the server's refusal.
- */
-export function pendingInvitations(audit: AuditRow[], now: number): PendingInvitation[] {
-  const closed = new Set<string>();
-  for (const row of audit) {
-    if (row.action === "invitation.withdrawn") closed.add(row.target_id);
-    if (row.action === "member.added") {
-      const invitation = parse(row.new_json).invitation;
-      if (typeof invitation === "string") closed.add(invitation);
-    }
-  }
-  return audit.flatMap((row) => {
-    if (row.action !== "invitation.created" || closed.has(row.target_id) || row.created_at + INVITATION_TTL_MS <= now) return [];
-    const details = parse(row.new_json);
-    return [{ id: row.target_id, role: typeof details.role === "string" ? details.role : "guest", invitedOrg: typeof details.invited_org_id === "string" ? details.invited_org_id : null, createdBy: row.actor_id, createdAt: row.created_at, expiresAt: row.created_at + INVITATION_TTL_MS }];
-  });
-}
-
-/** The room read has no owner organization, and the event that creates a room is its owner's, so it carries that organization. */
-export const roomOrgFromEvents = (events: { type: string; actor_org: string | null }[]) => events.find((event) => event.type === "workspace.created")?.actor_org ?? null;
+export const toPending = (row: InvitationRow): PendingInvitation => ({ id: row.id, role: row.role, invitedOrg: row.invited_org_id, createdBy: row.created_by, createdAt: row.created_at, expiresAt: row.expires_at });
 
 /** Only the room's own organization can be added directly. Anyone else needs an invitation, and the server refuses them here. */
 export const addableAgents = (agents: { id: string; name: string; org_id: string; revoked_at: number | null }[], roomOrg: string) => agents.filter((agent) => agent.org_id === roomOrg && agent.revoked_at === null).map(({ id, name, org_id }) => ({ id, name, org_id }));
@@ -73,7 +43,9 @@ export function explainRefusal(code: string, status = 400) {
     case "not_in_organization":
       return "That person isn't in this workroom's organization, so they couldn't act on the role. Invite them to the organization first. Nothing changed.";
     case "workspace_archived":
-      return "This workroom is archived, so nothing new can happen in it. Nothing changed.";
+      return "This workroom is archived, so nothing new can happen in it. Nothing changed. Its owner or an admin can bring it back.";
+    case "invalid_transition":
+      return "This workroom has already changed. Refresh to see where it is. Nothing changed.";
     case "already_member":
       return "They're already in this workroom.";
     case "limit_exceeded":

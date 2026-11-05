@@ -6,7 +6,7 @@ import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/serve
 import { roleLabel } from "../w/[id]/team/model";
 import { AdminsOnly, createAccess } from "./new/access";
 
-type Listed = { workspace_id: string; workspace_name: string; role: string };
+type Listed = { workspace_id: string; workspace_name: string; role: string; status?: string };
 
 export default async function MyWorkrooms() {
   const [rooms, identity, organizations] = await Promise.all([gatewayQuery<{ workspaces: Listed[] }>("/api/v1/workspaces"), getIdentity(), getOrganizations()]);
@@ -33,7 +33,10 @@ export default async function MyWorkrooms() {
               <Link href={`/w/${room.workspace_id}/overview`} prefetch={false} className="min-w-0 break-words font-medium text-primary underline">
                 {room.workspace_name}
               </Link>
-              <Badge variant="secondary">{roleLabel(room.role)}</Badge>
+              <span className="flex flex-wrap gap-2">
+                {room.status === "archived" ? <Badge variant="outline">Archived</Badge> : null}
+                <Badge variant="secondary">{roleLabel(room.role)}</Badge>
+              </span>
             </li>
           ))}
         </ul>
