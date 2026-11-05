@@ -2937,3 +2937,86 @@ describe("managing a room and reading its details", () => {
     for (const who of [orgAdmin("org_a"), OWNER, BOB, OUTSIDER]) expect((await rooms(who)).code).toBe("agent_not_found");
   });
 });
+
+describe("an organization's oversight of its own agent", () => {
+  const overseer = () => orgAdmin(BOB.org);
+  const newAgent = async (org = BOB.org) => {
+    const agent = { id: `agt_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`, org };
+    await register(agent);
+    return agent;
+  };
+  const seen = (who: Who, id: string, agent: Who, rest = "") => api(who, "GET", `/v1/workspaces/${id}/agents/${agent.id}/tasks${rest}`);
+  async function scene() {
+    const { id, tasks } = await room();
+    const agent = await newAgent();
+    expect((await admit(id, agent)).status).toBe(200);
+    const theirs = await offer(tasks, { assignee: agent.id, title: "Theirs" });
+    const another = await offer(tasks, { assignee: CAROL.id, title: "Someone else's" });
+    expect((await api(LEAD, "POST", `${tasks}/${theirs.id}/messages`, { body: "A thread message" })).status).toBe(200);
+    return { id, tasks, agent, theirs, another };
+  }
+
+  it("shows only the tasks the agent is party to, with their threads, and no room role", async () => {
+    const { id, agent, theirs, another } = await scene();
+    const list = await seen(overseer(), id, agent);
+    expect(list.status).toBe(200);
+    expect(list.body.tasks.map((t: any) => t.id)).toEqual([theirs.id]);
+    const one = await seen(overseer(), id, agent, `/${theirs.id}`);
+    expect(one.body.task.title).toBe("Theirs");
+    const thread = await seen(overseer(), id, agent, `/${theirs.id}/messages`);
+    expect(thread.body.messages.map((m: any) => m.body)).toEqual(["A thread message"]);
+    for (const rest of [`/${another.id}`, `/${another.id}/messages`]) expect((await seen(overseer(), id, agent, rest)).code).toBe("task_not_found");
+    // Nothing else in the room.
+    for (const path of ["", "/tasks", `/tasks/${theirs.id}`, "/events", "/audit", "/invitations"]) {
+      expect((await api(overseer(), "GET", `/v1/workspaces/${id}${path}`)).code, path).toBe("workspace_not_found");
+    }
+  });
+
+  it("is read-only, and writes get the same answer as anyone outside the room", async () => {
+    const { id, agent, tasks, theirs } = await scene();
+    expect((await api(overseer(), "POST", `/v1/workspaces/${id}/agents/${agent.id}/tasks`, { title: "No" })).code).toBe("workspace_not_found");
+    expect((await api(overseer(), "POST", `/v1/workspaces/${id}/agents/${agent.id}/tasks/${theirs.id}/messages`, { body: "No" })).code).toBe("workspace_not_found");
+    expect((await api(overseer(), "POST", `${tasks}/${theirs.id}/messages`, { body: "No" })).code).toBe("workspace_not_found");
+    expect((await api(overseer(), "POST", `${tasks}/${theirs.id}/accept`, { version: 1 })).code).toBe("workspace_not_found");
+  });
+
+  it("is only for an admin of the agent's organization", async () => {
+    const { id, agent, theirs } = await scene();
+    const plain: Who = { id: "per_b_member", kind: "person", org: BOB.org, orgs: [BOB.org], adminOrgs: [] };
+    for (const who of [plain, orgAdmin(CAROL.org), orgAdmin("org_x")]) {
+      expect((await seen(who, id, agent)).code).toBe("workspace_not_found");
+      expect((await seen(who, id, agent, `/${theirs.id}`)).code).toBe("workspace_not_found");
+    }
+    // An agent can't use it, even for itself.
+    expect((await seen(agent, id, agent)).code).toBe("not_allowed");
+    expect((await seen(CAROL, id, agent)).code).toBe("not_allowed");
+    // Someone in the room is told no, and has their own way to see what they may.
+    expect((await seen(LEAD, id, agent)).code).toBe("not_allowed");
+    expect((await seen(OWNER, id, agent)).code).toBe("not_allowed");
+    // It looks the same as a room that doesn't exist, and the unknown room stays empty.
+    const unknown = await seen(overseer(), "ws_no_such_room", agent);
+    expect(unknown.code).toBe("workspace_not_found");
+    expect((await seen(overseer(), id, { id: "agt_not_here", org: BOB.org })).code).toBe("workspace_not_found");
+    expect((await seen(overseer(), id, LEAD)).code).toBe("workspace_not_found");
+  });
+
+  it("ends when the agent leaves the room", async () => {
+    const { id, agent, theirs } = await scene();
+    expect((await seen(overseer(), id, agent)).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${agent.id}`, {})).status).toBe(200);
+    for (const rest of ["", `/${theirs.id}`, `/${theirs.id}/messages`]) expect((await seen(overseer(), id, agent, rest)).code).toBe("workspace_not_found");
+  });
+
+  it("lists the rooms an administered organization's agents are in, and no others", async () => {
+    const { id, agent } = await scene();
+    const rows = async (who: Who) => (await api(who, "GET", "/v1/oversight/rooms")).body.rooms.filter((r: any) => r.workspace_id === id);
+    await vi.waitFor(async () => expect((await rows(overseer())).map((r: any) => r.agent_id)).toContain(agent.id), { timeout: 5000 });
+    expect((await rows(overseer())).every((r: any) => r.org_id === BOB.org && r.workspace_name === "Billing v2" && r.status === "active")).toBe(true);
+    const plain: Who = { id: "per_b_member", kind: "person", org: BOB.org, orgs: [BOB.org], adminOrgs: [] };
+    expect(await rows(plain)).toEqual([]);
+    expect((await rows(orgAdmin("org_x")))).toEqual([]);
+    expect((await api(agent, "GET", "/v1/oversight/rooms")).code).toBe("not_allowed");
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${agent.id}`, {})).status).toBe(200);
+    await vi.waitFor(async () => expect((await rows(overseer())).map((r: any) => r.agent_id)).not.toContain(agent.id), { timeout: 5000 });
+  });
+});

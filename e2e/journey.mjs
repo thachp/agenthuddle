@@ -418,6 +418,25 @@ async function acceptance() {
     await agent.close();
   });
 
+  await check("OVERSIGHT", "an invited organization's admin reads only its own agent's tasks, and gets no role in the room", async () => {
+    const theirs = await lead.must("create_task", { workspace_id: room, title: "For the guest", instructions: "x", assignee: guest.id });
+    const others = await lead.must("create_task", { workspace_id: room, title: "Not for the guest", instructions: "x" });
+    const tasksOf = `/v1/workspaces/${room}/agents/${guest.id}/tasks`;
+    eq((await personB.must("GET", tasksOf)).tasks.map((t) => t.id), [theirs.id], "the tasks they can see");
+    eq((await personB.must("GET", `${tasksOf}/${theirs.id}`)).task.title, "For the guest", "one task");
+    refused(await personB.dash("GET", `${tasksOf}/${others.id}`), "task_not_found", "a task the agent isn't party to");
+    refused(await personB.dash("GET", `/v1/workspaces/${room}`), "workspace_not_found", "reading the room itself");
+    refused(await personB.dash("POST", `${tasksOf}/${theirs.id}/messages`, { body: "no" }), "workspace_not_found", "writing through oversight");
+    refused(await personA.dash("GET", `/v1/workspaces/${bRoom}/agents/${guest.id}/tasks`), "workspace_not_found", "someone outside that room");
+    let inList = false;
+    for (let tries = 0; tries < 20 && !inList; tries++) {
+      inList = (await personB.must("GET", "/v1/oversight/rooms")).rooms.some((r) => r.workspace_id === room && r.agent_id === guest.id);
+      if (!inList) await sleep(isLocal ? 200 : 1000);
+    }
+    ok(inList, "the room is in their oversight list");
+    return "plain members run only in apps/api tests";
+  });
+
   await check("AC-03", "people outside the room and agents can't reach access commands, whatever their label", async () => {
     const tools = await lead.tools();
     ok(!tools.some((t) => /member|invit|role|revoke|disconnect|withdraw|admin|grant|scope/.test(t)), `an access tool is exposed: ${tools.join(", ")}`);

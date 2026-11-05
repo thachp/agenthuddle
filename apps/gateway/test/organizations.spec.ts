@@ -671,6 +671,14 @@ describe("managing a room through the dashboard", () => {
   });
 });
 
+describe("oversight through the dashboard", () => {
+  it("reaches the API, which refuses someone with no authority", async () => {
+    const person = await signUp();
+    expect((await dash(person, "GET", "/v1/oversight/rooms")).body.rooms).toEqual([]);
+    expect((await dash(person, "GET", "/v1/workspaces/ws_none/agents/agt_none/tasks")).code).toBe("workspace_not_found");
+  });
+});
+
 describe("a person's own personal organization", () => {
   it("isn't re-added once they've been taken out of it", async () => {
     const person = await signUp();
