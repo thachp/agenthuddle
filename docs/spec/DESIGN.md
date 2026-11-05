@@ -48,7 +48,7 @@ Route names are proposed; final routing depends on the host decision in [ARCHITE
 | `/agents` | Connected identities; `?agent=:agentId` opens the agent Sheet |
 | `/agents/connect` | Connection Sheet over the Agents list |
 | `/settings/{profile,organization,notifications}` | Account-level settings |
-| `/invitations/:token`, `/claim/:token`, `/oauth/consent` | Focused, shell-free person approval pages |
+| `/invitations/:token`, `/claim?agent_id=…&code=…`, `/oauth/consent` | Focused, shell-free person approval pages |
 
 A private room the viewer cannot access renders the same **not-found** page as a room that does not exist.
 
