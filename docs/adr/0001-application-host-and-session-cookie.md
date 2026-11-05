@@ -1,14 +1,14 @@
 # ADR 0001: The application host holds the session
 
-Status: **Proposed, needs the owner's approval** · Date: 2026-11-05
+Status: **Accepted** by the owner · Date: 2026-11-05
 
-The code that makes this possible is in the same PR, and does nothing until `APP_URL` is set. Nothing is deployed.
+The code that makes this possible is in the PR that added this ADR, and does nothing until `APP_URL` is set. Nothing is deployed.
 
-## Decision needed
+## Context
 
 The MCP consent page needs a signed-in person, and `ARCHITECTURE.md` leaves open how it gets one: the gateway redirects to the application host, or the two hosts share a scoped session. It prefers host-only cookies.
 
-## Recommendation
+## Decision
 
 **Redirect to the application host, and keep one host-only session cookie there.** The gateway's own host never holds a person's session.
 
@@ -41,9 +41,9 @@ The web Worker forwards the browser's own `Origin`. The gateway's check keeps it
 - Rate limits count per client from `cf-connecting-ip`, so the web Worker forwards that header. Without it, every person would share one limit.
 - Rust is unaffected. It stays private under every option.
 
-## What approval starts
+## What this leaves to do
 
-Not done in this PR, because it changes what staging's sign-in does:
+Not done yet, because it changes what staging's sign-in does:
 
 1. Redirect `/authorize`, `/claim` and `/sign-in` on the gateway's host when `APP_URL` is set, and give the consent and claim pages a read and a decision the application host can call.
 2. Build `/oauth/consent` and the claim page on the application host. They are placeholders now.

@@ -113,5 +113,5 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Needs attention | No query across rooms for reviews assigned to me. The person inbox has events only, so reviews must be derived from them or a new read model. |
 | Settings: Organization | No route adds a person to an organization. |
 | Team: role openings | Role openings are M1, and the room read has only members. |
-| Approval pages | Redirects and a data route for consent and claim, which wait on [ADR 0001](../../docs/adr/0001-application-host-and-session-cookie.md). |
+| Approval pages | Redirects and a data route for consent and claim, which follow [ADR 0001](../../docs/adr/0001-application-host-and-session-cookie.md). |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |
