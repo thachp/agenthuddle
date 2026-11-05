@@ -1576,6 +1576,38 @@ fn apply_recovery(
     Ok(json!({ "owner": to }))
 }
 
+/// Records that the room's owner left, in the caller's transaction. They stop being a participant, and the room joins the
+/// list an organization's admins recover from.
+#[allow(clippy::too_many_arguments)]
+fn record_owner_left(
+    sql: &SqlStorage,
+    actor: &Caller,
+    actor_kind: &str,
+    person: &str,
+    org: &str,
+    left_at: i64,
+    note: String,
+    now: i64,
+) -> R<()> {
+    exec(
+        sql,
+        "UPDATE workspace SET owner_left_at = MAX(COALESCE(owner_left_at, 0), ?)",
+        vec![left_at.into()],
+    )?;
+    apply_departure_rules(sql, actor, person, now)?;
+    queue_index(sql, person, org, Some("owner"), now)?;
+    audit_as(
+        sql,
+        &actor.id,
+        actor_kind,
+        "owner.left_organization",
+        person,
+        None,
+        Some(note),
+        now,
+    )
+}
+
 /// Clears a room's removal, so the agent can return through an invitation. It's the room's decision alone.
 fn handle_clear_removal(
     sql: &SqlStorage,
@@ -2612,6 +2644,58 @@ impl Workspace {
         written
     }
 
+    /// Records a departure the room never heard about, when the owner's own signed assertion shows a newer membership
+    /// than the one they own the room under. Otherwise neither they nor an organization's admin could ever do anything
+    /// here, because recovery needs the room to know. The true time isn't known, so it uses the start of the new
+    /// membership, by when they had left. It happens once, and only the gateway can state that membership.
+    fn notice_owner_left(&self, identity: &Identity) -> R<bool> {
+        let sql = self.state.storage().sql();
+        let room = rows(
+            &sql,
+            "SELECT owner_person_id, owner_org_id, owner_left_at, owner_since FROM workspace",
+            vec![],
+        )?;
+        let Some(room) = room.first() else {
+            return Ok(false);
+        };
+        let org = text(&room["owner_org_id"]).unwrap_or_default();
+        let since = identity.org_since.get(&org).copied();
+        let newer = since.is_some_and(|since| {
+            room["owner_since"]
+                .as_i64()
+                .is_some_and(|owner_since| since > owner_since)
+        });
+        if identity.kind != "person"
+            || room["owner_person_id"].as_str() != Some(identity.id.as_str())
+            || !room["owner_left_at"].is_null()
+            || !newer
+        {
+            return Ok(false);
+        }
+        let person = identity.id.clone();
+        let left_at = since.unwrap_or_default();
+        transaction_sync(&self.state, move || {
+            let system = Caller {
+                id: "system".to_string(),
+                kind: PrincipalKind::Agent,
+                role: Role::None,
+                guest_can_create: false,
+            };
+            let note = json!({ "org_id": org, "left_at": left_at, "noticed": true }).to_string();
+            record_owner_left(
+                &sql,
+                &system,
+                "system",
+                &person,
+                &org,
+                left_at,
+                note,
+                now_ms(),
+            )
+        })?;
+        Ok(true)
+    }
+
     /// Applies a person's departure from an organization, from this room's own state. Repeating it changes nothing.
     fn org_departure(&self, body: &Value) -> R<Value> {
         let sql = self.state.storage().sql();
@@ -2670,30 +2754,23 @@ impl Workspace {
             // departure table and nothing more reaches their inbox. Each departure applies once, and one from before they
             // became owner under their current membership doesn't count.
             if is_owner(&sql, &person)? && room_org == org {
-                let since = rows(&sql, "SELECT owner_since FROM workspace", vec![])?;
-                let rejoined = since
-                    .first()
+                let held = rows(
+                    &sql,
+                    "SELECT owner_since, owner_left_at FROM workspace",
+                    vec![],
+                )?;
+                let held = held.first();
+                let rejoined = held
                     .and_then(|room| room["owner_since"].as_i64())
                     .is_some_and(|since| since > left_at);
+                // The room may already know of a later departure, or have noticed this one from their assertion.
+                let known = held
+                    .and_then(|room| room["owner_left_at"].as_i64())
+                    .is_some_and(|known| known >= left_at);
                 let note = json!({ "org_id": org, "left_at": left_at }).to_string();
                 let noted = rows(&sql, "SELECT id FROM audit_event WHERE action = 'owner.left_organization' AND new_json = ?", vec![note.as_str().into()])?;
-                if !rejoined && noted.is_empty() {
-                    exec(
-                        &sql,
-                        "UPDATE workspace SET owner_left_at = MAX(COALESCE(owner_left_at, 0), ?)",
-                        vec![left_at.into()],
-                    )?;
-                    apply_departure_rules(&sql, &actor, &person, now)?;
-                    queue_index(&sql, &person, &org, Some("owner"), now)?;
-                    audit(
-                        &sql,
-                        &actor,
-                        "owner.left_organization",
-                        &person,
-                        None,
-                        Some(note),
-                        now,
-                    )?;
+                if !rejoined && !known && noted.is_empty() {
+                    record_owner_left(&sql, &actor, "person", &person, &org, left_at, note, now)?;
                 }
             }
             Ok(())
@@ -2764,6 +2841,12 @@ impl Workspace {
                 .get("x-test-join-generation")?
                 .and_then(|v| v.parse().ok());
             *self.test_generation.borrow_mut() = forced;
+        }
+        if self.notice_owner_left(&identity)? {
+            // A read has nothing else to schedule the listing update and the events.
+            if let Err(error) = self.arm(false, false).await {
+                console_error!("couldn't schedule delivery: {:?}", error);
+            }
         }
         // An agent's owner may have no role in this room.
 

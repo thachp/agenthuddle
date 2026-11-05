@@ -70,12 +70,17 @@ Nothing to build. A personal organization has one person, and they can't be remo
 
 Today nobody can manage its access or take over its tasks. Recovery fixes this, because it doesn't need a role in the room. Two things are needed for an admin to find these rooms, since they can't read them:
 
-- `GET /v1/oversight/ownerless`: rooms of organizations this person administers whose owner has left, archived or not, from the listing read model, for showing only. Each row has the room's ID and name, the departed owner's ID and when they left. The room still decides when recovery runs. This needs one new column on `membership_index`, and departure queues an index update for the owner so a room reaches this list. A room whose owner left before this reaches the list the next time the room is used.
+- `GET /v1/oversight/ownerless`: rooms of organizations this person administers whose owner has left, archived or not, from the listing read model, for showing only. Each row has exactly the room's ID and name, the departed owner's ID and when they left. The room still decides when recovery runs. This needs one new column on `membership_index`, and departure queues an index update for the owner so a room reaches this list. A room whose owner left before this reaches the list the next time the room is used.
 
-  This is a new use of `admin_orgs`, and a new exception to the rule against revealing a private room: it shows a room's ID and name, its departed owner's ID and when they left to someone outside it. It's limited to rooms their own organization owns, and shows no content, members or tasks.
+  This is a new use of `admin_orgs`, and a new exception to the rule against revealing a private room: it shows a room's ID and name, its departed owner's ID and when they left to someone outside it. It's limited to rooms their own organization owns, and shows no content, members, tasks or archived status.
 - Removing someone from an organization should say which rooms they own. The gateway can ask the same listing before removal. This is a screen's job, and the route should exist first.
 
-An organization can't lose its last admin, because the gateway refuses that. So every room in a team organization has someone who can run recovery.
+An organization can't lose its last admin, because the gateway refuses that. So a room in a team organization has someone who can run recovery, once the room knows its owner left. It can learn that in two ways:
+
+- **A departure reaches it.** The person's `Principal` looks for their rooms for about 30 days, further and further apart, so an index write that fails for a while doesn't lose it.
+- **The owner comes back.** If the owner's own assertion shows a newer membership than `owner_since`, the room records the departure, on a read or a command. It uses the start of that membership as `left_at`, and the log's actor is `system`.
+
+**What's still stuck:** a room whose owner left, who doesn't come back, where no departure reaches it. That means someone removed before departures existed, or an index write failing for more than 30 days. Nobody can recover that room, and it still counts toward the 20. Only staging can hold the first case, because production has never run. There's no way out for it short of a change by hand.
 
 ### What's built, and what isn't
 
@@ -106,4 +111,6 @@ These aren't in the acceptance tests yet, so they become a new AC:
 - A delayed departure doesn't undo a transfer, or take out a new owner.
 - A room with no admin and a departed owner is recovered by an organization admin who was never in it.
 - A personal organization's room never reaches recovery.
+- A departure reaches a room whose listing appears only after the first sweeps, and the room notices an owner who comes back with a newer membership when no departure reached it.
+- A departed owner who rejoins doesn't see the room in their list until recovery names them.
 - Each case leaves one audit entry, one event and nothing partial when a command fails partway.

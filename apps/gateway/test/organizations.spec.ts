@@ -472,6 +472,8 @@ describe("leaving an organization", () => {
     expect(await listed(founder)).not.toContain(id);
     expect((await accept(founder, (await invite(admin, org)).token)).status).toBe(200);
     expect((await dash(founder, "GET", `/v1/workspaces/${id}`)).code).toBe("workspace_not_found");
+    // Once the room knows, the room stays off their list until recovery names them.
+    await vi.waitFor(async () => expect(await listed(founder)).not.toContain(id), { timeout: 10000 });
     // The admin finds the room, though they were never in it, and names them, which is on the record.
     await vi.waitFor(async () => {
       const rooms = (await dash(admin, "GET", "/v1/oversight/ownerless")).body.rooms as any[];
@@ -484,6 +486,7 @@ describe("leaving an organization", () => {
     expect((await send(founder.id, founder.id)).status).toBe(200);
     const read = await dash(founder, "GET", `/v1/workspaces/${id}`);
     expect(read.body.owner).toBe(founder.id);
+    await vi.waitFor(async () => expect(await listed(founder)).toContain(id), { timeout: 10000 });
     expect((await dash(founder, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((row: any) => row.action === "owner.recovered").map((row: any) => row.actor_id)).toEqual([admin.id]);
     await vi.waitFor(async () => {
       expect(((await dash(admin, "GET", "/v1/oversight/ownerless")).body.rooms as any[]).filter((r) => r.workspace_id === id)).toEqual([]);
@@ -502,7 +505,8 @@ describe("leaving an organization", () => {
     }
     const transfer = async (to: string) => dash(owner, "POST", `/v1/workspaces/${id}/owner/transfer`, { to, policy_version: await version() }, { "idempotency-key": crypto.randomUUID() });
     await dash(owner, "DELETE", `/orgs/${org}/members/${leaver.id}`);
-    expect((await transfer(leaver.id)).status).toBeGreaterThanOrEqual(400);
+    // Which one depends on whether the departure has reached the room yet. Either way, the room refuses.
+    expect(["invalid_argument", "not_in_organization"]).toContain((await transfer(leaver.id)).code);
     expect((await transfer(heir.id)).status).toBe(200);
     const read = await dash(heir, "GET", `/v1/workspaces/${id}`);
     expect(read.body.owner).toBe(heir.id);
@@ -510,14 +514,33 @@ describe("leaving an organization", () => {
   });
 
   it("can't forge what the directory says about the person named as owner", async () => {
-    const owner = await signUp();
-    const org = await newOrg(owner);
-    const id = await room(owner, org);
+    const admin = await signUp();
+    const org = await newOrg(admin);
+    const founder = await joined(admin, org, "admin");
+    const id = await room(founder, org);
     const outsider = await signUp();
-    const version = (await dash(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version;
-    const forged = await dash(owner, "POST", `/v1/workspaces/${id}/owner/transfer`, { to: outsider.id, policy_version: version, target_member: { person: outsider.id, orgs: { [org]: 1 } } }, { "idempotency-key": crypto.randomUUID() });
-    expect(forged.status).toBeGreaterThanOrEqual(400);
-    expect((await dash(owner, "GET", `/v1/workspaces/${id}`)).body.owner).toBe(owner.id);
+    await vi.waitFor(async () => expect(await listed(founder)).toContain(id), { timeout: 5000 });
+    await dash(admin, "DELETE", `/orgs/${org}/members/${founder.id}`);
+    await vi.waitFor(async () => {
+      expect(((await dash(admin, "GET", "/v1/oversight/ownerless")).body.rooms as any[]).map((r) => r.workspace_id)).toContain(id);
+    }, { timeout: 10000 });
+    // The room is ready to be recovered, so only what the directory says stops this.
+    const forged = await dash(admin, "POST", `/v1/workspaces/${id}/owner/recover`, { to: outsider.id, expected_owner: founder.id, target_member: { person: outsider.id, orgs: { [org]: 1 } } });
+    expect(forged.code).toBe("not_in_organization");
+    expect((await dash(outsider, "GET", `/v1/workspaces/${id}`)).code).toBe("workspace_not_found");
+  });
+
+  it("never brings a personal organization's room to recovery", async () => {
+    const person = await signUp();
+    const other = await signUp();
+    const id = (await dash(person, "POST", "/v1/workspaces", { name: "Mine" })).body.id as string;
+    expect((await dash(person, "DELETE", `/orgs/${person.personal}/members/${person.id}`)).code).toBe("personal_organization");
+    const recover = (who: Person) => dash(who, "POST", `/v1/workspaces/${id}/owner/recover`, { to: who.id, expected_owner: person.id });
+    expect((await recover(person)).code).toBe("not_allowed");
+    expect((await recover(other)).code).toBe("workspace_not_found");
+    const rooms = (await dash(person, "GET", "/v1/oversight/ownerless")).body.rooms as any[];
+    expect(rooms.map((r) => r.workspace_id)).not.toContain(id);
+    expect((await dash(person, "GET", `/v1/workspaces/${id}`)).body.owner).toBe(person.id);
   });
 
   it("lets a refused add's idempotency key work once the person has joined", async () => {

@@ -323,10 +323,9 @@ describe("access management", () => {
       const res = await api(ADMIN, method, path, body, { token: await rejoined(ADMIN) });
       expect([path, res.code]).toEqual([path, "workspace_not_found"]);
     }
-    // A role that started within this membership keeps working. Owner authority ends the same way, under decision 35.
+    // A role that started within this membership keeps working.
     const current = await api(ADMIN, "GET", `/v1/workspaces/${id}`, undefined, { token: await assertion(ADMIN, { claims: { org_since: { org_a: 1 } } }) });
     expect(current.status).toBe(200);
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`, undefined, { token: await rejoined(OWNER) })).code).toBe("workspace_not_found");
     // Changing the ended role is refused, and adding them again is the recorded way back.
     const target_member = { person: ADMIN.id, orgs: { org_a: later } };
     const role = await api(OWNER, "POST", `${members}/${ADMIN.id}/role`, { role: "member" }, { token: await assertion(OWNER, { claims: { target_member } }) });
@@ -341,6 +340,8 @@ describe("access management", () => {
     // A second add in the same membership is still refused.
     const again = await api(OWNER, "POST", members, { principal_id: ADMIN.id, kind: "person", org_id: "org_a", role: "member" }, { token: await assertion(OWNER, { claims: { target_member } }) });
     expect(again.code).toBe("already_member");
+    // Owner authority ends the same way, under decision 35. This comes last, because the room records it as a departure.
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`, undefined, { token: await rejoined(OWNER) })).code).toBe("workspace_not_found");
   });
 
   it("refuses a role change for a person the directory doesn't place in the organization", async () => {
@@ -2350,7 +2351,7 @@ describe("a person leaving the room's organization", () => {
     const parsed = await res.json<any>();
     if (settle && res.status === 200) await vi.waitFor(async () => {
       const [row] = await pending(departure.person);
-      expect(row === undefined || row.sweeps_left < 3).toBe(true);
+      expect(row === undefined || row.sweeps_left < 40).toBe(true);
     }, { timeout: 5000 });
     return { status: res.status, code: parsed?.error?.code };
   };
@@ -2534,7 +2535,7 @@ describe("a person leaving the room's organization", () => {
     for (let i = 0; i < 130; i++) await listRoom(`ws_many_${i}_${who}`, who);
     expect((await depart(OWNER, { person: who, org: "org_a", left_at: Date.now() }, false)).status).toBe(200);
     await vi.waitFor(async () => {
-      expect((await pending(who))[0]?.sweeps_left).toBe(2);
+      expect((await pending(who))[0]?.sweeps_left).toBe(39);
     }, { timeout: 20000, interval: 200 });
     expect((await rooms(who)).every((r) => r.applied === 1)).toBe(true);
     expect(await rooms(who)).toHaveLength(130);
@@ -2552,7 +2553,7 @@ describe("a person leaving the room's organization", () => {
     const leaving = { person: who, org: "org_a", left_at: Date.now() };
     expect((await depart(OWNER, leaving, false)).status).toBe(200);
     await vi.waitFor(async () => expect((await pending(who))[0]?.failures).toBe(1), { timeout: 5000 });
-    expect((await pending(who))[0].sweeps_left).toBe(3);
+    expect((await pending(who))[0].sweeps_left).toBe(40);
     expect((await rooms(who)).map((r) => [r.workspace_id, r.applied]).sort()).toEqual([[applied, 1], ["ws_fail_departure", 0]].sort());
     // A retry asks only the room that failed, so a change to the one that applied it stays.
     await addAdmin(applied, who);
@@ -2565,17 +2566,49 @@ describe("a person leaving the room's organization", () => {
     await runInDurableObject(principal(who), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure_room SET applied = 1 WHERE workspace_id = 'ws_fail_departure'"));
     await makeDue(who);
     await runDurableObjectAlarm(principal(who));
-    expect((await pending(who))[0]).toEqual({ sweeps_left: 2, failures: 0 });
+    expect((await pending(who))[0]).toEqual({ sweeps_left: 39, failures: 0 });
     await listRoom(id, who);
     expect(await roleOf(id, asPerson(who))).toBe("admin");
     await makeDue(who);
     await runDurableObjectAlarm(principal(who));
     expect(await roleOf(id, asPerson(who))).toBeUndefined();
-    expect((await pending(who))[0].sweeps_left).toBe(1);
+    expect((await pending(who))[0].sweeps_left).toBe(38);
+    // The last sweep ends it.
+    await runInDurableObject(principal(who), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET sweeps_left = 1"));
     await makeDue(who);
     await runDurableObjectAlarm(principal(who));
     expect(await pending(who)).toEqual([]);
     expect(await runDurableObjectAlarm(principal(who))).toBe(false);
+  });
+
+  it("waits longer between sweeps, and still reaches a room whose listing only appears much later", async () => {
+    const { id } = await room();
+    const who = person();
+    await addAdmin(id, who);
+    await vi.waitFor(async () => expect(await (env as any).DB.prepare("SELECT 1 FROM membership_index WHERE principal_id = ?").bind(who).first()).toBeTruthy(), { timeout: 5000 });
+    await (env as any).DB.prepare("DELETE FROM membership_index WHERE principal_id = ?").bind(who).run();
+    expect((await depart(OWNER, { person: who, org: "org_a", left_at: Date.now() })).status).toBe(200);
+    const gap = async () => {
+      const at = await runInDurableObject(principal(who), (_: any, state: any) => state.storage.sql.exec("SELECT next_sweep_at AS t FROM org_departure").one().t as number);
+      return at - Date.now();
+    };
+    for (let sweep = 0; sweep < 5; sweep++) {
+      await makeDue(who);
+      await runDurableObjectAlarm(principal(who));
+    }
+    expect((await pending(who))[0].sweeps_left).toBeLessThanOrEqual(35);
+    expect(await gap()).toBeGreaterThan(5 * 60_000);
+    // Long past the first three sweeps, the listing turns up, and the room hears.
+    await listRoom(id, who);
+    await makeDue(who);
+    await runDurableObjectAlarm(principal(who));
+    expect(await roleOf(id, asPerson(who))).toBeUndefined();
+    // The wait stops growing at a day.
+    await runInDurableObject(principal(who), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET sweeps_left = 2"));
+    await makeDue(who);
+    await runDurableObjectAlarm(principal(who));
+    expect(await gap()).toBeLessThanOrEqual(24 * 60 * 60 * 1000);
+    expect(await gap()).toBeGreaterThan(23 * 60 * 60 * 1000);
   });
 
   it("migrates an older room before applying a departure or a disconnect", async () => {
@@ -2627,6 +2660,17 @@ describe("transferring and recovering a room's ownership", () => {
   const ownerless = async (who: Who, id: string) => ((await api(who, "GET", "/v1/oversight/ownerless")).body.rooms as any[]).filter((r) => r.workspace_id === id);
   const ownerRow = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT owner_person_id, owner_since, owner_left_at, policy_version FROM workspace").one() as any);
   const memberRow = (id: string, who: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT role, revoked_at, added_at FROM member WHERE principal_id = ?", who).toArray()[0] as any);
+  const eventsOf = (id: string, type: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM event WHERE type = ?", type).one().n as number);
+  /** Waits for delivery to finish, then returns what's waiting and how many events there are, so a rollback can be compared. */
+  const settled = async (id: string) => {
+    const read = () => runInDurableObject(stub(id), (_: any, state: any) => ({
+      events: state.storage.sql.exec("SELECT count(*) AS n FROM event").one().n as number,
+      outbox: state.storage.sql.exec("SELECT count(*) AS n FROM outbox").one().n as number,
+      index: state.storage.sql.exec("SELECT count(*) AS n FROM index_outbox").one().n as number,
+    }));
+    await vi.waitFor(async () => expect(await read()).toMatchObject({ outbox: 0, index: 0 }), { timeout: 5000 });
+    return read();
+  };
   const recover = (id: string, admin: Who, to: string, expected_owner: string, opts: { key?: string; since?: Record<string, number>; fail?: boolean } = {}) =>
     naming(admin, to, opts.since).then((token) => api(admin, "POST", `${path(id)}/owner/recover`, { to, expected_owner }, { token, key: opts.key, fail: opts.fail }));
 
@@ -2704,12 +2748,14 @@ describe("transferring and recovering a room's ownership", () => {
     it("leaves nothing behind when it fails partway, and a retry gets one answer", async () => {
       const { id, founder, helper } = await scene();
       const body = { to: helper.id, policy_version: await version(id, founder) };
+      const before = await settled(id);
       const failed = await api(founder, "POST", `${path(id)}/owner/transfer`, body, { token: await naming(founder, helper.id), fail: true, key: "transfer-key" });
       expect(failed.status).toBe(500);
       expect((await ownerRow(id)).owner_person_id).toBe(founder.id);
       expect((await memberRow(id, helper.id)).role).toBe("admin");
       expect(await memberRow(id, founder.id)).toBeUndefined();
       expect(await log(id, founder, "owner.transferred")).toEqual([]);
+      expect(await settled(id)).toEqual(before);
       expect((await api(founder, "POST", `${path(id)}/owner/transfer`, body, { token: await naming(founder, helper.id), key: "transfer-key" })).status).toBe(200);
       const again = await api(founder, "POST", `${path(id)}/owner/transfer`, body, { token: await naming(founder, helper.id), key: "transfer-key" });
       expect(again.body.owner).toBe(helper.id);
@@ -2740,7 +2786,7 @@ describe("transferring and recovering a room's ownership", () => {
       const leftAt = Date.now();
       await departs(id, founder.id, leftAt);
       const before = await ownerRow(id);
-      await vi.waitFor(async () => expect(await ownerless(boss, id)).toEqual([{ workspace_id: id, workspace_name: "Stranded", status: "active", owner: founder.id, left_at: leftAt, org_id: "org_a" }]), { timeout: 5000 });
+      await vi.waitFor(async () => expect(await ownerless(boss, id)).toEqual([{ workspace_id: id, workspace_name: "Stranded", owner: founder.id, left_at: leftAt }]), { timeout: 5000 });
       expect((await api(boss, "GET", path(id))).code).toBe("workspace_not_found");
       const done = await recover(id, boss, successor.id, founder.id);
       expect(done.status).toBe(200);
@@ -2754,6 +2800,7 @@ describe("transferring and recovering a room's ownership", () => {
       expect(entry.actor_id).toBe(boss.id);
       expect(JSON.parse(entry.prior_json)).toEqual({ owner: founder.id, left_at: leftAt });
       expect(JSON.parse(entry.new_json)).toEqual({ owner: successor.id });
+      expect(await eventsOf(id, "owner.recovered")).toBe(1);
       await vi.waitFor(async () => {
         const events = (await api(successor, "GET", "/v1/inbox")).body.events as any[];
         expect(events.map((e) => e.type)).toContain("owner.recovered");
@@ -2867,7 +2914,7 @@ describe("transferring and recovering a room's ownership", () => {
       expect((await api(founder, "POST", `${path(id)}/archive`, { policy_version: await version(id, founder) })).status).toBe(200);
       await departs(id, founder.id, Date.now());
       const boss = human(["org_a"]);
-      await vi.waitFor(async () => expect((await ownerless(boss, id)).map((r) => r.status)).toEqual(["archived"]), { timeout: 5000 });
+      await vi.waitFor(async () => expect(await ownerless(boss, id)).toHaveLength(1), { timeout: 5000 });
       expect((await recover(id, boss, helper.id, founder.id)).status).toBe(200);
       expect((await api(helper, "GET", path(id))).body.status).toBe("archived");
     });
@@ -2877,12 +2924,14 @@ describe("transferring and recovering a room's ownership", () => {
       const boss = human(["org_a"]);
       const leftAt = Date.now();
       await departs(id, founder.id, leftAt);
+      const before = await settled(id);
       expect((await recover(id, boss, helper.id, founder.id, { fail: true, key: "fails" })).status).toBe(500);
       const row = await ownerRow(id);
       expect(row.owner_person_id).toBe(founder.id);
       expect(row.owner_left_at).toBe(leftAt);
       expect((await memberRow(id, helper.id)).role).toBe("admin");
       expect(await log(id, helper, "owner.recovered")).toEqual([]);
+      expect(await settled(id)).toEqual(before);
       expect((await recover(id, boss, helper.id, founder.id, { key: "fails" })).status).toBe(200);
     });
 
@@ -2899,6 +2948,57 @@ describe("transferring and recovering a room's ownership", () => {
     });
   });
 
+  describe("a room that never heard its owner left", () => {
+    const back = (who: Who, since: number) => assertion(who, { claims: { org_since: { org_a: since } } });
+
+    it("notices from the owner's own newer membership, once, on a read, so an organization admin can recover it", async () => {
+      const { id, founder, helper } = await scene();
+      const boss = human(["org_a"]);
+      const rejoined = Date.now();
+      expect(await ownerless(boss, id)).toEqual([]);
+      expect((await recover(id, boss, helper.id, founder.id)).code).toBe("workspace_not_found");
+      for (let i = 0; i < 2; i++) expect((await api(founder, "GET", path(id), undefined, { token: await back(founder, rejoined) })).code).toBe("workspace_not_found");
+      expect((await ownerRow(id)).owner_left_at).toBe(rejoined);
+      const entries = await log(id, helper, "owner.left_organization");
+      expect(entries.map((e) => [e.actor_id, e.actor_kind])).toEqual([["system", "system"]]);
+      expect(JSON.parse(entries[0].new_json)).toEqual({ org_id: "org_a", left_at: rejoined, noticed: true });
+      // The real departure arriving after that adds nothing.
+      await departs(id, founder.id, rejoined - 1000);
+      expect(await log(id, helper, "owner.left_organization")).toHaveLength(1);
+      expect((await ownerRow(id)).owner_left_at).toBe(rejoined);
+      await vi.waitFor(async () => expect((await ownerless(boss, id)).map((r) => r.owner)).toEqual([founder.id]), { timeout: 5000 });
+      expect((await recover(id, boss, helper.id, founder.id)).status).toBe(200);
+    });
+
+    it("isn't set off by anyone else, or by the owner's own membership", async () => {
+      const { id, founder, helper } = await scene();
+      const later = Date.now();
+      expect((await api(helper, "GET", path(id), undefined, { token: await back(helper, 1) })).status).toBe(200);
+      expect((await api(helper, "GET", path(id), undefined, { token: await back(helper, later) })).code).toBe("workspace_not_found");
+      expect((await api(human(), "GET", path(id), undefined, { token: await back(human(), later) })).code).toBe("workspace_not_found");
+      expect((await api(founder, "GET", path(id), undefined, { token: await back(founder, 1) })).status).toBe(200);
+      expect((await api(founder, "GET", path(id))).status).toBe(200);
+      expect((await ownerRow(id)).owner_left_at).toBeNull();
+    });
+  });
+
+  describe("a departed owner's own list", () => {
+    it("doesn't show the room between rejoining and recovery, with later renames either, and shows it once they're named", async () => {
+      const { id, founder, helper } = await scene();
+      const rejoined = Date.now() + 1000;
+      const token = () => assertion(founder, { claims: { org_since: { org_a: rejoined } } });
+      const listed = async () => (await api(founder, "GET", "/v1/workspaces", undefined, { token: await token() })).body.workspaces.filter((w: any) => w.workspace_id === id);
+      await vi.waitFor(async () => expect(await listed()).toHaveLength(1), { timeout: 5000 });
+      await departs(id, founder.id, rejoined - 500);
+      await vi.waitFor(async () => expect(await listed()).toEqual([]), { timeout: 5000 });
+      expect((await api(helper, "PUT", `${path(id)}/name`, { name: "Renamed", policy_version: await version(id, helper) })).status).toBe(200);
+      await vi.waitFor(async () => expect((await ownerless(human(["org_a"]), id)).map((r) => r.workspace_name)).toEqual(["Renamed"]), { timeout: 5000 });
+      expect(await listed()).toEqual([]);
+      expect((await recover(id, human(["org_a"]), founder.id, founder.id, { since: { org_a: rejoined } })).status).toBe(200);
+      await vi.waitFor(async () => expect((await listed()).map((w: any) => w.role)).toEqual(["owner"]), { timeout: 5000 });
+    });
+  });
+
   describe("the ownerless list", () => {
     it("is for people, shows only rooms of organizations they administer, and shows nothing while the owner is in the room", async () => {
       const { id, founder, member } = await scene();
@@ -2911,7 +3011,7 @@ describe("transferring and recovering a room's ownership", () => {
       const agent = { id: `agt_${unique()}`, org: "org_a", adminOrgs: ["org_a"] } as Who;
       await register(agent);
       expect((await api(agent, "GET", "/v1/oversight/ownerless")).code).toBe("not_allowed");
-      expect(Object.keys((await ownerless(boss, id))[0]).sort()).toEqual(["left_at", "org_id", "owner", "status", "workspace_id", "workspace_name"]);
+      expect(Object.keys((await ownerless(boss, id))[0]).sort()).toEqual(["left_at", "owner", "workspace_id", "workspace_name"]);
     });
   });
 
@@ -3481,6 +3581,9 @@ describe("the record of denied changes", () => {
   it("writes nothing on the request path, and repeats only raise a count", async () => {
     const { id } = await room();
     await flush(id);
+    // Setting up the room scheduled its own alarm, and running one by hand doesn't cancel it. If it fired after the refusal
+    // it would write the row on schedule, which is correct, so this waits for it first.
+    await vi.waitFor(async () => expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).toBeNull(), { timeout: 5000 });
     // Well inside the 5 seconds before the alarm, so a row here could only come from the request path.
     expect((await api(LEAD, "PUT", `/v1/workspaces/${id}/name`, { name: "Mine", policy_version: 1 })).code).toBe("not_allowed");
     expect(await stored(id)).toBe(0);
