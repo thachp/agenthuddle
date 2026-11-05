@@ -1695,16 +1695,16 @@ describe("dashboard inbox and agents", () => {
     const a = await signUp();
     expect((await dash(a, "GET", "/v1/inbox")).status).toBe(200);
     expect((await dashboard(a, "GET", "/v1/inbox?ack=true")).status).toBe(404);
-    expect((await dash(a, "POST", "/v1/inbox/ack", { cursor: 0 })).status).not.toBe(404);
-    expect((await dashboard(a, "POST", "/v1/inbox/ack", { cursor: 0 }, { origin: "https://evil.test" })).status).toBe(403);
+    expect((await dash(a, "POST", "/v1/inbox/ack", { up_to: 0 })).status).toBe(200);
+    expect((await dashboard(a, "POST", "/v1/inbox/ack", { up_to: 0 }, { origin: "https://evil.test" })).status).toBe(403);
     expect((await dashboard(a, "PUT", "/v1/inbox/wake", { url: "https://x.test" })).status).toBe(404);
   });
 
-  it("lets the owning organization oversee an agent's inbox, and nobody else", async () => {
+  it("lets the owning organization's admins oversee an agent's inbox, and nobody else", async () => {
     const [a, b] = [await signUp(), await signUp()];
     const agent = await claimedAgent(a);
     expect((await dash(a, "GET", `/v1/agents/${agent.id}/inbox`)).status).toBe(200);
-    expect((await dash(b, "GET", `/v1/agents/${agent.id}/inbox`)).status).toBeGreaterThanOrEqual(403);
+    expect(await dash(b, "GET", `/v1/agents/${agent.id}/inbox`)).toMatchObject({ status: 404, code: "agent_not_found" });
     expect((await dashboard(a, "GET", `/v1/agents/${agent.id}/inbox?ack=true`)).status).toBe(404);
     expect((await dashboard(a, "POST", `/v1/agents/${agent.id}/inbox`, {})).status).toBe(404);
   });
@@ -1718,6 +1718,40 @@ describe("dashboard inbox and agents", () => {
     expect(ids).toContain(mine.id);
     expect(ids).not.toContain(theirs.id);
     expect((await call("/api/agents")).status).toBe(401);
+  });
+
+  it("lists the newest agents first", async () => {
+    const a = await signUp();
+    const [first, second] = [await claimedAgent(a), await claimedAgent(a)];
+    await e.DB.prepare("UPDATE podster_agent SET created_at = 1000 WHERE id = ?").bind(first.id).run();
+    const { agents, truncated } = await (await call("/api/agents", { headers: { cookie: a.cookie } })).json<any>();
+    expect(agents.map((row: { id: string }) => row.id)).toEqual([second.id, first.id]);
+    expect(truncated).toBe(false);
+  });
+});
+
+describe("sliding a session", () => {
+  const age = (cookie: string) => {
+    const token = decodeURIComponent(cookie.split("=")[1]).split(".")[0];
+    const aged = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+    return { token, aged, write: () => e.DB.prepare(`UPDATE session SET expiresAt = ? WHERE token = ?`).bind(aged.toISOString(), token).run() };
+  };
+  const expiry = async (token: string) => e.DB.prepare(`SELECT expiresAt FROM session WHERE token = ?`).bind(token).first<string>("expiresAt");
+
+  it("happens only where the new cookie reaches the browser", async () => {
+    const a = await signUp();
+    const { token, write } = age(a.cookie);
+    await write();
+    const before = await expiry(token);
+
+    // These answer without a new cookie, so they mustn't move the expiry.
+    expect((await dashboard(a, "GET", "/v1/me")).status).toBe(200);
+    expect((await call("/api/auth/get-session?disableRefresh=true", { headers: { cookie: a.cookie } })).status).toBe(200);
+    expect(await expiry(token)).toBe(before);
+
+    const refreshed = await call("/api/auth/get-session", { headers: { cookie: a.cookie } });
+    expect(refreshed.headers.get("set-cookie")).toContain("better-auth.session_token=");
+    expect(await expiry(token)).not.toBe(before);
   });
 });
 

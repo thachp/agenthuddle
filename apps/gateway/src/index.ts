@@ -380,7 +380,8 @@ async function personIdentity(env: Env, request: Request, userId: string): Promi
 
 /**
  * A request for the application host is for a person there, so sign-in, its cookies and the origin check all use that
- * host. Only the web Worker can send one: public traffic for that hostname is routed to it, never here.
+ * host. This assumes only the web Worker can send one, because public traffic for that hostname is routed to it. ADR 0001
+ * lists that as something to probe on staging.
  */
 const forPublicHost = (request: Request, env: Env): Env => (env.APP_URL && new URL(request.url).origin === new URL(env.APP_URL).origin ? { ...env, BASE_URL: env.APP_URL } : env);
 
@@ -409,8 +410,9 @@ const MAX_LISTED_AGENTS = 500;
 /** Agents the person's organizations own. The directory is the gateway's own, and this reads only their memberships. */
 async function listAgents(env: Env, orgs: string[]): Promise<Response> {
   const placeholders = orgs.map(() => "?").join(",");
-  const { results } = await env.DB.prepare(`SELECT id, org_id, name, description, created_at, revoked_at FROM podster_agent WHERE org_id IN (${placeholders}) ORDER BY created_at LIMIT ?`).bind(...orgs, MAX_LISTED_AGENTS).all();
-  return json({ agents: results });
+  const { results } = await env.DB.prepare(`SELECT id, org_id, name, description, created_at, revoked_at FROM podster_agent WHERE org_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`).bind(...orgs, MAX_LISTED_AGENTS + 1).all();
+  // Newest first. There's no paging yet, so a longer list says it was cut.
+  return json({ agents: results.slice(0, MAX_LISTED_AGENTS), truncated: results.length > MAX_LISTED_AGENTS });
 }
 
 async function registerWithApi(env: Env, identity: Identity, agentId: string, org: string, name: string) {
@@ -832,7 +834,9 @@ const appHandler = {
     }
 
     const auth = createAuth(env);
-    const session = await auth.api.getSession({ headers: request.headers });
+    // Refreshing here would slide the session and drop its new cookie, because this response doesn't carry it. Only
+    // /api/auth/get-session slides it, where the cookie reaches the browser.
+    const session = await auth.api.getSession({ headers: request.headers, query: { disableRefresh: true } });
     if (url.pathname === "/sign-in" && request.method === "GET") return signInPage(env, safeNext(url.searchParams.get("next")), url.searchParams.has("error"));
     if (url.pathname === "/sign-in" && request.method === "POST") return handleSignIn(request, env);
     if (url.pathname === "/signed-in" && request.method === "GET") return page("You're signed in", "<p>You can close this page.</p>");
