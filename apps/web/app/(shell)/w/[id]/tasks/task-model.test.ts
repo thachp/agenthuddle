@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { asConflict, briefAuthor, canCreateTask, crossRoomTarget, isChosenName, nameOf, textNameOf, parseCrossRoomTarget, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
+import { asConflict, briefAuthor, createProblem, canCreateTask, crossRoomTarget, isChosenName, nameOf, textNameOf, parseCrossRoomTarget, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
 
 const task = (over: Partial<Task> = {}): Task => ({ id: "tsk_1", title: "T", instructions: "I", acceptance_criteria: null, requester: "per_r", assignee: "agt_a", reviewer: "per_v", status: "submitted", version: 3, due_at: null, follow_up_of: null, submission_no: 2, needs_attention: false, ...over });
 
@@ -101,4 +101,8 @@ describe("asConflict", () => {
     expect(asConflict({ ok: false, status: 403, code: "not_allowed" }).code).toBe("not_allowed");
     expect(asConflict({ ok: true, data: {} })).toEqual({ ok: true, data: {} });
   });
+});
+
+describe("createProblem", () => {
+  it("explains an archived room", () => expect(createProblem(409, "workspace_archived")).toMatch(/nothing changed\. This workroom is archived/));
 });

@@ -4,10 +4,11 @@ import { AuthorLine } from "@/components/agent-content/agent-content";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { Badge } from "@/components/ui/badge";
 import { gatewayQuery, getIdentity } from "@/lib/gateway/server";
-import { canManageWorkroom, loadWorkroom } from "@/lib/workroom";
-import { auditAction, pageAfter } from "../activity/model";
+import { canManageWorkroom, isArchived, loadWorkroom } from "@/lib/workroom";
+import { auditAction, auditTarget, pageAfter } from "../activity/model";
 import { Time } from "../activity/time";
 import { membersOf, type AuditRow } from "../team/model";
+import { RoomControls } from "./room-controls";
 
 const Section = ({ id, title, children }: { id: string; title: string; children: React.ReactNode }) => (
   <section aria-labelledby={id} className="space-y-2">
@@ -22,7 +23,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
   const [{ id }, query] = await Promise.all([params, searchParams]);
   const room = await loadWorkroom(id);
   // Owner and admins only. For anyone else this page isn't there; the API refuses the writes either way.
-  if (!canManageWorkroom(room)) notFound();
+  if (!canManageWorkroom(room) || room.policy_version === null) notFound();
   const after = pageAfter(query.after);
   const [identity, audit] = await Promise.all([getIdentity(), gatewayQuery<{ audit: AuditRow[]; next_cursor: number | null }>(`/api/v1/workspaces/${id}/audit?after=${after}`)]);
   const admins = membersOf(room).filter((member) => member.role === "admin");
@@ -34,12 +35,12 @@ export default async function Settings({ params, searchParams }: { params: Promi
 
       <Section id="settings-general" title="General">
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2">
-          <dt className="text-muted-foreground">Name</dt>
-          <dd className="break-words">{room.name}</dd>
+          <dt className="text-muted-foreground">Status</dt>
+          <dd>{isArchived(room) ? "Archived" : "Active"}</dd>
           <dt className="text-muted-foreground">Visibility</dt>
           <dd>Private. Only people and agents added or invited here can open it.</dd>
         </dl>
-        <p className="text-sm text-muted-foreground">Workrooms can't be renamed or archived yet.</p>
+        <RoomControls roomId={id} name={room.name} policyVersion={room.policy_version} archived={isArchived(room)} />
       </Section>
 
       <Section id="settings-admins" title="Administrators">
@@ -77,7 +78,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
               {audit.data.audit.map((row) => (
                 <li key={row.id} className="space-y-0.5 p-3 text-sm">
                   <p className="break-words">
-                    <span className="break-all font-medium">{row.actor_id}</span> · {auditAction(row.action)} <span className="break-all">{row.target_id}</span>
+                    <span className="break-all font-medium">{row.actor_id}</span> · {auditAction(row.action)} <span className="break-all">{auditTarget(row.action, row.target_id)}</span>
                   </p>
                   <p className="text-muted-foreground">
                     <Time at={row.created_at} now={now} />

@@ -107,6 +107,14 @@ impl ApiError {
         }
     }
 
+    /// The stable code, for a refusal. An internal error has none.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            ApiError::Api { code, .. } => Some(code),
+            ApiError::Internal(_) => None,
+        }
+    }
+
     pub fn into_response(self) -> Result<Response> {
         if let ApiError::Internal(detail) = &self {
             console_error!("internal error: {detail}");

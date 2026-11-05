@@ -14,7 +14,7 @@ vi.mock("@/lib/gateway/server", () => ({
   getIdentity: async () => identity,
   getOrganizations: async () => organizations,
 }));
-vi.mock("@/lib/workroom", () => ({ loadWorkroom: async () => room, canManageWorkroom: (r: { policy_version: number | null }) => r.policy_version !== null }));
+vi.mock("@/lib/workroom", () => ({ loadWorkroom: async () => room, canManageWorkroom: (r: { policy_version: number | null }) => r.policy_version !== null, isArchived: (r: { status: string }) => r.status === "archived" }));
 
 const { default: Overview } = await import("./overview/page");
 const { default: Activity } = await import("./activity/page");
@@ -199,6 +199,36 @@ describe("who's offered creating a workroom", () => {
     render(await NewWorkroom());
     expect(form()).toBeInTheDocument();
     expect(screen.getByText(/couldn't check your role/)).toBeInTheDocument();
+  });
+});
+
+describe("an archived room", () => {
+  const Layout = import("./layout").then((module) => module.default);
+
+  it("says so on every page, and points those who manage it to Settings", async () => {
+    room.status = "archived";
+    render(await (await Layout)({ params, children: null }));
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Bring it back in Settings" })).toHaveAttribute("href", "/w/ws_1/settings");
+  });
+
+  it("tells everyone else who can bring it back", async () => {
+    room.status = "archived";
+    room.policy_version = null;
+    render(await (await Layout)({ params, children: null }));
+    expect(screen.getByText(/Its owner or an admin can bring it back/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Bring it back in Settings" })).not.toBeInTheDocument();
+  });
+
+  it("says nothing on an active room", async () => {
+    render(await (await Layout)({ params, children: null }));
+    expect(screen.queryByText("Archived")).not.toBeInTheDocument();
+  });
+
+  it("marks it in My workrooms", async () => {
+    replies.set("/api/v1/workspaces", { ok: true, data: { workspaces: [{ workspace_id: "ws_1", workspace_name: "Launch", role: "owner", status: "archived" }] } });
+    render(await MyWorkrooms());
+    expect(screen.getByText("Archived")).toBeInTheDocument();
   });
 });
 

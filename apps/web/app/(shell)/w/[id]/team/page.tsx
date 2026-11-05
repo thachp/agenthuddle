@@ -1,9 +1,8 @@
 import { ReadFailure } from "@/components/shell/read-failure";
 import { getIdentity, getOrganizations, gatewayQuery } from "@/lib/gateway/server";
-import { canManageWorkroom, loadWorkroom } from "@/lib/workroom";
+import { canManageWorkroom, isArchived, loadWorkroom } from "@/lib/workroom";
 import { loadPeopleNames } from "../tasks/load-tasks";
-import { addableAgents, membersOf, pendingInvitations, roomOrgFromEvents } from "./model";
-import { readAudit } from "./queries";
+import { addableAgents, membersOf, toPending, type InvitationRow } from "./model";
 import { TeamScreen, type AgentOption } from "./team-screen";
 
 type AgentRow = AgentOption & { revoked_at: number | null };
@@ -12,13 +11,11 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
   const { id } = await params;
   const room = await loadWorkroom(id);
   const canManage = canManageWorkroom(room);
-  const [identity, organizations, agents, audit, events] = await Promise.all([
+  const [identity, organizations, agents, invitations] = await Promise.all([
     getIdentity(),
     getOrganizations(),
     gatewayQuery<{ agents: AgentRow[]; truncated?: boolean }>("/api/agents"),
-    canManage ? readAudit(id) : null,
-    // The room read doesn't say which organization owns the room. Its first event does, and only those who manage access add agents.
-    canManage ? gatewayQuery<{ events: { type: string; actor_org: string | null }[] }>(`/api/v1/workspaces/${id}/events?after=0`) : null,
+    canManage ? gatewayQuery<{ invitations: InvitationRow[]; truncated: boolean }>(`/api/v1/workspaces/${id}/invitations`) : null,
   ]);
   if (!identity.ok) {
     return (
@@ -31,11 +28,12 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
   const orgs = organizations.ok ? organizations.data.organizations : [];
   const agentRows = agents.ok ? agents.data.agents : [];
   const people = await loadPeopleNames(gatewayQuery, orgs);
-  const roomOrg = events?.ok ? roomOrgFromEvents(events.data.events) : null;
+  const roomOrg = room.owner_org ?? null;
   return (
     <TeamScreen
       roomId={id}
       roomName={room.name}
+      archived={isArchived(room)}
       owner={room.owner}
       policyVersion={canManage ? room.policy_version : null}
       members={membersOf(room)}
@@ -47,7 +45,7 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
       // Without knowing the room's organization, listing every agent would offer ones the server refuses, so this reads as a failure.
       agents={agents.ok && roomOrg ? addableAgents(agentRows, roomOrg) : null}
       agentsPartial={agents.ok && agents.data.truncated === true}
-      invitations={audit?.ok ? { pending: pendingInvitations(audit.rows, Date.now()), complete: audit.complete } : null}
+      invitations={invitations?.ok ? { pending: invitations.data.invitations.map(toPending), complete: !invitations.data.truncated } : null}
     />
   );
 }

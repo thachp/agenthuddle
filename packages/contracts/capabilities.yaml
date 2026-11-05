@@ -47,6 +47,7 @@ person_only:
   - listOverseenMessages
   - changeMemberRole
   - listEvents
+  - listDenials
   - listAudit
   - clearRemoval
   - recordOrgDeparture

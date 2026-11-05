@@ -271,3 +271,46 @@ fn only_human_owners_and_admins_rename_or_archive_a_room() {
         );
     }
 }
+
+#[test]
+fn a_denied_change_is_named_only_from_a_fixed_list() {
+    assert_eq!(
+        denied_change_name("POST", &["tasks", "t_1", "accept"]),
+        Some("task.accept")
+    );
+    assert_eq!(
+        denied_change_name("DELETE", &["organizations", "org_a"]),
+        Some("organization.revoke")
+    );
+    assert_eq!(
+        denied_change_name("POST", &["tasks", "t_1", "<script>"]),
+        None
+    );
+    assert_eq!(denied_change_name("GET", &["tasks"]), None);
+    assert_eq!(denied_change_name("POST", &["anything"]), None);
+}
+
+#[test]
+fn only_a_lack_of_authority_counts_as_a_denial() {
+    for code in [
+        "not_allowed",
+        "access_revoked",
+        "workspace_not_found",
+        "self_sign_off",
+    ] {
+        assert!(is_authority_refusal("task.accept", code), "{code}");
+    }
+    for code in [
+        "invalid_argument",
+        "version_conflict",
+        "idempotency_mismatch",
+        "workspace_archived",
+        "internal_error",
+        "not_in_organization",
+        "not_found",
+    ] {
+        assert!(!is_authority_refusal("task.accept", code), "{code}");
+    }
+    assert!(is_authority_refusal("member.withdraw", "not_found"));
+    assert!(is_authority_refusal("member.owner_consent", "not_found"));
+}

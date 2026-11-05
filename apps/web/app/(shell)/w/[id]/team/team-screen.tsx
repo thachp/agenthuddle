@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
 import { AuthorLine } from "@/components/agent-content/agent-content";
 import { plainName } from "@/components/agent-content/text";
@@ -10,22 +9,20 @@ import { ReadFailure } from "@/components/shell/read-failure";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { clientCommand } from "@/lib/gateway/client";
-import type { GatewayResult } from "@/lib/gateway/result";
 import { textNameOf } from "../tasks/task-model";
+import { CommandNotice, useCommands, type Send } from "./commands";
 import { ConfirmAction } from "./confirm-action";
 import { AccessSheet } from "./access-sheet";
 import { FIELD, MOBILE_TARGET } from "./field";
-import { explainRefusal, isExternal, roleLabel, type Member, type PendingInvitation, type Viewer } from "./model";
+import { isExternal, roleLabel, type Member, type PendingInvitation, type Viewer } from "./model";
 
 export type AgentOption = { id: string; name: string; org_id: string };
 export type OrgOption = { id: string; name: string };
 
-type Notice = { kind: "ok" | "refused" | "conflict"; text: string } | null;
-
 export type TeamProps = {
   roomId: string;
   roomName: string;
+  archived?: boolean;
   owner: string;
   /** Null unless the server says this viewer may manage access. */
   policyVersion: number | null;
@@ -43,39 +40,12 @@ export type TeamProps = {
   invitations: { pending: PendingInvitation[]; complete: boolean } | null;
 };
 
-/** Sends one access command and reports what the server said. Never optimistic: the list changes only on the refresh. */
-function useCommands(version: number | null) {
-  const router = useRouter();
-  const [notice, setNotice] = useState<Notice>(null);
-  const noticeRef = useRef<HTMLDivElement>(null);
-
-  async function send<T>(path: string, body: Record<string, unknown>, success: string, init: { method?: "POST" | "DELETE"; focus?: boolean } = {}): Promise<GatewayResult<T> | null> {
-    let result: GatewayResult<T> | null = null;
-    try {
-      result = await clientCommand<T>(path, { policy_version: version, ...body }, { method: init.method });
-    } catch {
-      setNotice({ kind: "refused", text: explainRefusal("network") });
-    }
-    if (result?.ok) {
-      setNotice({ kind: "ok", text: success });
-      router.refresh();
-    } else if (result) {
-      if (result.code === "version_conflict") setNotice({ kind: "conflict", text: "This workroom's access changed while you were working. Your change isn't saved." });
-      else setNotice({ kind: "refused", text: explainRefusal(result.code, result.status) });
-    }
-    if (init.focus) noticeRef.current?.focus();
-    return result;
-  }
-
-  return { notice, setNotice, noticeRef, send, review: () => (setNotice(null), router.refresh()) };
-}
-
 export function TeamScreen(props: TeamProps) {
-  const { roomId, roomName, owner, policyVersion, members, viewer, names, orgNames, orgs, agents, agentsPartial = false, invitations } = props;
+  const { roomId, roomName, archived = false, owner, policyVersion, members, viewer, names, orgNames, orgs, agents, agentsPartial = false, invitations } = props;
   const canManage = policyVersion !== null;
   const isOwner = viewer.id === owner;
   const commands = useCommands(policyVersion);
-  const { notice, noticeRef, send, review } = commands;
+  const { noticeRef, send } = commands;
   const room = plainName(roomName);
   const base = `/api/v1/workspaces/${encodeURIComponent(roomId)}`;
   const label = (id: string) => (id === viewer.id ? "You" : plainName(names[id] ?? id));
@@ -85,24 +55,8 @@ export function TeamScreen(props: TeamProps) {
   return (
     <section className="max-w-3xl space-y-6">
       <div className="space-y-2">
-      <h1 className="text-2xl font-semibold">Team</h1>
-      {/* Always there, because focus moves here when a result removes the control that asked. */}
-      <div ref={noticeRef} tabIndex={-1} role="status" className="rounded-lg outline-none">
-        {notice?.kind === "ok" ? <p className="rounded-lg bg-status-green-surface p-3 text-status-green">{notice.text}</p> : null}
-        {notice?.kind === "refused" ? (
-          <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-            {notice.text}
-          </p>
-        ) : null}
-        {notice?.kind === "conflict" ? (
-          <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-status-amber">
-            {notice.text}{" "}
-            <Button variant="link" className="h-auto p-0 text-status-amber underline" onClick={review}>
-              Review latest
-            </Button>
-          </p>
-        ) : null}
-      </div>
+        <h1 className="text-2xl font-semibold">Team</h1>
+        <CommandNotice commands={commands} />
       </div>
 
       <section aria-labelledby="participants" className="space-y-3">
@@ -134,7 +88,7 @@ export function TeamScreen(props: TeamProps) {
                       </SheetLink>
                     </Button>
                   ) : null}
-                  {member.kind === "person" && isOwner && member.role !== "admin" ? (
+                  {member.kind === "person" && isOwner && !archived && member.role !== "admin" ? (
                     <ConfirmAction
                       label="Make admin"
                       describedBy={nameId}
@@ -145,7 +99,7 @@ export function TeamScreen(props: TeamProps) {
                       action={() => send(`${base}/members/${encodeURIComponent(member.principal_id)}/role`, { role: "admin" }, "They're now an admin of this workroom.")}
                     />
                   ) : null}
-                  {member.kind === "person" && isOwner && member.role === "admin" ? (
+                  {member.kind === "person" && isOwner && !archived && member.role === "admin" ? (
                     <ConfirmAction
                       label="Remove admin"
                       describedBy={nameId}
@@ -174,20 +128,18 @@ export function TeamScreen(props: TeamProps) {
             );
           })}
         </ul>
-        {members.length === 0 && canManage ? <p className="text-muted-foreground">Nobody else is here yet. Add an agent from your organization, or invite another organization.</p> : null}
+        {members.length === 0 && canManage && !archived ? <p className="text-muted-foreground">Nobody else is here yet. Add an agent from your organization, or invite another organization.</p> : null}
         {members.length === 0 && !canManage ? <p className="text-muted-foreground">Nobody else is listed for you here.</p> : null}
         {canManage ? null : <p className="text-sm text-muted-foreground">Only this workroom's owner and appointed admins can change who's here.</p>}
       </section>
 
-      {canManage ? <AddParticipants base={base} isOwner={isOwner} orgs={orgs} agents={agents} agentsPartial={agentsPartial} orgNames={orgNames} memberIds={memberIds} send={send} /> : null}
-      {canManage ? <Invitations base={base} room={room} invitations={invitations} orgLabel={orgLabel} label={(id) => textNameOf(id, viewer.id, names)} send={send} focusAfter={noticeRef} /> : null}
+      {canManage && !archived ? <AddParticipants base={base} isOwner={isOwner} orgs={orgs} agents={agents} agentsPartial={agentsPartial} orgNames={orgNames} memberIds={memberIds} send={send} /> : null}
+      {canManage ? <Invitations base={base} room={room} archived={archived} invitations={invitations} orgLabel={orgLabel} label={(id) => textNameOf(id, viewer.id, names)} send={send} focusAfter={noticeRef} /> : null}
 
       <AccessSheet roomId={roomId} roomName={roomName} viewer={viewer} names={names} orgNames={orgNames} />
     </section>
   );
 }
-
-type Send = ReturnType<typeof useCommands>["send"];
 
 function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames, memberIds, send }: { base: string; isOwner: boolean; orgs: OrgOption[] | null; agents: AgentOption[] | null; agentsPartial: boolean; orgNames: Record<string, string>; memberIds: Set<string>; send: Send }) {
   const available = agents?.filter((agent) => !memberIds.has(agent.id)) ?? [];
@@ -203,16 +155,14 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
     const chosen = available.find((option) => option.id === agent);
     if (!chosen) return;
     setPending("agent");
-    const result = await send(`${base}/members`, { principal_id: chosen.id, kind: "agent", org_id: chosen.org_id, role: agentRole }, "Agent added. It will see this at its next session or wake.", { focus: true });
-    if (result?.ok) setAgent("");
+    await send(`${base}/members`, { principal_id: chosen.id, kind: "agent", org_id: chosen.org_id, role: agentRole }, "Agent added. It will see this at its next session or wake.", { focus: true, onOk: () => setAgent("") });
     setPending(null);
   };
 
   const addPerson = async (event: FormEvent) => {
     event.preventDefault();
     setPending("person");
-    const result = await send(`${base}/members`, { principal_id: person.trim(), kind: "person", org_id: personOrg, role: personRole }, "Person added.", { focus: true });
-    if (result?.ok) setPerson("");
+    await send(`${base}/members`, { principal_id: person.trim(), kind: "person", org_id: personOrg, role: personRole }, "Person added.", { focus: true, onOk: () => setPerson("") });
     setPending(null);
   };
 
@@ -308,13 +258,15 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
 
 type Created = { id: string; token?: string; role: string; expires_at: number };
 
-function Invitations({ base, room, invitations, orgLabel, label, send, focusAfter }: { base: string; room: string; invitations: TeamProps["invitations"]; orgLabel: (id: string) => string; label: (id: string) => string; send: Send; focusAfter: RefObject<HTMLDivElement | null> }) {
+function Invitations({ base, room, archived, invitations, orgLabel, label, send, focusAfter }: { base: string; room: string; archived: boolean; invitations: TeamProps["invitations"]; orgLabel: (id: string) => string; label: (id: string) => string; send: Send; focusAfter: RefObject<HTMLDivElement | null> }) {
   const [role, setRole] = useState<"guest" | "member">("guest");
   const [invitedOrg, setInvitedOrg] = useState("");
   const [guestCanCreate, setGuestCanCreate] = useState(false);
   const [pending, setPending] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [lostLink, setLostLink] = useState<string | null>(null);
+  const lostLinkRef = useRef<HTMLParagraphElement>(null);
   const linkRef = useRef<HTMLInputElement>(null);
 
   // The link is what the person has to act on, and it may be far from the message above.
@@ -322,16 +274,29 @@ function Invitations({ base, room, invitations, orgLabel, label, send, focusAfte
     if (link) linkRef.current?.focus();
   }, [link]);
 
+  useEffect(() => {
+    if (lostLink) lostLinkRef.current?.focus();
+  }, [lostLink]);
+
   const create = async (event: FormEvent) => {
     event.preventDefault();
     setPending(true);
     setLink(null);
+    setLostLink(null);
     setCopied(false);
     const body = { role, ...(invitedOrg.trim() ? { invited_org_id: invitedOrg.trim() } : {}), ...(role === "guest" ? { guest_can_create: guestCanCreate } : {}) };
-    const result = await send<Created>(`${base}/invitations`, body, "Invitation created. Copy its link now: it's shown only once.");
-    if (result?.ok && result.data.token) setLink(`${window.location.origin}/invitations/${result.data.token}`);
-    // Refused or lost: nothing to copy, and focus should be on why.
-    else focusAfter.current?.focus();
+    // A retry's stored answer never repeats the secret, so that link can't be shown again and there's nothing to copy.
+    const success = (created: Created) => (created.token ? "Invitation created. Copy its link now: it's shown only once." : null);
+    await send<Created>(`${base}/invitations`, body, success, {
+      onOk: (created) => {
+        if (created.token) setLink(`${window.location.origin}/invitations/${created.token}`);
+        else setLostLink(created.id);
+      },
+      onDone: (outcome) => {
+        // Refused or unknown: nothing to copy, and focus should be on why. A retry lands here too.
+        if (outcome.kind !== "ok") focusAfter.current?.focus();
+      },
+    });
     setPending(false);
   };
 
@@ -372,6 +337,14 @@ function Invitations({ base, room, invitations, orgLabel, label, send, focusAfte
           </div>
         </div>
       ) : null}
+      {lostLink ? (
+        <p ref={lostLinkRef} tabIndex={-1} role="alert" className="rounded-lg bg-status-amber-surface p-3 break-words text-status-amber outline-none">
+          The invitation was created, but its link is shown only once and that answer was lost. Withdraw {lostLink} below and create another.
+        </p>
+      ) : null}
+      {archived ? (
+        <p className="text-sm text-muted-foreground">New invitations wait until this workroom is brought back. Links below can't be used until then, but you can still withdraw them.</p>
+      ) : (
       <form onSubmit={create} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Create an invitation</h3>
         <div className="grid gap-3 sm:grid-cols-2">
@@ -398,17 +371,21 @@ function Invitations({ base, room, invitations, orgLabel, label, send, focusAfte
           {pending ? "Creating…" : "Create invitation"}
         </Button>
       </form>
+      )}
       <div className="space-y-2">
         <h3 className="font-medium">Pending</h3>
         {invitations === null ? <ReadFailure /> : null}
-        {invitations && !invitations.complete ? <p role="alert">This workroom has more access history than we can read here, so newer invitations may be missing.</p> : null}
-        {invitations?.pending.length === 0 ? <p className="text-sm text-muted-foreground">No invitations are pending. Create one above to bring in another organization's agents.</p> : null}
+        {invitations && !invitations.complete ? <p role="status">This workroom has more pending invitations than we can list here. These are the newest.</p> : null}
+        {invitations?.pending.length === 0 ? <p className="text-sm text-muted-foreground">{archived ? "No invitations are pending." : "No invitations are pending. Create one above to bring in another organization's agents."}</p> : null}
         {invitations && invitations.pending.length > 0 ? (
           <ul className="divide-y rounded-lg border">
             {invitations.pending.map((invitation) => (
               <li key={invitation.id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
                 <div id={invitation.id} className="min-w-0 flex-1 basis-56 space-y-0.5">
-                  <p className="break-all font-medium">{invitation.id}</p>
+                  <p className="flex flex-wrap items-center gap-2">
+                    <span className="break-all font-medium">{invitation.id}</span>
+                    <Badge variant="outline">{archived ? "Paused" : "Pending"}</Badge>
+                  </p>
                   <p className="break-words text-muted-foreground">
                     {roleLabel(invitation.role)} · {invitation.invitedOrg ? `Only ${plainName(orgLabel(invitation.invitedOrg))}` : "Any organization"} · Created by {label(invitation.createdBy)} · Expires {new Date(invitation.expiresAt).toUTCString()}
                   </p>
@@ -421,7 +398,7 @@ function Invitations({ base, room, invitations, orgLabel, label, send, focusAfte
                   confirm="Withdraw invitation"
                   destructive
                   focusAfter={focusAfter}
-                  action={() => send(`${base}/invitations/${encodeURIComponent(invitation.id)}`, {}, "Invitation withdrawn. Its link no longer works.", { method: "DELETE" })}
+                  action={() => send(`${base}/invitations/${encodeURIComponent(invitation.id)}`, {}, "Invitation withdrawn. Its link no longer works.", { method: "DELETE", onOk: () => setLostLink((current) => (current === invitation.id ? null : current)) })}
                 />
               </li>
             ))}
