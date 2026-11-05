@@ -1,6 +1,6 @@
 # ADR 0005: Ownership transfer and recovery
 
-**Status:** On 2026-11-05 the owner accepted the five choices below and the risk in "Takeover". The rest of this design follows from them and wasn't separately approved. Not built yet.
+**Status:** On 2026-11-05 the owner accepted the five choices below, the risk in "Takeover", the ownerless list ([decision 40](../spec/PRODUCT.md#decisions-needed)) and recovery in archived rooms ([decision 41](../spec/PRODUCT.md#decisions-needed)). The rest of this design follows from them and wasn't separately approved. Not built yet.
 
 ## The owner's choices
 

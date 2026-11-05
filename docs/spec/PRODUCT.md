@@ -532,11 +532,14 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 37 | Whether a new owner must accept a transfer | **Decided:** no, in M0 | M0 |
 | 38 | Who recovery can make the owner | **Decided:** any person currently in the room's organization, including the admin running it. Never an agent | M0 |
 | 39 | What the former owner becomes after a transfer | **Decided:** a room admin | M0 |
+| 40 | Finding rooms whose owner left | **Decided:** org admins can see their own organization's rooms whose owner left, including private rooms they aren't in. The list shows room ID, room name, the departed owner's ID and when they left. Anyone else sees nothing, and an org admin gets not-found for a room whose owner hasn't left | M0 |
+| 41 | Ownership changes in archived rooms | **Decided:** recovery works in an archived room, and transfer is refused | M0 |
 
 ## M0 decisions, November 5, 2026
 
 - The owner ruled on organizations: decision 32 (a rejoining owner gets their room back, for now), decision 33 (only org admins create rooms, for now) and decision 34 (any org admin can remove another, for M0).
 - The owner accepted all five recommendations in [ADR 0005](../adr/0005-ownership-transfer-and-recovery.md), now decisions 35 to 39, after being told that one org admin can remove an owner and make themselves owner with no waiting period. They aren't built yet.
+- The owner accepted decisions 40 (org admins can list rooms whose owner left) and 41 (recovery works in archived rooms, and transfer is refused). They aren't built yet.
 
 ## M0 decisions, November 4, 2026
 
