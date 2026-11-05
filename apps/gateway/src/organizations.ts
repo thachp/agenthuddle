@@ -87,7 +87,7 @@ async function deliverDeparture(env: Env, row: DepartureRow) {
   else console.error("departure not delivered", row.id, response.status);
 }
 
-/** Run by the cron, for whatever the removal itself couldn't deliver. One failure doesn't stop the rest. */
+/** Run by the cron, for up to 50 of whatever the removal itself couldn't deliver, oldest first. One failure doesn't stop the rest. */
 export async function retryDepartures(env: Env) {
   const { results } = await env.DB.prepare(`SELECT id, person_id, org_id, left_at, actor_id FROM org_departure_outbox ORDER BY left_at LIMIT ?`).bind(MAX_DEPARTURES_RETRIED).all<DepartureRow>();
   for (const row of results) await deliverDeparture(env, row).catch(() => console.error("departure not delivered", row.id));
@@ -105,7 +105,7 @@ async function removeMember(env: Env, org: string, actor: string, target: string
     env.DB.prepare(`DELETE FROM org_member AS m WHERE ${where}`).bind(org, target),
   ]);
   if (recorded.meta.changes) {
-    // Their authority ended with the delete. If this fails, the cron delivers it later.
+    // Their authority ended with the delete. If this fails, a later cron run delivers it.
     await deliverDeparture(env, { id: departure, person_id: target, org_id: org, left_at: now, actor_id: actor }).catch(() => console.error("departure not delivered", departure));
     return json({ person_id: target, status: "removed" });
   }

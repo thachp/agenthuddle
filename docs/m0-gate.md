@@ -176,7 +176,7 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 
 | # | Gap | Size | Where | Blocks |
 | --- | --- | --- | --- | --- |
-| 1 | **Closed locally, apart from a ruling and the screens.** An org admin invites by a link, and a signed-in person accepts. Adding someone outside the organization to a room, or changing their role, is refused with `not_in_organization`. Leaving ends their credentials, room listings and room roles, and rejoining restores none of those, except a room they own. See [Leaving an organization](#leaving-an-organization). The dashboard screens aren't built. | S, once ruled | `apps/gateway/src/organizations.ts`; `apps/api/src/workspace.rs` `org_departure` | Nothing locally |
+| 1 | **Built locally, with a ruling and the screens open.** An org admin invites by a link, and a signed-in person accepts. Adding someone outside the organization to a room, or changing their role, is refused with `not_in_organization`. Leaving ends their credentials, room listings and room roles, and rejoining restores none of those, except a room they own. See [Leaving an organization](#leaving-an-organization). The dashboard screens aren't built. | S, once ruled | `apps/gateway/src/organizations.ts`; `apps/api/src/workspace.rs` `org_departure` | Dashboard screens for an organization's people, and the owner's ruling on a departed room owner |
 | 2 | **No ownership transfer or recovery.** `owner_person_id` is written once, and there's no contract, policy action or command for either. Recovery needs an organization admin other than the owner, so it depends on gap 1. Personal organizations have no recovery ([ruling](#gate-rulings-2026-11-05-utc)). | L, with contract and audit | `apps/api/src/workspace.rs:1669`, `:80`; `crates/policy/src/lib.rs` | Decision 8 |
 | 3 | **Denied changes aren't recorded.** `audit_event` has an `outcome` column, and the only value ever written is `allowed`. ACCESS-CONTROL.md asks for a protected denial stream. Needs a design that can't be flooded, because a refused request rolls back its transaction. | M | `apps/api/src/workspace.rs:490` | AC-22 |
 | 4 | **Closed by [#26](https://github.com/thachp/podster/pull/26).** People can reach their inbox and, as org admins, an agent's. | Done | `apps/gateway/src/index.ts` | Decision 21, dashboard |
@@ -191,8 +191,10 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 
 Removing someone from an organization now reaches their rooms, as [ADR 0003](adr/0003-organization-departure.md) describes, locally only: their role ends with the departure rules, and their room invitations are withdrawn. What's still open:
 
-- **A departed room owner keeps the room,** and gets full owner authority back if they rejoin, even from a member invitation. The room's log records that they left, not that they returned. Their tasks aren't changed. The owner needs to rule on this, and it ties into gap 2.
-- **An API outage delays the rooms** by up to an hour, until the cron runs. Authority doesn't wait for this.
+- **A departed room owner keeps the room,** and gets full owner authority back if they rejoin, even from a member invitation. While they're out they aren't a participant, so their tasks follow the departure table and their inbox stops. The room's log records both the departure and their first command after returning. The owner needs to rule on this, and it ties into gap 2.
+- **A room with no admin** has nobody to tell when a task needs attention while its owner is out.
+- **If the API can't be reached,** delivery waits for the cron, which takes 50 rows an hour, oldest first. So a backlog can take several hours, and rows that keep failing can hold up the rest. Authority doesn't wait for this.
+- **A room the index never lists** keeps the person in its member list, and their invitations there stay usable until they expire, up to 7 days. `org_since` refuses their role but doesn't cover invitations.
 
 ## Gate rulings, 2026-11-05 UTC
 

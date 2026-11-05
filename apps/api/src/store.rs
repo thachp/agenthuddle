@@ -41,6 +41,8 @@ CREATE TABLE idempotency (actor_id TEXT NOT NULL, key TEXT NOT NULL, request_has
   PRIMARY KEY (actor_id, key));
 CREATE TABLE audit_event (id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, actor_kind TEXT NOT NULL, action TEXT NOT NULL, target_id TEXT NOT NULL, outcome TEXT NOT NULL,
   reason_code TEXT, prior_json TEXT, new_json TEXT, policy_version INTEGER NOT NULL, created_at INTEGER NOT NULL);
+", "
+ALTER TABLE workspace ADD COLUMN owner_left_at INTEGER;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -123,8 +125,16 @@ pub fn migrate(sql: &SqlStorage) -> R<()> {
 
 /// A current participant's kind and role, from authoritative state.
 pub fn participant(sql: &SqlStorage, id: &str) -> R<Option<(String, String)>> {
-    let room = rows(sql, "SELECT owner_person_id FROM workspace", vec![])?;
+    let room = rows(
+        sql,
+        "SELECT owner_person_id, owner_left_at FROM workspace",
+        vec![],
+    )?;
     if room.first().and_then(|r| r["owner_person_id"].as_str()) == Some(id) {
+        // An owner who left the organization is told nothing and can't be given work until they're back and act here.
+        if room.first().is_some_and(|r| !r["owner_left_at"].is_null()) {
+            return Ok(None);
+        }
         return Ok(Some(("person".to_string(), "owner".to_string())));
     }
     let found = rows(
@@ -250,10 +260,14 @@ pub fn record_event(
 
 /// Human owners and admins, who handle tasks a departure left needing attention.
 fn room_admins(sql: &SqlStorage) -> R<Vec<String>> {
-    let mut admins: Vec<String> = rows(sql, "SELECT owner_person_id FROM workspace", vec![])?
-        .iter()
-        .filter_map(|r| text(&r["owner_person_id"]))
-        .collect();
+    let mut admins: Vec<String> = rows(
+        sql,
+        "SELECT owner_person_id FROM workspace WHERE owner_left_at IS NULL",
+        vec![],
+    )?
+    .iter()
+    .filter_map(|r| text(&r["owner_person_id"]))
+    .collect();
     admins.extend(rows(sql, "SELECT principal_id FROM member WHERE role = 'admin' AND kind = 'person' AND revoked_at IS NULL", vec![])?.iter().filter_map(|r| text(&r["principal_id"])));
     Ok(admins)
 }

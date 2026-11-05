@@ -794,11 +794,23 @@ fn find_invitation(sql: &SqlStorage, id: &str, secret: &str, now: i64) -> R<Opti
         "SELECT * FROM invitation WHERE id = ?",
         vec![id.into()],
     )?;
-    Ok(found.into_iter().next().filter(|row| {
+    let Some(row) = found.into_iter().next().filter(|row| {
         row["token_hash"].as_str() == Some(invitation_hash(secret).as_str())
             && (row["status"].as_str() == Some("accepted")
                 || int(&row["expires_at"]) > now && row["status"].as_str() == Some("pending"))
-    }))
+    }) else {
+        return Ok(None);
+    };
+    // A pending invitation lasts only as long as its creator can still invite here. An accepted one is only replayed.
+    if row["status"].as_str() == Some("pending") {
+        let creator = row["created_by"].as_str().unwrap_or_default();
+        let can_invite =
+            participant(sql, creator)?.is_some_and(|(_, role)| role == "owner" || role == "admin");
+        if !can_invite {
+            return Ok(None);
+        }
+    }
+    Ok(Some(row))
 }
 
 /// Changes an active member's role. Any change to or from admin is the owner's alone.
@@ -915,6 +927,27 @@ async fn send_to_inbox(env: &Env, recipient: &str, body: &Value) -> bool {
     }
 }
 
+/// Applies the departure table to a principal's open tasks, and drops anything still queued for them.
+fn apply_departure_rules(sql: &SqlStorage, actor: &Caller, principal: &str, now: i64) -> R<()> {
+    let affected = rows(sql, "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled') AND (assignee_id = ? OR reviewer_id = ? OR requester_id = ?)",
+        vec![principal.into(), principal.into(), principal.into()])?;
+    for row in &affected {
+        let task = store::task_from_row(row)?;
+        let requester_ok = participant(sql, &task.requester)?
+            .is_some_and(|(kind, role)| can_review(parse_kind(&kind), parse_role(&role), false));
+        if let Some(decision) = apply_departure(&task, principal, requester_ok) {
+            save_task(sql, &decision.task, now)?;
+            record_decision(sql, &decision, task.status, &actor.id, now)?;
+        }
+    }
+    exec(
+        sql,
+        "DELETE FROM outbox WHERE recipient_principal_id = ?",
+        vec![principal.into()],
+    )?;
+    Ok(())
+}
+
 /// Removes a participant and applies the departure rules, inside the caller's transaction.
 /// Used by room revocation, agent-owner withdrawal and global disconnect, which differ only by actor and reason.
 fn remove_member(
@@ -939,22 +972,7 @@ fn remove_member(
         .and_then(|m| text(&m["org_id"]))
         .unwrap_or_default();
     exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
-    let affected = rows(sql, "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled') AND (assignee_id = ? OR reviewer_id = ? OR requester_id = ?)",
-        vec![principal.into(), principal.into(), principal.into()])?;
-    for row in &affected {
-        let task = store::task_from_row(row)?;
-        let requester_ok = participant(sql, &task.requester)?
-            .is_some_and(|(kind, role)| can_review(parse_kind(&kind), parse_role(&role), false));
-        if let Some(decision) = apply_departure(&task, principal, requester_ok) {
-            save_task(sql, &decision.task, now)?;
-            record_decision(sql, &decision, task.status, &actor.id, now)?;
-        }
-    }
-    exec(
-        sql,
-        "DELETE FROM outbox WHERE recipient_principal_id = ?",
-        vec![principal.into()],
-    )?;
+    apply_departure_rules(sql, actor, principal, now)?;
     audit_as(
         sql,
         &actor.id,
@@ -1243,6 +1261,7 @@ impl Workspace {
         let key = key
             .filter(|k| !k.is_empty() && k.len() <= MAX_KEY_BYTES)
             .ok_or_else(ApiError::idempotency_required)?;
+        self.note_owner_return(identity)?;
         let sql = self.state.storage().sql();
         let identity = identity.clone();
         let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
@@ -1291,6 +1310,7 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Ok(json!({ "acked": true }));
         }
+        self.migrate_if_needed()?;
         transaction_sync(&self.state, move || {
             let now = now_ms();
             let prior = rows(
@@ -1734,12 +1754,58 @@ impl Workspace {
         Ok(json!({ "id": identity.workspace_id, "owner": identity.id }))
     }
 
+    /// Internal routes come in ahead of the migration in `dispatch`, and the departure rules read every column.
+    fn migrate_if_needed(&self) -> R<()> {
+        let sql = self.state.storage().sql();
+        if store::needs_migration(&sql)? {
+            let migrating = sql.clone();
+            transaction_sync(&self.state, move || store::migrate(&migrating))?;
+        }
+        Ok(())
+    }
+
+    /// Records that an owner who left the organization is back and acting here. It's separate from the command it comes
+    /// before, so a refused command can't leave them out of the room's work.
+    fn note_owner_return(&self, identity: &Identity) -> R<()> {
+        let sql = self.state.storage().sql();
+        let room = rows(&sql, "SELECT owner_person_id, owner_org_id, owner_left_at FROM workspace WHERE owner_left_at IS NOT NULL", vec![])?;
+        let Some(room) = room.first() else {
+            return Ok(());
+        };
+        let org = text(&room["owner_org_id"]).unwrap_or_default();
+        let back = room["owner_person_id"].as_str() == Some(identity.id.as_str())
+            && in_org(identity, &org)
+            && identity
+                .org_since
+                .get(&org)
+                .is_some_and(|since| *since > int(&room["owner_left_at"]));
+        if !back {
+            return Ok(());
+        }
+        let identity = identity.clone();
+        transaction_sync(&self.state, move || {
+            exec(&sql, "UPDATE workspace SET owner_left_at = NULL", vec![])?;
+            audit_as(
+                &sql,
+                &identity.id,
+                "person",
+                "owner.returned",
+                &identity.id,
+                None,
+                None,
+                now_ms(),
+            )
+        })?;
+        Ok(())
+    }
+
     /// Applies a person's departure from an organization, from this room's own state. Repeating it changes nothing.
     fn org_departure(&self, body: &Value) -> R<Value> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? {
             return Ok(json!({ "applied": false }));
         }
+        self.migrate_if_needed()?;
         let person = required(body, "person")?;
         let org = required(body, "org")?;
         let actor_id = required(body, "actor")?;
@@ -1787,11 +1853,18 @@ impl Workspace {
                     )?;
                 }
             }
-            // The room keeps its owner, because nobody else can hold it yet. Its log says they left, once per departure.
+            // The room keeps its owner, because nobody else can hold it yet. They stop being a participant, so their tasks
+            // follow the departure table and nothing more reaches their inbox. Each departure applies once.
             if is_owner(&sql, &person)? && room_org == org {
                 let note = json!({ "org_id": org, "left_at": left_at }).to_string();
                 let noted = rows(&sql, "SELECT id FROM audit_event WHERE action = 'owner.left_organization' AND new_json = ?", vec![note.as_str().into()])?;
                 if noted.is_empty() {
+                    exec(
+                        &sql,
+                        "UPDATE workspace SET owner_left_at = ?",
+                        vec![left_at.into()],
+                    )?;
+                    apply_departure_rules(&sql, &actor, &person, now)?;
                     audit(
                         &sql,
                         &actor,

@@ -2315,16 +2315,30 @@ describe("wake", () => {
 });
 
 describe("a person leaving the room's organization", () => {
-  const depart = async (who: Who, departure: unknown) => {
+  const principal = (id: string) => (env as any).PRINCIPAL.get((env as any).PRINCIPAL.idFromName(id));
+  const pending = (id: string) => runInDurableObject(principal(id), (_: any, state: any) => {
+    const exists = state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_master WHERE name = 'org_departure'").one().n;
+    return (exists ? state.storage.sql.exec("SELECT sweeps_left, failures FROM org_departure").toArray() : []) as { sweeps_left: number; failures: number }[];
+  });
+  const rooms = (id: string) => runInDurableObject(principal(id), (_: any, state: any) => state.storage.sql.exec("SELECT workspace_id, applied FROM org_departure_room ORDER BY workspace_id").toArray() as { workspace_id: string; applied: number }[]);
+  const makeDue = (id: string) => runInDurableObject(principal(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
+  /** Sends a departure and waits for its first sweep, which the alarm runs. */
+  const depart = async (who: Who, departure: any, settle = true) => {
     const res = await SELF.fetch("https://api.internal/v1/org-departures", { method: "POST", headers: { "x-podster-assertion": await assertion(who, departure === undefined ? {} : { claims: { departure } }) }, body: "{}" });
     const parsed = await res.json<any>();
+    if (settle && res.status === 200) await vi.waitFor(async () => {
+      const [row] = await pending(departure.person);
+      expect(row === undefined || row.sweeps_left < 3).toBe(true);
+    }, { timeout: 5000 });
     return { status: res.status, code: parsed?.error?.code };
   };
-  const listRoom = (workspace: string, person: string, org = "org_a") =>
-    (env as any).DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'member', 'Room', 0, 1)").bind(workspace, person, org).run();
-  const principal = (id: string) => (env as any).PRINCIPAL.get((env as any).PRINCIPAL.idFromName(id));
-  const pending = (id: string) => runInDurableObject(principal(id), (_: any, state: any) => state.storage.sql.exec("SELECT sweeps_left FROM org_departure").toArray() as { sweeps_left: number }[]);
+  const listRoom = (workspace: string, person: string, org = "org_a", removed = 0) =>
+    (env as any).DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'member', 'Room', ?, 1)").bind(workspace, person, org, removed).run();
   const roleOf = async (id: string, who: Who) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.members.find((m: any) => m.principal_id === who.id)?.role;
+  const auditLog = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit as any[];
+  const person = () => `per_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  const addAdmin = async (id: string, who: string) => expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who, kind: "person", org_id: "org_a", role: "admin" })).status).toBe(200);
+  const asPerson = (id: string): Who => ({ id, kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: [] });
 
   it("is refused without the gateway's claim, and for agents even with it", async () => {
     const leaving = { person: ADMIN.id, org: "org_a", left_at: Date.now() };
@@ -2335,81 +2349,197 @@ describe("a person leaving the room's organization", () => {
 
   it("removes the person with the departure rules, withdraws their invitations, and changes nothing on a retry", async () => {
     const { id, tasks } = await room();
-    await listRoom(id, ADMIN.id);
-    const task = await api(ADMIN, "POST", tasks, { title: "Theirs", instructions: "x", acceptance_criteria: "y" });
+    const who = person();
+    await addAdmin(id, who);
+    await listRoom(id, who);
+    const task = await api(asPerson(who), "POST", tasks, { title: "Theirs", instructions: "x", acceptance_criteria: "y" });
     expect(task.status).toBe(200);
-    const invitation = await api(ADMIN, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" });
-    const leaving = { person: ADMIN.id, org: "org_a", left_at: Date.now() };
+    const invitation = await api(asPerson(who), "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" });
+    const leaving = { person: who, org: "org_a", left_at: Date.now() };
     expect((await depart(OWNER, leaving)).status).toBe(200);
-    expect(await roleOf(id, ADMIN)).toBeUndefined();
-    expect((await api(ADMIN, "GET", `/v1/workspaces/${id}`)).code).toBe("access_revoked");
+    expect(await roleOf(id, asPerson(who))).toBeUndefined();
+    expect((await api(asPerson(who), "GET", `/v1/workspaces/${id}`)).code).toBe("access_revoked");
     expect((await api(OWNER, "GET", `${tasks}/${task.body.id}`)).body.task.needs_attention).toBe(true);
     const accepted = await api(orgAdmin(BOB.org), "POST", "/v1/invitations/accept", { token: invitation.body.token, org_id: BOB.org, agents: [BOB.id] });
     expect(accepted.code).toBe("invitation_not_found");
-    const log = async () => (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit as any[];
-    const revoked = (await log()).filter((e) => e.action === "member.revoked" && e.target_id === ADMIN.id);
+    const revoked = (await auditLog(id)).filter((e) => e.action === "member.revoked" && e.target_id === who);
     expect(revoked).toHaveLength(1);
     expect(revoked[0].actor_id).toBe(OWNER.id);
     expect(JSON.parse(revoked[0].prior_json)).toMatchObject({ role: "admin", reason: "org_departure" });
-    expect((await log()).filter((e) => e.action === "invitation.withdrawn")).toHaveLength(1);
-    // A retry finds nothing to do.
+    expect((await auditLog(id)).filter((e) => e.action === "invitation.withdrawn")).toHaveLength(1);
+    // Asking the room again finds nothing to do.
     const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
-    expect((await depart(OWNER, leaving)).status).toBe(200);
+    expect((await depart(OWNER, { ...leaving })).status).toBe(200);
+    await makeDue(who);
+    await runDurableObjectAlarm(principal(who));
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version).toBe(version);
-    // Adding them again still works.
-    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: ADMIN.id, kind: "person", org_id: "org_a", role: "member" })).status).toBe(200);
-    expect(await roleOf(id, ADMIN)).toBe("member");
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who, kind: "person", org_id: "org_a", role: "member" })).status).toBe(200);
+    expect(await roleOf(id, asPerson(who))).toBe("member");
+  });
+
+  it("ends an invitation in a room that had already removed them", async () => {
+    const { id } = await room();
+    const who = person();
+    await addAdmin(id, who);
+    const invitation = await api(asPerson(who), "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" });
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${who}`)).status).toBe(200);
+    await vi.waitFor(async () => expect(await (env as any).DB.prepare("SELECT 1 FROM membership_index WHERE principal_id = ? AND removed = 1").bind(who).first()).toBeTruthy(), { timeout: 5000 });
+    expect((await depart(OWNER, { person: who, org: "org_a", left_at: Date.now() })).status).toBe(200);
+    const withdrawn = (await auditLog(id)).filter((e) => e.action === "invitation.withdrawn" && e.target_id === invitation.body.id);
+    expect(withdrawn.map((e) => JSON.parse(e.new_json).reason)).toEqual(["org_departure"]);
+  });
+
+  it("refuses a pending invitation once its creator can't invite, even with no departure", async () => {
+    const { id } = await room();
+    const [gone, demoted] = [person(), person()];
+    await addAdmin(id, gone);
+    await addAdmin(id, demoted);
+    const links = [await api(asPerson(gone), "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" }), await api(asPerson(demoted), "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" }), await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" })];
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${gone}`)).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${demoted}/role`, { role: "member" })).status).toBe(200);
+    const newcomer = { id: `agt_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`, org: BOB.org };
+    await register(newcomer);
+    const accept = (token: string) => api(orgAdmin(BOB.org), "POST", "/v1/invitations/accept", { token, org_id: BOB.org, agents: [newcomer.id] });
+    expect((await accept(links[0].body.token)).code).toBe("invitation_not_found");
+    expect((await accept(links[1].body.token)).code).toBe("invitation_not_found");
+    const fine = await accept(links[2].body.token);
+    expect(fine.status).toBe(200);
+    // An accepted one still replays, whoever made it.
+    expect((await accept(links[2].body.token)).status).toBe(200);
   });
 
   it("leaves a role or invitation that began after the departure, and other organizations' departures", async () => {
     const { id } = await room();
-    await listRoom(id, ADMIN.id);
-    const invitation = await api(ADMIN, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" });
-    expect((await depart(OWNER, { person: ADMIN.id, org: "org_a", left_at: Date.now() - 600_000 })).status).toBe(200);
-    expect(await roleOf(id, ADMIN)).toBe("admin");
-    await listRoom(id, ADMIN.id, "org_other");
-    expect((await depart(OWNER, { person: ADMIN.id, org: "org_other", left_at: Date.now() })).status).toBe(200);
-    expect(await roleOf(id, ADMIN)).toBe("admin");
-    expect((await api(ADMIN, "DELETE", `/v1/workspaces/${id}/invitations/${invitation.body.id}`, {})).status).toBe(200);
+    const who = person();
+    await addAdmin(id, who);
+    await listRoom(id, who);
+    const invitation = await api(asPerson(who), "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" });
+    expect((await depart(OWNER, { person: who, org: "org_a", left_at: Date.now() - 600_000 })).status).toBe(200);
+    expect(await roleOf(id, asPerson(who))).toBe("admin");
+    await listRoom(id, who, "org_other");
+    expect((await depart(OWNER, { person: who, org: "org_other", left_at: Date.now() })).status).toBe(200);
+    expect(await roleOf(id, asPerson(who))).toBe("admin");
+    expect((await api(asPerson(who), "DELETE", `/v1/workspaces/${id}/invitations/${invitation.body.id}`, {})).status).toBe(200);
   });
 
-  it("keeps a departed owner on the room, and records it once", async () => {
-    const { id } = await room();
-    await listRoom(id, OWNER.id);
-    const invitation = await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest" });
-    const leaving = { person: OWNER.id, org: "org_a", left_at: Date.now() };
-    expect((await depart(ADMIN, leaving)).status).toBe(200);
-    expect((await depart(ADMIN, leaving)).status).toBe(200);
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.owner).toBe(OWNER.id);
-    const log = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit as any[];
-    expect(log.filter((e) => e.action === "owner.left_organization").map((e) => e.actor_id)).toEqual([ADMIN.id]);
-    expect(log.filter((e) => e.action === "invitation.withdrawn" && e.target_id === invitation.body.id)).toHaveLength(1);
+  it("takes a departed owner out of the room's work, keeps them as owner, and records it once", async () => {
+    const founder: Who = { id: person(), kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
+    const claimsFor = (since: number) => assertion(founder, { claims: { org_since: { org_a: since } } });
+    const created = await api(founder, "POST", "/v1/workspaces", { name: "Owner leaves" });
+    const id = created.body.id as string;
+    const tasks = `/v1/workspaces/${id}/tasks`;
+    const version = async (token?: string) => (await api(founder, "GET", `/v1/workspaces/${id}`, undefined, { token })).body.policy_version as number;
+    const helper = person();
+    expect((await api(founder, "POST", `/v1/workspaces/${id}/members`, { principal_id: helper, kind: "person", org_id: "org_a", role: "admin", policy_version: await version() })).status).toBe(200);
+    await listRoom(id, founder.id);
+    const lone = await api(founder, "POST", tasks, { title: "Reviews its own", instructions: "x", acceptance_criteria: "y" });
+    expect(lone.status).toBe(200);
+    const invitation = await api(founder, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: await version() });
+    const leftAt = Date.now();
+    const leaving = { person: founder.id, org: "org_a", left_at: leftAt };
+    expect((await depart(asPerson(helper), leaving)).status).toBe(200);
+    await makeDue(founder.id);
+    await runDurableObjectAlarm(principal(founder.id));
+    expect((await api(founder, "GET", `/v1/workspaces/${id}`)).body.owner).toBe(founder.id);
+    const log = async () => (await api(founder, "GET", `/v1/workspaces/${id}/audit`)).body.audit as any[];
+    expect((await log()).filter((e) => e.action === "owner.left_organization").map((e) => e.actor_id)).toEqual([helper]);
+    expect((await log()).filter((e) => e.action === "invitation.withdrawn" && e.target_id === invitation.body.id)).toHaveLength(1);
+    // Their task follows the table, with nobody falling back to them.
+    const read = (await api(asPerson(helper), "GET", `${tasks}/${lone.body.id}`)).body.task;
+    expect(read.needs_attention).toBe(true);
+    // Nothing more reaches their inbox.
+    const unread = async () => (await api(founder, "GET", "/v1/me")).body.inbox_unread as number;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const before = await unread();
+    const taken = await api(asPerson(helper), "POST", `${tasks}/${lone.body.id}/set-requester`, { version: read.version, requester: helper });
+    expect(taken.status).toBe(200);
+    expect((await api(asPerson(helper), "POST", `${tasks}/${lone.body.id}/messages`, { body: "After they left" })).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await unread()).toBe(before);
+    // An assertion from before they left records nothing, and a command after rejoining does, even if it's refused.
+    const stale = await api(founder, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: await version() }, { token: await claimsFor(leftAt - 1) });
+    expect(stale.status).toBe(200);
+    expect((await log()).filter((e) => e.action === "owner.returned")).toHaveLength(0);
+    const v = await version();
+    const first = await api(founder, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: v }, { token: await claimsFor(leftAt + 1) });
+    expect(first.code).toBe("version_conflict");
+    expect((await log()).filter((e) => e.action === "owner.returned").map((e) => e.actor_id)).toEqual([founder.id]);
+    // A retry of the same departure doesn't take them out again, and they're a participant again.
+    expect((await depart(asPerson(helper), leaving, false)).status).toBe(200);
+    await makeDue(founder.id);
+    await runDurableObjectAlarm(principal(founder.id));
+    const again = await api(founder, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: await version() }, { token: await claimsFor(leftAt + 1) });
+    expect(again.status).toBe(200);
+    const newcomer = { id: `agt_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`, org: BOB.org };
+    await register(newcomer);
+    const accepted = await api(orgAdmin(BOB.org), "POST", "/v1/invitations/accept", { token: again.body.token, org_id: BOB.org, agents: [newcomer.id] });
+    expect(accepted.status).toBe(200);
   });
 
-  it("finds a room the index was late about, retries a room that fails, and stops after its sweeps", async () => {
+  it("gets through more rooms than one alarm can ask", async () => {
+    const who = person();
+    for (let i = 0; i < 130; i++) await listRoom(`ws_many_${i}_${who}`, who);
+    expect((await depart(OWNER, { person: who, org: "org_a", left_at: Date.now() }, false)).status).toBe(200);
+    await vi.waitFor(async () => {
+      expect((await pending(who))[0]?.sweeps_left).toBe(2);
+    }, { timeout: 20000, interval: 200 });
+    expect((await rooms(who)).every((r) => r.applied === 1)).toBe(true);
+    expect(await rooms(who)).toHaveLength(130);
+  }, 30000);
+
+  it("asks a room again only if it failed, backs off, and finds a room the index was late about", async () => {
     const { id } = await room();
-    const person = `per_late_${crypto.randomUUID().slice(0, 8)}`;
-    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: person, kind: "person", org_id: "org_a", role: "member" })).status).toBe(200);
-    // The room writes its index after answering, so wait for it, or it could arrive after the delete below.
-    await vi.waitFor(async () => expect(await (env as any).DB.prepare("SELECT 1 FROM membership_index WHERE principal_id = ?").bind(person).first()).toBeTruthy(), { timeout: 5000 });
-    await (env as any).DB.prepare("DELETE FROM membership_index WHERE principal_id = ?").bind(person).run();
-    await listRoom("ws_fail_departure", person);
-    expect((await depart(OWNER, { person, org: "org_a", left_at: Date.now() })).status).toBe(200);
-    // A failed room doesn't use up a sweep, and neither does waiting for it.
-    expect(await pending(person)).toEqual([{ sweeps_left: 3 }]);
-    await (env as any).DB.prepare("DELETE FROM membership_index WHERE principal_id = ?").bind(person).run();
-    await runDurableObjectAlarm(principal(person));
-    expect(await pending(person)).toEqual([{ sweeps_left: 2 }]);
-    // The room shows up in the index before the next sweep.
-    await listRoom(id, person);
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.members.map((m: any) => m.principal_id)).toContain(person);
-    await runInDurableObject(principal(person), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
-    await runDurableObjectAlarm(principal(person));
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.members.map((m: any) => m.principal_id)).not.toContain(person);
-    expect(await pending(person)).toEqual([{ sweeps_left: 1 }]);
-    await runInDurableObject(principal(person), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
-    await runDurableObjectAlarm(principal(person));
-    expect(await pending(person)).toEqual([]);
-    expect(await runDurableObjectAlarm(principal(person))).toBe(false);
+    const [late, applied] = [person(), (await room()).id];
+    const who = late;
+    await addAdmin(applied, who);
+    await addAdmin(id, who);
+    await vi.waitFor(async () => expect((await (env as any).DB.prepare("SELECT count(*) AS n FROM membership_index WHERE principal_id = ?").bind(who).first()).n).toBe(2), { timeout: 5000 });
+    await (env as any).DB.prepare("DELETE FROM membership_index WHERE principal_id = ? AND workspace_id = ?").bind(who, id).run();
+    await listRoom("ws_fail_departure", who);
+    const leaving = { person: who, org: "org_a", left_at: Date.now() };
+    expect((await depart(OWNER, leaving, false)).status).toBe(200);
+    await vi.waitFor(async () => expect((await pending(who))[0]?.failures).toBe(1), { timeout: 5000 });
+    expect((await pending(who))[0].sweeps_left).toBe(3);
+    expect((await rooms(who)).map((r) => [r.workspace_id, r.applied]).sort()).toEqual([[applied, 1], ["ws_fail_departure", 0]].sort());
+    // A retry asks only the room that failed, so a change to the one that applied it stays.
+    await addAdmin(applied, who);
+    await makeDue(who);
+    await runDurableObjectAlarm(principal(who));
+    expect((await pending(who))[0].failures).toBe(2);
+    expect(await roleOf(applied, asPerson(who))).toBe("admin");
+    // Once that room answers, the sweep counts, and the next one finds the room the index left out.
+    await (env as any).DB.prepare("DELETE FROM membership_index WHERE workspace_id = 'ws_fail_departure' AND principal_id = ?").bind(who).run();
+    await runInDurableObject(principal(who), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure_room SET applied = 1 WHERE workspace_id = 'ws_fail_departure'"));
+    await makeDue(who);
+    await runDurableObjectAlarm(principal(who));
+    expect((await pending(who))[0]).toEqual({ sweeps_left: 2, failures: 0 });
+    await listRoom(id, who);
+    expect(await roleOf(id, asPerson(who))).toBe("admin");
+    await makeDue(who);
+    await runDurableObjectAlarm(principal(who));
+    expect(await roleOf(id, asPerson(who))).toBeUndefined();
+    expect((await pending(who))[0].sweeps_left).toBe(1);
+    await makeDue(who);
+    await runDurableObjectAlarm(principal(who));
+    expect(await pending(who)).toEqual([]);
+    expect(await runDurableObjectAlarm(principal(who))).toBe(false);
+  });
+
+  it("migrates an older room before applying a departure or a disconnect", async () => {
+    const { id } = await room();
+    const who = person();
+    await addAdmin(id, who);
+    await listRoom(id, who);
+    const downgrade = () => runInDurableObject(stub(id), (_: any, state: any) => {
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN owner_left_at");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    await downgrade();
+    expect((await depart(OWNER, { person: who, org: "org_a", left_at: Date.now() })).status).toBe(200);
+    expect(await roleOf(id, asPerson(who))).toBeUndefined();
+    await downgrade();
+    const answer = await runInDurableObject(stub(id), (instance: any) => instance.fetch(new Request("https://workspace/internal/revoke", { method: "POST", body: JSON.stringify({ principal: LEAD.id, floor: 99 }) })));
+    expect((answer as Response).status).toBe(200);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.members.map((m: any) => m.principal_id)).not.toContain(LEAD.id);
   });
 });

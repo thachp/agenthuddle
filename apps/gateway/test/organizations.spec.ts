@@ -1,5 +1,5 @@
 import { env, SELF } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { allowedPassthrough, resolveAgent, type Env } from "../src/index";
 import { handleOrgPeople, retryDepartures } from "../src/organizations";
 
@@ -497,6 +497,8 @@ describe("a departure reaching the person's rooms", () => {
     return person;
   }
   const inRoom = async (owner: Person, id: string, person: Person) => (await dash(owner, "GET", `/v1/workspaces/${id}`)).body.members.some((m: any) => m.principal_id === person.id);
+  // The room applies a departure from an alarm, moments after the removal answers.
+  const leavesRoom = (owner: Person, id: string, person: Person) => vi.waitFor(async () => expect(await inRoom(owner, id, person)).toBe(false), { timeout: 5000 });
   const waitForIndex = async (workspace: string, person: Person) => {
     for (let tries = 0; tries < 50; tries++) {
       if (await e.API_DB.prepare("SELECT 1 FROM membership_index WHERE workspace_id = ? AND principal_id = ? AND removed = 0").bind(workspace, person.id).first()) return;
@@ -517,7 +519,7 @@ describe("a departure reaching the person's rooms", () => {
     const roomLink = await dash(person, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: version });
     expect(roomLink.status).toBe(200);
     expect((await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`)).status).toBe(200);
-    expect(await inRoom(owner, id, person)).toBe(false);
+    await leavesRoom(owner, id, person);
     expect(await waiting()).toBe(before);
     const log = (await dash(owner, "GET", `/v1/workspaces/${id}/audit`)).body.audit;
     expect(log.filter((row: any) => row.action === "member.revoked" && row.target_id === person.id)).toHaveLength(1);
@@ -535,6 +537,7 @@ describe("a departure reaching the person's rooms", () => {
     const task = await dash(owner, "POST", `/v1/workspaces/${id}/tasks`, { title: "Task", instructions: "x", acceptance_criteria: "y", reviewer: person.id });
     expect(task.status).toBe(200);
     expect((await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`)).status).toBe(200);
+    await leavesRoom(owner, id, person);
     const after = await dash(owner, "GET", `/v1/workspaces/${id}/tasks/${task.body.id}`);
     expect(after.body.task.reviewer).not.toBe(person.id);
     const unread = async () => (await dash(person, "GET", "/v1/me")).body.inbox_unread as number;
@@ -564,7 +567,7 @@ describe("a departure reaching the person's rooms", () => {
     expect(await waiting()).toBe(before + 1);
     await retryDepartures(e);
     expect(await waiting()).toBe(0);
-    expect(await inRoom(owner, id, person)).toBe(false);
+    await leavesRoom(owner, id, person);
   });
 
   it("can't be requested from the dashboard", async () => {
@@ -587,6 +590,7 @@ describe("a departure reaching the person's rooms", () => {
     await new Promise((resolve) => setTimeout(resolve, 2));
     expect((await dash(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: person.id, kind: "person", org_id: org, role: "member", policy_version: version })).status).toBe(200);
     await retryDepartures(e);
+    await new Promise((resolve) => setTimeout(resolve, 500));
     expect(await inRoom(owner, id, person)).toBe(true);
     expect((await dash(person, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
   });

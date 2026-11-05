@@ -5,6 +5,7 @@
 use crate::error::ApiError;
 use crate::store::{exec, int, rows, text, transaction_sync};
 use crate::{Caller, CALLER_HEADER};
+use futures_util::future::{select, Either};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{cell::RefCell, rc::Rc, time::Duration};
@@ -43,15 +44,24 @@ const WAKE_QUEUE_MAX_DELAY_SECS: i64 = 12 * 60 * 60;
 // If a queued wake is lost, the next event can queue another after this long.
 const WAKE_QUEUE_STALE_MS: i64 = 60 * 60 * 1000;
 
-/// Departures from an organization still being carried to the person's rooms.
+/// Departures from an organization still being carried to the person's rooms, and which rooms have applied each.
 const DEPARTURE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS org_departure (org_id TEXT NOT NULL, left_at INTEGER NOT NULL, person_id TEXT NOT NULL, actor_id TEXT NOT NULL,
-  sweeps_left INTEGER NOT NULL, next_sweep_at INTEGER NOT NULL, PRIMARY KEY (org_id, left_at));
+  sweeps_left INTEGER NOT NULL, failures INTEGER NOT NULL DEFAULT 0, next_sweep_at INTEGER NOT NULL, PRIMARY KEY (org_id, left_at));
+CREATE TABLE IF NOT EXISTS org_departure_room (org_id TEXT NOT NULL, left_at INTEGER NOT NULL, workspace_id TEXT NOT NULL,
+  applied INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (org_id, left_at, workspace_id));
 ";
 /// The room index lags behind commits, so a room joined just before a removal can be missing from the first sweep.
 const DEPARTURE_SWEEPS: i64 = 3;
-const DEPARTURE_SWEEP_GAP_SECS: u64 = 60;
-const DEPARTURE_ROOMS_PER_SWEEP: i32 = 500;
+const DEPARTURE_SWEEP_GAP_MS: i64 = 60_000;
+const DEPARTURE_INDEX_PAGE: i32 = 500;
+/// Room calls in one alarm. Anything left goes in the next one, which runs straight away.
+const DEPARTURE_ROOM_CALLS: usize = 100;
+const DEPARTURE_ROOM_TIMEOUT_SECS: u64 = 10;
+const DEPARTURE_RETRY_MIN_MS: i64 = 5_000;
+const DEPARTURE_RETRY_MAX_MS: i64 = 60 * 60 * 1000;
+/// Long enough for one alarm's calls, so an eviction partway still comes back.
+const DEPARTURE_REARM_SECS: u64 = 300;
 
 const REMOVAL_NOTICE: &str = "member.revoked";
 const INBOX_CAPACITY: i64 = 10_000;
@@ -632,6 +642,12 @@ pub async fn register_room(env: &Env, agent: &str, org: &str, workspace_id: &str
     Ok(int(&body["generation"]) as u64)
 }
 
+/// Doubles from the minimum with each failure, up to the maximum.
+fn retry_delay_ms(failures: i64) -> i64 {
+    let doublings = (failures - 1).clamp(0, 20) as u32;
+    (DEPARTURE_RETRY_MIN_MS << doublings).min(DEPARTURE_RETRY_MAX_MS)
+}
+
 /// Hands a departure to the person's Principal, which carries it to their rooms until each has answered.
 pub async fn record_org_departure(
     env: &Env,
@@ -802,69 +818,113 @@ impl Principal {
         Ok(())
     }
 
-    /// Sweeps each departure that's due: asks every room the index lists to apply it. A room that doesn't answer is
-    /// retried soon. Once all have answered, the sweep counts, and the last one ends the departure.
+    /// Runs only from the alarm, so sweeps don't overlap. Each sweep learns the person's rooms from the index, then asks
+    /// the ones that haven't applied this departure yet. A room that fails is retried alone, with backoff. Once every
+    /// known room has applied it the sweep counts, and the last sweep ends the departure.
     async fn sweep_departures(&self) -> R<()> {
         let sql = self.state.storage().sql();
         exec(&sql, DEPARTURE_SCHEMA, vec![])?;
         let now = now_ms();
         let due = rows(
             &sql,
-            "SELECT org_id, left_at, person_id, actor_id, sweeps_left FROM org_departure WHERE next_sweep_at <= ?",
+            "SELECT org_id, left_at, person_id, actor_id, sweeps_left, failures FROM org_departure WHERE next_sweep_at <= ?",
             vec![now.into()],
         )?;
-        if due.is_empty() {
-            return self.arm_next_sweep(false).await;
+        if !due.is_empty() {
+            self.state
+                .storage()
+                .set_alarm(Duration::from_secs(DEPARTURE_REARM_SECS))
+                .await?;
         }
-        // Armed before the first await, so an eviction mid-way still retries.
-        self.state
-            .storage()
-            .set_alarm(Duration::from_secs(RETRY_SECS))
-            .await?;
-        let mut failed = false;
+        let mut calls_left = DEPARTURE_ROOM_CALLS;
         for departure in &due {
-            let (org, left_at, person, actor) = (
-                text(&departure["org_id"]).unwrap_or_default(),
-                int(&departure["left_at"]),
-                text(&departure["person_id"]).unwrap_or_default(),
-                text(&departure["actor_id"]).unwrap_or_default(),
-            );
-            let rooms = self
-                .env
-                .d1("DB")?
-                .prepare("SELECT workspace_id FROM membership_index WHERE principal_id = ? AND org_id = ? AND removed = 0 LIMIT ?")
-                .bind(&[person.as_str().into(), org.as_str().into(), DEPARTURE_ROOMS_PER_SWEEP.into()])?
-                .all()
-                .await?
-                .results::<Value>()?;
+            let org = text(&departure["org_id"]).unwrap_or_default();
+            let left_at = int(&departure["left_at"]);
+            let person = text(&departure["person_id"]).unwrap_or_default();
+            let actor = text(&departure["actor_id"]).unwrap_or_default();
+            self.learn_rooms(&org, left_at, &person).await?;
+            let key =
+                || -> Vec<worker::SqlStorageValue> { vec![org.as_str().into(), left_at.into()] };
+            let waiting = rows(&sql, "SELECT workspace_id FROM org_departure_room WHERE org_id = ? AND left_at = ? AND applied = 0", key())?;
             let body = json!({ "person": person, "org": org, "left_at": left_at, "actor": actor });
-            let mut all_answered = true;
-            for room in &rooms {
+            let mut failed = false;
+            let mut unasked = false;
+            for room in &waiting {
+                if calls_left == 0 {
+                    unasked = true;
+                    break;
+                }
+                calls_left -= 1;
                 let workspace_id = room["workspace_id"].as_str().unwrap_or_default();
-                if !self.room_applied(workspace_id, &body).await {
-                    all_answered = false;
+                if self.room_applied(workspace_id, &body).await {
+                    exec(&sql, "UPDATE org_departure_room SET applied = 1 WHERE org_id = ? AND left_at = ? AND workspace_id = ?",
+                        vec![org.as_str().into(), left_at.into(), workspace_id.into()])?;
+                } else {
+                    failed = true;
                 }
             }
-            if !all_answered {
-                failed = true;
-                continue;
-            }
-            let key = vec![org.as_str().into(), left_at.into()];
-            if int(&departure["sweeps_left"]) <= 1 {
+            let now = now_ms();
+            if failed {
+                let failures = int(&departure["failures"]) + 1;
+                console_error!("departure not applied in every room: {}", person);
+                exec(&sql, "UPDATE org_departure SET failures = ?, next_sweep_at = ? WHERE org_id = ? AND left_at = ?", vec![
+                    failures.into(), (now + retry_delay_ms(failures)).into(), org.as_str().into(), left_at.into(),
+                ])?;
+            } else if unasked {
+                // Stays due, so the next alarm carries on.
+            } else if int(&departure["sweeps_left"]) <= 1 {
                 exec(
                     &sql,
                     "DELETE FROM org_departure WHERE org_id = ? AND left_at = ?",
-                    key,
+                    key(),
+                )?;
+                exec(
+                    &sql,
+                    "DELETE FROM org_departure_room WHERE org_id = ? AND left_at = ?",
+                    key(),
                 )?;
             } else {
-                let next = now + (DEPARTURE_SWEEP_GAP_SECS as i64) * 1000;
-                exec(&sql, "UPDATE org_departure SET sweeps_left = sweeps_left - 1, next_sweep_at = ? WHERE org_id = ? AND left_at = ?",
-                    vec![next.into(), org.as_str().into(), left_at.into()])?;
+                exec(&sql, "UPDATE org_departure SET sweeps_left = sweeps_left - 1, failures = 0, next_sweep_at = ? WHERE org_id = ? AND left_at = ?", vec![
+                    (now + DEPARTURE_SWEEP_GAP_MS).into(), org.as_str().into(), left_at.into(),
+                ])?;
             }
         }
-        self.arm_next_sweep(failed).await
+        self.arm_next_sweep().await
     }
 
+    /// Adds rooms the index lists for this person and organization, including ones that already removed them, because a
+    /// room invitation they made can outlive their role there.
+    async fn learn_rooms(&self, org: &str, left_at: i64, person: &str) -> R<()> {
+        let sql = self.state.storage().sql();
+        let db = self.env.d1("DB")?;
+        let mut after = String::new();
+        loop {
+            let page = db
+                .prepare("SELECT workspace_id FROM membership_index WHERE principal_id = ? AND org_id = ? AND workspace_id > ? ORDER BY workspace_id LIMIT ?")
+                .bind(&[person.into(), org.into(), after.as_str().into(), DEPARTURE_INDEX_PAGE.into()])?
+                .all()
+                .await?
+                .results::<Value>()?;
+            let Some(last) = page
+                .last()
+                .and_then(|row| row["workspace_id"].as_str())
+                .map(str::to_string)
+            else {
+                return Ok(());
+            };
+            for row in &page {
+                let workspace_id = row["workspace_id"].as_str().unwrap_or_default();
+                exec(&sql, "INSERT OR IGNORE INTO org_departure_room (org_id, left_at, workspace_id) VALUES (?, ?, ?)",
+                    vec![org.into(), left_at.into(), workspace_id.into()])?;
+            }
+            if page.len() < DEPARTURE_INDEX_PAGE as usize {
+                return Ok(());
+            }
+            after = last;
+        }
+    }
+
+    /// Whether the room answered in time. A hung room counts as a failure, so it can't hold up the ones after it.
     async fn room_applied(&self, workspace_id: &str, body: &Value) -> bool {
         #[cfg(feature = "failpoints")]
         if workspace_id == "ws_fail_departure" {
@@ -886,28 +946,33 @@ impl Principal {
         else {
             return false;
         };
-        matches!(
-            stub.fetch_with_request(request)
-                .await
-                .map(|r| r.status_code()),
-            Ok(200)
-        )
+        let call = Box::pin(stub.fetch_with_request(request));
+        let deadline = Box::pin(Delay::from(Duration::from_secs(
+            DEPARTURE_ROOM_TIMEOUT_SECS,
+        )));
+        let applied = match select(call, deadline).await {
+            Either::Left((Ok(response), _)) => response.status_code() == 200,
+            _ => false,
+        };
+        applied
     }
 
-    async fn arm_next_sweep(&self, soon: bool) -> R<()> {
+    /// Sets the alarm for whichever departure is due first, or clears it when none are left.
+    async fn arm_next_sweep(&self) -> R<()> {
         let sql = self.state.storage().sql();
-        if rows(&sql, "SELECT org_id FROM org_departure LIMIT 1", vec![])?.is_empty() {
+        let next = rows(
+            &sql,
+            "SELECT MIN(next_sweep_at) AS next FROM org_departure",
+            vec![],
+        )?;
+        let Some(next) = next.first().and_then(|row| row["next"].as_i64()) else {
             self.state.storage().delete_alarm().await?;
             return Ok(());
-        }
-        let wait = if soon {
-            RETRY_SECS
-        } else {
-            DEPARTURE_SWEEP_GAP_SECS
         };
+        let wait = (next - now_ms()).max(1) as u64;
         self.state
             .storage()
-            .set_alarm(Duration::from_secs(wait))
+            .set_alarm(Duration::from_millis(wait))
             .await?;
         Ok(())
     }
@@ -927,7 +992,8 @@ impl Principal {
                     body["actor"].as_str().unwrap_or_default().into(),
                     DEPARTURE_SWEEPS.into(),
                 ])?;
-                self.sweep_departures().await?;
+                // The alarm does the rooms, so answering the gateway doesn't depend on how many there are.
+                self.arm_next_sweep().await?;
                 return Ok(json!({ "recorded": true }));
             }
             "/internal/check" => {
@@ -1205,7 +1271,8 @@ impl DurableObject for Principal {
     async fn alarm(&self) -> Result<Response> {
         // A person has departures and an agent has a fan-out, so neither clears the other's alarm.
         let sql = self.state.storage().sql();
-        let outcome = if matches!(connection(&sql), Ok(Some(_))) {
+        let is_agent = matches!(connection(&sql), Ok(Some(_)));
+        let outcome = if is_agent {
             self.fan_out().await
         } else {
             self.sweep_departures().await
