@@ -2,7 +2,7 @@
 // decisions that the public surface can reach. Two organizations are held by two separate people.
 //
 //   Local:   node run-local.mjs
-//   Deployed: see docs/m0-gate.md for the steps and the two session cookies this needs.
+//   Deployed: see docs/m0-gate.md for the steps, and for the two session cookies, or the test sign-up secret, this needs.
 //
 // It exits 1 on a failure. A gap is something the product doesn't do yet: it's reported and doesn't fail the run, and
 // `--strict` makes it fail. It writes results/<host>-<time>.json, which holds IDs and outcomes, never cookies or tokens.
@@ -32,6 +32,18 @@ if (!isLocal && host !== "gateway-staging.podster.dev" && option("--allow-host")
   process.exit(2);
 }
 
+// The test sign-up's secret goes to this one host and no other, even with --allow-host.
+const signupSecret = process.env.PODSTER_E2E_SIGNUP_SECRET;
+const STAGING = "https://gateway-staging.podster.dev";
+if (signupSecret && new URL(base).origin !== STAGING) {
+  console.error(`PODSTER_E2E_SIGNUP_SECRET only works against ${STAGING}. Unset it to run against ${host}.`);
+  process.exit(2);
+}
+if (signupSecret && (process.env.PODSTER_E2E_COOKIE_A || process.env.PODSTER_E2E_COOKIE_B)) {
+  console.error("Set either PODSTER_E2E_SIGNUP_SECRET or the two session cookies, not both: a run has to be clear about who its people are.");
+  process.exit(2);
+}
+
 // Cookies and tokens go to this host, so anything that isn't local has to be HTTPS.
 if (!isLocal && new URL(base).protocol !== "https:") {
   console.error(`Refusing to send session cookies to ${base} without HTTPS.`);
@@ -45,8 +57,17 @@ const settle = () => sleep(isLocal ? 1000 : 4000);
 const roomName = (name) => `e2e ${new Date().toISOString().slice(0, 19)} ${name}`;
 const typesFor = (events, room) => events.filter((e) => e.workspace_id === room).map((e) => e.type);
 
-/** One person per organization, from sign-up locally, or from sessions the two people signed in to on a deployment. */
+/** Sessions this run started itself. They're always ended, because nobody else has them. */
+const ownCookies = [];
+const testPerson = async (label) => {
+  const cookie = await Person.testSessionCookie(target, label, signupSecret);
+  ownCookies.push(cookie);
+  return Person.fromCookie(target, label, cookie);
+};
+
+/** One person per organization: from sign-up locally, and on a deployment from staging's test sign-up or from sessions two people signed in to. */
 async function people() {
+  if (signupSecret) return [await testPerson("Person A"), await testPerson("Person B")];
   const [a, b] = [process.env.PODSTER_E2E_COOKIE_A, process.env.PODSTER_E2E_COOKIE_B];
   if (isLocal && !a && !b) return [await Person.signUp(target, "Person A"), await Person.signUp(target, "Person B")];
   if (!a || !b) {
@@ -61,15 +82,14 @@ async function people() {
  * one might still be live, so nobody is told it ended when it didn't.
  */
 async function endSessions() {
-  if (keepSessions) return true;
   let ended = true;
-  const cookies = new Set([process.env.PODSTER_E2E_COOKIE_A, process.env.PODSTER_E2E_COOKIE_B].filter(Boolean));
+  const cookies = new Set([...(keepSessions ? [] : [process.env.PODSTER_E2E_COOKIE_A, process.env.PODSTER_E2E_COOKIE_B].filter(Boolean)), ...ownCookies]);
   for (const cookie of cookies) {
     await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: target.base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
     const after = await target.http("/api/orgs", { headers: { cookie } }).catch(() => null);
     if (after?.status !== 401) ended = false;
   }
-  if (cookies.size) console.log(ended ? "\nThe sessions used for this run are signed out." : "\nWARNING: a session may still be live. Run `node journey.mjs --base-url <url> --sign-out-only` with the same cookies.");
+  if (cookies.size) console.log(ended ? "\nThe sessions used for this run are signed out." : "\nWARNING: a session may still be live. Run `node journey.mjs --base-url <url> --sign-out-only` with the same cookies, or for test people, let it end by itself within two hours.");
   return ended;
 }
 
@@ -87,6 +107,7 @@ try {
   await endSessions();
   process.exit(2);
 }
+if (signupSecret) console.log("Using staging's test people: this says nothing about a second real person or their GitHub sign-in.");
 // One person holding both organizations proves nothing across people, and the run would leave data behind for it.
 if (personA.id === personB.id) {
   console.error("Both sessions belong to the same person. Sign the second one in with a different account.");
@@ -313,7 +334,7 @@ async function acceptance() {
     eq((await personA.audit(room)).filter((e) => e.target_id === personB.id), [], "audit entries for a refused add");
   });
 
-  await check("AC-02+", "a real second person joins by a link, acts as a room admin, and loses the room when removed", async () => {
+  await check("AC-02+", "a second person joins by a link, acts as a room admin, and loses the room when removed", async () => {
     // Reused between runs, because organizations can't be deleted. A run that died midway may have left Person B in it.
     const orgs = (await personA.must("GET", "/orgs")).organizations;
     const team = orgs.find((o) => o.name === "Podster e2e team") ?? (await personA.must("POST", "/orgs", { name: "Podster e2e team" }));
@@ -693,9 +714,11 @@ for (const suite of [kernel, acceptance]) {
 const sessionsEnded = await endSessions();
 
 const counts = report.counts();
-const summary = { target: new URL(base).origin, kind: isLocal ? "local" : "deployment", started, finished: new Date().toISOString(), persons_distinct: personA.id !== personB.id, counts, results: report.results };
+// A rehearsal's target says staging, but nothing left this machine, so it must never read like a deployed run.
+const rehearsal = Boolean(process.env.PODSTER_E2E_REHEARSE_PORT);
+const summary = { target: new URL(base).origin, kind: rehearsal ? "rehearsal" : isLocal ? "local" : "deployment", started, finished: new Date().toISOString(), persons_distinct: personA.id !== personB.id, people: signupSecret ? "test_signup" : process.env.PODSTER_E2E_COOKIE_A ? "session_cookies" : "local_signup", counts, results: report.results };
 mkdirSync(join(here, "results"), { recursive: true });
-const file = join(here, "results", `${host}-${started.replaceAll(":", "-").slice(0, 19)}.json`);
+const file = join(here, "results", `${rehearsal ? "rehearsal-" : ""}${host}-${started.replaceAll(":", "-").slice(0, 19)}.json`);
 writeFileSync(file, `${JSON.stringify(summary, null, 2)}\n`);
 console.log(`\n${counts.pass} passed, ${counts.fail} failed, ${counts.gap} gaps. Results: ${file}`);
 process.exit(counts.fail > 0 || crashed || !sessionsEnded || (strict && counts.gap > 0) ? 1 : 0);

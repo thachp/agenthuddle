@@ -9,6 +9,7 @@ import { calculateJwkThumbprint, decodeJwt, type JWK } from "jose";
 import { handleOrgPeople, retryDepartures } from "./organizations";
 import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
+import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
 
 export interface Env {
   DB: D1Database;
@@ -34,6 +35,9 @@ export interface Env {
   STRICT_PER_DAY?: string;
   /** Test environments only. Never set in staging or production. */
   ENABLE_PASSWORD_SIGNIN?: string;
+  /** Staging's test sign-up, set only in env.staging. See test-people.ts. */
+  ENABLE_E2E_SIGNUP?: string;
+  E2E_SIGNUP_SECRET?: string;
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
@@ -285,7 +289,8 @@ export function spentToken(pluginAgent: string, authorization: string | null | u
   return { key: `${pluginAgent}:${jti}`, expiresAt: Math.min(iat ?? now, now) + AGENT_JWT_MAX_AGE_SECONDS + 30 };
 }
 
-export function createAuth(env: Env) {
+/** `testPeople` is only for the test sign-up, once it has checked everything. Requests never get this instance. */
+export function createAuth(env: Env, { testPeople = false } = {}) {
   // Better Auth falls back to a public default outside production, and Workers don't set NODE_ENV.
   if (!env.AUTH_SECRET) throw new Error("AUTH_SECRET is not set");
   const social: Record<string, { clientId: string; clientSecret: string }> = {};
@@ -295,19 +300,31 @@ export function createAuth(env: Env) {
     database: env.DB,
     baseURL: env.BASE_URL,
     secret: env.AUTH_SECRET,
-    emailAndPassword: { enabled: passwordSignInEnabled(env) },
+    emailAndPassword: { enabled: testPeople || passwordSignInEnabled(env) },
+    ...(testPeople ? { session: { expiresIn: TEST_SESSION_SECONDS } } : {}),
     // Never join accounts on a matching email: an address can move to someone else, or be verified somewhere it shouldn't.
     account: { accountLinking: { disableImplicitLinking: true } },
     // A failed sign-in comes back to our page, which only offers another try, instead of a page with no way back.
     onAPIError: { errorURL: "/sign-in" },
     // The schema check would run on every request, because an instance lasts one request. A test checks for drift instead.
-    advanced: { database: { validateSchema: false } },
+    advanced: { database: { validateSchema: false, ...(testPeople ? { generateId: ({ model }: { model: string }) => `${model === "user" ? TEST_ID_PREFIX : ""}${crypto.randomUUID().replaceAll("-", "")}` } : {}) } },
     socialProviders: social,
     databaseHooks: {
+      session: {
+        update: {
+          // Refreshing moves a session's expiry a full term out, and any route that reads a session can do it. A test
+          // session keeps the end it started with, on every instance, so a killed run's session really does end.
+          before: async (_session, ctx) => {
+            const current = ctx?.context.session as { session: { expiresAt: Date }; user: { id: string } } | null | undefined;
+            return current?.user.id.startsWith(TEST_ID_PREFIX) ? { data: { expiresAt: current.session.expiresAt } } : undefined;
+          },
+        },
+      },
       user: {
         create: {
           // An unverified email could claim someone else's address and lock out its real owner.
-          before: async (user) => (user.emailVerified || passwordSignInEnabled(env) ? undefined : false),
+          // The reserved test domain means a test person, so nobody else gets an address on it.
+          before: async (user) => ((isTestEmail(user.email) ? testPeople : user.emailVerified || passwordSignInEnabled(env)) ? undefined : false),
           // Everyone starts with a personal organization, so individuals aren't a second ownership model. If this write
           // fails, the person's next request restores it, so a failure here doesn't fail the sign-up.
           after: async (user) => ensurePersonalOrg(env, personId(user.id)),
@@ -993,6 +1010,7 @@ const appHandler = {
     if (url.pathname === "/.well-known/agent-configuration" || url.pathname === "/api/auth/agent-configuration") return json(publicConfiguration(await createAuth(env).api.getAgentConfiguration({ headers: request.headers })));
     if (url.pathname.startsWith("/api/auth/")) {
       const route = url.pathname.slice("/api/auth".length);
+      if (route === TEST_SIGNUP_ROUTE) return handleTestSignUp(request, publicEnv);
       if (!isPublicAuthRoute(route)) return denied("not_found", 404);
       if (publicEnv.APP_URL && !onApplicationHost && STARTS_SESSION.test(route)) return denied("not_found", 404);
       if (route === "/agent/register" && request.method === "POST") {
