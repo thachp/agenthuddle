@@ -30,6 +30,12 @@ export function wakeHost(wake: Wake) {
 /** The event an agent's inbox keeps when it leaves a room. Everything else from that room has been cleared by then. */
 const REMOVAL_NOTICE = "member.revoked";
 
+/**
+ * Where the newest events should start. A read returns the oldest after a point, and has no way to ask for the newest, so
+ * this works back from the cursor and the unread count. Expiry can leave it short, so its caller keeps reading.
+ */
+export const newestAfter = (page: Pick<InboxPage, "acked_seq" | "unread" | "events">, pageSize: number) => Math.max(page.events.at(-1)?.seq ?? 0, page.acked_seq + page.unread - pageSize);
+
 export type AgentRoom = {
   id: string;
   /** Absent when the viewer can't read this room, which an agent's owner needn't be able to. */
@@ -44,7 +50,9 @@ export type ReadableRoom = { id: string; name: string; role: string | null; list
 
 /**
  * No route lists an agent's workrooms, so this joins the two things a person can read: the rooms they belong to, and the
- * rooms in the agent's inbox. Only a room's member list counts as proof of membership.
+ * rooms in the agent's inbox. Only a room's member list counts as proof of membership. Leaving a room clears its events
+ * from the inbox and leaves only the notice, and only current participants get events after that, so any other event means
+ * the agent has been in that room since it last left.
  */
 export function roomsOf(readable: ReadableRoom[], events: InboxEvent[]): AgentRoom[] {
   const rooms: AgentRoom[] = readable.filter((room) => room.lists_agent).map(({ id, name, role }) => ({ id, name, role, source: "listed" as const }));

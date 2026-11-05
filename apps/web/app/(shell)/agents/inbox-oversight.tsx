@@ -115,6 +115,7 @@ export function InboxOversight({ agent, name, openable }: { agent: { id: string;
               {page.dropped === 1 ? "1 unread event was" : `${page.dropped} unread events were`} dropped before this agent read {page.dropped === 1 ? "it" : "them"}.
             </p>
           ) : null}
+          {events.length > 0 ? <p className="text-xs text-muted-foreground">Oldest first.</p> : null}
           {events.length > 0 ? (
             <ul className="divide-y rounded-lg border bg-background">
               {events.map((event) => (

@@ -3,8 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { currentUrl, navigate, routerCalls, setUrl } from "@/test/next-navigation";
-import { AgentSheet, DISCONNECT_CHECK_MS } from "./agent-sheet";
-import { roomsOf, wakeLabel } from "./model";
+import { AgentSheet, DISCONNECT_CHECK_MS, MAX_ROOM_READS } from "./agent-sheet";
+import { newestAfter, roomsOf, wakeLabel } from "./model";
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response> | undefined;
 
@@ -22,7 +22,6 @@ function server(url: string, init: RequestInit = {}) {
   calls.push({ url, method });
   const answered = special(url, init);
   if (answered) return Promise.resolve(answered);
-  if (url === "/api/agents") return Promise.resolve(Response.json({ agents: [{ ...AGENT, description: "Reviews *Rust*. ![x](https://evil.test/x) <img src=https://evil.test/y>", created_at: 1, revoked_at: null }], truncated: false }));
   if (url === "/api/agents/agt_1") return Promise.resolve(Response.json(agent));
   if (url === "/api/v1/workspaces") return Promise.resolve(Response.json({ workspaces: [{ workspace_id: "ws_mine", workspace_name: "Platform", role: "guest" }] }));
   if (url === "/api/v1/workspaces/ws_mine") return Promise.resolve(Response.json(ROOM));
@@ -39,12 +38,14 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
-const Screen = () => (
+const DESCRIPTIONS = { agt_1: "Reviews *Rust*. ![x](https://evil.test/x) <img src=https://evil.test/y>" };
+
+const Screen = ({ descriptions = DESCRIPTIONS }: { descriptions?: Record<string, string> | null }) => (
   <>
     <SheetLink param="agent" target="agt_1">
       Open it
     </SheetLink>
-    <AgentSheet organizations={[{ id: "org_1", name: "Acme" }]} />
+    <AgentSheet organizations={[{ id: "org_1", name: "Acme" }]} descriptions={descriptions} />
   </>
 );
 
@@ -143,6 +144,53 @@ describe("UI-13: disconnecting", () => {
     expect(screen.queryByRole("button", { name: /^Withdraw/ })).toBeNull();
   });
 
+  it("a lost response with a failed re-read says the outcome is unknown, and never that nothing changed", async () => {
+    render(<Screen />);
+    await opened();
+    special = (url, init) => {
+      if (url.endsWith("/disconnect") && init.method === "POST") {
+        // It committed, and then neither its answer nor the next read got through.
+        agent = { ...AGENT, status: "disconnecting" };
+        special = (next) => (next === "/api/agents/agt_1" ? new Response("{}", { status: 503 }) : undefined);
+        return new Response("{}", { status: 502 });
+      }
+      return undefined;
+    };
+    await disconnect();
+    expect(await screen.findByText(/We couldn't confirm that/)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing changed/)).toBeNull();
+    expect(screen.queryByText(/no longer be allowed/)).toBeNull();
+    // Refreshing when it can read again settles it, and the warning goes.
+    special = () => undefined;
+    agent = { ...AGENT, status: "disconnected" };
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("Disconnected")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/We couldn't confirm that/)).toBeNull());
+  });
+
+  it("Try now on an outage says the outcome is unknown, not that it isn't allowed", async () => {
+    agent = { ...AGENT, status: "disconnecting" };
+    special = (url, init) => (url.endsWith("/disconnect") && init.method === "POST" ? new Response("{}", { status: 500 }) : undefined);
+    render(<Screen />);
+    await screen.findByText("Disconnecting");
+    await userEvent.click(screen.getByRole("button", { name: "Try now" }));
+    expect(await screen.findByText(/We couldn't confirm that/)).toBeInTheDocument();
+    expect(screen.queryByText(/no longer be allowed/)).toBeNull();
+    expect(screen.getByText("Disconnecting")).toBeInTheDocument();
+  });
+
+  it("a network failure counts as unknown too", async () => {
+    special = (url, init) => {
+      if (url.endsWith("/disconnect") && init.method === "POST") throw new TypeError("lost");
+      return undefined;
+    };
+    render(<Screen />);
+    await opened();
+    await disconnect();
+    expect(await screen.findByText(/We couldn't confirm that/)).toBeInTheDocument();
+    expect(screen.queryByText(/Check your connection/)).toBeNull();
+  });
+
   it("a failed request shows the state the server reports, not 'nothing changed'", async () => {
     special = (url, init) => {
       if (url.endsWith("/disconnect") && init.method === "POST") {
@@ -190,6 +238,96 @@ describe("UI-13: disconnecting", () => {
   });
 });
 
+describe("workroom reads", () => {
+  it("withdrawing on an outage says the outcome is unknown, with no 'Withdrawn', and reads the rooms again", async () => {
+    special = (url) => (url.endsWith("/withdraw") ? new Response("{}", { status: 500 }) : undefined);
+    render(<Screen />);
+    await opened();
+    const before = calls.filter((call) => call.url === "/api/v1/workspaces").length;
+    await userEvent.click(screen.getByRole("button", { name: "Withdraw from ws_other" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Withdraw" }));
+    expect(await screen.findByText(/We couldn't confirm that/)).toBeInTheDocument();
+    expect(screen.queryByRole("status")).toBeNull();
+    await waitFor(() => expect(calls.filter((call) => call.url === "/api/v1/workspaces").length).toBe(before + 1));
+  });
+
+  it.each([429, 503])("a %i on the room list isn't 'not in any workroom', and Try again reads again", async (status) => {
+    special = (url) => (url === "/api/v1/workspaces" ? new Response("{}", { status }) : url.includes("/inbox") ? Response.json({ events: [], acked_seq: 0, unread: 0, dropped: 0 }) : undefined);
+    render(<Screen />);
+    await opened();
+    expect(screen.getByText(/Couldn't read all of this agent's workrooms/)).toBeInTheDocument();
+    expect(screen.queryByText(/We didn't find this agent/)).toBeNull();
+    special = (url) => (url.includes("/inbox") ? Response.json({ events: [], acked_seq: 0, unread: 0, dropped: 0 }) : undefined);
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("button", { name: "Withdraw from Platform" })).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't read all/)).toBeNull();
+  });
+
+  it("a failed inbox read also leaves the list unproven, while the rooms it did read keep their Withdraw", async () => {
+    special = (url) => (url.includes("/inbox") ? new Response("{}", { status: 503 }) : undefined);
+    render(<Screen />);
+    await opened();
+    expect(screen.getByRole("button", { name: "Withdraw from Platform" })).toBeEnabled();
+    expect(screen.getByText(/Couldn't read all of this agent's workrooms/)).toBeInTheDocument();
+  });
+
+  it("a room the viewer has just lost isn't a failed read", async () => {
+    special = (url) => (url === "/api/v1/workspaces/ws_mine" ? Response.json({ error: { code: "workspace_not_found" } }, { status: 404 }) : url.includes("/inbox") ? Response.json({ events: [], acked_seq: 0, unread: 0, dropped: 0 }) : undefined);
+    render(<Screen />);
+    await opened();
+    expect(screen.getByText(/We didn't find this agent/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("a failed directory read says so rather than hiding the agent's skills", async () => {
+    render(<Screen descriptions={null} />);
+    await opened();
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't load what this agent says about its skills");
+  });
+
+  it("finds a room joined after 50 older events, reading the newest ones too", async () => {
+    const old = Array.from({ length: 50 }, (_, index) => ({ ...EVENT, seq: index + 1, event_id: `e${index + 1}`, workspace_id: "ws_old" }));
+    special = (url) => {
+      if (url.endsWith("after=0&limit=50")) return Response.json({ events: old, acked_seq: 200, unread: 1, dropped: 0 });
+      if (url.includes("/inbox?after=151")) return Response.json({ events: [{ ...EVENT, seq: 201, event_id: "e201", workspace_id: "ws_recent", type: "member.added" }], acked_seq: 200, unread: 1, dropped: 0 });
+      return undefined;
+    };
+    render(<Screen />);
+    await opened();
+    expect(screen.getByRole("button", { name: "Withdraw from ws_recent" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Withdraw from ws_old" })).toBeEnabled();
+  });
+
+  it("a reload after a command spends no room reads, and a withdrawn listed room goes", async () => {
+    special = (url) => (url.endsWith("/withdraw") ? Response.json({ status: "ok" }) : undefined);
+    render(<Screen />);
+    await opened();
+    const first = calls.length;
+    expect(first).toBe(4); // The agent, its inbox, the viewer's rooms, and the one room.
+    await userEvent.click(screen.getByRole("button", { name: "Withdraw from Platform" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Withdraw" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Withdrawn from Platform.");
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Withdraw from Platform" })).toBeNull());
+    expect(calls.slice(first).map((call) => call.url)).toEqual(["/api/v1/workspaces/ws_mine/members/agt_1/withdraw", "/api/agents/agt_1", "/api/v1/agents/agt_1/inbox?after=0&limit=50"]);
+  });
+
+  it("a disconnected agent spends no reads on rooms", async () => {
+    agent = { ...AGENT, status: "disconnected" };
+    render(<Screen />);
+    await opened();
+    expect(calls.map((call) => call.url)).toEqual(["/api/agents/agt_1", "/api/v1/agents/agt_1/inbox?after=0&limit=50"]);
+  });
+
+  it("caps room reads, and says so", async () => {
+    const many = Array.from({ length: MAX_ROOM_READS + 3 }, (_, index) => ({ workspace_id: `ws_${index}`, workspace_name: `Room ${index}`, role: "member" }));
+    special = (url) => (url === "/api/v1/workspaces" ? Response.json({ workspaces: many }) : url.startsWith("/api/v1/workspaces/ws_") ? Response.json({ id: url.split("/").at(-1), name: "Room", members: [] }) : undefined);
+    render(<Screen />);
+    await opened();
+    expect(calls.filter((call) => call.url.startsWith("/api/v1/workspaces/")).length).toBe(MAX_ROOM_READS);
+    expect(screen.getByText(new RegExp(`first ${MAX_ROOM_READS} of the workrooms`))).toBeInTheDocument();
+  });
+});
+
 describe("UI-09: inbox oversight", () => {
   it("is labeled, shows the cursor and unread, and only ever reads", async () => {
     render(<Screen />);
@@ -231,7 +369,7 @@ describe("UI-09: inbox oversight", () => {
     special = (url) => (url.includes("/inbox") ? new Response("{}", { status: 503 }) : undefined);
     render(<Screen />);
     await opened();
-    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't read this inbox");
+    expect(screen.getByText("Couldn't read this inbox.")).toHaveAttribute("role", "alert");
     expect(screen.queryByText("This inbox is empty.")).toBeNull();
   });
 });
@@ -299,6 +437,12 @@ describe("what the model decides", () => {
   it("a removal notice takes the room out, unless something came after it", () => {
     expect(roomsOf([], [event(1, "gone", "member.revoked")])).toEqual([]);
     expect(roomsOf([], [event(1, "back", "member.revoked"), event(2, "back", "member.added")]).map((room) => room.id)).toEqual(["back"]);
+  });
+
+  it("works back from the cursor to the newest events, and never behind what it has", () => {
+    const page = (lastSeq: number, acked_seq: number, unread: number) => ({ events: [{ ...EVENT, seq: lastSeq }], acked_seq, unread });
+    expect(newestAfter(page(50, 200, 3), 50)).toBe(153);
+    expect(newestAfter(page(50, 60, 0), 50)).toBe(50);
   });
 
   it("wake has the spec's three labels", () => {

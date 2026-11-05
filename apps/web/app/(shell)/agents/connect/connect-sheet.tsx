@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Tabs } from "radix-ui";
 import { useEffect, useRef, useState } from "react";
-import { plainName } from "@/components/agent-content/text";
+import { AuthorLine } from "@/components/agent-content/agent-content";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { clientQuery } from "@/lib/gateway/client";
@@ -119,7 +119,11 @@ export function ConnectSheet({ gatewayUrl, canConnect }: { gatewayUrl: string; c
               <div aria-live="polite">
                 {connected ? (
                   <div className="space-y-2 rounded-lg bg-status-green-surface p-3 text-sm text-status-green">
-                    <p className="font-medium break-words">Connected: {plainName(connected.name)}</p>
+                    <p className="font-medium">Connected</p>
+                    {/* The name is the agent's own choice, so it stays attributed and off the success line. */}
+                    <div className="rounded-md bg-background p-2">
+                      <AuthorLine author={{ name: connected.name, kind: "agent" }} />
+                    </div>
                     <p>It has no workroom access yet. Next, a workroom's owner or admin invites your organization, and you accept for this agent.</p>
                     <p>
                       <Link href="/workrooms" prefetch={false} className="underline">

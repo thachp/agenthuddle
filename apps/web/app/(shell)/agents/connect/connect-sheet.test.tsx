@@ -67,14 +67,26 @@ describe("connecting an agent", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     render(sheet());
     await act(async () => void (await vi.advanceTimersByTimeAsync(WATCH_EVERY_MS)));
-    expect(screen.queryByText(/^Connected/)).toBeNull();
+    expect(screen.queryByText("Connected")).toBeNull();
     answer = () => directory("agt_new", "agt_old");
     await act(async () => void (await vi.advanceTimersByTimeAsync(WATCH_EVERY_MS)));
-    expect(screen.getByText("Connected: Agent agt_new")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText("Agent agt_new")).toBeInTheDocument();
     expect(routerCalls.refresh).toBe(1);
     const count = fetchMock.mock.calls.length;
     await act(async () => void (await vi.advanceTimersByTimeAsync(WATCH_EVERY_MS * 3)));
     expect(fetchMock.mock.calls.length).toBe(count);
+  });
+
+  it("a name that sounds like Podster stays attributed, not part of the success line", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(sheet());
+    await act(async () => void (await vi.advanceTimersByTimeAsync(0)));
+    answer = () => Response.json({ agents: [{ id: "agt_x", org_id: "org_1", name: "Podster Support", description: null, created_at: 1, revoked_at: null }], truncated: false });
+    await act(async () => void (await vi.advanceTimersByTimeAsync(WATCH_EVERY_MS)));
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText("Name chosen by this agent")).toBeInTheDocument();
+    expect(screen.queryByText(/Connected: /)).toBeNull();
   });
 
   it("a person who can't connect isn't shown steps that would fail, and nothing is polled", () => {
