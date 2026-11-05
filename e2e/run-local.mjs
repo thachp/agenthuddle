@@ -115,7 +115,7 @@ async function waitForStack() {
     try {
       // A signed-in /v1/me is the first request that crosses the service binding to the API.
       cookie ||= await signUp();
-      const me = await fetch(`${base}/api/v1/me`, { headers: { cookie } });
+      const me = await fetch(`${base}/api/v1/me`, { headers: { cookie }, signal: AbortSignal.timeout(30_000) });
       if (me.status === 200) return;
     } catch {
       // Not listening yet.
@@ -127,7 +127,7 @@ async function waitForStack() {
 }
 
 async function signUp() {
-  const res = await fetch(`${base}/api/auth/sign-up/email`, { method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify({ email: `${randomBytes(8).toString("hex")}@example.test`, password: randomBytes(16).toString("hex"), name: "Rehearsal" }) });
+  const res = await fetch(`${base}/api/auth/sign-up/email`, { signal: AbortSignal.timeout(30_000), method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify({ email: `${randomBytes(8).toString("hex")}@example.test`, password: randomBytes(16).toString("hex"), name: "Rehearsal" }) });
   return res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
 }
 
@@ -146,7 +146,8 @@ try {
   const cookies = first ? { PODSTER_E2E_COOKIE_A: first, PODSTER_E2E_COOKIE_B: samePerson ? first : await signUp() } : {};
   const journey = await child("journey.mjs", ["--base-url", base, ...passOn], cookies);
   const probe = await child("probe-api.mjs", ["--gateway", base, "--gateway-only", "--with-posts"]);
-  code = journey || probe;
+  const selfTest = await child("probe-selftest.mjs", []);
+  code = journey || probe || selfTest;
   if (code !== 0) console.error(`\n--- last of the stack's log ---\n${log.join("").slice(-4000)}`);
 } catch (error) {
   console.error(error);

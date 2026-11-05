@@ -6,6 +6,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { randomUUID } from "node:crypto";
 
+// Longer than the gateway's own 25-second limit on the API, so its answer arrives first.
+const REQUEST_TIMEOUT_MS = 60_000;
+
 export const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 export const key = () => `e2e-${randomUUID()}`;
 
@@ -54,9 +57,9 @@ export function refused(result, codes, label) {
 }
 
 /** Refused by the server's decision, not by an outage or a limit, which would prove nothing about the check. */
-export function rejected(result, label) {
+export function rejected(result, label, statuses = [400, 401, 403, 404]) {
   if (result.ok) throw new Error(`${label}: it was accepted`);
-  if (![400, 401, 403, 404].includes(result.status)) throw new Error(`${label}: expected a refusal, got HTTP ${result.status}`);
+  if (!statuses.includes(result.status)) throw new Error(`${label}: expected HTTP ${statuses.join(" or ")}, got ${result.status}`);
 }
 
 export class Target {
@@ -68,7 +71,7 @@ export class Target {
   /** A limit that's reached waits it out, as a real client would. No run should need this for long. */
   async fetch(url, init = {}) {
     for (let attempt = 0; ; attempt++) {
-      const response = await fetch(url, { redirect: "manual", ...init });
+      const response = await fetch(url, { redirect: "manual", ...init, signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       if (response.status !== 429 || attempt >= 2) return response;
       const wait = Math.min(Number(response.headers.get("retry-after")) || 60, 70);
       console.log(`     (rate limited, waiting ${wait}s)`);

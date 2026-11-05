@@ -32,6 +32,12 @@ if (!isLocal && host !== "gateway-staging.podster.dev" && option("--allow-host")
   process.exit(2);
 }
 
+// Cookies and tokens go to this host, so anything that isn't local has to be HTTPS.
+if (!isLocal && new URL(base).protocol !== "https:") {
+  console.error(`Refusing to send session cookies to ${base} without HTTPS.`);
+  process.exit(2);
+}
+
 const report = new Report();
 const target = new Target(base, { pollMs: isLocal ? 150 : 1000 });
 const check = report.check.bind(report);
@@ -105,7 +111,7 @@ async function kernel() {
     await personA.addAgent(room, lead);
     architect = await AuthAgent.register(target, "Architect agent");
     eq(architect.status, "pending", "a new Agent Auth agent's status");
-    rejected(await architect.call("get_identity"), "an unclaimed agent calling a capability");
+    rejected(await architect.call("get_identity"), "an unclaimed agent calling a capability", [401, 403]);
     architect.calls = 0;
     await architect.claim(personB);
     await architect.identify();
@@ -249,7 +255,8 @@ async function kernel() {
       report.gap("C7-org", "revoking a whole organization", `DELETE /v1/workspaces/{ws}/organizations/{org} answers HTTP ${whole.status}: it's in ARCHITECTURE.md's route list but isn't built. This run revokes each of Org B's agents instead.`);
       // Messages race the revocation, and none may reach B afterward.
       const racing = Array.from({ length: 5 }, (_, i) => lead.call("send_message", { workspace_id: room, task_id: scoped.id, body: `SECRET-RACE ${i}`, idempotency_key: key() }));
-      await Promise.all([personA.revoke(room, architect.id), ...racing]);
+      const [, ...sent] = await Promise.all([personA.revoke(room, architect.id), ...racing]);
+      eq(sent.filter((r) => r.ok).length, racing.length, "racing messages A sent, which A may still do");
       await personA.revoke(room, second.id);
     }
     refused(await architect.call("get_task", { workspace_id: room, task_id: scoped.id }), "access_revoked", "B's next read");
@@ -299,14 +306,14 @@ async function acceptance() {
     refused(await personB.dash("POST", members(), { principal_id: personB.id, kind: "person", org_id: personB.org, role: "admin", policy_version: 1 }), "workspace_not_found", "a stranger appointing itself");
     refused(await personA.dash("POST", members(), { principal_id: lead.id, kind: "agent", org_id: personA.org, role: "admin", policy_version: await personA.policyVersion(room) }), ["invalid_argument", "already_member"], "making an agent an admin");
     refused(await personA.dash("POST", `${members()}/${lead.id}/role`, { role: "admin", policy_version: await personA.policyVersion(room) }), "invalid_argument", "promoting an agent to admin");
+    // Person B isn't in the owner's organization, so being named an admin must give them nothing.
     const added = await personA.dash("POST", members(), { principal_id: personB.id, kind: "person", org_id: personA.org, role: "admin", policy_version: await personA.policyVersion(room) });
-    if (added.ok) {
-      const asAdmin = await personB.dash("GET", `/v1/workspaces/${room}`);
-      if (!asAdmin.ok) report.gap("AC-02+", "a real second person acting as admin", `The owner's add answered 200, but that person got ${asAdmin.code}: admins must be in the owner's organization, and no public route adds a person to one. The success path runs only in apps/api tests.`);
-      await personA.revoke(room, personB.id);
-      const actions = (await personA.audit(room)).filter((e) => e.target_id === personB.id).map((e) => [e.action, e.actor_id]);
-      eq(actions, [["member.added", personA.id], ["member.revoked", personA.id]], "audit entries");
-    }
+    ok(added.ok, `the owner's add answered HTTP ${added.status} ${added.code ?? ""}. If gap 1's fix now refuses someone outside the organization, change this check to use a real second person.`);
+    refused(await personB.dash("GET", `/v1/workspaces/${room}`), "workspace_not_found", "someone outside the owner's organization acting on an admin role");
+    report.gap("AC-02+", "a real second person acting as admin", "Admins must be in the owner's organization, and no public route adds a person to one, so the success path, and an ordinary admin trying to appoint another, run only in apps/api tests.");
+    await personA.revoke(room, personB.id);
+    const actions = (await personA.audit(room)).filter((e) => e.target_id === personB.id).map((e) => [e.action, e.actor_id]);
+    eq(actions, [["member.added", personA.id], ["member.revoked", personA.id]], "audit entries");
   });
 
   await check("AC-03", "people outside the room and agents can't reach access commands, whatever their label", async () => {
@@ -362,13 +369,13 @@ async function acceptance() {
   await check("AC-06", "the agent's owner withdraws it with no room approval, and the room can't bring it back", async () => {
     const withdrawn = await AuthAgent.connect(target, personB, "Withdrawn agent");
     await admit(withdrawn);
-    const version = await personA.policyVersion(room);
     await personB.must("POST", `${members()}/${withdrawn.id}/withdraw`, {});
+    const recorded = (await personA.audit(room)).filter((e) => e.action === "member.revoked" && e.target_id === withdrawn.id).at(-1);
+    eq([recorded?.actor_id, JSON.parse(recorded?.prior_json ?? "{}").reason], [personB.id, "owner_withdrawn"], "the audit entry for the withdrawal");
     refused(await withdrawn.call("get_workspace", { workspace_id: room }), "access_revoked", "the withdrawn agent reading");
     refused(await personA.dash("POST", members(), { principal_id: withdrawn.id, kind: "agent", org_id: personB.org, role: "member", policy_version: await personA.policyVersion(room) }), "invitation_required", "the room owner re-adding it");
     const invitation = await personA.invite(room, personB.org);
     refused(await personA.accept(invitation.token, personB.org, [withdrawn]), "not_allowed", "the room owner accepting for it");
-    ok((await personA.policyVersion(room)) > version, "the audit log should have moved the policy version");
     eq((await personB.accept(invitation.token, personB.org, [withdrawn])).body?.agents, [withdrawn.id], "its own owner bringing it back");
   });
 
@@ -409,10 +416,10 @@ async function acceptance() {
       "edited payload": `${head}.${base64(JSON.stringify(edited))}.${signature}`,
       garbage: "not.a.token",
     };
-    for (const [name, jwt] of Object.entries(cases)) rejected(await guest.execute(identity, {}, jwt), `a token ${name}`);
+    for (const [name, jwt] of Object.entries(cases)) rejected(await guest.execute(identity, {}, jwt), `a token ${name}`, [401, 403]);
     const once = await guest.token(identity);
     ok((await guest.execute(identity, {}, once)).ok, "a good token was refused");
-    rejected(await guest.execute(identity, {}, once), "a replayed token");
+    rejected(await guest.execute(identity, {}, once), "a replayed token", [401]);
     const mcp = await target.http("/mcp", { method: "POST", headers: { authorization: "Bearer forged", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" });
     eq(mcp.status, 401, "a forged MCP token");
     eq((await target.http("/api/v1/me", { headers: { cookie: "better-auth.session_token=forged; __Secure-better-auth.session_token=forged" } })).status, 401, "a forged session");
@@ -442,7 +449,7 @@ async function acceptance() {
     const burst = Array.from({ length: 6 }, (_, i) => fenced.call("send_message", { ...where, body: `racing ${i}`, idempotency_key: key() }));
     const [off] = await Promise.all([personB.must("POST", `/agents/${fenced.id}/disconnect`), ...burst]);
     eq(off.status, "disconnected", "connection status");
-    rejected(await fenced.call("get_identity"), "its old key");
+    rejected(await fenced.call("get_identity"), "its old key", [401, 403]);
     ok(!(await roleOf(personA, room, fenced.id)), "it's still a member");
     eq((await lead.must("get_task", where, false)).task.status, "open", "its offered task");
     const state = await lead.must("get_task", where, false);
@@ -455,7 +462,7 @@ async function acceptance() {
   await check("AC-29", "disconnect, reconnect, rejoin and disconnect again: no room comes back by itself, and the second one completes", async () => {
     const on = await personB.must("POST", `/agents/${fenced.id}/reconnect`);
     eq(on.status, "active", "status after reconnecting");
-    rejected(await fenced.call("get_identity"), "its old key after reconnecting");
+    rejected(await fenced.call("get_identity"), "its old key after reconnecting", [401, 403]);
     const fresh = await AuthAgent.connect(target, personB, "Reconnected agent", { linkAgent: fenced.id });
     eq(fresh.id, fenced.id, "a new credential reattaches to the same agent");
     refused(await fresh.call("get_workspace", { workspace_id: room }), "access_revoked", "room access after reconnecting");
@@ -559,8 +566,10 @@ async function acceptance() {
     ok(unread > before, `the reviewer's unread count stayed at ${before} after a submission`);
     eq((await personA.must("POST", `/v1/workspaces/${room}/tasks/${offered.id}/verify`, { submission_no: submitted.submission_no })).status, "completed", "a person approving from the dashboard");
     const inbox = await personA.dash("GET", "/v1/inbox");
+    ok(inbox.ok || inbox.status === 404, `a person's inbox answered HTTP ${inbox.status}`);
     if (!inbox.ok) report.gap("D21+", "people reading their inbox", `GET /api/v1/inbox answers HTTP ${inbox.status}: unread counts show on /v1/me, but the gateway doesn't let a person read or ack their inbox, so decision 21 can't be used yet.`);
     const oversight = await personB.dash("GET", `/agents/${guest.id}/inbox`);
+    ok(oversight.ok || oversight.status === 404, `oversight of an agent's inbox answered HTTP ${oversight.status}`);
     if (!oversight.ok) report.gap("D21-o", "an owner looking at its agent's inbox", `GET /api/agents/{agent}/inbox answers HTTP ${oversight.status}: the API has it and the gateway doesn't expose it.`);
   });
 

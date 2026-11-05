@@ -75,18 +75,18 @@ async function probeHosts() {
 async function probeGateway() {
   for (const path of PRIVATE_PATHS) {
     const answer = await ask(`${gateway}${path}`);
-    say(answer.status !== 0 && !isApi(answer), `${gateway}${path} answers, and it isn't the API (${describe(answer)})`);
+    say(answer.status === 404 && !isApi(answer), `${gateway}${path} answers with the gateway's 404 (${describe(answer)})`);
     if (!withPosts) continue;
     const posted = await ask(`${gateway}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-podster-assertion": "forged" }, body: "{}" });
-    say(posted.status !== 0 && !isApi(posted), `POST ${gateway}${path} with a forged assertion answers, and it isn't the API (${describe(posted)})`);
+    say(posted.status === 404 && !isApi(posted), `POST ${gateway}${path} with a forged assertion gets the gateway's 404 (${describe(posted)})`);
   }
   for (const path of PRIVATE_PATHS) {
     const answer = await ask(`${gateway}/api${path}`, { headers: { "x-podster-assertion": "forged" } });
-    say(!isApi(answer) && answer.status !== 200, `${gateway}/api${path} refuses a caller with no session (${describe(answer)})`);
+    say(answer.status === 401 && !isApi(answer), `${gateway}/api${path} refuses a caller with no session with a 401 (${describe(answer)})`);
   }
 }
 
-// A host that can't be reached looks the same as one with no API. A gateway that answers shows this machine is online.
+// A host that can't be reached looks the same as one with no API. The gateway's expected answers show this machine is online.
 if (!configOnly && !gateway) {
   console.error("Pass --gateway, or --config-only.");
   process.exit(2);

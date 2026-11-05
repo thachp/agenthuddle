@@ -22,7 +22,7 @@ The November 4 staging run doesn't count here. Its driver was never committed, o
 | 2. Offer reaches B's inbox with no public URL | journey `C2` | Local only |
 | 3. Accept, message, submit | journey `C3` | Local only |
 | 4. Changes, resubmit, verify | journey `C4` | Local only |
-| 5. Same state and history after reconnecting | journey `C5` | Local only |
+| 5. Same state and history after reconnecting | journey `C5`. Agent A opens a new MCP client on the same credential. Agent Auth has no connection to reopen, so agent B's "reconnect" is just its next signed call | Local only |
 | 6. Outsiders and guests see only their own tasks | journey `C6` | Local only |
 | 7. Org A revokes Org B | journey `C7`, by revoking each agent. The whole-organization route isn't built (gap `C7-org`) | Local only, and incomplete |
 | 8. A retry creates nothing new | journey `C2` to `C4` retry each command, and `C8` counts the result | Local only |
@@ -97,7 +97,7 @@ On 2026-11-05 UTC, read-only probes of staging found no answer from the API:
 What keeps this from passing:
 
 - **The `workers.dev` evidence is limited.** Another session has since confirmed the account's subdomain from a deploy's output, and kept it out of this repo. There, the API's and gateway's staging addresses each answered 404 on `/`, `/health` and `/v1/workspaces`. That's not the API's answer, but a made-up subdomain also answers 404. Step 5 below hasn't been run with the confirmed subdomain.
-- **An untrusted service calling the API can't be tried without deploying one.** The proof is local: assertions from any other key are refused, and the probe's fingerprints were tested against a fake API that answers like the real one.
+- **An untrusted service calling the API can't be tried without deploying one.** The proof is local: assertions from any other key are refused, and [e2e/probe-selftest.mjs](../e2e/probe-selftest.mjs), which runs with `run-local.mjs`, shows the probe fails against a fake API that answers like the real one, and against a gateway nothing answers on.
 
 Also, `apps/gateway/wrangler.jsonc` doesn't set `workers_dev` at its top level, only in `env.staging`. A production deploy from that config would get a `workers.dev` address for the gateway. That isn't the API, but it should be settled before production.
 
@@ -166,7 +166,7 @@ Each was checked against the code on commit `c30f51a`, by a test that ran or by 
 | 8. Ownership transfer and recovery | **Not built** | Gap 2 |
 | 14. Guests creating tasks | Holds | journey `D14`; `apps/api/src/workspace.rs:708`; `crates/policy/src/lib.rs:107` |
 | 21. Person inboxes | **Half built** | The API stores and serves them, and a person's unread count works (journey `D21`). People can't read or ack them through the gateway (gap 4) |
-| 22. Who creates tasks from the dashboard | Holds for owners on a real run. Admin and member people only in tests | journey `D22`; `crates/policy/src/lib.rs:107`. Reaching them needs gap 1 |
+| 22. Who creates tasks from the dashboard | Holds for owners in the local journey. Admin and member people only in apps/api tests | journey `D22`; `crates/policy/src/lib.rs:107`. Reaching them needs gap 1 |
 | 23. Personal accounts | Holds, with one failure case | journey `D23`; `apps/gateway/src/index.ts:303`. See gap 8 |
 | 24. Taking over a task when its requester leaves | Holds for owner and admin. Coordinator waits for M1 | journey `AC-25`; `crates/policy/src/lib.rs:154`. See gap 9 |
 
@@ -189,7 +189,7 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 
 ## Gate rulings, 2026-11-05 UTC
 
-The owner asked for the recommended option on each of these. They still need adding to [PRODUCT.md](spec/PRODUCT.md#decisions-needed).
+The session that wrote this doc recommended these, and the owner answered "up to ur recommendation" in that session on 2026-11-05 UTC. The first four were put to the owner as questions. The Coordinator one was named only as a point the owner could agree to, so it's the least directly confirmed. Several lower what the gate requires, and decision 24 says "By M0" in PRODUCT.md, so the Coordinator row changes that decision's M0 scope, as PRODUCT.md's note on decision 24 now says too. The others still need adding to [PRODUCT.md](spec/PRODUCT.md#decisions-needed), and the owner can overrule any of them.
 
 | Question | Ruling | Effect |
 | --- | --- | --- |
