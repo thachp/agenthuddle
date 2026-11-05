@@ -32,7 +32,7 @@ function stack(overrides: object = {}) {
     return res;
   };
   /** What a browser sends for the landing page's form. */
-  const use = (path: string, host = APP) => fetch(host + path, { headers: { "sec-fetch-site": "same-origin" } });
+  const use = (path: string, host = APP) => fetch(host + path, { headers: { "sec-fetch-site": "same-origin", referer: `${host}/sign-in/email?token=x` } });
   return { sent, fetch, ask, use };
 }
 const answer = async (res: Response) => [res.status, await res.text()];
@@ -241,7 +241,7 @@ describe("email sign-in", () => {
       expect(made.headers.get("location")).toContain("/sign-in?error=");
       await s.ask(unique("nocb"));
       const { token } = tokenIn(s.sent[0]);
-      const bare = await s.fetch(`${APP}/api/auth/magic-link/verify?token=${token}`, { headers: { "sec-fetch-site": "same-origin" } });
+      const bare = await s.fetch(`${APP}/api/auth/magic-link/verify?token=${token}`, { headers: { "sec-fetch-site": "same-origin", referer: `${APP}/sign-in/email` } });
       expect(bare.status).toBe(404);
       expect(await bare.text()).not.toContain("session");
       expect((await s.use(verifyPath(token))).status).toBe(302);
@@ -277,6 +277,12 @@ describe("email sign-in", () => {
       ["a sibling host", { "sec-fetch-site": "same-site" }],
       ["a typed or pasted address", { "sec-fetch-site": "none" }],
       ["a client that says nothing", {}],
+      ["another site, whatever referrer it claims", { "sec-fetch-site": "cross-site", referer: `${APP}/sign-in/email` }],
+      // Same-origin, but not the page's form: the consent page's redirect, or a link in an agent's message.
+      ["another page on this host", { "sec-fetch-site": "same-origin", referer: `${APP}/oauth/consent?client_id=x` }],
+      ["a same-origin link that sends no referrer", { "sec-fetch-site": "same-origin" }],
+      ["another site claiming the path", { "sec-fetch-site": "same-origin", referer: "https://evil.test/sign-in/email" }],
+      ["a referrer that isn't a URL", { "sec-fetch-site": "same-origin", referer: "nonsense" }],
     ];
     for (const [name, headers] of fromBrowser) {
       it(`starts no session and stays unspent, from ${name}`, async () => {
@@ -286,12 +292,70 @@ describe("email sign-in", () => {
         const { token } = tokenIn(s.sent[0]);
         const res = await s.fetch(APP + verifyPath(token), { headers });
         expect(res.status).toBe(302);
-        expect(res.headers.get("location")).toBe(`${APP}/sign-in?error=1`);
+        expect(res.headers.get("location")).toBe(`${APP}/sign-in?next=%2Fattention&error=1`);
         expect(res.headers.getSetCookie()).toEqual([]);
         expect(await userCalled(email)).toBeNull();
         expect(sessionCookies(await s.use(verifyPath(token)))).toHaveLength(1);
       });
     }
+  });
+
+  it("keeps where to go on a refused use, only if it's a path here", async () => {
+    const s = stack();
+    const refused = (callback: string) => s.fetch(APP + verifyPath("t", callback), { headers: { "sec-fetch-site": "cross-site" } });
+    expect((await refused("/w/ws_1?tab=team")).headers.get("location")).toBe(`${APP}/sign-in?next=${encodeURIComponent("/w/ws_1?tab=team")}&error=1`);
+    expect((await refused("https://evil.test/")).headers.get("location")).toBe(`${APP}/sign-in?next=%2F&error=1`);
+  });
+
+  describe("our own hosts as an OAuth client's address", () => {
+    /** Registered while the check couldn't see this host, like a client from before it existed. */
+    async function oldClient(redirect: string) {
+      const before = stack({ APP_URL: "https://elsewhere.test" });
+      const res = await before.fetch(`${GATEWAY}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: [redirect], client_name: "Old client", token_endpoint_auth_method: "none" }) });
+      expect(res.status).toBe(201);
+      const { client_id } = await res.json<{ client_id: string }>();
+      return new URLSearchParams({ response_type: "code", client_id, redirect_uri: redirect, scope: "mcp", code_challenge: "x".repeat(43), code_challenge_method: "S256", state: "s" }).toString();
+    }
+    const owned = [`${APP}/api/auth/magic-link/verify?token=t&callbackURL=%2F`, `${GATEWAY}/cb`, "https://APP.test/cb", "https://app.test./cb", "https://app.test:8443/cb", "https://user@app.test/cb"];
+
+    for (const redirect of owned) {
+      it(`can't be registered: ${redirect}`, async () => {
+        const res = await stack().fetch(`${GATEWAY}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.test/cb", redirect], client_name: "x", token_endpoint_auth_method: "none" }) });
+        expect(res.status).toBe(400);
+        expect((await res.json<any>()).error).toBe("invalid_redirect_uri");
+      });
+    }
+
+    it("still registers anyone else's", async () => {
+      const res = await stack().fetch(`${GATEWAY}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://client.test/cb?a=1", "https://app.test.evil.test/cb"], client_name: "x", token_endpoint_auth_method: "none" }) });
+      expect(res.status).toBe(201);
+    });
+
+    it("covers the gateway's host when the request comes through the application host", async () => {
+      const elsewhere = "https://elsewhere.test";
+      const res = await stack({ BASE_URL: elsewhere, APP_URL: undefined }).fetch(`${elsewhere}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: [`${GATEWAY}/cb`], client_name: "Old client", token_endpoint_auth_method: "none" }) });
+      expect(res.status).toBe(201);
+      const { client_id } = await res.json<{ client_id: string }>();
+      const query = new URLSearchParams({ response_type: "code", client_id, redirect_uri: `${GATEWAY}/cb`, scope: "mcp", code_challenge: "x".repeat(43), code_challenge_method: "S256", state: "s" }).toString();
+      const s = stack();
+      const cookie = cookieOf(await signIn(s, unique("gateway-client")));
+      expect((await s.fetch(`${APP}/api/consent?${query}`, { headers: { cookie } })).status).toBe(400);
+    });
+
+    it("is refused for an existing client at /authorize, the consent read, approval and decline", async () => {
+      const query = await oldClient(`${APP}/api/auth/magic-link/verify?token=t&callbackURL=%2F`);
+      const s = stack();
+      const email = unique("victim");
+      const cookie = cookieOf(await signIn(s, email));
+      expect((await s.fetch(`${GATEWAY}/authorize?${query}`)).status).toBe(400);
+      expect((await s.fetch(`${APP}/api/consent?${query}`, { headers: { cookie } })).status).toBe(400);
+      const org = (await (await s.fetch(`${APP}/api/orgs`, { headers: { cookie } })).json<any>()).organizations[0].id;
+      for (const body of [{ decision: "decline" }, { decision: "approve", org_id: org }]) {
+        const res = await s.fetch(`${APP}/api/consent`, { method: "POST", headers: { cookie, origin: APP, "content-type": "application/json" }, body: JSON.stringify({ oauth_query: `?${query}`, ...body }) });
+        expect(res.status, body.decision).toBe(400);
+        expect(await res.text(), body.decision).not.toContain("magic-link");
+      }
+    });
   });
 
   it("makes one session from one link, even from requests at the same moment", async () => {
@@ -368,7 +432,7 @@ describe("email sign-in", () => {
       const { token } = tokenIn(s.sent[0]);
       const id = await unverified(email);
       const res = await s.use(verifyPath(token));
-      expect(res.headers.get("location")).toContain("/sign-in?error=");
+      expect(res.headers.get("location")).toContain("error=1");
       expect(sessionCookies(res)).toEqual([]);
       await untouched(id);
     });
@@ -429,7 +493,7 @@ describe("email sign-in", () => {
       const id = await githubPerson(email);
       const res = await s.use(verifyPath(token));
       expect(res.status).toBe(302);
-      expect(res.headers.get("location")).toContain("/sign-in?error=");
+      expect(res.headers.get("location")).toContain("error=1");
       expect(sessionCookies(res)).toEqual([]);
       expect(await e.DB.prepare(`SELECT 1 FROM session WHERE userId = ?`).bind(id).first()).toBeNull();
       expect((await e.DB.prepare(`SELECT COUNT(*) AS n FROM account WHERE userId = ?`).bind(id).first<{ n: number }>())!.n).toBe(1);

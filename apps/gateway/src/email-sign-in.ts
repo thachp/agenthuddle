@@ -121,16 +121,28 @@ export async function handleEmailLink(request: Request, env: Env, ctx: Pick<Exec
   return accepted;
 }
 
+/** Only the landing page's form sends both of these: other sites fail the first, and other pages here fail the second. */
+function fromLandingPage(request: Request, origin: string) {
+  if (request.headers.get("sec-fetch-site") !== "same-origin") return false;
+  try {
+    const from = new URL(request.headers.get("referer") ?? "");
+    return from.origin === origin && from.pathname === "/sign-in/email";
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Using a link. Only a click on the landing page's form sends `same-origin`, so a link from another site can't sign a
- * browser in to whoever asked for the token, without so much as a button, and the token stays unspent.
+ * Using a link. Anywhere but the landing page, the token stays unspent. Otherwise a link on another site, an agent's
+ * message or an OAuth client's redirect could sign a browser in to whoever asked for the token, with no warning.
  */
 export async function handleEmailVerify(request: Request, env: Env) {
   const url = new URL(request.url);
   // Without a callback, the plugin would answer with the session's token in its body.
   if (request.method !== "GET" || !url.searchParams.get("callbackURL")) return denied("not_found", 404);
-  const refused = () => new Response(null, { status: 302, headers: { location: `${url.origin}/sign-in?error=1` } });
-  if (request.headers.get("sec-fetch-site") !== "same-origin") return refused();
+  const next = encodeURIComponent(appPath(url.searchParams.get("callbackURL"), url.origin));
+  const refused = () => new Response(null, { status: 302, headers: { location: `${url.origin}/sign-in?next=${next}&error=1` } });
+  if (!fromLandingPage(request, url.origin)) return refused();
   const token = url.searchParams.get("token");
   const pending = token ? await env.DB.prepare(`SELECT value FROM verification WHERE identifier = ?`).bind(`magic-link:${await linkTokenHash(token)}`).first<{ value: string }>() : null;
   const email = pending ? (JSON.parse(pending.value) as { email?: string }).email : undefined;

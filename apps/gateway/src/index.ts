@@ -693,9 +693,31 @@ function consentPage(choices: ConsentChoices) {
 </form>`);
 }
 
+/**
+ * A client's address is somewhere else by definition. On one of our hosts, the consent page would navigate to any of our
+ * routes from our own origin, even on Decline, and an authorization code would land on our own page.
+ */
+function namesOurHost(env: Env, redirectUri: unknown, ...others: string[]) {
+  if (typeof redirectUri !== "string") return false;
+  const hostOf = (value: string) => new URL(value).hostname.replace(/\.+$/, "");
+  try {
+    return [env.BASE_URL, env.APP_URL, ...others].some((ours) => ours && hostOf(ours) === hostOf(redirectUri));
+  } catch {
+    return false;
+  }
+}
+
+/** The provider has no check for this, and handles registration before our routes, so it's asked here first. */
+async function registersOurHost(request: Request, env: Env) {
+  const body = await request.clone().json<{ redirect_uris?: unknown }>().catch(() => null);
+  return Array.isArray(body?.redirect_uris) && body.redirect_uris.some((uri) => namesOurHost(env, uri));
+}
+
 async function parseOAuth(env: Env, request: Request) {
   try {
     const parsed = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+    // `request` is for the gateway's host even when `env` is the application host's, so this covers both.
+    if (namesOurHost(env, parsed.redirectUri, request.url)) return null;
     // MCP clients often send no scope, and refresh tokens are issued anyway, so both of those mean plain `mcp` access.
     if (parsed.scope.some((scope) => scope !== "mcp" && scope !== "offline_access")) return null;
     return parsed;
@@ -1240,6 +1262,9 @@ export default {
       const body = (request.headers.get("authorization")?.length ?? 0) > MAX_STORED_BODY_BYTES ? null : await boundedBody(request, MAX_STORED_BODY_BYTES);
       if (!body) return withHsts(json({ error: "invalid_client_metadata", error_description: "body_too_large", message: "body_too_large" }, 413), env);
       request = new Request(request, { body });
+    }
+    if (request.method === "POST" && new URL(request.url).pathname === "/oauth/register" && (await registersOurHost(request, env))) {
+      return withHsts(json({ error: "invalid_redirect_uri", error_description: "redirect_uri_on_our_host" }, 400), env);
     }
     if (provider?.base !== env.BASE_URL) {
       provider = {

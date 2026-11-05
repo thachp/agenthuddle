@@ -63,6 +63,15 @@ describe("forwardedHeaders", () => {
 });
 
 describe("forwardToGateway", () => {
+  it("passes the referrer to the route that uses a sign-in link, and no other", async () => {
+    const { fetch, calls } = gateway();
+    const sent = (path: string) => forwardToGateway(new Request(`${APP}${path}`, { headers: { referer: `${APP}/sign-in/email?token=t` } }), { fetch }, APP);
+    await sent("/api/auth/magic-link/verify?token=t&callbackURL=%2F");
+    await sent("/api/v1/me");
+    const headers = calls.mock.calls.map((call: unknown[]) => new Headers((call[1] as RequestInit).headers).get("referer"));
+    expect(headers).toEqual([`${APP}/sign-in/email?token=t`, null]);
+  });
+
   it("answers a refused path without calling the gateway", async () => {
     const { fetch, calls } = gateway();
     const response = await forwardToGateway(new Request(`${APP}/api/auth/agent/register`, { method: "POST" }), { fetch }, APP);

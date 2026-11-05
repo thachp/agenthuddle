@@ -158,7 +158,7 @@ Deploy the gateway before the web Worker, because the web Worker's `SIGN_IN_PROV
 3. The same link used again goes back to the sign-in page with an error.
 4. An address that signs in with GitHub gets the notice, and no link.
 5. `POST https://gateway-staging.podster.dev/api/auth/sign-in/magic-link` answers 404.
-6. Pasting `https://app-staging.podster.dev/api/auth/magic-link/verify?token=<a fresh token>&callbackURL=%2Fattention` into the address bar goes to the sign-in page with an error and starts no session. The same token then still works from its emailed link's button. This also shows a real browser sends `same-origin` from that form, so try Safari too.
+6. Pasting `https://app-staging.podster.dev/api/auth/magic-link/verify?token=<a fresh token>&callbackURL=%2Fattention` into the address bar goes to the sign-in page with an error and starts no session. The same token then still works from its emailed link's button. This also shows a real browser sends `same-origin` and the referrer from that form, so try Safari too.
 7. Asking twice from one browser and then from another network shows the per-client limit counts real addresses, which means `cf-connecting-ip` survived the service binding. If every client shares one count, it didn't.
 8. Clicking one link's button in several tabs at once starts one session, which shows a token stays single-use on real D1.
 

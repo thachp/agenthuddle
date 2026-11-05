@@ -37,9 +37,13 @@ export async function forwardToGateway(request: Request, gateway: Pick<Fetcher, 
   const url = new URL(request.url);
   if (!isForwardable(url.pathname)) return Response.json({ error: { code: "not_found", message: "not_found" } }, { status: 404 });
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
+  const sent = forwardedHeaders(request.headers);
+  // Only here, where the gateway checks a sign-in link came from its landing page. A referrer can hold anything otherwise.
+  const referer = request.headers.get("referer");
+  if (url.pathname === "/api/auth/magic-link/verify" && referer) sent.set("referer", referer);
   const response = await gateway.fetch(new URL(url.pathname + url.search, appUrl).toString(), {
     method: request.method,
-    headers: forwardedHeaders(request.headers),
+    headers: sent,
     body: hasBody ? await request.arrayBuffer() : undefined,
     redirect: "manual",
   });
