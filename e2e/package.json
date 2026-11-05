@@ -1,0 +1,16 @@
+{
+  "name": "@podster/e2e",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "local": "node run-local.mjs",
+    "journey": "node journey.mjs",
+    "probe": "node probe-api.mjs"
+  },
+  "dependencies": {
+    "@auth/agent": "0.6.2",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "jose": "^6.2.15"
+  }
+}

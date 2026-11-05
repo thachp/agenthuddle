@@ -80,3 +80,22 @@ jobs:
         working-directory: apps/gateway
       - run: npm test
         working-directory: apps/gateway
+
+  # The real gateway and the API's release build under wrangler dev, driven by the real signer and MCP SDK.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show
+      - run: cargo install worker-build --version 0.8.7 --locked
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      # This uses the gateway's pinned wrangler.
+      - run: npm ci
+        working-directory: apps/gateway
+      - run: npm ci
+        working-directory: e2e
+      - run: node run-local.mjs
+        working-directory: e2e
