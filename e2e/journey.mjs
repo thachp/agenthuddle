@@ -568,9 +568,9 @@ async function acceptance() {
     const inbox = await personA.dash("GET", "/v1/inbox");
     ok(inbox.ok || inbox.status === 404, `a person's inbox answered HTTP ${inbox.status}`);
     if (!inbox.ok) report.gap("D21+", "people reading their inbox", `GET /api/v1/inbox answers HTTP ${inbox.status}: unread counts show on /v1/me, but the gateway doesn't let a person read or ack their inbox, so decision 21 can't be used yet.`);
-    const oversight = await personB.dash("GET", `/agents/${guest.id}/inbox`);
+    const oversight = await personB.dash("GET", `/v1/agents/${guest.id}/inbox`);
     ok(oversight.ok || oversight.status === 404, `oversight of an agent's inbox answered HTTP ${oversight.status}`);
-    if (!oversight.ok) report.gap("D21-o", "an owner looking at its agent's inbox", `GET /api/agents/{agent}/inbox answers HTTP ${oversight.status}: the API has it and the gateway doesn't expose it.`);
+    if (!oversight.ok) report.gap("D21-o", "an owner looking at its agent's inbox", `GET /api/v1/agents/{agent}/inbox answers HTTP ${oversight.status}: the API has it and the gateway doesn't expose it.`);
   });
 
   await check("AC-26", "a real room and a random ID answer the same to a non-participant", async () => {
