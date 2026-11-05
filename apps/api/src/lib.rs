@@ -21,6 +21,8 @@ pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
 pub const INTERNAL_PREVIEW_PATH: &str = "/internal/invitation-preview";
 pub const AGENT_ID_PREFIX: &str = "agt_";
 const MAX_ID_BYTES: usize = 128;
+const OVERSIGHT_ORGS: usize = 50;
+const OVERSIGHT_ROOMS: i32 = 200;
 
 /// The verified caller, passed to Durable Objects. It says who they are, never what they may do.
 #[derive(Clone, Serialize, Deserialize)]
@@ -96,6 +98,33 @@ async fn list_workspaces(env: &Env, caller: &Caller) -> std::result::Result<Resp
         .map(|row| json!({ "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "role": row["role"], "status": row["workspace_status"] }))
         .collect();
     Ok(Response::from_json(&json!({ "workspaces": current }))?)
+}
+
+/// Rooms the agents of the organizations this person administers are in. It only shows them, and each read of a task
+/// asks the room, which decides from its own state.
+async fn list_oversight_rooms(
+    env: &Env,
+    caller: &Caller,
+) -> std::result::Result<Response, ApiError> {
+    let db = env.d1("DB")?;
+    let mut rooms = Vec::new();
+    let mut truncated = caller.admin_orgs.len() > OVERSIGHT_ORGS;
+    for org in caller.admin_orgs.iter().take(OVERSIGHT_ORGS) {
+        let found = db
+            .prepare("SELECT workspace_id, workspace_name, workspace_status, principal_id, org_id FROM membership_index WHERE org_id = ? AND removed = 0 AND principal_id LIKE 'agt\\_%' ESCAPE '\\' ORDER BY workspace_name LIMIT ?")
+            .bind(&[org.as_str().into(), (OVERSIGHT_ROOMS + 1).into()])?
+            .all()
+            .await?
+            .results::<Value>()?;
+        truncated |= found.len() > OVERSIGHT_ROOMS as usize;
+        rooms.extend(found.into_iter().take(OVERSIGHT_ROOMS as usize).map(|row| json!({
+            "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "status": row["workspace_status"],
+            "agent_id": row["principal_id"], "org_id": row["org_id"],
+        })));
+    }
+    Ok(Response::from_json(
+        &json!({ "rooms": rooms, "truncated": truncated }),
+    )?)
 }
 
 async fn me(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiError> {
@@ -192,6 +221,12 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         }
         ["v1", "workspaces"] if method == Method::Get => {
             return list_workspaces(&env, &caller).await
+        }
+        ["v1", "oversight", "rooms"] if method == Method::Get => {
+            if is_agent {
+                return Err(ApiError::not_allowed());
+            }
+            return list_oversight_rooms(&env, &caller).await;
         }
         ["v1", "org-departures"] if method == Method::Post => {
             // Only the gateway's own removal states a departure. The person who left may have made the request.

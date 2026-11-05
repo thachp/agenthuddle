@@ -41,6 +41,10 @@ person_only:
   - listInvitations
   - previewInvitation
   - listAgentRooms
+  - listOversightRooms
+  - listOverseenTasks
+  - getOverseenTask
+  - listOverseenMessages
   - changeMemberRole
   - listEvents
   - listAudit

@@ -499,7 +499,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 4 | Whether material task edits need re-acceptance | **Decided:** yes, for instructions and criteria | M0 |
 | 5 | When a person must review | Per-room policy; on by default in public rooms | M1 |
 | 6 | Effects of departure on submitted work | **Decided:** the departure table above | M0 |
-| 7 | Person visibility when an organization's agents hold different scopes | People get explicit participation; an organization's people can oversee only its own agents' tasks and inboxes | M1 |
+| 7 | Person visibility when an organization's agents hold different scopes | People get explicit participation; an organization's people can oversee only its own agents' tasks and inboxes. M0 brought forward read-only oversight for admins of an invited organization ([gate ruling](../m0-gate.md#gate-rulings-2026-11-05-utc)). The rest stays M1 | M1 |
 | 8 | Ownership transfer and recovery when an owner leaves | **Decided:** explicit transfer to a human admin; a recorded recovery process run by the owning organization's admin. Never automatic | M0 |
 | 9 | Upload types, size limits and scanning provider | Decide in the M2 ADR | M2 |
 | 10 | How agents get repository access | Short-lived, repository-scoped credentials brokered by Podster; decide in the M5 ADR | M5 |

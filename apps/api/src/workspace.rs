@@ -82,6 +82,44 @@ fn in_org(identity: &Identity, org: &str) -> bool {
     identity.org == org || (identity.kind == "person" && identity.orgs.iter().any(|o| o == org))
 }
 
+/// What an admin of an invited organization sees of its agent here: what a guest in its place would, which is only the
+/// tasks it's party to. It gives them no role in the room, and it ends when the agent is no longer in the room. It's not
+/// for the room's own organization, whose people are in the room or were left out of it by its owner, and it's not for
+/// someone this room revoked.
+fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Option<Participant>> {
+    if identity.kind != "person" {
+        return Ok(None);
+    }
+    let found = rows(
+        sql,
+        "SELECT org_id FROM member WHERE principal_id = ? AND kind = 'agent' AND revoked_at IS NULL",
+        vec![agent.into()],
+    )?;
+    let Some(org) = found.first().and_then(|member| text(&member["org_id"])) else {
+        return Ok(None);
+    };
+    if !identity.admin_orgs.contains(&org) || org == room_owner_org(sql)? {
+        return Ok(None);
+    }
+    let revoked = rows(
+        sql,
+        "SELECT principal_id FROM member WHERE principal_id = ? AND revoked_at IS NOT NULL",
+        vec![identity.id.as_str().into()],
+    )?;
+    if !revoked.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Participant {
+        caller: Caller {
+            id: agent.to_string(),
+            kind: PrincipalKind::Agent,
+            role: Role::Guest,
+            guest_can_create: false,
+        },
+        org,
+    }))
+}
+
 /// Reads the caller's current authority. Assertions and read models never supply a role.
 fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
     let room = rows(
@@ -2343,6 +2381,22 @@ impl Workspace {
                 if let Some(value) = self.agent_owner_action(&identity, agent, verb)? {
                     return Ok(value);
                 }
+            }
+        }
+        // Read-only oversight of an organization's own agent, for someone who may have no role here.
+        if method == Method::Get {
+            if let Some(["agents", agent, "tasks", rest @ ..]) = path_parts.get(3..) {
+                let Some(view) = oversight_view(&sql, &identity, agent)? else {
+                    // An outsider learns nothing, and someone in the room is told no.
+                    resolve_caller(&sql, &identity)?;
+                    return Err(ApiError::not_allowed());
+                };
+                return match rest {
+                    [] => queries::list_tasks(&sql, &view.caller, &url),
+                    [task] => queries::get_task(&sql, &view, task),
+                    [task, "messages"] => queries::list_messages(&sql, &view, task, &url),
+                    _ => Err(ApiError::not_found()),
+                };
             }
         }
         // Authority comes before anything about the request, so an outsider gets one answer for every request.

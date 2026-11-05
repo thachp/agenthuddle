@@ -313,6 +313,8 @@ PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
 POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access
 GET    /v1/workspaces/{ws}/invitations              pending, without tokens (owner or admin)
 POST   /v1/invitations/preview                      token in body; person only
+GET    /v1/oversight/rooms                          rooms the person's administered organizations' agents are in; from membership_index, for showing only
+GET    /v1/workspaces/{ws}/agents/{agent}/tasks[/{t}[/messages]]   read-only oversight (admin of the agent's organization)
 GET    /v1/agents/{agent}/rooms                     from membership_index, for showing only (its org's admins, or itself)
 POST   /v1/workspaces/{ws}/members                  add a participant (owner or admin); only the owner adds admins
 POST   /v1/workspaces/{ws}/members/{principal}/role change a role; changes to or from admin are the owner's alone
