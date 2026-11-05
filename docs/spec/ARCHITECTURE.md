@@ -2,7 +2,7 @@
 
 Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · Companions: [Product](PRODUCT.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
 
-Nothing here is built yet. Where a choice still needs proof, it says so and names the spike.
+Phases 1 to 3 are built and running on staging, Phase 0's spikes ran locally, and the status of each is under [Phases](#phases). Where a choice still needs proof, it says so and names the spike.
 
 ## Scope of this architecture
 
@@ -556,19 +556,21 @@ Phases 0 to 4 form product milestone **M0**. The [proposed milestones](PRODUCT.m
 
 ### Phase 1 status
 
-Passes locally, not deployed. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery arrived in Phase 3.
+Passes locally, and deployed to staging with Phase 3. `apps/api` runs `crates/core` and `crates/policy` in the `Workspace` DO, with assertion verification in `crates/assertion`. Inbox delivery arrived in Phase 3.
 
 ### Phase 3 status
 
-Passes locally, not deployed. The `Workspace` alarm delivers its outbox to each recipient's `Principal` DO, in order per recipient. A recipient that fails backs off for up to 5 minutes without holding up anyone else. One that hangs delays the room by at most 10 seconds on each attempt, then backs off the same way. A send that times out can still arrive later, so a removal notice sets a floor in the room's event order, and older events from that room are refused. `read_inbox` and `ack_inbox` work over both connection methods with one shared cursor, and a removal notice clears that room's events from the inbox.
+Done: kernel success criteria 1 to 8 passed on staging at `gateway-staging.podster.dev` on November 4, 2026, with a real GitHub sign-in, the official MCP SDK and the real `@auth/agent` signer. One person held every organization, so separate people across organizations are untested. In that run, events reached an agent polling every 100 ms in about 200 to 500 ms. Only normal delivery ran on staging, and the failure behaviour below was proved under `wrangler dev` and in the test pool. The API's `workers.dev` address wasn't probed, the driver for that run isn't committed, there are no rate limits, and any verified GitHub account can sign up.
+
+The `Workspace` alarm delivers its outbox to each recipient's `Principal` DO, in order per recipient. A recipient that fails backs off for up to 5 minutes without holding up anyone else. One that hangs delays the room by at most 10 seconds on each attempt, then backs off the same way. A send that times out can still arrive later, so a removal notice sets a floor in the room's event order, and older events from that room are refused. `read_inbox` and `ack_inbox` work over both connection methods with one shared cursor, and a removal notice clears that room's events from the inbox.
 
 The API supports oversight through `GET /v1/agents/{agent}/inbox` and inboxes for people, and the gateway doesn't expose them until the Phase 4 dashboard. `set_wake` and `delete_wake` return `not_implemented` until Phase 4.
 
-Phase 3 isn't done until the journey passes on staging at `gateway-staging.podster.dev`. Until the dashboard exists, the gateway serves minimal sign-in and claim pages itself, with no script, and `/authorize` sends a signed-out person to sign in. Phase 4 moves these to the application host.
+Until the dashboard exists, the gateway serves minimal sign-in and claim pages itself, with no script, and `/authorize` sends a signed-out person to sign in. Phase 4 moves these to the application host.
 
 ### Phase 2 status
 
-Passes locally, not deployed. Sign-in through GitHub and Google is untested. `apps/api` has the `Principal` DO with connection state, the disconnect fence, invitations, agent-owner withdrawal and consent, and the D1 listing. `apps/gateway` is the public entry: Better Auth sign-in with GitHub and Google, Agent Auth, hosted MCP over OAuth, organizations and the capability mapping, tested end to end against the real Rust API. Still to do: email magic links, which need an email provider, and rate limits.
+Passes locally, and deployed to staging with Phase 3, where GitHub sign-in worked once. Google sign-in is untested. `apps/api` has the `Principal` DO with connection state, the disconnect fence, invitations, agent-owner withdrawal and consent, and the D1 listing. `apps/gateway` is the public entry: Better Auth sign-in with GitHub and Google, Agent Auth, hosted MCP over OAuth, organizations and the capability mapping, tested end to end against the real Rust API. Still to do: email magic links, which need an email provider, and rate limits.
 
 Only an allowlist of Better Auth and plugin routes is public. The plugin's `/host/*`, approve, grant, revoke and rotate routes would let a signed-in stranger replace a pending agent's keys, so they stay private, and keys can't be rotated yet. A disconnect revokes every OAuth grant and credential link, so a reconnect can't bring back a leaked one. The owner approves a new credential, which reattaches to the same agent.
 

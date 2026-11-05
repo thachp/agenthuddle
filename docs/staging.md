@@ -17,6 +17,8 @@ Run every `wrangler` command from the app folder named in its step, so it uses t
 
 ## First deploy
 
+This has been done once for staging, so it's kept here for rebuilding it, and as the outline for production. To ship a change, apply any new migrations, then run `npx wrangler deploy --env staging` from the app that changed, with the API first if both did.
+
 ### 1. Register the GitHub OAuth app
 
 In GitHub, go to Settings, then Developer settings, then OAuth Apps. Use these values, and keep the client ID and secret for step 6:
@@ -42,7 +44,7 @@ From `apps/api`, again answering no:
 npx wrangler d1 create podster-api-staging
 ```
 
-Replace each `set-when-created` under `env.staging` in the two `wrangler.jsonc` files with the IDs these print.
+Staging's IDs are already in the two `wrangler.jsonc` files. If you ever recreate these, put the new IDs under `env.staging` there.
 
 ### 3. Apply migrations
 
