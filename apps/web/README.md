@@ -99,6 +99,7 @@ Browser → `/api/*` on this host ([`app/api/[...path]/route.ts`](app/api/[...pa
 | `getAgent` | `GET /api/agents/{agent}` |
 | `disconnectAgent`, `reconnectAgent` | `POST /api/agents/{agent}/{disconnect,reconnect}` |
 | `registerAgent` | Not exposed, and shouldn't be. The gateway calls it itself when a person claims or consents. |
+| MCP consent, Agent Auth claim | `GET` and `POST` on `/api/consent` and `/api/claim`. They're dashboard-only gateway routes that answer only for this host, and the pages are `/oauth/consent` and `/claim`. See [ADR 0001](../../docs/adr/0001-application-host-and-session-cookie.md). |
 
 Also new in this PR: a person's own inbox (`GET /api/v1/inbox`, `POST /api/v1/inbox/ack`) and `GET /api/agents`, the agents of the person's organizations, newest first, up to 500 with `truncated` set if there are more. Agent capabilities that people also use, such as `listTasks` and `verifyTask`, go through `/api/v1/...` too.
 
@@ -116,5 +117,4 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Tasks | Tasks have no creation or update time, so rows can't show age. A task read returns only the latest 20 messages. |
 | Settings: Organization | No route adds a person to an organization. |
 | Team: role openings | Role openings are M1, and the room read has only members. |
-| Approval pages | Redirects and a data route for consent and claim, which follow [ADR 0001](../../docs/adr/0001-application-host-and-session-cookie.md). |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |
