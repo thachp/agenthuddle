@@ -48,7 +48,7 @@ The November 4 staging run doesn't count here. Its driver was never committed, o
 | AC-13 | journey `AC-13` is partial; apps/api "a stale form can't restore revoked access or apply over newer changes", "orders revocation against concurrent commands" | Local only | Timing against a live admin revocation can't be arranged from outside. An admin needs gap 1 |
 | AC-14 | journey `AC-14` is partial; apps/api "refuses an assertion minted before the disconnect on every route" | Local only | A pre-minted assertion can't be made from outside, so this half can only run in tests |
 | AC-15 | journey `AC-15`; apps/api "returns the first result on retry" | Local only | |
-| AC-16 | apps/api "rolls back task, event, outbox and idempotency when a command fails after writing" | Local only | Failpoints never ship, so this can't pass on a deployment. The owner needs to accept the local proof, or the gate can't close. External providers arrive in M5 |
+| AC-16 | apps/api "rolls back task, event, outbox and idempotency when a command fails after writing" | Local only | Failpoints never ship, so this closes on local proof ([ruling](#gate-rulings-2026-11-05-utc)). External providers arrive in M5 |
 | AC-17 | journey `AC-17`; `crates/core/tests/transitions.rs` `nobody_signs_off_their_own_work` | Local only | |
 | AC-19 | [e2e/probe-api.mjs](../e2e/probe-api.mjs). See [below](#ac-19-the-apis-public-reachability) | Local only | The deployment probes are clean but incomplete |
 | AC-20 | Server half: journey `AC-13`, apps/api "a stale form can't restore revoked access" | Not covered | The Sheet is in `apps/web`, which isn't merged |
@@ -57,7 +57,7 @@ The November 4 staging run doesn't count here. Its driver was never committed, o
 | AC-25 | journey `AC-25`; `transitions.rs` departure tests; apps/api "applies the departure rules to submissions, reviewers and requesters" | Local only | |
 | AC-26 | journey `AC-26` is partial; apps/api "an unknown room and a private room look identical to outsiders" | Local only | Rooms can't be deleted, so a previously deleted ID can't be tried |
 | AC-29 | journey `AC-29` is partial; apps/api "a join begun before a disconnect can't commit after the room acknowledges it, even after reconnect", "a second disconnect needs a new acknowledgment" | Local only | A delayed join needs a failpoint, so that half can only run in tests |
-| AC-30 | journey `AC-30` for the swap; `crates/policy/tests/matrix.rs` `a_requester_cant_swap_the_reviewer_of_a_submitted_task` | Local only, and incomplete | Rooms can't yet require a person as reviewer (decision 5, M1), so two of the three cases can't run. The owner needs to rule whether they wait for M1 |
+| AC-30 | journey `AC-30` for the swap; `crates/policy/tests/matrix.rs` `a_requester_cant_swap_the_reviewer_of_a_submitted_task` | Local only, and incomplete | Rooms can't yet require a person as reviewer (decision 5, M1), so two of the three cases wait for M1 ([ruling](#gate-rulings-2026-11-05-utc)) |
 
 Wake is part of M0's scope and has no AC of its own. PR [#22](https://github.com/thachp/podster/pull/22) merged while this was being written, so it's no longer blocked on that PR. Its tests in apps/api and gateway are **local only**, a real send hasn't been checked on a deployment by this work, and the journey doesn't drive it because that would send requests to a third-party URL.
 
@@ -142,7 +142,7 @@ Each was checked against the code on commit `c30f51a`, by a test that ran or by 
 | 21. Person inboxes | **Half built** | The API stores and serves them, and a person's unread count works (journey `D21`). People can't read or ack them through the gateway (gap 4) |
 | 22. Who creates tasks from the dashboard | Holds for owners on a real run. Admin and member people only in tests | journey `D22`; `crates/policy/src/lib.rs:107`. Reaching them needs gap 1 |
 | 23. Personal accounts | Holds, with one failure case | journey `D23`; `apps/gateway/src/index.ts:303`. See gap 8 |
-| 24. Taking over a task when its requester leaves | Holds for owner and admin. **Coordinator not built** | journey `AC-25`; `crates/policy/src/lib.rs:154`. See gap 9 |
+| 24. Taking over a task when its requester leaves | Holds for owner and admin. Coordinator waits for M1 | journey `AC-25`; `crates/policy/src/lib.rs:154`. See gap 9 |
 
 ## Backend gaps
 
@@ -151,19 +151,26 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 | # | Gap | Size | Where | Blocks |
 | --- | --- | --- | --- | --- |
 | 1 | **Organizations can't have a second person.** The only inserts into `org_member` are at sign-up and organization creation. Workroom admins must be in the owner's organization, so nobody can act as one on a deployment. The owner's add still answers 200 and records an admin who can't act, for any person ID. | M, with contract | `apps/gateway/src/index.ts:308`, `:777`; `apps/api/src/workspace.rs:104`, `:574` | AC-02, AC-04, AC-13, decisions 8 and 22 |
-| 2 | **No ownership transfer or recovery.** `owner_person_id` is written once, and there's no contract, policy action or command for either. Recovery needs an organization admin other than the owner, so it depends on gap 1, and a personal organization has nobody else: that case needs a ruling. | L, with contract and audit | `apps/api/src/workspace.rs:1669`, `:80`; `crates/policy/src/lib.rs` | Decision 8 |
+| 2 | **No ownership transfer or recovery.** `owner_person_id` is written once, and there's no contract, policy action or command for either. Recovery needs an organization admin other than the owner, so it depends on gap 1. Personal organizations have no recovery ([ruling](#gate-rulings-2026-11-05-utc)). | L, with contract and audit | `apps/api/src/workspace.rs:1669`, `:80`; `crates/policy/src/lib.rs` | Decision 8 |
 | 3 | **Denied changes aren't recorded.** `audit_event` has an `outcome` column, and the only value ever written is `allowed`. ACCESS-CONTROL.md asks for a protected denial stream. Needs a design that can't be flooded, because a refused request rolls back its transaction. | M | `apps/api/src/workspace.rs:490` | AC-22 |
 | 4 | **People can't reach their inbox, or an agent's.** `allowedPassthrough` refuses `/v1/inbox` and `/v1/agents`, and the gateway has no route for `GET /v1/agents/{agent}/inbox`. | S | `apps/gateway/src/index.ts:383` | Decision 21, dashboard |
 | 5 | **Revoking a whole organization isn't built.** The route is in ARCHITECTURE.md's internal API list, and it's in neither the code nor `openapi.yaml`. Criterion 7 currently needs one call per agent. Either build it or change the spec. | S, with contract | `apps/api/src/workspace.rs:1871` | Criterion 7 as written |
-| 6 | **A person in an invited organization can't see the room.** Only the agent is a member, so that person gets `workspace_not_found` even when their own agents are in it, and the room isn't in their list. PRODUCT.md's baseline says they see what their agents see, while decision 7 changes this in M1. Needs a ruling on M0, then a route. | M | `apps/api/src/workspace.rs:104`; `apps/api/src/lib.rs:75` | Dashboard for Org B |
+| 6 | **A person in an invited organization can't see the room.** Only the agent is a member, so that person gets `workspace_not_found` even when their own agents are in it, and the room isn't in their list. M0 gives them read-only oversight of their own agents ([ruling](#gate-rulings-2026-11-05-utc)), which needs a new read path. | M | `apps/api/src/workspace.rs:104`; `apps/api/src/lib.rs:75` | Dashboard for Org B |
 | 7 | **Dashboard reads that don't exist.** No route lists an organization's agents, or a room's invitations. No route renames or archives a room, which PRODUCT.md gives admins. Confirm with the dashboard's needs first. | S to M | `apps/gateway/src/index.ts`; `apps/api/src/workspace.rs` | Dashboard |
 | 8 | **A failed sign-up hook leaves a person with no organization.** The personal organization is written in an `after` hook. If that write fails, every later request answers 403 and nothing retries it. | S | `apps/gateway/src/index.ts:303` | Decision 23 |
-| 9 | **No Coordinator.** `set_requester` is for owners and admins only. The rest of decision 24 needs the Coordinator preset, which comes with decision 20 in M1, so it can wait for M1 if the owner agrees. | S once presets exist | `crates/policy/src/lib.rs:154` | Decision 24 |
+| 9 | **No Coordinator.** `set_requester` is for owners and admins only. The rest of decision 24 needs the Coordinator preset, which comes with decision 20, so it's M1 work ([ruling](#gate-rulings-2026-11-05-utc)). | S once presets exist | `crates/policy/src/lib.rs:154` | Nothing in M0 |
 | 10 | **Smaller baseline items.** The limit of 20 workspaces per organization isn't enforced. Rooms can't be deleted, though PRODUCT.md mentions it. Email magic-link sign-in isn't built. | S each | `apps/api/src/workspace.rs:1657`; `apps/gateway/src/index.ts` | Limits, AC-26's deleted case |
 
-Decisions for the owner, none of them blocking gaps 1, 3, 4 and 5:
+## Gate rulings, 2026-11-05 UTC
 
-- Can AC-16, and the failpoint halves of AC-14 and AC-29, close on local proof? They can't run on a deployment.
-- Do AC-30's person-review cases wait for M1, along with decision 5?
-- How does recovery work for a personal organization, where the owner is the only person?
-- What should an invited organization's person see in M0?
+The owner asked for the recommended option on each of these. They still need adding to [PRODUCT.md](spec/PRODUCT.md#decisions-needed).
+
+| Question | Ruling | Effect |
+| --- | --- | --- |
+| Can tests that need failpoints close on local proof? | Yes, as long as they pass in CI. This covers AC-16 and the failure half of the event property, plus the parts of AC-14 and AC-29 that can't be timed from outside | Everything else in those items still has to pass on a deployment |
+| Do AC-30's person-review cases wait for M1? | Yes, with decision 5, because M0's gate covers only the features M0 includes | AC-30's swap case still has to pass on a deployment for M0 |
+| How does recovery work for a personal organization? | It doesn't, in M0. The owner is its only person, and nobody at Podster overrides that. Someone who wants a successor creates the room in a team organization. The product says so when a room is created in a personal organization | Gap 2's recovery applies to team organizations only, and transfer needs an admin, so it does too |
+| What does an invited organization's person see in M0? | Read-only oversight of their own agents: the rooms those agents are in, and the tasks and inboxes of those agents. It gives no room role, and nothing else in the room. This is decision 7's recommendation, brought forward | Gap 6 is that scope. It needs a new read path and doesn't add them as members |
+| Does the Coordinator half of decision 24 wait for M1? | Yes, with the presets in decision 20 | Gap 9 leaves M0 |
+
+These are rulings on what the gate requires, so no status above changes until the tests run.
