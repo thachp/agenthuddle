@@ -2,7 +2,7 @@
 
 Status: **proposed for review** · Owner: Patrick Thach · Last updated: 2026-11-04
 
-Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Access control](ACCESS-CONTROL.md) · [Concept mockups](../mockups/README.md)
+Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Access control](ACCESS-CONTROL.md) · [Concept mockups](../mockups/README.md) · [Task planning handoff](TASK-PLANNING.md)
 
 Nothing here is built. This document turns the concept mockups into one consistent interface specification: navigation, vocabulary, states, screens, patterns and tokens. When sources disagree, access rules in ACCESS-CONTROL.md win, then behavior in PRODUCT.md, then this document, then the images. The images are historical concepts; [section 11](#11-mockup-reconciliation) lists where each one must change.
 
@@ -184,7 +184,7 @@ The settings column has **Visibility**, **Workflow** (General or Engineering) an
 Tabs, in order: **Overview, Tasks, Team, Collaboration, Activity, Artifacts, Settings**. The header shows name, visibility, the viewer's relationship such as *Owner*, *Admin* or *Your agent: Architect*, and any primary action. Hide Settings from everyone except the owner and admins.
 
 - **Overview:** goal, context, input assets, expected outputs with status, and the current lead.
-- **Tasks:** grouped by state or filterable by state, assignee, role and "needs my review". Rows show title, state, assignee, reviewer and age. Do not use row checkboxes until a bulk action exists.
+- **Tasks:** synchronized List / Board / Gantt views, preserving authorized scope, filters and the existing task Sheet. The approved November 5 direction and proposed implementation details are in [Task planning](TASK-PLANNING.md). Use canonical status columns, scoped progress and qualified forecasts; estimates and dependencies need new contracts before implementation. Rows show title, state, assignee, reviewer and age only where data exists; filters likewise require actual data. Do not use row checkboxes until a bulk action exists.
 - **Team:** role openings first, including vacant ones, then participants with organization, access preset and external marker. **Manage access** appears here for the owner and admins.
 - **Activity:** permission-filtered event history with actor, verb, object and time, filterable by task or participant. It has no read/unread behavior and never acknowledges an inbox.
 - **Artifacts:** one row per output with current approved version, version history, reviewer, source task, submitted commit, and preview and download where allowed. A newer unreviewed version never replaces the approved badge.
@@ -343,6 +343,8 @@ Warnings, including merge consequences, use amber. Reserve red for failure and d
 | [Manage access](../mockups/manage-access.png) | Workroom dropdown inside the Sheet creates AC-21 risk; opened from Agents page | Fixed target; launch from the Team tab |
 | Manage access | "Owner only" and "Personal account" | "Owner and admins only"; personal accounts are personal organizations |
 | [Settings](../mockups/settings.png) | "Your team and workspace"; weekly summary has no delivery design | "Your organization"; show only delivered notification types |
+| [Board and task detail](../mockups/podster-board-task-detail.png) | Approved November 5 direction; demo counts, estimates and billing labels | Follow [Task planning](TASK-PLANNING.md), canonical states and existing fixed-target Task Sheet; no drag completion or invented authority |
+| [Gantt forecast](../mockups/podster-gantt-forecast.png) | Conceptual pixels include release-note slack and emphasize only one of two tied paths | Textual fixture and forecast rules in [Task planning](TASK-PLANNING.md) govern dates, parallel paths, completeness and uncertainty |
 
 ## 12. Design acceptance criteria
 

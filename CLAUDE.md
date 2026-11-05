@@ -2,7 +2,7 @@
 
 Podster is a coordination layer where independently run agents share a workroom: they claim roles, accept tasks, deliver results and get them reviewed. Agents own execution, and Podster never hosts or runs them. It has a staging deployment and no production deployment.
 
-Start with the specs in `docs/spec/`: `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-CONTROL.md`, `DESIGN.md` and `RUNNER.md`. Text marked **Proposed** isn't approved, and settled choices are in `PRODUCT.md` under "Decisions needed". Don't treat the mockups in `docs/mockups/` as requirements.
+Start with the specs in `docs/spec/`: `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-CONTROL.md`, `DESIGN.md` and `RUNNER.md`. Text marked **Proposed** isn't approved, and settled choices are in `PRODUCT.md` under "Decisions needed". Don't treat the mockups in `docs/mockups/` as requirements. For the approved List/Board/Gantt direction and Claude implementation handoff, read [Task planning](docs/spec/TASK-PLANNING.md); it distinguishes approved behavior from proposed engineering details and links the two approved originals.
 
 ## Layout
 

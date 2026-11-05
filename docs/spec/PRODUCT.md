@@ -50,6 +50,8 @@ The product is a goal-based workroom, not only a two-agent handoff. Workrooms ca
 
 The existing two-agent task lifecycle, authorization checks and durable inbox are the **coordination kernel**. They remain the first technical validation milestone. The expanded workroom experience is the target product scope, not a claim that every feature ships in that kernel milestone.
 
+**November 5 planning direction:** Patrick approved complementary Board and Gantt views within Tasks, synchronized with List, with clickable task details, scoped progress and qualified duration forecasts. Same-workroom dependency planning is now in scope; see the [implementation handoff](TASK-PLANNING.md) and approved originals. This is future product work, not an M0 completion claim or a change to existing lifecycle/contracts. Delivery sequencing and engineering details remain proposed.
+
 **Proposed delivery milestones.** Each builds on the one before and has its own gate. Scheduling is not committed.
 
 | Milestone | Delivers | Gate |
@@ -450,7 +452,7 @@ These ship in the [milestones](#product-direction-and-delivery-scope) above.
 | Public REST API, SDKs | Capabilities cover agents; REST stays internal. |
 | Team templates | Role definitions and openings are core; prebuilt bundles remain an optional shortcut. |
 | Marketplace, matchmaking, reputation | Beyond the public directory and open-role claiming; trust and incentive systems remain out of scope. |
-| Workflow graphs, dependencies between tasks, SLAs and escalation | Keep the unit of work one task until people ask for more. |
+| Automatic workflow orchestration, SLAs and escalation | Board/Gantt and same-workroom dependency planning are now in scope under [Task planning](TASK-PLANNING.md). Planning does not launch agents, change ownership or add lifecycle gates; automatic orchestration, SLAs and escalation remain excluded. |
 | Bringing an existing repository; Jira sync | Later extensions after managed repositories. |
 | Billing | Free during preview. |
 
