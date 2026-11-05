@@ -3,13 +3,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { getMigrations } from "better-auth/db/migration";
-import { env, SELF } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
-import worker, { clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import worker, { cleanUp, clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string; TEST_WRANGLER: string };
@@ -1047,14 +1047,123 @@ describe("rate limits", () => {
     expect((await send("/sign-in", { headers: from("203.0.113.10") }, { RL_GENERAL: general.fake })).status).toBe(200);
   });
 
-  it("limits anonymous routes that start something, each counted separately", async () => {
-    for (const [method, path, route] of [["POST", "/sign-in", "sign-in"], ["POST", "/oauth/register", "oauth-register"], ["POST", "/oauth/token", "oauth-token"], ["POST", "/api/auth/agent/register", "agent-register"], ["POST", "/api/auth/sign-in/social", "auth"], ["POST", "/api/auth/sign-up/email", "auth"], ["GET", "/api/auth/callback/github", "auth"]] as const) {
+  it("counts anonymous routes that store something exactly, each separately for each client", async () => {
+    const routes = [["POST", "/sign-in", "sign-in"], ["POST", "/oauth/register", "oauth-register"], ["POST", "/oauth/token", "oauth-token"], ["POST", "/api/auth/agent/register", "agent-register"], ["POST", "/api/auth/sign-in/social", "auth"], ["POST", "/api/auth/sign-up/email", "auth"], ["GET", "/api/auth/callback/github", "auth"]] as const;
+    for (const [method, path, route] of routes) {
       expect(sensitiveRoute(method, path), path).toBe(route);
-      const sensitive = limiter((key) => key === `${route}:203.0.113.9`);
-      const res = await send(path, { method, headers: { ...from("203.0.113.9"), origin: BASE, "content-type": "application/json" }, body: method === "POST" ? "{}" : undefined }, { RL_SENSITIVE: sensitive.fake });
-      await expectLimitedFor(path, res);
+      const ip = `198.51.100.${++counter % 250}${counter}`;
+      const attempt = (address: string) => send(path, { method, redirect: "manual", headers: { ...from(address), origin: BASE, "content-type": "application/json" }, body: method === "POST" ? "{}" : undefined }, { STRICT_PER_MINUTE: "2" });
+      expect((await attempt(ip)).status, path).not.toBe(429);
+      expect((await attempt(ip)).status, path).not.toBe(429);
+      await expectLimitedFor(path, await attempt(ip));
+      expect((await attempt(`${ip}.other`)).status, `${path} other client`).not.toBe(429);
     }
     for (const [method, path] of [["GET", "/sign-in"], ["GET", "/oauth/register"], ["POST", "/mcp"], ["GET", "/api/auth/agent-configuration"], ["POST", "/api/auth/capability/execute"]]) expect(sensitiveRoute(method, path), path).toBeNull();
+    // Each route has its own count for a client.
+    const shared = `198.51.100.shared${++counter}`;
+    const post_ = (path: string) => send(path, { method: "POST", headers: { ...from(shared), origin: BASE, "content-type": "application/json" }, body: "{}" }, { STRICT_PER_MINUTE: "1" });
+    expect((await post_("/oauth/token")).status).not.toBe(429);
+    expect((await post_("/oauth/token")).status).toBe(429);
+    expect((await post_("/oauth/register")).status).not.toBe(429);
+  });
+
+  it("the strict count is exact under concurrency, and has a daily limit too", async () => {
+    const ip = `198.51.100.burst${++counter}`;
+    const attempt = (env: object) => send("/oauth/token", { method: "POST", headers: { ...from(ip), "content-type": "application/json" }, body: "{}" }, env);
+    const statuses = await Promise.all(Array.from({ length: 12 }, () => attempt({ STRICT_PER_MINUTE: "5" })));
+    expect(statuses.filter((res) => res.status === 429)).toHaveLength(7);
+    const daily = `198.51.100.day${++counter}`;
+    const once = () => send("/oauth/token", { method: "POST", headers: { ...from(daily), "content-type": "application/json" }, body: "{}" }, { STRICT_PER_MINUTE: "100", STRICT_PER_DAY: "1" });
+    expect((await once()).status).not.toBe(429);
+    expect((await once()).status).toBe(429);
+  });
+
+  it("the strict counter resets by window, and removes itself after a day", async () => {
+    const stub = e.STRICT_COUNTER.get(e.STRICT_COUNTER.idFromName(unique("window")));
+    expect(await stub.take(1, 2)).toBe(true);
+    expect(await stub.take(1, 2)).toBe(false);
+    const age = (minuteMs: number, dayMs: number) => runInDurableObject(stub, async (_: unknown, state: DurableObjectState) => {
+      const count = await state.storage.get<any>("count");
+      await state.storage.put("count", { ...count, minuteStart: Date.now() - minuteMs, dayStart: Date.now() - dayMs });
+    });
+    await age(61_000, 1000);
+    expect(await stub.take(1, 2)).toBe(true);
+    await age(61_000, 1000);
+    expect(await stub.take(1, 2)).toBe(false);
+    await age(61_000, 86_401_000);
+    expect(await stub.take(1, 2)).toBe(true);
+    expect(await runInDurableObject(stub, (_: unknown, state: DurableObjectState) => state.storage.getAlarm())).not.toBeNull();
+    // A live count waits for its day to end, and an old one is deleted.
+    await age(1000, 1000);
+    await runInDurableObject(stub, async (_: unknown, state: DurableObjectState) => void (await state.storage.setAlarm(Date.now() + 3_600_000)));
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await runInDurableObject(stub, (_: unknown, state: DurableObjectState) => state.storage.get("count"))).toBeDefined();
+    await age(1000, 86_401_000);
+    await runInDurableObject(stub, async (_: unknown, state: DurableObjectState) => void (await state.storage.setAlarm(Date.now() + 3_600_000)));
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await runInDurableObject(stub, (_: unknown, state: DurableObjectState) => state.storage.get("count"))).toBeUndefined();
+  });
+
+  it("keeps working if the strict counter fails", async () => {
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      const res = await send("/oauth/token", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }, { STRICT_COUNTER: { idFromName() { throw new Error("down"); } } });
+      expect(res.status).not.toBe(429);
+    } finally {
+      console.error = quiet;
+    }
+  });
+
+  it("limits long return paths and host names, which cost more stored than sent", async () => {
+    expect(safeNext(`/claim?x=${"a".repeat(8 * 1024)}`)).toBe("/signed-in");
+    const longest = `/authorize?state=${"a".repeat(4 * 1024)}`;
+    expect(safeNext(longest)).toBe(longest);
+    const [host, key] = [await generateKeypair(), await generateKeypair()];
+    const register = async (hostName: string) => post("/api/auth/agent/register", { name: "x", mode: "delegated", capabilities: ["get_identity"], preferred_method: "device_authorization" }, { authorization: `Bearer ${await signHostJWT({ hostKeypair: host, audience: BASE, agentPublicKey: key.publicKey, hostName } as never)}` });
+    expect((await register("h".repeat(201))).status).toBe(400);
+    expect((await register("h".repeat(200))).status).toBe(200);
+  });
+
+  it("the schedule runs the cleanup", async () => {
+    const identifier = unique("scheduled");
+    const old = new Date(Date.now() - 86_400_000).toISOString();
+    await e.DB.prepare("INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt) VALUES (?, ?, 'x', ?, ?, ?)").bind(unique("v"), identifier, old, old, old).run();
+    const waits: Promise<unknown>[] = [];
+    await worker.scheduled({} as ScheduledController, e, { waitUntil: (p: Promise<unknown>) => void waits.push(p), passThroughOnException() {} } as unknown as ExecutionContext);
+    await Promise.all(waits);
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM verification WHERE identifier = ?").bind(identifier).first()).toEqual({ n: 0 });
+  });
+
+  it("clears abandoned registrations and expired state, and nothing else", async () => {
+    const owner = await signUp();
+    const old = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    const abandoned = await registerAgent();
+    const stillLive = await registerAgent();
+    const claimed = await claimedAgent(owner);
+    const recent = await registerAgent();
+    await e.DB.prepare("UPDATE agent SET createdAt = ? WHERE id IN (?, ?, ?)").bind(old, abandoned.pluginId, stillLive.pluginId, claimed.pluginId).run();
+    await e.DB.prepare("UPDATE agentHost SET createdAt = ? WHERE id IN (?, ?)").bind(old, abandoned.registered.host_id, stillLive.registered.host_id).run();
+    await e.DB.prepare("UPDATE approvalRequest SET expiresAt = ? WHERE agentId IN (?, ?)").bind(old, abandoned.pluginId, recent.pluginId).run();
+    await e.DB.prepare("INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt) VALUES (?, ?, 'x', ?, ?, ?), (?, ?, 'x', ?, ?, ?)").bind(unique("v"), unique("gone"), old, old, old, unique("v"), "keep-me", new Date(Date.now() + 60_000).toISOString(), old, old).run();
+    expect(await cleanUp(e)).toBeGreaterThanOrEqual(1);
+    const exists = async (id: string) => (await e.DB.prepare("SELECT id FROM agent WHERE id = ?").bind(id).first()) !== null;
+    expect(await exists(abandoned.pluginId)).toBe(false);
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM agentCapabilityGrant WHERE agentId = ?").bind(abandoned.pluginId).first()).toEqual({ n: 0 });
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM approvalRequest WHERE agentId = ?").bind(abandoned.pluginId).first()).toEqual({ n: 0 });
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM agentHost WHERE id = ?").bind(abandoned.registered.host_id).first()).toEqual({ n: 0 });
+    // A live code, a claimed agent and a recent registration all stay.
+    expect(await exists(stillLive.pluginId)).toBe(true);
+    expect(await exists(claimed.pluginId)).toBe(true);
+    expect(await exists(recent.pluginId)).toBe(true);
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM agentHost WHERE id = ?").bind(stillLive.registered.host_id).first()).toEqual({ n: 1 });
+    expect((await execute(claimed, "get_identity")).status).toBe(200);
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM verification WHERE identifier = 'keep-me'").first()).toEqual({ n: 1 });
+    expect(await e.DB.prepare("SELECT count(*) AS n FROM verification WHERE expiresAt < ?").bind(new Date().toISOString()).first()).toEqual({ n: 0 });
+    // Coming back afterward starts again.
+    const again = await registerAgent({ host: abandoned.host, keypair: abandoned.keypair });
+    expect(again.registered.status).toBe("pending");
+    expect((await claim(owner, again)).status).toBe(200);
   });
 
   it("limits each agent credential, and a limited agent can retry with the same token", async () => {
@@ -1135,8 +1244,7 @@ describe("rate limits", () => {
     // A registration's host name is in its token, so the header counts.
     expect((await send("/api/auth/agent/register", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${"x".repeat(17_000)}` }, body: "{}" })).status).toBe(413);
     // The limit comes first, so an oversized request still counts.
-    const sensitive = limiter(() => true);
-    expect((await send("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: big }, { RL_SENSITIVE: sensitive.fake })).status).toBe(429);
+    expect((await send("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: big }, { STRICT_PER_MINUTE: "0" })).status).toBe(429);
     // A body arriving in pieces is put back together intact.
     const encoder = new TextEncoder();
     const pieces = encoder.encode(JSON.stringify({ redirect_uris: ["https://client.test/cb"], client_name: "in pieces", token_endpoint_auth_method: "none" }));
@@ -1208,6 +1316,11 @@ describe("rate limits", () => {
 
   it("every deployed environment has all three limits, with its own counters", () => {
     const config = JSON.parse(e.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+    for (const environment of [config, ...Object.values<any>(config.env)]) {
+      expect(environment.durable_objects.bindings.map((b: any) => b.class_name)).toContain("StrictCounter");
+      expect(environment.triggers.crons).toHaveLength(1);
+    }
+    expect(config.migrations.flatMap((m: any) => m.new_sqlite_classes)).toContain("StrictCounter");
     const expected = { RL_GENERAL: 600, RL_ACCOUNT: 120, RL_SENSITIVE: 20 };
     const ids = new Set<string>();
     for (const environment of [config, ...Object.values<any>(config.env)]) {

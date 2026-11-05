@@ -1,4 +1,5 @@
 import { agentAuth } from "@better-auth/agent-auth";
+import { DurableObject } from "cloudflare:workers";
 import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -23,6 +24,11 @@ export interface Env {
   RL_GENERAL: RateLimit;
   RL_ACCOUNT: RateLimit;
   RL_SENSITIVE: RateLimit;
+  /** One object per route and client, for an exact count on routes that store what anonymous callers send. */
+  STRICT_COUNTER: DurableObjectNamespace<StrictCounter>;
+  /** Overrides the counter's limits. Tests only. */
+  STRICT_PER_MINUTE?: string;
+  STRICT_PER_DAY?: string;
   /** Test environments only. Never set in staging or production. */
   ENABLE_PASSWORD_SIGNIN?: string;
   OAUTH_PROVIDER: OAuthHelpers;
@@ -77,6 +83,8 @@ async function honestKey(key: unknown) {
  * the plugin puts the agent on the victim's host, and a claim with `force_approval` then revokes the victim's agents
  * and takes the host. Remote key URLs are refused too, since we'd fetch them and a host could change keys with them.
  */
+const MAX_HOST_NAME_LENGTH = 200;
+
 async function refusedRegistration(request: Request, text: string): Promise<Response | null> {
   let body: { force_approval?: unknown; capabilities?: unknown } | null;
   try {
@@ -94,6 +102,8 @@ async function refusedRegistration(request: Request, text: string): Promise<Resp
   } catch {
     return denied("invalid_jwt", 401);
   }
+  // The plugin limits a host name in the body, but stores one from the token as it is.
+  if (typeof claims.host_name === "string" && claims.host_name.length > MAX_HOST_NAME_LENGTH) return denied("invalid_argument", 400);
   if (claims.host_jwks_url !== undefined || claims.agent_jwks_url !== undefined) return denied("jwks_url_not_supported", 400);
   if (!(await honestKey(claims.host_public_key)) || !(await honestKey(claims.agent_public_key))) return denied("invalid_public_key", 400);
   return null;
@@ -103,6 +113,50 @@ async function refusedRegistration(request: Request, text: string): Promise<Resp
 function passwordSignInEnabled(env: Env) {
   const host = new URL(env.BASE_URL).hostname;
   return env.ENABLE_PASSWORD_SIGNIN === "true" && (host === "localhost" || host.endsWith(".test"));
+}
+
+const STRICT_PER_MINUTE = 20;
+const STRICT_PER_DAY = 500;
+const MINUTE_MS = 60_000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+
+/**
+ * An exact count, because Cloudflare's rate-limit binding overshot by 8 times or more on new connections when measured
+ * on staging. A Durable Object is one thread in one place, so requests can't slip between counts. The record removes
+ * itself after a day, so an attacker changing address doesn't leave storage behind.
+ */
+export class StrictCounter extends DurableObject<Env> {
+  async take(perMinute: number, perDay: number): Promise<boolean> {
+    const now = Date.now();
+    const stored = await this.ctx.storage.get<{ minuteStart: number; minute: number; dayStart: number; day: number }>("count");
+    const count = stored ?? { minuteStart: now, minute: 0, dayStart: now, day: 0 };
+    if (now - count.minuteStart >= MINUTE_MS) Object.assign(count, { minuteStart: now, minute: 0 });
+    if (now - count.dayStart >= DAY_MS) Object.assign(count, { dayStart: now, day: 0 });
+    if (count.minute >= perMinute || count.day >= perDay) return false;
+    count.minute += 1;
+    count.day += 1;
+    await this.ctx.storage.put("count", count);
+    if (!stored) await this.ctx.storage.setAlarm(now + DAY_MS);
+    return true;
+  }
+
+  async alarm() {
+    const stored = await this.ctx.storage.get<{ dayStart: number }>("count");
+    if (stored && Date.now() - stored.dayStart < DAY_MS) await this.ctx.storage.setAlarm(stored.dayStart + DAY_MS);
+    else await this.ctx.storage.deleteAll();
+  }
+}
+
+/** Like the binding, a failure here lets the request through, because the limit shouldn't take the service down. */
+async function withinStrictLimit(env: Env, key: string) {
+  try {
+    const stub = env.STRICT_COUNTER.get(env.STRICT_COUNTER.idFromName(key));
+    return await stub.take(Number(env.STRICT_PER_MINUTE ?? STRICT_PER_MINUTE), Number(env.STRICT_PER_DAY ?? STRICT_PER_DAY));
+  } catch (error) {
+    if (!limiterFailureLogged) console.error("strict counter failed", error);
+    limiterFailureLogged = true;
+    return true;
+  }
 }
 
 export type RateLimit = { limit(options: { key: string }): Promise<{ success: boolean }> };
@@ -378,9 +432,12 @@ ${body}
  * Where sign-in may return to. Only our own pages that need a session, so a link can't use sign-in to send someone
  * elsewhere. Anything else falls back to a plain confirmation.
  */
+const MAX_NEXT_LENGTH = 8 * 1024;
+
 export function safeNext(value: string | null | undefined) {
   const fallback = "/signed-in";
-  if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return fallback;
+  // It's stored with extra encoding during sign-in, so a long one costs far more than its size.
+  if (!value || value.length > MAX_NEXT_LENGTH || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return fallback;
   try {
     const url = new URL(value, "https://gateway.invalid");
     if (url.origin !== "https://gateway.invalid") return fallback;
@@ -821,6 +878,25 @@ const mcpHandler = {
 
 let provider: { base: string; instance: OAuthProvider<Env> } | undefined;
 
+const ABANDONED_AFTER_MS = 24 * 60 * 60 * 1000;
+const CLEANUP_BATCH = 200;
+
+/**
+ * Removes what anonymous callers left behind: sign-in state past its expiry, and agents nobody claimed. An agent stays
+ * while it has a live code, and a registration that comes back afterward simply starts again.
+ */
+export async function cleanUp(env: Pick<Env, "DB">, now = Date.now()) {
+  const nowIso = new Date(now).toISOString();
+  await env.DB.prepare(`DELETE FROM verification WHERE expiresAt < ?`).bind(nowIso).run();
+  const { results } = await env.DB.prepare(
+    `SELECT id FROM agent WHERE status = 'pending' AND userId IS NULL AND createdAt < ? AND id NOT IN (SELECT agentId FROM approvalRequest WHERE agentId IS NOT NULL AND status = 'pending' AND expiresAt >= ?) LIMIT ?`,
+  ).bind(new Date(now - ABANDONED_AFTER_MS).toISOString(), nowIso, CLEANUP_BATCH).all<{ id: string }>();
+  // The agent's grants and approvals go with it, by the plugin's foreign keys.
+  for (const { id } of results) await env.DB.prepare(`DELETE FROM agent WHERE id = ?`).bind(id).run();
+  await env.DB.prepare(`DELETE FROM agentHost WHERE userId IS NULL AND status = 'pending' AND createdAt < ? AND id NOT IN (SELECT hostId FROM agent WHERE hostId IS NOT NULL)`).bind(new Date(now - ABANDONED_AFTER_MS).toISOString()).run();
+  return results.length;
+}
+
 function withHsts(response: Response, env: Env) {
   if (!env.BASE_URL.startsWith("https:")) return response;
   const secured = new Response(response.body, response);
@@ -834,7 +910,7 @@ async function limitByClient(request: Request, env: Env) {
   const path = new URL(request.url).pathname;
   if (!(await withinLimit(env.RL_GENERAL, `ip:${client}`))) return rateLimited(path);
   const route = sensitiveRoute(request.method, path);
-  if (route && !(await withinLimit(env.RL_SENSITIVE, `${route}:${client}`))) return rateLimited(path);
+  if (route && !(await withinStrictLimit(env, `${route}:${client}`))) return rateLimited(path);
   return null;
 }
 
@@ -883,6 +959,9 @@ function insecureRequest(request: Request, env: Env): Response | null {
 
 export default {
   // The resource URL comes from the environment, so the provider is built per deployment rather than at import.
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(cleanUp(env));
+  },
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const insecure = insecureRequest(request, env);
     if (insecure) return insecure;

@@ -9,6 +9,10 @@
   "d1_databases": [{ "binding": "DB", "database_name": "podster-gateway", "database_id": "local-only", "migrations_dir": "migrations" }],
   "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "local-only" }],
   "vars": { "BASE_URL": "https://gateway.podster.dev" },
+  "durable_objects": { "bindings": [{ "name": "STRICT_COUNTER", "class_name": "StrictCounter" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StrictCounter"] }],
+  // Clears abandoned registrations and expired sign-in state.
+  "triggers": { "crons": ["17 * * * *"] },
   // Per minute: anything per client, per credential or person, and sensitive actions. Bindings aren't inherited by environments.
   "ratelimits": [
     { "name": "RL_GENERAL", "namespace_id": "73101", "simple": { "limit": 600, "period": 60 } },
@@ -25,6 +29,8 @@
       "d1_databases": [{ "binding": "DB", "database_name": "podster-gateway-staging", "database_id": "055c6e16-853c-4dae-8a32-693b2d1f50c2", "migrations_dir": "migrations" }],
       "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "57637530b0404f209d89b9ab00b5ef0c" }],
       "vars": { "BASE_URL": "https://gateway-staging.podster.dev" },
+      "durable_objects": { "bindings": [{ "name": "STRICT_COUNTER", "class_name": "StrictCounter" }] },
+      "triggers": { "crons": ["17 * * * *"] },
       "ratelimits": [
         { "name": "RL_GENERAL", "namespace_id": "73201", "simple": { "limit": 600, "period": 60 } },
         { "name": "RL_ACCOUNT", "namespace_id": "73202", "simple": { "limit": 120, "period": 60 } },
