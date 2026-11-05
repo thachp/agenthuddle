@@ -113,6 +113,8 @@ const RETRY_AFTER_SECONDS = "60";
  * unrecoverable and starts a new consent, which a headless agent can't complete. The Agent Auth SDK reads `error`.
  */
 function rateLimited(path = "") {
+  // A 503 on discovery makes OAuth clients stop and retry. They treat a 429 as no metadata, and head for a new consent.
+  if (path.startsWith("/.well-known/")) return new Response(JSON.stringify({ error: { code: "temporarily_unavailable", message: "rate_limited" } }), { status: 503, headers: { "content-type": "application/json", "retry-after": RETRY_AFTER_SECONDS } });
   const body = path.startsWith("/oauth/") ? { error: "temporarily_unavailable", error_description: "rate_limited" } : path.startsWith("/api/auth/") ? { error: "rate_limited", message: "rate_limited" } : { error: { code: "rate_limited", message: "rate_limited" } };
   return new Response(JSON.stringify(body), { status: 429, headers: { "content-type": "application/json", "retry-after": RETRY_AFTER_SECONDS } });
 }
@@ -790,8 +792,11 @@ const mcpHandler = {
     if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
     const externalId = ctx.props?.externalId ?? "";
     if (!(await withinLimit(env.RL_ACCOUNT, `mcp:${externalId}`))) return rateLimited();
+    // Read once, at the size the SDK itself allows, so a huge body can't exhaust the isolate.
+    const body = await boundedBody(request, MAX_MCP_BODY_BYTES);
+    if (!body) return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "body too large" } }, 413);
     // One batch would run up to 100 calls for one count. The protocol's clients send single messages.
-    if (Array.isArray(await request.clone().json().catch(() => null))) return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "batch requests aren't supported" } }, 400);
+    if (Array.isArray(await new Response(body).json().catch(() => null))) return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "batch requests aren't supported" } }, 400);
     const server = new McpServer({ name: "podster", version: "0.0.0" });
     for (const capability of CAPABILITIES) {
       server.registerTool(capability.name, { description: capability.description, inputSchema: zodShape(capability) as any }, async (args: Record<string, unknown>) => {
@@ -810,7 +815,7 @@ const mcpHandler = {
     }
     const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     await server.connect(transport);
-    return transport.handleRequest(request);
+    return transport.handleRequest(new Request(request, { body }));
   },
 };
 
@@ -835,11 +840,13 @@ async function limitByClient(request: Request, env: Env) {
 
 /** Routes that store what an anonymous caller sends, so a limit on requests alone would still allow large records. */
 const MAX_STORED_BODY_BYTES = 16 * 1024;
-const storesAnonymousBody = (method: string, path: string) => method === "POST" && (path === "/oauth/register" || path === "/api/auth/agent/register");
+const MAX_MCP_BODY_BYTES = 4 * 1024 * 1024;
+const storesAnonymousBody = (method: string, path: string) =>
+  method === "POST" && (path === "/oauth/register" || path === "/api/auth/agent/register" || path === "/sign-in" || path.startsWith("/api/auth/sign-in/") || path.startsWith("/api/auth/sign-up/"));
 
 /** Reads the stream as well as trusting the header, because a chunked body has no length. */
-async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | null> {
-  if (Number(request.headers.get("content-length") ?? 0) > MAX_STORED_BODY_BYTES) return null;
+async function boundedBody(request: Request, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  if (Number(request.headers.get("content-length") ?? 0) > limit) return null;
   const reader = request.body?.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -847,7 +854,7 @@ async function boundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | 
     const { done, value } = reader ? await reader.read() : { done: true, value: undefined };
     if (done) break;
     size += value.length;
-    if (size > MAX_STORED_BODY_BYTES) {
+    if (size > limit) {
       await reader?.cancel();
       return null;
     }
@@ -882,7 +889,8 @@ export default {
     const limitedResponse = await limitByClient(request, env);
     if (limitedResponse) return withHsts(limitedResponse, env);
     if (storesAnonymousBody(request.method, new URL(request.url).pathname)) {
-      const body = await boundedBody(request);
+      // The host name in a registration's token is stored too, so the header counts.
+      const body = (request.headers.get("authorization")?.length ?? 0) > MAX_STORED_BODY_BYTES ? null : await boundedBody(request, MAX_STORED_BODY_BYTES);
       if (!body) return withHsts(json({ error: "invalid_client_metadata", error_description: "body_too_large", message: "body_too_large" }, 413), env);
       request = new Request(request, { body });
     }

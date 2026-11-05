@@ -1010,6 +1010,7 @@ describe("rate limits", () => {
     expect(res.status, path).toBe(429);
     expect(res.headers.get("retry-after"), path).toBe("60");
     const body = await res.json<any>();
+    if (path.startsWith("/.well-known/")) throw new Error("discovery answers 503");
     if (path.startsWith("/oauth/")) expect(body, path).toEqual({ error: "temporarily_unavailable", error_description: "rate_limited" });
     else if (path.startsWith("/api/auth/")) expect(body, path).toEqual({ error: "rate_limited", message: "rate_limited" });
     else expect(body.error.code, path).toBe("rate_limited");
@@ -1038,7 +1039,10 @@ describe("rate limits", () => {
     for (const path of ["/sign-in", "/mcp", "/.well-known/oauth-authorization-server", "/api/v1/me", "/oauth/token", "/api/auth/agent-configuration"]) {
       const res = await send(path, { headers: from("203.0.113.9") }, { RL_GENERAL: general.fake, AUTH_SECRET: "" });
       expect(res.headers.get("strict-transport-security"), path).toBe("max-age=31536000");
-      await expectLimitedFor(path, res);
+      if (path.startsWith("/.well-known/")) {
+        expect(res.status, path).toBe(503);
+        expect(res.headers.get("retry-after"), path).toBe("60");
+      } else await expectLimitedFor(path, res);
     }
     expect((await send("/sign-in", { headers: from("203.0.113.10") }, { RL_GENERAL: general.fake })).status).toBe(200);
   });
@@ -1088,6 +1092,24 @@ describe("rate limits", () => {
     expect(await batch.json<any>()).toMatchObject({ error: { code: -32600 } });
     const single = await post_(call_(3));
     expect(single.status).toBe(200);
+    // A body that isn't JSON still gets the protocol's own error.
+    const garbled = await send("/mcp", { method: "POST", headers: { authorization: `Bearer ${agent.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{not json" });
+    expect(garbled.status).toBe(400);
+    expect((await garbled.json<any>()).error.code).toBe(-32700);
+    // The limit comes first, so a batch counts and gets refused as limited.
+    const account = limiter(() => true);
+    expect((await send("/mcp", { method: "POST", headers: { authorization: `Bearer ${agent.token}`, "content-type": "application/json" }, body: JSON.stringify([call_(4)]) }, { RL_ACCOUNT: account.fake })).status).toBe(429);
+  });
+
+  it("caps MCP bodies at the size the SDK allows, even with no declared length", async () => {
+    const owner = await signUp();
+    const agent = await mcpAgent(owner);
+    const headers = { authorization: `Bearer ${agent.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
+    const huge = "x".repeat(4 * 1024 * 1024 + 1);
+    expect((await send("/mcp", { method: "POST", headers, body: huge })).status).toBe(413);
+    expect((await send("/mcp", { method: "POST", headers, body: new Blob([huge]).stream(), duplex: "half" } as RequestInit)).status).toBe(413);
+    // A huge batch is stopped by size, before anything parses it.
+    expect((await send("/mcp", { method: "POST", headers, body: `[${"1,".repeat(2 * 1024 * 1024 + 1)}1]` })).status).toBe(413);
   });
 
   it("caps what an anonymous caller can have stored, even with no declared length", async () => {
@@ -1098,6 +1120,30 @@ describe("rate limits", () => {
     const chunked = await send("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: stream, duplex: "half" } as RequestInit);
     expect(chunked.status).toBe(413);
     expect((await send("/api/auth/agent/register", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer x" }, body: big })).status).toBe(413);
+    // Sign-in stores its return path and extra data, so it's capped too.
+    const padded = "x".repeat(20_000);
+    for (const [path, init] of [
+      ["/sign-in", { method: "POST", headers: { origin: BASE, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ provider: "github", next: `/claim?x=${padded}` }) }],
+      ["/api/auth/sign-in/social", { method: "POST", headers: { origin: BASE, "content-type": "application/json" }, body: JSON.stringify({ provider: "github", additionalData: { padded } }) }],
+      ["/api/auth/sign-up/email", { method: "POST", headers: { origin: BASE, "content-type": "application/json" }, body: JSON.stringify({ email: "a@example.test", password: "local-test-password-123", name: padded }) }],
+    ] as const) {
+      const res = await send(path, init as RequestInit);
+      expect(res.status, path).toBe(413);
+      expect(res.headers.get("strict-transport-security"), path).toBe("max-age=31536000");
+      expect((await res.json<any>()).message, path).toBe("body_too_large");
+    }
+    // A registration's host name is in its token, so the header counts.
+    expect((await send("/api/auth/agent/register", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${"x".repeat(17_000)}` }, body: "{}" })).status).toBe(413);
+    // The limit comes first, so an oversized request still counts.
+    const sensitive = limiter(() => true);
+    expect((await send("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: big }, { RL_SENSITIVE: sensitive.fake })).status).toBe(429);
+    // A body arriving in pieces is put back together intact.
+    const encoder = new TextEncoder();
+    const pieces = encoder.encode(JSON.stringify({ redirect_uris: ["https://client.test/cb"], client_name: "in pieces", token_endpoint_auth_method: "none" }));
+    const inPieces = new ReadableStream({ start(controller) { for (let i = 0; i < pieces.length; i += 20) controller.enqueue(pieces.slice(i, i + 20)); controller.close(); } });
+    const assembled = await send("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: inPieces, duplex: "half" } as RequestInit);
+    expect(assembled.status).toBe(201);
+    expect((await assembled.json<any>()).client_name).toBe("in pieces");
     // Normal registrations are well under it, and still work.
     expect((await post("/oauth/register", { redirect_uris: ["https://client.test/cb"], client_name: "normal", token_endpoint_auth_method: "none" })).status).toBe(201);
   });
@@ -1169,6 +1215,7 @@ describe("rate limits", () => {
       expect(found).toEqual(expected);
       for (const r of environment.ratelimits) {
         expect(r.simple.period).toBe(60);
+        expect(r.namespace_id).toMatch(/^[1-9][0-9]*$/);
         ids.add(r.namespace_id);
       }
     }
