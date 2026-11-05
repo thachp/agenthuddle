@@ -15,7 +15,6 @@ export default defineConfig({
       miniflare: {
         bindings: {
           BASE_URL: "https://gateway.test",
-          APP_URL: "https://app.test",
           AUTH_SECRET: "local-test-only-not-a-real-secret-0123456789",
           ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid: "test" }),
           ENABLE_PASSWORD_SIGNIN: "true",

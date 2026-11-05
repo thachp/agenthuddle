@@ -1,6 +1,6 @@
 import { agentAuth } from "@better-auth/agent-auth";
 import { DurableObject } from "cloudflare:workers";
-import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import { authorizationErrorRedirect, OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { betterAuth } from "better-auth";
@@ -530,29 +530,41 @@ async function handleSignIn(request: Request, env: Env): Promise<Response> {
   return new Response(null, { status: 302, headers });
 }
 
-/** What a person sees from an agent's approval link. It reveals nothing about the agent unless the code is right. */
-async function claimPage(request: Request, env: Env, userId: string) {
-  const url = new URL(request.url);
-  const agentId = url.searchParams.get("agent_id") ?? "";
-  const code = url.searchParams.get("code") ?? "";
-  const { adminOrgs } = await memberships(env, personId(userId));
-  if (adminOrgs.length === 0) return page("Connect an agent", "<p>You need to be an admin of an organization to connect an agent.</p>", 403);
+/** The organizations a person can act for, and their agents an approval can connect to. */
+async function approverChoices(env: Env, adminOrgs: string[]) {
   const placeholders = adminOrgs.map(() => "?").join(",");
   const orgs = await env.DB.prepare(`SELECT id, name FROM organization WHERE id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; name: string }>();
   const agents = await env.DB.prepare(`SELECT id, org_id, name FROM podster_agent WHERE revoked_at IS NULL AND org_id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; org_id: string; name: string }>();
-  const orgName = (id: string) => orgs.results.find((o) => o.id === id)?.name ?? id;
+  return { orgs: orgs.results, agents: agents.results };
+}
+
+/** What an agent's approval link may show. It reveals nothing about the agent unless the code is right. */
+async function claimChoices(env: Env, url: URL, userId: string) {
+  const agentId = url.searchParams.get("agent_id") ?? "";
+  const code = url.searchParams.get("code") ?? "";
+  const { adminOrgs } = await memberships(env, personId(userId));
+  if (adminOrgs.length === 0) return "not_admin" as const;
+  const choices = await approverChoices(env, adminOrgs);
   // Nothing from the link appears until its code proves a real request, so a link can't put its own words on our page.
-  if (agentId === "" || !(await codeMatchesLiveApproval(env, agentId, code))) return page("Connect an agent", "<p>This link isn't valid or has expired. Ask the agent for a new one.</p>", 404);
+  if (agentId === "" || !(await codeMatchesLiveApproval(env, agentId, code))) return "invalid_link" as const;
   const registered = await env.DB.prepare(`SELECT name FROM agent WHERE id = ?`).bind(agentId).first<{ name: string | null }>();
-  const who = registered?.name ? `An agent calling itself <strong>${escapeHtml(registered.name)}</strong>` : "An agent";
+  return { agent_id: agentId, agent_name: registered?.name ?? null, code, ...choices };
+}
+
+async function claimPage(request: Request, env: Env, userId: string) {
+  const choices = await claimChoices(env, new URL(request.url), userId);
+  if (choices === "not_admin") return page("Connect an agent", "<p>You need to be an admin of an organization to connect an agent.</p>", 403);
+  if (choices === "invalid_link") return page("Connect an agent", "<p>This link isn't valid or has expired. Ask the agent for a new one.</p>", 404);
+  const orgName = (id: string) => choices.orgs.find((o) => o.id === id)?.name ?? id;
+  const who = choices.agent_name ? `An agent calling itself <strong>${escapeHtml(choices.agent_name)}</strong>` : "An agent";
   return page("Connect an agent", `<p>${who} is asking to join your organization. Podster hasn't verified this name.</p>
-<p>Only continue if you started this, and your agent showed you this code: <strong>${escapeHtml(code)}</strong></p>
+<p>Only continue if you started this, and your agent showed you this code: <strong>${escapeHtml(choices.code)}</strong></p>
 <p>Connecting doesn't run or wake the agent, and workroom access is set separately.</p>
 <form method="post" action="/claim">
-<input type="hidden" name="agent_id" value="${escapeHtml(agentId)}">
-<input type="hidden" name="user_code" value="${escapeHtml(code)}">
-<label>Organization <select name="org_id" required>${orgs.results.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name)}</option>`).join("")}</select></label>
-<label>Connect as <select name="link_agent_id"><option value="">A new agent</option>${agents.results.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(`${a.name} (${orgName(a.org_id)})`)}</option>`).join("")}</select></label>
+<input type="hidden" name="agent_id" value="${escapeHtml(choices.agent_id)}">
+<input type="hidden" name="user_code" value="${escapeHtml(choices.code)}">
+<label>Organization <select name="org_id" required>${choices.orgs.map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.name)}</option>`).join("")}</select></label>
+<label>Connect as <select name="link_agent_id"><option value="">A new agent</option>${choices.agents.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(`${a.name} (${orgName(a.org_id)})`)}</option>`).join("")}</select></label>
 <label>Name for a new agent <input name="name" maxlength="${MAX_NAME_BYTES}"></label>
 <button type="submit">Connect</button>
 </form>`);
@@ -587,33 +599,33 @@ async function parseOAuth(env: Env, request: Request) {
   }
 }
 
-async function handleAuthorize(request: Request, env: Env, userId: string): Promise<Response> {
+/**
+ * Always parsed as a request to the gateway's own host, whichever host the person is on: the provider takes the `iss` it
+ * sends the client from this URL, and the client checks that against the issuer it discovered.
+ */
+const parseOAuthQuery = (env: Env, gatewayUrl: string, query: string) => parseOAuth(env, new Request(`${gatewayUrl}/authorize${query}`));
+
+async function consentChoices(env: Env, gatewayUrl: string, person: string, query: string): Promise<ConsentChoices | Response> {
+  const { adminOrgs } = await memberships(env, person);
+  const parsed = await parseOAuthQuery(env, gatewayUrl, query);
+  if (!parsed) return denied("invalid_request", 400);
+  const client = await env.OAUTH_PROVIDER.lookupClient(parsed.clientId);
+  if (!client) return denied("invalid_client", 400);
+  if (adminOrgs.length === 0) return denied("not_allowed", 403);
+  return { clientName: client.clientName ?? parsed.clientId, redirectHosts: [new URL(parsed.redirectUri).host], query, ...(await approverChoices(env, adminOrgs)) };
+}
+
+type ConsentFields = { query: string; org: string; linkAgent: string; name: string };
+
+/** Connects the client as an agent. The answer goes back to the client, so a caller only ever passes it on. */
+async function approveConsent(request: Request, env: Env, gatewayUrl: string, userId: string, fields: ConsentFields): Promise<{ redirectTo: string } | Response> {
   const person = personId(userId);
   const { adminOrgs } = await memberships(env, person);
-
-  if (request.method === "GET") {
-    const url = new URL(request.url);
-    const parsed = await parseOAuth(env, request);
-    if (!parsed) return denied("invalid_request", 400);
-    const client = await env.OAUTH_PROVIDER.lookupClient(parsed.clientId);
-    if (!client) return denied("invalid_client", 400);
-    if (adminOrgs.length === 0) return denied("not_allowed", 403);
-    const placeholders = adminOrgs.map(() => "?").join(",");
-    const orgs = await env.DB.prepare(`SELECT id, name FROM organization WHERE id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; name: string }>();
-    const agents = await env.DB.prepare(`SELECT id, org_id, name FROM podster_agent WHERE revoked_at IS NULL AND org_id IN (${placeholders})`).bind(...adminOrgs).all<{ id: string; org_id: string; name: string }>();
-    return consentPage({ clientName: client.clientName ?? parsed.clientId, redirectHosts: [new URL(parsed.redirectUri).host], query: url.search, orgs: orgs.results, agents: agents.results });
-  }
-
-  // Approving is a POST from our own page, so a link can't connect an agent on someone's behalf.
-  if (request.method !== "POST" || !sameOrigin(request, env)) return denied("not_allowed", 403);
-  const form = await request.formData().catch(() => null);
-  if (!form) return denied("invalid_argument", 400);
-  const org = String(form.get("org_id") ?? "");
-  const linkAgent = String(form.get("link_agent_id") ?? "");
-  const name = String(form.get("agent_name") ?? "").trim() || "MCP agent";
+  const { org, linkAgent, query } = fields;
+  const name = fields.name.trim() || "MCP agent";
   if (!adminOrgs.includes(org)) return denied("not_allowed", 403);
   if (!validName(name)) return denied("invalid_argument", 400);
-  const parsed = await parseOAuth(env, new Request(`${env.BASE_URL}/authorize${String(form.get("oauth_query") ?? "")}`));
+  const parsed = await parseOAuthQuery(env, gatewayUrl, query);
   if (!parsed) return denied("invalid_request", 400);
 
   const identity = await personIdentity(env, new Request(request.url, { headers: { "x-podster-org": org } }), userId);
@@ -639,7 +651,84 @@ async function handleAuthorize(request: Request, env: Env, userId: string): Prom
   const replaced = await grantIds(env, person, externalId);
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: parsed, userId: person, metadata: { org, externalId }, scope: ["mcp"], props: { externalId }, revokeExistingGrants: false });
   for (const id of replaced) await env.OAUTH_PROVIDER.revokeGrant(id, person);
-  return Response.redirect(redirectTo, 302);
+  return { redirectTo };
+}
+
+async function handleAuthorize(request: Request, env: Env, userId: string): Promise<Response> {
+  if (request.method === "GET") {
+    const choices = await consentChoices(env, env.BASE_URL, personId(userId), new URL(request.url).search);
+    return choices instanceof Response ? choices : consentPage(choices);
+  }
+
+  // Approving is a POST from our own page, so a link can't connect an agent on someone's behalf.
+  if (request.method !== "POST" || !sameOrigin(request, env)) return denied("not_allowed", 403);
+  const form = await request.formData().catch(() => null);
+  if (!form) return denied("invalid_argument", 400);
+  const answer = await approveConsent(request, env, env.BASE_URL, userId, { query: String(form.get("oauth_query") ?? ""), org: String(form.get("org_id") ?? ""), linkAgent: String(form.get("link_agent_id") ?? ""), name: String(form.get("agent_name") ?? "") });
+  return answer instanceof Response ? answer : Response.redirect(answer.redirectTo, 302);
+}
+
+/**
+ * The application host's read and decision for consent, reached only over the service binding. A decision answers with
+ * where to send the browser, because a page's fetch can't follow a redirect to another host. A query is only ever a
+ * query: it's joined to our own URL as text.
+ */
+async function handleConsentApi(request: Request, env: Env, gatewayUrl: string, userId: string): Promise<Response> {
+  if (request.method === "GET") {
+    const choices = await consentChoices(env, gatewayUrl, personId(userId), new URL(request.url).search);
+    if (choices instanceof Response) return choices;
+    return json({ client_name: choices.clientName, redirect_hosts: choices.redirectHosts, oauth_query: choices.query, orgs: choices.orgs, agents: choices.agents });
+  }
+  if (request.method !== "POST") return denied("not_found", 404);
+  if (!sameOrigin(request, env)) return denied("not_allowed", 403);
+  if (!(await withinLimit(env.RL_SENSITIVE, `consent:${userId}`))) return rateLimited();
+  const body = await request.json<{ decision?: unknown; oauth_query?: unknown; org_id?: unknown; link_agent_id?: unknown; agent_name?: unknown }>().catch(() => null);
+  if (typeof body?.oauth_query !== "string" || !body.oauth_query.startsWith("?")) return denied("invalid_argument", 400);
+  if (body.decision === "decline") {
+    const parsed = await parseOAuthQuery(env, gatewayUrl, body.oauth_query);
+    return parsed ? json({ redirect_to: authorizationErrorRedirect(parsed, "access_denied") }) : denied("invalid_request", 400);
+  }
+  // There's no default: only an explicit approval connects anything.
+  if (body.decision !== "approve" || typeof body.org_id !== "string") return denied("invalid_argument", 400);
+  const answer = await approveConsent(request, env, gatewayUrl, userId, { query: body.oauth_query, org: body.org_id, linkAgent: typeof body.link_agent_id === "string" ? body.link_agent_id : "", name: typeof body.agent_name === "string" ? body.agent_name : "" });
+  return answer instanceof Response ? answer : json({ redirect_to: answer.redirectTo });
+}
+
+/** The same for an agent's approval link. The code is checked on the read, so guessing through it counts as posting. */
+async function handleClaimApi(request: Request, env: Env, userId: string): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "POST") return denied("not_found", 404);
+  if (request.method === "POST" && !sameOrigin(request, env)) return denied("not_allowed", 403);
+  if (!(await withinLimit(env.RL_SENSITIVE, `claim:${userId}`))) return rateLimited();
+  if (request.method === "POST") return claim(request, env, userId, await request.json<ClaimBody>().catch(() => null));
+  const choices = await claimChoices(env, new URL(request.url), userId);
+  if (choices === "not_admin") return denied("not_allowed", 403);
+  if (choices === "invalid_link") return denied("not_found", 404);
+  return json(choices);
+}
+
+/**
+ * With an application host, a person's pages live there and this host keeps only agents' routes. A form POST to
+ * `/authorize` or `/claim` stays, with its origin check: no browser holds a session here, and test clients use it.
+ */
+async function movedToApplicationHost(request: Request, env: Env, appUrl: string): Promise<Response | null> {
+  const url = new URL(request.url);
+  const app = new URL(appUrl).origin;
+  const to = (path: string, status = 302) => new Response(null, { status, headers: { location: app + path } });
+  if (url.pathname === "/authorize" && request.method === "GET") {
+    // Only a request that could really finish gets sent on, so a link can't use this host to reach the app with junk.
+    return (await parseOAuth(env, request)) ? to(`/oauth/consent${url.search}`) : denied("invalid_request", 400);
+  }
+  if (url.pathname === "/claim" && request.method === "GET") return to(`/claim${url.search}`);
+  if (url.pathname === "/sign-in" && request.method === "POST") return to("/sign-in", 303);
+  if (url.pathname === "/sign-in" && request.method === "GET") {
+    const next = new URL(safeNext(url.searchParams.get("next")), url.origin);
+    const page = next.pathname === "/authorize" ? "/oauth/consent" : next.pathname === "/claim" ? "/claim" : null;
+    const query = new URLSearchParams();
+    if (page) query.set("next", page + next.search);
+    if (url.searchParams.has("error")) query.set("error", "1");
+    return to(`/sign-in${query.size ? `?${query}` : ""}`);
+  }
+  return null;
 }
 
 /** Writes a claim's link. If the write fails because a double submit got there first, the same link counts as success. */
@@ -818,6 +907,11 @@ const appHandler = {
   async fetch(request: Request, publicEnv: Env): Promise<Response> {
     const env = forPublicHost(request, publicEnv);
     const url = new URL(request.url);
+    const onApplicationHost = env !== publicEnv;
+    if (publicEnv.APP_URL && !onApplicationHost) {
+      const moved = await movedToApplicationHost(request, publicEnv, publicEnv.APP_URL);
+      if (moved) return moved;
+    }
     // Refusals come before the auth instance exists, so an anonymous refusal doesn't start its setup.
     if (url.pathname === "/.well-known/agent-configuration" || url.pathname === "/api/auth/agent-configuration") return json(publicConfiguration(await createAuth(env).api.getAgentConfiguration({ headers: request.headers })));
     if (url.pathname.startsWith("/api/auth/")) {
@@ -861,6 +955,8 @@ const appHandler = {
     const person = personId(session.user.id);
 
     if (!(await withinLimit(env.RL_ACCOUNT, `person:${session.user.id}`))) return rateLimited();
+    if (onApplicationHost && url.pathname === "/api/consent") return handleConsentApi(request, env, publicEnv.BASE_URL, session.user.id);
+    if (onApplicationHost && url.pathname === "/api/claim") return handleClaimApi(request, env, session.user.id);
     if (url.pathname === "/api/orgs") {
       if (request.method === "POST" && !(await withinLimit(env.RL_SENSITIVE, `create-org:${session.user.id}`))) return rateLimited();
       return handleOrganizations(request, env, person);
