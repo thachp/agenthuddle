@@ -167,7 +167,7 @@ Each was checked against the code by a test that ran or by reading, and the line
 | 14. Guests creating tasks | Holds | journey `D14`; `apps/api/src/workspace.rs:708`; `crates/policy/src/lib.rs:107` |
 | 21. Person inboxes | **Half built** | The API stores and serves them, and a person's unread count works (journey `D21`). People can't read or ack them through the gateway (gap 4) |
 | 22. Who creates tasks from the dashboard | Holds for owners in the local journey. Admin and member people only in apps/api tests | journey `D22`; `crates/policy/src/lib.rs:107`. Reaching them needs gap 1 |
-| 23. Personal accounts | Holds, with one failure case | journey `D23`; `apps/gateway/src/index.ts:303`. See gap 8 |
+| 23. Personal accounts | Holds | journey `D23`; gateway "when the sign-up hook can't write the personal organization", local only because a failed write can't be arranged from outside |
 | 24. Taking over a task when its requester leaves | Holds for owner and admin. Coordinator waits for M1 | journey `AC-25`; `crates/policy/src/lib.rs:154`. See gap 9 |
 
 ## Backend gaps
@@ -183,7 +183,7 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 | 5 | **Revoking a whole organization isn't built.** The route is in ARCHITECTURE.md's internal API list, and it's in neither the code nor `openapi.yaml`. Criterion 7 currently needs one call per agent. Either build it or change the spec. | S, with contract | `apps/api/src/workspace.rs:1871` | Criterion 7 as written |
 | 6 | **A person in an invited organization can't see the room.** Only the agent is a member, so that person gets `workspace_not_found` even when their own agents are in it, and the room isn't in their list. M0 gives them read-only oversight of their own agents ([ruling](#gate-rulings-2026-11-05-utc)), which needs a new read path. | M | `apps/api/src/workspace.rs:104`; `apps/api/src/lib.rs:75` | Dashboard for Org B |
 | 7 | **Dashboard reads that don't exist.** No route lists an organization's agents, or a room's invitations. No route renames or archives a room, which PRODUCT.md gives admins. Confirm with the dashboard's needs first. | S to M | `apps/gateway/src/index.ts`; `apps/api/src/workspace.rs` | Dashboard |
-| 8 | **A failed sign-up hook leaves a person with no organization.** The personal organization is written in an `after` hook. If that write fails, every later request answers 403 and nothing retries it. | S | `apps/gateway/src/index.ts:303` | Decision 23 |
+| 8 | **Closed: a failed sign-up hook no longer leaves a person with no organization.** The person's next request restores it, and one index keeps it to one organization. | Done | `apps/gateway/src/index.ts` `ensurePersonalOrg`; migration `0003_one_personal_org.sql` | Nothing |
 | 9 | **No Coordinator.** `set_requester` is for owners and admins only. The rest of decision 24 needs the Coordinator preset, which comes with decision 20, so it's M1 work ([ruling](#gate-rulings-2026-11-05-utc)). | S once presets exist | `crates/policy/src/lib.rs:154` | Nothing in M0 |
 | 10 | **Smaller baseline items.** The limit of 20 workspaces per organization isn't enforced. Rooms can't be deleted, though PRODUCT.md mentions it. Email magic-link sign-in isn't built. | S each | `apps/api/src/workspace.rs:1657`; `apps/gateway/src/index.ts` | Limits, AC-26's deleted case |
 

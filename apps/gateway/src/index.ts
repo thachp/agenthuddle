@@ -301,15 +301,9 @@ export function createAuth(env: Env) {
         create: {
           // An unverified email could claim someone else's address and lock out its real owner.
           before: async (user) => (user.emailVerified || passwordSignInEnabled(env) ? undefined : false),
-          // Everyone starts with a personal organization, so individuals aren't a second ownership model.
-          after: async (user) => {
-            const org = newId("org");
-            const now = Date.now();
-            await env.DB.batch([
-              env.DB.prepare(`INSERT INTO organization (id, name, personal, created_by, created_at) VALUES (?, ?, 1, ?, ?)`).bind(org, user.name || "Personal", personId(user.id), now),
-              env.DB.prepare(`INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'admin', ?)`).bind(org, personId(user.id), now),
-            ]);
-          },
+          // Everyone starts with a personal organization, so individuals aren't a second ownership model. If this write
+          // fails, the person's next request restores it, so a failure here doesn't fail the sign-up.
+          after: async (user) => ensurePersonalOrg(env, personId(user.id)),
         },
       },
     },
@@ -360,8 +354,33 @@ export function createAuth(env: Env) {
 
 type Memberships = { orgs: string[]; adminOrgs: string[]; personal: string | null };
 
+/**
+ * Writes the person's personal organization and their admin membership if either is missing. It's safe to repeat, and
+ * concurrent calls leave one organization, because of the unique index in migration 0003. A failure is only logged: the
+ * person has no organization to act in, and their next request tries again.
+ */
+async function ensurePersonalOrg(env: Env, person: string) {
+  const now = Date.now();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`INSERT OR IGNORE INTO organization (id, name, personal, created_by, created_at) SELECT ?, COALESCE(NULLIF(name, ''), 'Personal'), 1, ?, ? FROM "user" WHERE id = ?`).bind(newId("org"), person, now, person.slice("per_".length)),
+      env.DB.prepare(`INSERT OR IGNORE INTO org_member (org_id, person_id, role, created_at) SELECT id, ?, 'admin', ? FROM organization WHERE personal = 1 AND created_by = ?`).bind(person, now, person),
+    ]);
+  } catch {
+    console.error("personal organization not written", person);
+  }
+}
+
+const membershipRows = async (env: Env, person: string) =>
+  (await env.DB.prepare(`SELECT m.org_id, m.role, o.personal FROM org_member m JOIN organization o ON o.id = m.org_id WHERE m.person_id = ?`).bind(person).all<{ org_id: string; role: string; personal: number }>()).results;
+
+/** The person's organizations, restoring their personal one first if a failed sign-up left it unwritten. */
 async function memberships(env: Env, person: string): Promise<Memberships> {
-  const { results } = await env.DB.prepare(`SELECT m.org_id, m.role, o.personal FROM org_member m JOIN organization o ON o.id = m.org_id WHERE m.person_id = ?`).bind(person).all<{ org_id: string; role: string; personal: number }>();
+  let results = await membershipRows(env, person);
+  if (!results.some((r) => r.personal)) {
+    await ensurePersonalOrg(env, person);
+    results = await membershipRows(env, person);
+  }
   return {
     orgs: results.map((r) => r.org_id),
     adminOrgs: results.filter((r) => r.role === "admin").map((r) => r.org_id),
@@ -863,6 +882,7 @@ const appHandler = {
     if (!(await withinLimit(env.RL_ACCOUNT, `person:${session.user.id}`))) return rateLimited();
     if (url.pathname === "/api/orgs") {
       if (request.method === "POST" && !(await withinLimit(env.RL_SENSITIVE, `create-org:${session.user.id}`))) return rateLimited();
+      await memberships(env, person);
       return handleOrganizations(request, env, person);
     }
 
