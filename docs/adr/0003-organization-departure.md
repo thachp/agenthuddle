@@ -1,6 +1,6 @@
 # ADR 0003: Removing a person from an organization reaches their rooms
 
-**Status:** Built. [Decision 32](../spec/PRODUCT.md#decisions-needed) settles what a departed room owner gets back.
+**Status:** Accepted by the owner, and built. [Decision 32](../spec/PRODUCT.md#decisions-needed) settles what a departed room owner gets back.
 
 ## Context
 

@@ -30,13 +30,13 @@ describe("AppShell", () => {
   it("anchors the profile button in the footer, after the navigation", () => {
     shell();
     const footer = screen.getByTestId("sidebar-footer");
-    const button = within(footer).getByRole("button", { name: "Profile menu" });
+    const button = within(footer).getByRole("button", { name: /^Profile menu:/ });
     expect(screen.getByRole("list", { name: "Primary" }).compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("the profile menu has what the spec lists, and no billing", async () => {
     shell();
-    await userEvent.click(screen.getByRole("button", { name: "Profile menu" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Profile menu:/ }));
     const menu = await screen.findByRole("menu");
     for (const item of ["Acme", "Beta", "Account", "Notifications", "Log out"]) expect(within(menu).getByText(item)).toBeInTheDocument();
     expect(within(menu).queryByText("Billing")).toBeNull();
@@ -54,14 +54,14 @@ describe("AppShell", () => {
   it("logging out forgets an invitation kept in this tab", async () => {
     sessionStorage.setItem("podster-org-invitation", "oin_1.secret");
     shell();
-    await userEvent.click(screen.getByRole("button", { name: "Profile menu" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Profile menu:/ }));
     await userEvent.click(await screen.findByText("Log out"));
     expect(sessionStorage.getItem("podster-org-invitation")).toBeNull();
   });
 
   it("switching organization only sets a selector", async () => {
     shell();
-    await userEvent.click(screen.getByRole("button", { name: "Profile menu" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Profile menu:/ }));
     await userEvent.click(await screen.findByText("Acme"));
     expect(document.cookie).toContain("podster-org=org_1");
     document.cookie = "podster-org=; max-age=0; path=/";
@@ -69,10 +69,10 @@ describe("AppShell", () => {
 
   it("shows an unread count only when it knows one", () => {
     const { unmount } = shell(3);
-    expect(screen.getByLabelText("3 unread")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Needs attention/ }).closest("li")).toHaveTextContent("3 unread");
     unmount();
     shell(null);
-    expect(screen.queryByLabelText(/unread/)).toBeNull();
+    expect(screen.queryByText(/unread/)).toBeNull();
   });
 
   it("offers a way past the navigation", () => {

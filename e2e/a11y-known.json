@@ -1,0 +1,10 @@
+{
+  "axe": [],
+  "keyboard": [
+    {
+      "path": "create a room",
+      "file": "apps/web/components/shell/app-shell.tsx",
+      "problem": "Every step works by keyboard, but after a client-side navigation focus falls to the page body, because the control that had it is gone. The shell could move focus to #main-content when the path changes and nothing has focus."
+    }
+  ]
+}
