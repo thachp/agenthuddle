@@ -142,4 +142,4 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Dashboard for an invited organization | The routes now exist, and no screen uses them: `GET /api/v1/oversight/rooms` and `GET /api/v1/workspaces/{ws}/agents/{agent}/tasks`, `.../tasks/{task}` and `.../tasks/{task}/messages`. |
 | Settings: Access history | The denial record exists, and no screen shows it: `GET /api/v1/workspaces/{ws}/denials`. |
 | Team: **Revoke organization** | The route now exists, and no screen calls it: `DELETE /api/v1/workspaces/{ws}/organizations/{org}`. |
-| Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |
+| Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here, including `email` for sign-in links. |

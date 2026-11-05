@@ -9,7 +9,7 @@ function gateway(response = new Response("{}")) {
 }
 
 describe("isForwardable", () => {
-  it.each(["/api/v1/me", "/api/v1/workspaces/ws_1/tasks", "/api/v1/agents/agt_1/inbox", "/api/orgs", "/api/orgs/org_1/members", "/api/orgs/org_1/members/per_1", "/api/orgs/org_1/invitations", "/api/orgs/org_1/invitations/oin_1", "/api/org-invitations/preview", "/api/org-invitations/accept", "/api/agents", "/api/agents/agt_1/disconnect", "/api/auth/get-session", "/api/auth/sign-out", "/api/auth/sign-in/social", "/api/auth/callback/github", "/api/consent", "/api/claim"])("forwards %s", (path) => expect(isForwardable(path)).toBe(true));
+  it.each(["/api/auth/sign-in/magic-link", "/api/auth/magic-link/verify", "/api/v1/me", "/api/v1/workspaces/ws_1/tasks", "/api/v1/agents/agt_1/inbox", "/api/orgs", "/api/orgs/org_1/members", "/api/orgs/org_1/members/per_1", "/api/orgs/org_1/invitations", "/api/orgs/org_1/invitations/oin_1", "/api/org-invitations/preview", "/api/org-invitations/accept", "/api/agents", "/api/agents/agt_1/disconnect", "/api/auth/get-session", "/api/auth/sign-out", "/api/auth/sign-in/social", "/api/auth/callback/github", "/api/consent", "/api/claim"])("forwards %s", (path) => expect(isForwardable(path)).toBe(true));
 
   it.each([
     "/api/auth/agent/register",
@@ -38,6 +38,10 @@ describe("isForwardable", () => {
 });
 
 describe("forwardedHeaders", () => {
+  it("passes on where a request came from, which using a sign-in link depends on", () => {
+    expect(forwardedHeaders(new Headers({ "sec-fetch-site": "cross-site" })).get("sec-fetch-site")).toBe("cross-site");
+  });
+
   const incoming = new Headers({ cookie: "better-auth.session_token=s; podster-org=org_1", origin: APP, "content-type": "application/json", "idempotency-key": "k", "cf-connecting-ip": "203.0.113.9", "x-podster-org": "org_chosen_by_client", "x-podster-assertion": "forged", "x-podster-caller": "{}", authorization: "Bearer x", "x-forwarded-for": "1.1.1.1" });
   const headers = forwardedHeaders(incoming);
 
@@ -59,6 +63,15 @@ describe("forwardedHeaders", () => {
 });
 
 describe("forwardToGateway", () => {
+  it("passes the referrer to the route that uses a sign-in link, and no other", async () => {
+    const { fetch, calls } = gateway();
+    const sent = (path: string) => forwardToGateway(new Request(`${APP}${path}`, { headers: { referer: `${APP}/sign-in/email?token=t` } }), { fetch }, APP);
+    await sent("/api/auth/magic-link/verify?token=t&callbackURL=%2F");
+    await sent("/api/v1/me");
+    const headers = calls.mock.calls.map((call: unknown[]) => new Headers((call[1] as RequestInit).headers).get("referer"));
+    expect(headers).toEqual([`${APP}/sign-in/email?token=t`, null]);
+  });
+
   it("answers a refused path without calling the gateway", async () => {
     const { fetch, calls } = gateway();
     const response = await forwardToGateway(new Request(`${APP}/api/auth/agent/register`, { method: "POST" }), { fetch }, APP);

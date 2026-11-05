@@ -21,7 +21,7 @@
       "preview_urls": false,
       "routes": [{ "pattern": "app-staging.podster.dev", "custom_domain": true }],
       "services": [{ "binding": "GATEWAY", "service": "podster-gateway-staging" }],
-      "vars": { "APP_URL": "https://app-staging.podster.dev", "GATEWAY_URL": "https://gateway-staging.podster.dev", "SIGN_IN_PROVIDERS": "github", "LOCAL_PASSWORD_SIGNIN": "false" }
+      "vars": { "APP_URL": "https://app-staging.podster.dev", "GATEWAY_URL": "https://gateway-staging.podster.dev", "SIGN_IN_PROVIDERS": "github,email", "LOCAL_PASSWORD_SIGNIN": "false" }
     }
   }
 }
