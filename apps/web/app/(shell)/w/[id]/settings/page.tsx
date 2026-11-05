@@ -49,7 +49,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
           <ul className="divide-y rounded-lg border">
             {admins.map((admin) => (
               <li key={admin.principal_id} className="p-3">
-                <AuthorLine author={{ name: identity.ok && admin.principal_id === identity.data.id ? "You" : admin.principal_id, kind: "person" }} />
+                <AuthorLine author={{ name: identity.ok && admin.principal_id === identity.data.id ? "You" : admin.principal_id, kind: "person", viewer: identity.ok && admin.principal_id === identity.data.id }} />
               </li>
             ))}
           </ul>

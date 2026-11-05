@@ -8,7 +8,7 @@ import { visibleWorkroomTabs } from "./nav";
 export function WorkroomTabs({ id, canManage }: { id: string; canManage: boolean }) {
   const pathname = usePathname();
   return (
-    <nav aria-label="Workroom" className="flex gap-1 overflow-x-auto border-b">
+    <nav aria-label="Workroom" className="flex flex-wrap gap-1 border-b">
       {visibleWorkroomTabs(canManage).map((tab) => {
         const href = `/w/${id}/${tab.segment}`;
         const active = pathname === href || pathname.startsWith(`${href}/`);

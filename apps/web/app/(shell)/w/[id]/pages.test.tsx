@@ -7,10 +7,12 @@ import { NotFoundSignal, setUrl } from "@/test/next-navigation";
 const replies = new Map<string, GatewayResult<unknown>>();
 let identity: GatewayResult<unknown>;
 let room: Record<string, unknown>;
+let organizations: GatewayResult<unknown>;
 
 vi.mock("@/lib/gateway/server", () => ({
   gatewayQuery: async (path: string) => replies.get(path.split("?")[0]) ?? { ok: false, status: 404, code: "not_found" },
   getIdentity: async () => identity,
+  getOrganizations: async () => organizations,
 }));
 vi.mock("@/lib/workroom", () => ({ loadWorkroom: async () => room, canManageWorkroom: (r: { policy_version: number | null }) => r.policy_version !== null }));
 
@@ -18,6 +20,7 @@ const { default: Overview } = await import("./overview/page");
 const { default: Activity } = await import("./activity/page");
 const { default: Settings } = await import("./settings/page");
 const { default: MyWorkrooms } = await import("../../workrooms/page");
+const { default: NewWorkroom } = await import("../../workrooms/new/page");
 
 const params = Promise.resolve({ id: "ws_1" });
 const searchParams = Promise.resolve({});
@@ -29,6 +32,7 @@ beforeEach(() => {
   setUrl("/w/ws_1/overview");
   replies.clear();
   identity = ME;
+  organizations = { ok: true, data: { organizations: [{ id: "org_a", name: "Org A", personal: 0, role: "member" }, { id: "org_p", name: "Mine", personal: 1, role: "admin" }] } };
   room = { id: "ws_1", name: "Launch room", owner: "per_owner", status: "active", policy_version: 3, members: [] };
 });
 
@@ -55,6 +59,53 @@ describe("Overview", () => {
 });
 
 describe("Activity", () => {
+  const event = (seq: number, actor_id: string, type: string, task_id: string | null = null) => ({ seq, id: `evt_${seq}`, type, actor_id, actor_org: "org_a", task_id, created_at: 0 });
+
+  it("names people, agents and tasks it can, keeps IDs for the rest, and reads once per organization", async () => {
+    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "per_me", "workspace.created"), event(2, "agt_1", "task.accepted", "tsk_1"), event(3, "per_sam", "task.message", "tsk_1"), event(4, "agt_other", "task.declined", "tsk_gone")] } });
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_1", name: "Builder" }] } });
+    replies.set("/api/orgs/org_a/members", { ok: true, data: { members: [{ person_id: "per_sam", name: "Sam" }] } });
+    replies.set("/api/v1/workspaces/ws_1/tasks", { ok: true, data: { tasks: [{ id: "tsk_1", title: "Design the API" }], next_cursor: null } });
+    render(await Activity({ params, searchParams }));
+    for (const text of ["You", "Builder", "Sam", "agt_other", "tsk_gone"]) expect(screen.getByText(text)).toBeInTheDocument();
+    expect(screen.queryByText("per_me")).toBeNull();
+    expect(screen.queryByText("tsk_1")).toBeNull();
+    const links = screen.getAllByRole("link", { name: "Design the API" });
+    expect(links[0]).toHaveAttribute("title", "tsk_1");
+    expect(links[0]).toHaveAttribute("href", "/w/ws_1/tasks?task=tsk_1");
+    expect(screen.getAllByText("Org A").length).toBe(4);
+  });
+
+  it("says who's an agent, so one named like a person can't pass for them, and labels names that sound like authority", async () => {
+    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "agt_sam", "task.message"), event(2, "per_sam", "task.message"), event(3, "agt_boss", "task.message"), event(4, "per_you", "task.message"), event(5, "per_me", "task.message")] } });
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_sam", name: "Sam" }, { id: "agt_boss", name: "Podster Admin" }] } });
+    replies.set("/api/orgs/org_a/members", { ok: true, data: { members: [{ person_id: "per_sam", name: "Sam" }, { person_id: "per_you", name: "You" }] } });
+    render(await Activity({ params, searchParams }));
+    const row = (id: string) => screen.getByTitle(id);
+    expect(row("agt_sam")).toHaveTextContent("Agent");
+    expect(row("per_sam")).toHaveTextContent("Person");
+    expect(row("per_sam")).not.toHaveTextContent("Name chosen");
+    expect(row("agt_boss")).toHaveTextContent("Name chosen by this agent");
+    expect(row("per_you")).toHaveTextContent("Name chosen by this person");
+    expect(row("per_me")).not.toHaveTextContent("Name chosen");
+  });
+
+  it("reads no tasks when no event on the page has one", async () => {
+    let read = false;
+    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "per_me", "workspace.created")] } });
+    replies.set("/api/v1/workspaces/ws_1/tasks", { get ok() { read = true; return true; }, data: { tasks: [], next_cursor: null } } as never);
+    render(await Activity({ params, searchParams }));
+    expect(read).toBe(false);
+  });
+
+  it("still shows the events, by ID, when names can't be read", async () => {
+    organizations = failed(503);
+    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "agt_1", "task.accepted", "tsk_1")] } });
+    render(await Activity({ params, searchParams }));
+    expect(screen.getByText("agt_1")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "tsk_1" })).toBeInTheDocument();
+  });
+
   it("explains the limit to someone the API refuses", async () => {
     replies.set("/api/v1/workspaces/ws_1/events", failed(403, "not_allowed"));
     render(await Activity({ params, searchParams }));
@@ -95,6 +146,59 @@ describe("Settings", () => {
     replies.set("/api/v1/workspaces/ws_1/audit", failed(503));
     render(await Settings({ params, searchParams }));
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
+  });
+});
+
+describe("who's offered creating a workroom", () => {
+  const rooms = { ok: true as const, data: { workspaces: [] } };
+  const member = { ok: true as const, data: { id: "per_me", org_id: "org_a", orgs: ["org_a", "org_p"], admin_orgs: ["org_p"] } };
+  const link = () => screen.queryByRole("link", { name: "Create a workroom" });
+  const form = () => screen.queryByRole("button", { name: "Create workroom" });
+
+  beforeEach(() => replies.set("/api/v1/workspaces", rooms));
+
+  it("offers it to an admin of the organization they're working in", async () => {
+    identity = { ok: true, data: { ...member.data, org_id: "org_p" } };
+    const { unmount } = render(await MyWorkrooms());
+    expect(link()).toHaveAttribute("href", "/workrooms/new");
+    expect(screen.getByText(/Create one, then add/)).toBeInTheDocument();
+    unmount();
+    render(await NewWorkroom());
+    expect(form()).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't check/)).toBeNull();
+  });
+
+  it("tells a plain member why, and where they are an admin", async () => {
+    identity = member;
+    const { unmount } = render(await MyWorkrooms());
+    expect(link()).toBeNull();
+    expect(screen.getByText(/you're a member of Org A/)).toBeInTheDocument();
+    expect(screen.getByText(/You're an admin of Mine/)).toBeInTheDocument();
+    expect(screen.queryByText(/Create one, then add/)).toBeNull();
+    unmount();
+    render(await NewWorkroom());
+    expect(form()).toBeNull();
+    expect(screen.getByText(/you're a member of Org A/)).toBeInTheDocument();
+  });
+
+  it("still refuses a member when organization names can't be read, without naming any", async () => {
+    identity = member;
+    organizations = failed(503);
+    render(await NewWorkroom());
+    expect(form()).toBeNull();
+    expect(screen.getByText(/the organization you're working in/)).toBeInTheDocument();
+    expect(screen.queryByText(/You're an admin of/)).toBeNull();
+  });
+
+  it.each([403, 503])("doesn't treat a failed identity read (%i) as a refusal", async (status) => {
+    identity = failed(status);
+    const { unmount } = render(await MyWorkrooms());
+    expect(link()).toBeInTheDocument();
+    expect(screen.queryByText(/you're a member of/)).toBeNull();
+    unmount();
+    render(await NewWorkroom());
+    expect(form()).toBeInTheDocument();
+    expect(screen.getByText(/couldn't check your role/)).toBeInTheDocument();
   });
 });
 

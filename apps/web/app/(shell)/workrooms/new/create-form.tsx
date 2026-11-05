@@ -18,7 +18,8 @@ const UNKNOWN_OUTCOME = "We can't tell whether a workroom was created. Check My 
 export function createProblem(status: number, code: string) {
   if (status === 429) return "Too many requests. Wait a minute and try again.";
   if (status >= 500) return UNKNOWN_OUTCOME;
-  return code === "invalid_argument" ? "Check the name, and try again." : "That didn't work, and no workroom was created.";
+  if (code === "invalid_argument") return "Check the name, and try again.";
+  return status === 403 ? "That didn't work, and no workroom was created. Only an organization's admins can create its workrooms." : "That didn't work, and no workroom was created.";
 }
 
 export function CreateWorkroomForm({ organization }: { organization: string | null }) {

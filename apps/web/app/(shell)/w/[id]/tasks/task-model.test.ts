@@ -59,11 +59,15 @@ it("calls the viewer You, an agent by its name, and anyone else by ID", () => {
   expect(nameOf("agt_2", "per_me", { agt_1: "Architect" })).toBe("agt_2");
 });
 
-describe("names agents chose", () => {
+describe("names people and agents chose", () => {
   it("strips what could make a name read as something else", () => expect(nameOf("agt_1", "per_me", { agt_1: "Arch\u202Eitect\u200B" })).toBe("Architect"));
   it.each(["You", "you", "Owner", "Podster Support"])("flags %s in text-only places", (name) => {
-    expect(isChosenName("agt_1", name)).toBe(true);
+    expect(isChosenName("agt_1", name, "per_me")).toBe(true);
     expect(textNameOf("agt_1", "per_me", { agt_1: name })).toBe(`${name} (name chosen by this agent)`);
+  });
+  it.each(["You", "Owner", "Podster Support"])("flags a person named %s, saying a person chose it", (name) => {
+    expect(isChosenName("per_2", name, "per_me")).toBe(true);
+    expect(textNameOf("per_2", "per_me", { per_2: name })).toBe(`${name} (name chosen by this person)`);
   });
   it("doesn't flag the viewer, or an ordinary name", () => {
     expect(textNameOf("per_me", "per_me", {})).toBe("You");

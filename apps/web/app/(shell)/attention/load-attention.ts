@@ -7,9 +7,10 @@ type Query = <T>(path: string) => Promise<GatewayResult<T>>;
 
 /**
  * There's no query across rooms for "reviews assigned to me", so this asks each room, against the person's limit of 120
- * calls a minute. A render costs 3 for the shell, 3 for the inbox, listing and names, 1 per room asked, and up to
- * `MAX_TITLE_READS`, plus 1 for each room the listing hasn't caught up with. That's 31 at this limit, and a decision adds
- * the Sheet's own 2, so about 3 decisions a minute use it all up. With 3 rooms it's about 12. It stops here and says so.
+ * calls a minute. A render costs 3 for the shell, 3 for the inbox, listing and agent names, 1 per shared organization
+ * named (`MAX_NAMED_ORGS`), 1 per room asked, and up to `MAX_TITLE_READS`, plus 1 for each room the listing hasn't caught up
+ * with. That's 36 at these limits, and a decision adds the Sheet's own 2, so about 3 decisions a minute use it all up. With
+ * 3 rooms and one shared organization it's about 13. It stops here and says so.
  */
 export const MAX_ROOMS = 20;
 

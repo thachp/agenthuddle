@@ -43,6 +43,12 @@ export function pendingInvitations(audit: AuditRow[], now: number): PendingInvit
   });
 }
 
+/** The room read has no owner organization, and the event that creates a room is its owner's, so it carries that organization. */
+export const roomOrgFromEvents = (events: { type: string; actor_org: string | null }[]) => events.find((event) => event.type === "workspace.created")?.actor_org ?? null;
+
+/** Only the room's own organization can be added directly. Anyone else needs an invitation, and the server refuses them here. */
+export const addableAgents = (agents: { id: string; name: string; org_id: string; revoked_at: number | null }[], roomOrg: string) => agents.filter((agent) => agent.org_id === roomOrg && agent.revoked_at === null).map(({ id, name, org_id }) => ({ id, name, org_id }));
+
 export const ROLE_LABELS: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member", guest: "Guest" };
 
 export const roleLabel = (role: string) => ROLE_LABELS[role] ?? role;

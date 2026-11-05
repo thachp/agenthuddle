@@ -19,8 +19,29 @@ export async function loadTasks(query: Query, workspace: string, filter = "", ma
   return { ok: true, data: { tasks, more: cursor !== null } };
 }
 
-/** The names we can show: agents in the viewer's own organizations. Nothing yet names anyone else, so a failure here just leaves IDs. */
-export async function loadNames(query: Query): Promise<Names> {
-  const result = await query<{ agents: { id: string; name: string }[] }>("/api/agents");
-  return result.ok ? Object.fromEntries(result.data.agents.map((agent) => [agent.id, agent.name])) : {};
+type OrgRow = { id: string; name: string; personal: number };
+
+/** One read per organization, however many rows a screen has. Past this many, people there show as IDs. */
+export const MAX_NAMED_ORGS = 5;
+
+/**
+ * People in the viewer's own organizations, which any member may list. A personal organization holds only its owner, who
+ * shows as "You", so it costs no read. A failure just leaves IDs.
+ */
+export async function loadPeopleNames(query: Query, orgs: OrgRow[]): Promise<Names> {
+  const shared = orgs.filter((org) => !org.personal).slice(0, MAX_NAMED_ORGS);
+  const results = await Promise.all(shared.map((org) => query<{ members: { person_id: string; name: string | null }[] }>(`/api/orgs/${encodeURIComponent(org.id)}/members`)));
+  return Object.fromEntries(results.flatMap((result) => (result.ok ? result.data.members : [])).flatMap((member) => (member.name ? [[member.person_id, member.name]] : [])));
 }
+
+/** The names we can show: agents and people in the viewer's own organizations. Nothing yet names anyone else, so a failure here just leaves IDs. */
+export async function loadNames(query: Query, orgs: OrgRow[] = []): Promise<Names> {
+  const [agents, people] = await Promise.all([query<{ agents: { id: string; name: string }[] }>("/api/agents"), loadPeopleNames(query, orgs)]);
+  return { ...people, ...(agents.ok ? Object.fromEntries(agents.data.agents.map((agent) => [agent.id, agent.name])) : {}) };
+}
+
+/** The organizations a viewer can name are their own. Any other shows as its ID. */
+export const orgNamesOf = (orgs: Pick<OrgRow, "id" | "name">[]): Names => Object.fromEntries(orgs.map((org) => [org.id, org.name]));
+
+/** From the shell's cached read. If it failed, there's just nothing to name with. */
+export const orgRows = (result: GatewayResult<{ organizations: OrgRow[] }>) => (result.ok ? result.data.organizations : []);

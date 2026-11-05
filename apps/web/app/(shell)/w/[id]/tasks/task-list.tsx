@@ -45,7 +45,7 @@ export function TaskList({ tasks, me, names, emptyHint }: { tasks: Task[]; me: s
 
 function TaskRow({ task, me, names }: { task: Task; me: string; names: Names }) {
   return (
-    <li className="grid gap-x-4 gap-y-1 p-3 md:grid-cols-[minmax(0,2fr)_auto_minmax(0,1fr)_minmax(0,1fr)] md:items-center">
+    <li className="grid gap-x-4 gap-y-1 p-3 lg:grid-cols-[minmax(0,2fr)_auto_minmax(0,1fr)_minmax(0,1fr)] lg:items-center">
       <div className="min-w-0">
         {/* A title is whatever its author wrote, so it's plain text and wraps. */}
         <SheetLink param="task" target={task.id} className="flex min-h-6 items-center font-medium break-words text-primary underline-offset-2 hover:underline">
@@ -56,11 +56,11 @@ function TaskRow({ task, me, names }: { task: Task; me: string; names: Names }) 
       <TaskStatusBadge status={task.status} />
       <div className="min-w-0 text-sm">
         <span className="text-xs text-muted-foreground">Assignee</span>
-        {task.assignee ? <PrincipalName id={task.assignee} label={nameOf(task.assignee, me, names)} /> : <span className="block text-muted-foreground">Nobody yet</span>}
+        {task.assignee ? <PrincipalName id={task.assignee} label={nameOf(task.assignee, me, names)} me={me} /> : <span className="block text-muted-foreground">Nobody yet</span>}
       </div>
       <div className="min-w-0 text-sm">
         <span className="text-xs text-muted-foreground">Reviewer</span>
-        <PrincipalName id={task.reviewer} label={nameOf(task.reviewer, me, names)} />
+        <PrincipalName id={task.reviewer} label={nameOf(task.reviewer, me, names)} me={me} />
       </div>
     </li>
   );
