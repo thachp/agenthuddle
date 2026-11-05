@@ -457,6 +457,19 @@ describe("TargetSheet", () => {
       await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
     });
 
+    it.each([
+      ["a server error", async () => ({ ok: false as const, status: 502, code: "bad_gateway" })],
+      ["a lost response", async () => Promise.reject(new TypeError("fetch failed"))],
+    ])("can't say nothing changed after %s", async (_what, command) => {
+      setUrl("/agents?agent=a");
+      render(<Screen command={command} />);
+      await title("Agent A");
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("We can't tell whether this saved.");
+      expect(alert).not.toHaveTextContent("nothing changed");
+    });
+
     it("says a denied save didn't happen", async () => {
       setUrl("/agents?agent=a");
       render(<Screen command={async () => ({ ok: false, status: 403, code: "not_allowed" })} />);

@@ -272,13 +272,13 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
         setReloads((count) => count + 1);
       } else {
         if (result.code === "version_conflict") setConflict(true);
-        else setFailedCode(result.code);
+        else setFailedCode(result.status >= 500 ? "unknown" : result.code);
         if (selectedRef.current !== target) setHeldFailure(true);
       }
       return result;
     } catch {
       if (alive.current) {
-        setFailedCode("network");
+        setFailedCode("unknown");
         if (selectedRef.current !== target) setHeldFailure(true);
       }
       return null;
@@ -347,7 +347,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
             ) : null}
             {failedCode ? (
               <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-                That didn't save, and nothing changed. {failedCode === "network" ? "Check your connection and try again." : "You may no longer be allowed to do this."}
+                {failedCode === "unknown" ? "We can't tell whether this saved. Refresh before trying again." : "That didn't save, and nothing changed. You may no longer be allowed to do this."}
               </p>
             ) : null}
             {data !== null ? children({ data, binding, dirty, setDirty, saving, run, close: requestClose }) : null}
