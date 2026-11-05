@@ -124,6 +124,7 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Tasks | Tasks have no creation or update time, so rows can't show age. A task read returns only the latest 20 messages. |
 | Settings: Profile | Forwarding doesn't include Better Auth's update route, so name and email are read-only. |
 | Settings: Organization | The audit list (`/api/orgs/{org}/audit`) has no screen and isn't forwarded. No route says which workrooms a person owns, so the removal warning can't name them, and nothing transfers one. |
+| Create a workroom | Offered only to an admin of the organization the person is working in, from `/v1/me`. A failed read keeps the offer, says so, and leaves the decision to Rust. |
 | Team: adding | The room read has no `owner_org`, so Team reads it from the room's `workspace.created` event, one extra call per render. |
 | Settings: Notifications | Podster delivers no email, so there are no choices to offer. |
 | Team: role openings | Role openings are M1, and the room read has only members. |

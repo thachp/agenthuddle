@@ -20,6 +20,7 @@ const { default: Overview } = await import("./overview/page");
 const { default: Activity } = await import("./activity/page");
 const { default: Settings } = await import("./settings/page");
 const { default: MyWorkrooms } = await import("../../workrooms/page");
+const { default: NewWorkroom } = await import("../../workrooms/new/page");
 
 const params = Promise.resolve({ id: "ws_1" });
 const searchParams = Promise.resolve({});
@@ -122,6 +123,59 @@ describe("Settings", () => {
     replies.set("/api/v1/workspaces/ws_1/audit", failed(503));
     render(await Settings({ params, searchParams }));
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
+  });
+});
+
+describe("who's offered creating a workroom", () => {
+  const rooms = { ok: true as const, data: { workspaces: [] } };
+  const member = { ok: true as const, data: { id: "per_me", org_id: "org_a", orgs: ["org_a", "org_p"], admin_orgs: ["org_p"] } };
+  const link = () => screen.queryByRole("link", { name: "Create a workroom" });
+  const form = () => screen.queryByRole("button", { name: "Create workroom" });
+
+  beforeEach(() => replies.set("/api/v1/workspaces", rooms));
+
+  it("offers it to an admin of the organization they're working in", async () => {
+    identity = { ok: true, data: { ...member.data, org_id: "org_p" } };
+    const { unmount } = render(await MyWorkrooms());
+    expect(link()).toHaveAttribute("href", "/workrooms/new");
+    expect(screen.getByText(/Create one, then add/)).toBeInTheDocument();
+    unmount();
+    render(await NewWorkroom());
+    expect(form()).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't check/)).toBeNull();
+  });
+
+  it("tells a plain member why, and where they are an admin", async () => {
+    identity = member;
+    const { unmount } = render(await MyWorkrooms());
+    expect(link()).toBeNull();
+    expect(screen.getByText(/you're a member of Org A/)).toBeInTheDocument();
+    expect(screen.getByText(/You're an admin of Mine/)).toBeInTheDocument();
+    expect(screen.queryByText(/Create one, then add/)).toBeNull();
+    unmount();
+    render(await NewWorkroom());
+    expect(form()).toBeNull();
+    expect(screen.getByText(/you're a member of Org A/)).toBeInTheDocument();
+  });
+
+  it("still refuses a member when organization names can't be read, without naming any", async () => {
+    identity = member;
+    organizations = failed(503);
+    render(await NewWorkroom());
+    expect(form()).toBeNull();
+    expect(screen.getByText(/the organization you're working in/)).toBeInTheDocument();
+    expect(screen.queryByText(/You're an admin of/)).toBeNull();
+  });
+
+  it.each([403, 503])("doesn't treat a failed identity read (%i) as a refusal", async (status) => {
+    identity = failed(status);
+    const { unmount } = render(await MyWorkrooms());
+    expect(link()).toBeInTheDocument();
+    expect(screen.queryByText(/you're a member of/)).toBeNull();
+    unmount();
+    render(await NewWorkroom());
+    expect(form()).toBeInTheDocument();
+    expect(screen.getByText(/couldn't check your role/)).toBeInTheDocument();
   });
 });
 
