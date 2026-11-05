@@ -2105,22 +2105,49 @@ describe("wake", () => {
       await setWake(bob, `https://hooks.example.com${unique()}`);
       await internalCall(bob, "wake-report", { ok: false, secret: claim.secret, last_seq: claim.last_seq });
       expect((await wakeRow(bob)).consecutive_failures).toBe(0);
-      await internalCall(bob, "wake-report", { ok: true, secret: claim.secret, last_seq: claim.last_seq });
-      expect((await wakeRow(bob)).last_sent_at).toBeNull();
+    });
+
+    it("a send counts against the window even if the URL changed during it", async () => {
+      // Re-setting a URL during each send would otherwise trigger another at once.
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 3600 });
+      await deliver(bob);
+      const claim: any = await internalCall(bob, "wake-claim");
+      const replaced = unique();
+      await setWake(bob, `https://hooks.example.com${replaced}`, { debounce: 3600 });
+      await internalCall(bob, "wake-report", { ok: false, secret: claim.secret, last_seq: claim.last_seq });
+      expect((await wakeRow(bob)).last_sent_at).toBeGreaterThan(0);
+      expect((await consume(bob))[0]).toBeGreaterThan(3000);
+      expect(await hookLog(replaced)).toEqual([]);
+      // The same if it was deleted during the send.
+      const gone = await fresh();
+      await setWake(gone, `https://hooks.example.com${unique()}`, { debounce: 3600 });
+      await deliver(gone);
+      const held: any = await internalCall(gone, "wake-claim");
+      await api(gone, "DELETE", "/v1/inbox/wake", {}, { key: null });
+      await internalCall(gone, "wake-report", { ok: true, secret: held.secret, last_seq: held.last_seq });
+      const after = unique();
+      await setWake(gone, `https://hooks.example.com${after}`, { debounce: 3600 });
+      await deliver(gone, 2);
+      expect((await consume(gone))[0]).toBeGreaterThan(3000);
+      expect(await hookLog(after)).toEqual([]);
     });
 
     it("replacing a URL during a send doesn't silence the new one", async () => {
       const bob = await fresh();
-      await setWake(bob, `https://hooks.example.com${unique()}`);
+      await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 60 });
       await deliver(bob);
       const claim: any = await internalCall(bob, "wake-claim");
       const fresher = unique();
-      await setWake(bob, `https://hooks.example.com${fresher}`);
+      await setWake(bob, `https://hooks.example.com${fresher}`, { debounce: 60 });
       const report: any = await internalCall(bob, "wake-report", { ok: true, secret: claim.secret, last_seq: claim.last_seq });
       expect(report.requeue).toBe(true);
       const row = await wakeRow(bob);
       expect(row.sending_until).toBeNull();
       expect(row.queued_until).toBeGreaterThan(Date.now());
+      // It waits out the window, and then the new URL hears about what's unread.
+      expect((await consume(bob))[0]).toBeGreaterThan(50);
+      await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET last_sent_at = ?", Date.now() - 61_000));
       await consume(bob);
       expect(await hookLog(fresher)).toHaveLength(1);
       // With nothing unread, an old report queues nothing.

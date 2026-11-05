@@ -447,19 +447,21 @@ fn claim_wake(sql: &SqlStorage, now: i64) -> R<Value> {
     )
 }
 
-/// Records how a send went. Three failures in a row turn wake off until it's set again. A report for a URL that's since
-/// been replaced says nothing about the new one, so it's ignored.
+/// Records how a send went. Three failures in a row turn wake off until it's set again. A send that was attempted always
+/// counts against the debounce window, even if the URL was replaced or deleted meanwhile, or re-setting a URL during each
+/// send could trigger another at once. Whether it worked says nothing about the new URL, so that part is ignored.
 fn report_wake(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
-    let ignored = json!({ "retry": false, "requeue": false });
     let Some(wake) = wake_row(sql)? else {
-        return Ok(ignored);
+        // Deleted during the send. The row is still there, blanked, because a report only follows a claim.
+        exec(sql, "UPDATE wake SET last_sent_at = ?", vec![now.into()])?;
+        return Ok(json!({ "retry": false, "requeue": false }));
     };
     if body["secret"].as_str() != wake["secret"].as_str() {
         // Its message is finished, so the flags it left would keep the new URL quiet.
         exec(
             sql,
-            "UPDATE wake SET queued_until = NULL, sending_until = NULL",
-            vec![],
+            "UPDATE wake SET last_sent_at = ?, queued_until = NULL, sending_until = NULL",
+            vec![now.into()],
         )?;
         let (acked, _, _) = inbox_state(sql)?;
         return Ok(json!({ "retry": false, "requeue": unread_count(sql, acked, now)? > 0 }));
