@@ -72,11 +72,11 @@ On 2026-11-05 UTC, read-only probes of staging found no answer from the API:
 | `gateway-staging.podster.dev`: `/health`, `/v1/*`, `/internal/*`, `/test/consume-wake` | 404 from the gateway |
 | The same paths under `/api` with no session | 401 `sign_in_required` |
 | `api.podster.dev`, `api-staging.podster.dev`, `podster-api.podster.dev`, `podster-api-staging.podster.dev` | No connection |
-| `podster-api-staging.agentlater.workers.dev`, `podster-api.agentlater.workers.dev` | 404 from Cloudflare |
+| `podster-api-staging` and `podster-api` under a candidate `workers.dev` subdomain | 404 from Cloudflare |
 
 What keeps this from passing:
 
-- **The account's `workers.dev` subdomain isn't confirmed.** `agentlater` came from an old session's log of a temporary Worker on this account, and a made-up subdomain also answers 404, so that result proves little. Step 5 below uses the real one.
+- **The account's `workers.dev` subdomain isn't confirmed.** The one probed came from an old session's log, and a made-up subdomain also answers 404, so that result proves little. Step 5 below uses the real one.
 - **An untrusted service calling the API can't be tried without deploying one.** The proof is local: assertions from any other key are refused, and the probe's fingerprints were tested against a fake API that answers like the real one.
 
 Also, `apps/gateway/wrangler.jsonc` doesn't set `workers_dev` at its top level, only in `env.staging`. A production deploy from that config would get a `workers.dev` address for the gateway. That isn't the API, but it should be settled before production.
@@ -109,16 +109,16 @@ This needs two people with different GitHub accounts, about five minutes, and th
    read -rs PODSTER_E2E_COOKIE_A && export PODSTER_E2E_COOKIE_A
    ```
 
-3. **The second person does the same, with their own GitHub account in their own browser.** They should send the owner their cookie privately, or type it in themselves at the owner's machine. It stops working when the run ends, because the driver signs both sessions out. They shouldn't put it in chat or a file that lasts.
+3. **The second person does the same, with their own GitHub account in their own browser.** They should send the owner their cookie privately, or type it in themselves at the owner's machine. The driver signs both sessions out when it ends and confirms they no longer work. If it warns that one may still be live, or the run was killed, run step 7. They shouldn't put it in chat or a file that lasts.
 
    ```bash
    read -rs PODSTER_E2E_COOKIE_B && export PODSTER_E2E_COOKIE_B
    ```
 
-4. **Run the journey.** It stops before writing anything if both cookies are the same person's.
+4. **Run the journey,** from the `e2e` folder. It stops before writing anything if both cookies are the same person's.
 
    ```bash
-   cd e2e && npm ci && node journey.mjs --base-url https://gateway-staging.podster.dev
+   npm ci && node journey.mjs --base-url https://gateway-staging.podster.dev
    ```
 
 5. **Run the probe.** Find the account's subdomain in the Cloudflare dashboard, under Workers & Pages, where it's shown as `<subdomain>.workers.dev`. Replace `<subdomain>` below.
@@ -128,6 +128,12 @@ This needs two people with different GitHub accounts, about five minutes, and th
    ```
 
 6. **Record the result.** The journey writes `e2e/results/gateway-staging.podster.dev-<time>.json`, which holds IDs and outcomes only. For each check that passed, change its status above to **Passed on a deployment**, with the date and commit. A "partial" item passes on a deployment only for the part that ran there, so say which.
+
+7. **Only if a session may still be live,** end it, from the same shell:
+
+   ```bash
+   node journey.mjs --base-url https://gateway-staging.podster.dev --sign-out-only
+   ```
 
 ## Decision audit
 

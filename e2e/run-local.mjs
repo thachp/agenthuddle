@@ -109,15 +109,14 @@ for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.exi
 
 async function waitForStack() {
   const deadline = Date.now() + 120_000;
+  let cookie;
   while (Date.now() < deadline) {
     if (stack.exitCode !== null) break;
     try {
-      const res = await fetch(`${base}/.well-known/agent-configuration`);
-      if (res.status === 200) {
-        // The binding to the API is up only once a request through the gateway reaches it.
-        const anonymous = await fetch(`${base}/api/v1/me`);
-        if (anonymous.status === 401) return;
-      }
+      // A signed-in /v1/me is the first request that crosses the service binding to the API.
+      cookie ||= await signUp();
+      const me = await fetch(`${base}/api/v1/me`, { headers: { cookie } });
+      if (me.status === 200) return;
     } catch {
       // Not listening yet.
     }

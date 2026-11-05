@@ -10,7 +10,7 @@ import { generateKeypair, signAgentJWT } from "@auth/agent";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthAgent, eq, key, McpAgent, ok, Person, refused, Report, sleep, Target } from "./lib.mjs";
+import { AuthAgent, eq, key, McpAgent, ok, Person, refused, rejected, Report, sleep, Target } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -18,6 +18,7 @@ const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : u
 const base = option("--base-url") ?? process.env.PODSTER_E2E_BASE_URL;
 const strict = args.includes("--strict");
 const keepSessions = args.includes("--keep-sessions");
+const signOutOnly = args.includes("--sign-out-only");
 
 if (!base) {
   console.error("Pass --base-url, or set PODSTER_E2E_BASE_URL.");
@@ -49,10 +50,41 @@ async function people() {
   return [await Person.fromCookie(target, "Person A", a), await Person.fromCookie(target, "Person B", b)];
 }
 
-const [personA, personB] = await people();
+/**
+ * Ends the sessions whose cookies were pasted for this run, and confirms each one no longer works. Returns false if
+ * one might still be live, so nobody is told it ended when it didn't.
+ */
+async function endSessions() {
+  if (keepSessions) return true;
+  let ended = true;
+  const cookies = new Set([process.env.PODSTER_E2E_COOKIE_A, process.env.PODSTER_E2E_COOKIE_B].filter(Boolean));
+  for (const cookie of cookies) {
+    await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: target.base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
+    const after = await target.http("/api/orgs", { headers: { cookie } }).catch(() => null);
+    if (after?.status !== 401) ended = false;
+  }
+  if (cookies.size) console.log(ended ? "\nThe sessions used for this run are signed out." : "\nWARNING: a session may still be live. Run `node journey.mjs --base-url <url> --sign-out-only` with the same cookies.");
+  return ended;
+}
+
+if (signOutOnly) process.exit((await endSessions()) ? 0 : 1);
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => endSessions().finally(() => process.exit(130)));
+}
+
+let personA, personB;
+try {
+  [personA, personB] = await people();
+} catch (error) {
+  console.error(error.message);
+  await endSessions();
+  process.exit(2);
+}
 // One person holding both organizations proves nothing across people, and the run would leave data behind for it.
 if (personA.id === personB.id) {
   console.error("Both sessions belong to the same person. Sign the second one in with a different account.");
+  await endSessions();
   process.exit(2);
 }
 
@@ -73,7 +105,7 @@ async function kernel() {
     await personA.addAgent(room, lead);
     architect = await AuthAgent.register(target, "Architect agent");
     eq(architect.status, "pending", "a new Agent Auth agent's status");
-    ok(!(await architect.call("get_identity")).ok, "an unclaimed agent could call a capability");
+    rejected(await architect.call("get_identity"), "an unclaimed agent calling a capability");
     architect.calls = 0;
     await architect.claim(personB);
     await architect.identify();
@@ -108,7 +140,7 @@ async function kernel() {
     await architect.waitFor("task.changes_requested", task.id);
     const second = await architect.twice("submit_task", { ...at, version: changes.version, note: "Second draft", artifacts: [{ uri: "https://example.com/pr/2", label: "PR" }] });
     eq(second.submission_no, 2, "submission number");
-    refused(await architect.call("verify_task", { ...at, submission_no: 2, idempotency_key: key() }), ["not_allowed", "self_sign_off", "FORBIDDEN"], "B verifying its own work");
+    refused(await architect.call("verify_task", { ...at, submission_no: 2, idempotency_key: key() }), "not_allowed", "B verifying its own work");
     eq((await lead.twice("verify_task", { ...at, submission_no: 2 })).status, "completed", "status");
   });
 
@@ -212,6 +244,7 @@ async function kernel() {
   await check("C7", "Org A revokes Org B: B's next read and next action fail, and it gets one ID-only removal notice", async () => {
     const version = await personA.policyVersion(room);
     const whole = await personA.dash("DELETE", `/v1/workspaces/${room}/organizations/${personB.org}`, { policy_version: version });
+    ok(whole.ok || whole.status === 404, `revoking the organization answered HTTP ${whole.status} ${whole.code ?? ""}`);
     if (!whole.ok) {
       report.gap("C7-org", "revoking a whole organization", `DELETE /v1/workspaces/{ws}/organizations/{org} answers HTTP ${whole.status}: it's in ARCHITECTURE.md's route list but isn't built. This run revokes each of Org B's agents instead.`);
       // Messages race the revocation, and none may reach B afterward.
@@ -219,8 +252,8 @@ async function kernel() {
       await Promise.all([personA.revoke(room, architect.id), ...racing]);
       await personA.revoke(room, second.id);
     }
-    refused(await architect.call("get_task", { workspace_id: room, task_id: scoped.id }), ["access_revoked", "FORBIDDEN"], "B's next read");
-    refused(await architect.call("send_message", { workspace_id: room, task_id: scoped.id, body: "still here?", idempotency_key: key() }), ["access_revoked", "FORBIDDEN"], "B's next action");
+    refused(await architect.call("get_task", { workspace_id: room, task_id: scoped.id }), "access_revoked", "B's next read");
+    refused(await architect.call("send_message", { workspace_id: room, task_id: scoped.id, body: "still here?", idempotency_key: key() }), "access_revoked", "B's next action");
     await architect.waitFor("member.revoked");
     await lead.must("send_message", { workspace_id: room, task_id: scoped.id, body: "SECRET-AFTER after the revocation" });
     await settle();
@@ -279,8 +312,7 @@ async function acceptance() {
   await check("AC-03", "people outside the room and agents can't reach access commands, whatever their label", async () => {
     const tools = await lead.tools();
     ok(!tools.some((t) => /member|invit|role|revoke|disconnect|withdraw|admin|grant|scope/.test(t)), `an access tool is exposed: ${tools.join(", ")}`);
-    const execute = await guest.execute("add_member", { workspace_id: room });
-    ok(!execute.ok, "an unknown capability ran");
+    rejected(await guest.execute("add_member", { workspace_id: room }), "an unknown capability");
     for (const [method, path, body] of [
       ["POST", members(), { principal_id: guest.id, kind: "agent", org_id: personB.org, role: "member", policy_version: 1 }],
       ["POST", `${members()}/${lead.id}/role`, { role: "guest", policy_version: 1 }],
@@ -332,7 +364,7 @@ async function acceptance() {
     await admit(withdrawn);
     const version = await personA.policyVersion(room);
     await personB.must("POST", `${members()}/${withdrawn.id}/withdraw`, {});
-    refused(await withdrawn.call("get_workspace", { workspace_id: room }), ["access_revoked", "FORBIDDEN"], "the withdrawn agent reading");
+    refused(await withdrawn.call("get_workspace", { workspace_id: room }), "access_revoked", "the withdrawn agent reading");
     refused(await personA.dash("POST", members(), { principal_id: withdrawn.id, kind: "agent", org_id: personB.org, role: "member", policy_version: await personA.policyVersion(room) }), "invitation_required", "the room owner re-adding it");
     const invitation = await personA.invite(room, personB.org);
     refused(await personA.accept(invitation.token, personB.org, [withdrawn]), "not_allowed", "the room owner accepting for it");
@@ -342,8 +374,7 @@ async function acceptance() {
 
   await check("AC-07", "someone else's agent can't be withdrawn or disconnected", async () => {
     const before = await guest.must("get_identity", {}, false);
-    const attempt = await personA.dash("POST", `${members()}/${guest.id}/withdraw`, {});
-    ok(!attempt.ok, "the room owner withdrew another organization's agent");
+    rejected(await personA.dash("POST", `${members()}/${guest.id}/withdraw`, {}), "the room owner withdrawing another organization's agent");
     refused(await personA.dash("POST", `/agents/${guest.id}/disconnect`), "agent_not_found", "disconnecting another organization's agent");
     refused(await personA.dash("GET", `/agents/${guest.id}`), "agent_not_found", "reading another organization's agent");
     eq(await roleOf(personA, room, guest.id), "guest", "its participation");
@@ -378,10 +409,10 @@ async function acceptance() {
       "edited payload": `${head}.${base64(JSON.stringify(edited))}.${signature}`,
       garbage: "not.a.token",
     };
-    for (const [name, jwt] of Object.entries(cases)) ok(!(await guest.execute(identity, {}, jwt)).ok, `a token ${name} was accepted`);
+    for (const [name, jwt] of Object.entries(cases)) rejected(await guest.execute(identity, {}, jwt), `a token ${name}`);
     const once = await guest.token(identity);
     ok((await guest.execute(identity, {}, once)).ok, "a good token was refused");
-    ok(!(await guest.execute(identity, {}, once)).ok, "a replayed token was accepted");
+    rejected(await guest.execute(identity, {}, once), "a replayed token");
     const mcp = await target.http("/mcp", { method: "POST", headers: { authorization: "Bearer forged", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" });
     eq(mcp.status, 401, "a forged MCP token");
     eq((await target.http("/api/v1/me", { headers: { cookie: "better-auth.session_token=forged; __Secure-better-auth.session_token=forged" } })).status, 401, "a forged session");
@@ -411,7 +442,7 @@ async function acceptance() {
     const burst = Array.from({ length: 6 }, (_, i) => fenced.call("send_message", { ...where, body: `racing ${i}`, idempotency_key: key() }));
     const [off] = await Promise.all([personB.must("POST", `/agents/${fenced.id}/disconnect`), ...burst]);
     eq(off.status, "disconnected", "connection status");
-    ok(!(await fenced.call("get_identity")).ok, "its old key still works");
+    rejected(await fenced.call("get_identity"), "its old key");
     ok(!(await roleOf(personA, room, fenced.id)), "it's still a member");
     eq((await lead.must("get_task", where, false)).task.status, "open", "its offered task");
     const state = await lead.must("get_task", where, false);
@@ -424,10 +455,10 @@ async function acceptance() {
   await check("AC-29", "disconnect, reconnect, rejoin and disconnect again: no room comes back by itself, and the second one completes", async () => {
     const on = await personB.must("POST", `/agents/${fenced.id}/reconnect`);
     eq(on.status, "active", "status after reconnecting");
-    ok(!(await fenced.call("get_identity")).ok, "reconnecting brought an old key back");
+    rejected(await fenced.call("get_identity"), "its old key after reconnecting");
     const fresh = await AuthAgent.connect(target, personB, "Reconnected agent", { linkAgent: fenced.id });
     eq(fresh.id, fenced.id, "a new credential reattaches to the same agent");
-    refused(await fresh.call("get_workspace", { workspace_id: room }), ["access_revoked", "FORBIDDEN"], "room access after reconnecting");
+    refused(await fresh.call("get_workspace", { workspace_id: room }), "access_revoked", "room access after reconnecting");
     await admit(fresh);
     await fresh.must("get_workspace", { workspace_id: room }, false);
     eq((await personB.must("POST", `/agents/${fresh.id}/disconnect`)).status, "disconnected", "the second disconnect");
@@ -458,7 +489,7 @@ async function acceptance() {
     refused(await lead.call("create_task", { workspace_id: room, title: "x", instructions: "x", assignee: reviewer.id, reviewer: reviewer.id, idempotency_key: key() }), "self_sign_off", "creating a task reviewed by its assignee");
     const accepted = await guest.must("accept_task", { ...where, version: reviewed.version });
     const submitted = await guest.must("submit_task", { ...where, version: accepted.version, note: "done" });
-    for (const who of [guest, lead]) refused(await who.call("verify_task", { ...where, submission_no: submitted.submission_no, idempotency_key: key() }), ["not_allowed", "FORBIDDEN"], `${who.label} verifying`);
+    for (const who of [guest, lead]) refused(await who.call("verify_task", { ...where, submission_no: submitted.submission_no, idempotency_key: key() }), "not_allowed", `${who.label} verifying`);
     eq((await reviewer.must("verify_task", { ...where, submission_no: submitted.submission_no })).status, "completed", "the reviewer's approval");
     const tools = await lead.tools();
     ok(!tools.some((t) => /merge|deploy/.test(t)), "a merge or deploy tool is exposed");
@@ -469,7 +500,7 @@ async function acceptance() {
     for (const method of ["POST", "PUT", "DELETE"]) eq((await personA.dash(method, `/v1/workspaces/${room}/audit`, {})).status, 404, `owner ${method} on the audit log`);
     refused(await personB.dash("GET", `/v1/workspaces/${room}/audit`), "workspace_not_found", "someone outside reading it");
     eq((await personA.audit(room)).length, before.length, "audit entries afterward");
-    ok(before.every((e) => e.prior_json === null || !/token|secret/i.test(e.prior_json + e.new_json)), "an audit entry holds a secret");
+    ok(before.every((e) => !/token|secret/i.test(`${e.prior_json} ${e.new_json}`)), "an audit entry holds a secret");
     if (!before.some((e) => e.outcome !== "allowed")) report.gap("AC-22+", "protected denial records", "this run's refusals left no audit entries: only allowed changes are recorded, so the denied-mutation stream ACCESS-CONTROL.md asks for doesn't exist.");
     return "a member or agent reading it is apps/api's test: no public route lets an agent ask";
   });
@@ -507,7 +538,7 @@ async function acceptance() {
     await personA.revoke(room, requesterLeaves.id);
     const flagged = (await personA.must("GET", `/v1/workspaces/${room}/tasks/${byRequester.id}`)).task;
     eq([flagged.status, flagged.needs_attention], ["submitted", true], "requester leaving flags the task");
-    refused(await lead.call("set_requester", { ...whereRequester, version: flagged.version, requester: lead.id, idempotency_key: key() }), ["not_allowed", "FORBIDDEN"], "D24: a member agent taking over");
+    refused(await lead.call("set_requester", { ...whereRequester, version: flagged.version, requester: lead.id, idempotency_key: key() }), "not_allowed", "D24: a member agent taking over");
     const taker = await personA.must("POST", `/v1/workspaces/${room}/tasks/${byRequester.id}/set-requester`, { version: flagged.version, requester: lead.id });
     eq([taker.requester, taker.needs_attention], [lead.id, false], "D24: the owner taking over with set_requester");
     await requesterLeaves.close();
@@ -533,7 +564,7 @@ async function acceptance() {
     if (!oversight.ok) report.gap("D21-o", "an owner looking at its agent's inbox", `GET /api/agents/{agent}/inbox answers HTTP ${oversight.status}: the API has it and the gateway doesn't expose it.`);
   });
 
-  await check("AC-26", "valid, random and malformed room IDs all answer the same to a non-participant", async () => {
+  await check("AC-26", "a real room and a random ID answer the same to a non-participant", async () => {
     const read = (id) => personB.dash("GET", `/v1/workspaces/${id}`);
     const [real, random] = [await read(room), await read(`ws_${crypto.randomUUID().replaceAll("-", "")}`)];
     eq([real.status, real.body], [random.status, random.body], "a real room and a random ID");
@@ -546,7 +577,7 @@ async function acceptance() {
     const where = { workspace_id: room, task_id: offered.id };
     const accepted = await guest.must("accept_task", { ...where, version: offered.version });
     const submitted = await guest.must("submit_task", { ...where, version: accepted.version, note: "done" });
-    refused(await lead.call("set_reviewer", { ...where, version: submitted.version, reviewer: lead.id, idempotency_key: key() }), ["not_allowed", "FORBIDDEN"], "the requester swapping");
+    refused(await lead.call("set_reviewer", { ...where, version: submitted.version, reviewer: lead.id, idempotency_key: key() }), "not_allowed", "the requester swapping");
     eq((await personA.must("POST", `/v1/workspaces/${room}/tasks/${offered.id}/set-reviewer`, { version: submitted.version, reviewer: lead.id })).reviewer, lead.id, "the owner swapping");
   });
   report.gap("AC-30+", "rooms that require a person to review", "there's no such room setting yet (`can_review` is always passed false in apps/api), so the policy cases of AC-30 can't run. Room-level person review is decision 5, for M1.");
@@ -568,7 +599,7 @@ async function acceptance() {
   });
 
   await check("D14", "guests can't create tasks unless the invitation allows it", async () => {
-    refused(await guest.call("create_task", { workspace_id: room, title: "No", instructions: "x", idempotency_key: key() }), ["not_allowed", "FORBIDDEN"], "a default guest creating a task");
+    refused(await guest.call("create_task", { workspace_id: room, title: "No", instructions: "x", idempotency_key: key() }), "not_allowed", "a default guest creating a task");
     const allowed = await AuthAgent.connect(target, personB, "Allowed guest");
     await admit(allowed, room, { guest_can_create: true });
     eq((await allowed.must("create_task", { workspace_id: room, title: "Yes", instructions: "x" })).status, "open", "a guest invited with the switch on");
@@ -586,14 +617,6 @@ async function acceptance() {
   await reviewer.close();
 }
 
-/** Ends both sessions, so the cookies pasted for this run stop working. */
-async function signOut() {
-  for (const person of [personA, personB]) {
-    const res = await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie: person.cookie, origin: target.base, "content-type": "application/json" }, body: "{}" });
-    console.log(`signed out ${person.label}: HTTP ${res.status}`);
-  }
-}
-
 const started = new Date().toISOString();
 let crashed;
 for (const suite of [kernel, acceptance]) {
@@ -606,7 +629,7 @@ for (const suite of [kernel, acceptance]) {
     console.error(`FAIL ${suite.name} stopped: ${error.message}`);
   }
 }
-if (process.env.PODSTER_E2E_COOKIE_A && !keepSessions) await signOut();
+const sessionsEnded = await endSessions();
 
 const counts = report.counts();
 const summary = { target: new URL(base).origin, kind: isLocal ? "local" : "deployment", started, finished: new Date().toISOString(), persons_distinct: personA.id !== personB.id, counts, results: report.results };
@@ -614,4 +637,4 @@ mkdirSync(join(here, "results"), { recursive: true });
 const file = join(here, "results", `${host}-${started.replaceAll(":", "-").slice(0, 19)}.json`);
 writeFileSync(file, `${JSON.stringify(summary, null, 2)}\n`);
 console.log(`\n${counts.pass} passed, ${counts.fail} failed, ${counts.gap} gaps. Results: ${file}`);
-process.exit(counts.fail > 0 || crashed || (strict && counts.gap > 0) ? 1 : 0);
+process.exit(counts.fail > 0 || crashed || !sessionsEnded || (strict && counts.gap > 0) ? 1 : 0);

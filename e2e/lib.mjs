@@ -53,6 +53,12 @@ export function refused(result, codes, label) {
   if (!allowed.includes(result.code)) throw new Error(`${label}: expected ${allowed.join(" or ")}, got ${result.code ?? `HTTP ${result.status}`}`);
 }
 
+/** Refused by the server's decision, not by an outage or a limit, which would prove nothing about the check. */
+export function rejected(result, label) {
+  if (result.ok) throw new Error(`${label}: it was accepted`);
+  if (![400, 401, 403, 404].includes(result.status)) throw new Error(`${label}: expected a refusal, got HTTP ${result.status}`);
+}
+
 export class Target {
   constructor(base, { pollMs }) {
     this.base = base.replace(/\/$/, "");
@@ -164,8 +170,16 @@ export class Person {
     return this.must("DELETE", `/v1/workspaces/${room}/members/${principal}`, { policy_version: await this.policyVersion(room) });
   }
 
+  /** The whole log, because a count or scan of one page would miss anything past it. */
   async audit(room) {
-    return (await this.must("GET", `/v1/workspaces/${room}/audit`)).audit;
+    const entries = [];
+    let after = 0;
+    for (;;) {
+      const page = await this.must("GET", `/v1/workspaces/${room}/audit?after=${after}`);
+      entries.push(...page.audit);
+      if (!page.next_cursor) return entries;
+      after = page.next_cursor;
+    }
   }
 }
 

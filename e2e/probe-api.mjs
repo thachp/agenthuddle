@@ -75,10 +75,10 @@ async function probeHosts() {
 async function probeGateway() {
   for (const path of PRIVATE_PATHS) {
     const answer = await ask(`${gateway}${path}`);
-    say(!isApi(answer), `${gateway}${path} doesn't reach the API (${describe(answer)})`);
+    say(answer.status !== 0 && !isApi(answer), `${gateway}${path} answers, and it isn't the API (${describe(answer)})`);
     if (!withPosts) continue;
     const posted = await ask(`${gateway}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-podster-assertion": "forged" }, body: "{}" });
-    say(!isApi(posted), `POST ${gateway}${path} with a forged assertion doesn't reach the API (${describe(posted)})`);
+    say(posted.status !== 0 && !isApi(posted), `POST ${gateway}${path} with a forged assertion answers, and it isn't the API (${describe(posted)})`);
   }
   for (const path of PRIVATE_PATHS) {
     const answer = await ask(`${gateway}/api${path}`, { headers: { "x-podster-assertion": "forged" } });
@@ -86,6 +86,11 @@ async function probeGateway() {
   }
 }
 
+// A host that can't be reached looks the same as one with no API. A gateway that answers shows this machine is online.
+if (!configOnly && !gateway) {
+  console.error("Pass --gateway, or --config-only.");
+  process.exit(2);
+}
 checkConfig();
 if (!configOnly) {
   if (gateway) await probeGateway();
