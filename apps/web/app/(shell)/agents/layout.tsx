@@ -2,6 +2,7 @@ import { ReadFailure } from "@/components/shell/read-failure";
 import { getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { AgentList, ConnectLink, type AgentRow } from "./agent-list";
 import { getDirectory } from "./directory";
+import { OversightRooms } from "./oversight-rooms";
 
 /** A layout, so the list stays put behind the agent and connection Sheets, and focus has its launcher to return to. */
 export default async function AgentsLayout({ children }: { children: React.ReactNode }) {
@@ -24,6 +25,7 @@ export default async function AgentsLayout({ children }: { children: React.React
       </header>
       {children}
       {list.ok ? <AgentList rows={rows} truncated={list.data.truncated} canConnect={canConnect} /> : <ReadFailure />}
+      {canConnect ? <OversightRooms agents={Object.fromEntries(rows.map(({ agent }) => [agent.id, agent.name]))} /> : null}
     </section>
   );
 }

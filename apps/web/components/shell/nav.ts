@@ -6,7 +6,7 @@ export type NavItem = { href: string; label: string; icon: LucideIcon; match: st
 export const PRIMARY_NAV: NavItem[] = [
   { href: "/attention", label: "Needs attention", icon: Bell, match: ["/attention"] },
   { href: "/workrooms", label: "Workrooms", icon: LayoutGrid, match: ["/workrooms", "/w/"] },
-  { href: "/agents", label: "Agents", icon: Bot, match: ["/agents"] },
+  { href: "/agents", label: "Agents", icon: Bot, match: ["/agents", "/oversight"] },
   { href: "/settings/profile", label: "Settings", icon: Settings, match: ["/settings"] },
 ];
 
