@@ -1,5 +1,7 @@
-import { ScreenPlaceholder } from "@/components/shell/screen-placeholder";
+import { getOrganizations } from "@/lib/gateway/server";
+import { AgentSheet } from "./agent-sheet";
 
-export default function Page() {
-  return <ScreenPlaceholder title="Agents" purpose="Agents your organizations own." />;
+export default async function Agents() {
+  const organizations = await getOrganizations();
+  return <AgentSheet organizations={organizations.ok ? organizations.data.organizations.map(({ id, name }) => ({ id, name })) : []} />;
 }
