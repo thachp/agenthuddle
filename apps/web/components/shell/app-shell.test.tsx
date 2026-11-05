@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { setUrl } from "@/test/next-navigation";
+import { routerCalls, setUrl } from "@/test/next-navigation";
 import { AppShell } from "./app-shell";
 import { visibleWorkroomTabs } from "./nav";
 
@@ -41,6 +41,22 @@ describe("AppShell", () => {
     for (const item of ["Acme", "Beta", "Account", "Notifications", "Log out"]) expect(within(menu).getByText(item)).toBeInTheDocument();
     expect(within(menu).queryByText("Billing")).toBeNull();
     expect(within(menu).getByLabelText("Current organization").closest('[role="menuitem"]')).toHaveTextContent("Beta");
+  });
+
+  it("drops a selected organization the person is no longer in, so room reads work again", () => {
+    document.cookie = "podster-org=org_gone; path=/";
+    const before = routerCalls.refresh;
+    render(<AppShell unread={0} profile={profile} staleOrg>content</AppShell>);
+    expect(document.cookie).not.toContain("podster-org=org_gone");
+    expect(routerCalls.refresh).toBe(before + 1);
+  });
+
+  it("logging out forgets an invitation kept in this tab", async () => {
+    sessionStorage.setItem("podster-org-invitation", "oin_1.secret");
+    shell();
+    await userEvent.click(screen.getByRole("button", { name: "Profile menu" }));
+    await userEvent.click(await screen.findByText("Log out"));
+    expect(sessionStorage.getItem("podster-org-invitation")).toBeNull();
   });
 
   it("switching organization only sets a selector", async () => {

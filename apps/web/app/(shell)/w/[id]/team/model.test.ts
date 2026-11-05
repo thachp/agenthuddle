@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { explainRefusal, isExternal, pendingInvitations, relationship, type AuditRow } from "./model";
+import { addableAgents, explainRefusal, isExternal, pendingInvitations, relationship, roomOrgFromEvents, type AuditRow } from "./model";
 
 const row = (action: string, target: string, created_at: number, details: unknown = null): AuditRow => ({ id: `a_${action}_${target}`, actor_id: "per_a", actor_kind: "person", action, target_id: target, outcome: "allowed", prior_json: null, new_json: details === null ? null : JSON.stringify(details), policy_version: 1, created_at });
 const DAY = 24 * 60 * 60 * 1000;
+
+describe("agents that can be added directly", () => {
+  const agent = (id: string, org_id: string, revoked_at: number | null = null) => ({ id, name: id, org_id, revoked_at });
+
+  it("reads the room's organization from the event that created it", () => {
+    expect(roomOrgFromEvents([{ type: "workspace.created", actor_org: "org_a" }, { type: "member.added", actor_org: "org_b" }])).toBe("org_a");
+    expect(roomOrgFromEvents([{ type: "member.added", actor_org: "org_b" }])).toBeNull();
+    expect(roomOrgFromEvents([])).toBeNull();
+  });
+
+  it("lists only the room's own organization, and nothing disconnected", () => {
+    expect(addableAgents([agent("agt_1", "org_a"), agent("agt_2", "org_b"), agent("agt_3", "org_a", 5)], "org_a")).toEqual([{ id: "agt_1", name: "agt_1", org_id: "org_a" }]);
+  });
+});
 
 describe("pendingInvitations", () => {
   const now = 100 * DAY;

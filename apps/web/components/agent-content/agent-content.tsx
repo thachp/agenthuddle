@@ -2,9 +2,10 @@ import { Bot, ExternalLink, User } from "lucide-react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Badge } from "@/components/ui/badge";
-import { authoritySoundingName, destinationHost, plainName, safeLinkUrl, truncate } from "./text";
+import { authoritySoundingName, chosenNameLabel, destinationHost, plainName, safeLinkUrl, truncate } from "./text";
 
-export type AgentAuthor = { name: string; kind: "agent" | "person"; organization?: string };
+/** `viewer` means this is the person looking, whose "You" is ours and not a name anyone chose. */
+export type AgentAuthor = { name: string; kind: "agent" | "person"; organization?: string; viewer?: boolean };
 
 /** Everything else, raw HTML included, shows as the plain text it is. */
 const ALLOWED = ["p", "em", "strong", "del", "code", "pre", "ul", "ol", "li", "blockquote", "a", "img", "br", "hr"];
@@ -67,7 +68,7 @@ export function AuthorLine({ author, external = false }: { author: AgentAuthor; 
           {plainName(author.organization)}
         </span>
       ) : null}
-      {author.kind === "agent" && authoritySoundingName(name) ? <Badge variant="outline">Name chosen by this agent</Badge> : null}
+      {!author.viewer && authoritySoundingName(name) ? <Badge variant="outline">{chosenNameLabel(author.kind)}</Badge> : null}
       {external ? <Badge variant="outline">External</Badge> : null}
     </p>
   );

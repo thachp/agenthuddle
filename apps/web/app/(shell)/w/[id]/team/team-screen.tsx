@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { clientCommand } from "@/lib/gateway/client";
 import type { GatewayResult } from "@/lib/gateway/result";
+import { textNameOf } from "../tasks/task-model";
 import { ConfirmAction } from "./confirm-action";
 import { AccessSheet } from "./access-sheet";
 import { FIELD, MOBILE_TARGET } from "./field";
@@ -34,7 +35,7 @@ export type TeamProps = {
   orgNames: Record<string, string>;
   /** The viewer's organizations, or null if that read failed. */
   orgs: OrgOption[] | null;
-  /** The viewer's organizations' agents, or null if that read failed. */
+  /** Agents of the room's own organization that the viewer's organizations hold, or null if either read failed. */
   agents: AgentOption[] | null;
   /** There are more of the viewer's organizations' agents than the read returned. */
   agentsPartial?: boolean;
@@ -111,7 +112,7 @@ export function TeamScreen(props: TeamProps) {
         <ul className="divide-y rounded-lg border">
           <li className="flex flex-wrap items-center justify-between gap-2 p-3">
             <div className="min-w-0">
-              <AuthorLine author={{ name: label(owner), kind: "person" }} />
+              <AuthorLine author={{ name: label(owner), kind: "person", viewer: isOwner }} />
             </div>
             <Badge variant="secondary">Owner</Badge>
           </li>
@@ -122,7 +123,7 @@ export function TeamScreen(props: TeamProps) {
             return (
               <li key={member.principal_id} className="flex flex-wrap items-center justify-between gap-2 p-3">
                 <div id={nameId} className="min-w-0 flex-1 basis-56">
-                  <AuthorLine author={{ name, kind: member.kind, organization: orgLabel(member.org_id) }} external={isExternal(member.org_id, viewer)} />
+                  <AuthorLine author={{ name, kind: member.kind, organization: orgLabel(member.org_id), viewer: self }} external={isExternal(member.org_id, viewer)} />
                 </div>
                 <Badge variant="secondary">{roleLabel(member.role)}</Badge>
                 <div className="flex flex-wrap gap-2">
@@ -179,7 +180,7 @@ export function TeamScreen(props: TeamProps) {
       </section>
 
       {canManage ? <AddParticipants base={base} isOwner={isOwner} orgs={orgs} agents={agents} agentsPartial={agentsPartial} orgNames={orgNames} memberIds={memberIds} send={send} /> : null}
-      {canManage ? <Invitations base={base} room={room} invitations={invitations} orgLabel={orgLabel} label={label} send={send} focusAfter={noticeRef} /> : null}
+      {canManage ? <Invitations base={base} room={room} invitations={invitations} orgLabel={orgLabel} label={(id) => textNameOf(id, viewer.id, names)} send={send} focusAfter={noticeRef} /> : null}
 
       <AccessSheet roomId={roomId} roomName={roomName} viewer={viewer} names={names} orgNames={orgNames} />
     </section>
@@ -226,10 +227,10 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
       <form onSubmit={addAgent} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add an agent</h3>
         {agents === null ? <ReadFailure /> : null}
-        {agentsPartial ? <p role="status" className="text-sm">Your organizations have more agents than we can list here, so some may be missing.</p> : null}
+        {agentsPartial ? <p role="status" className="text-sm">Your organizations have more agents than we can list here, so some of this workroom's may be missing.</p> : null}
         {agents !== null && available.length === 0 && !agentsPartial ? (
           <p className="text-sm text-muted-foreground">
-            None of your organizations' agents are left to add.{" "}
+            None of this workroom's organization's agents are left to add.{" "}
             <Link href="/agents/connect" prefetch={false} className="text-primary underline">
               Connect an agent
             </Link>

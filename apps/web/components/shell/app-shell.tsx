@@ -1,21 +1,31 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ORG_COOKIE } from "@/lib/gateway/forward";
 import { isActive, PRIMARY_NAV } from "./nav";
 import { ProfileMenu, type ProfileMenuProps } from "./profile-menu";
 
-export function AppShell({ unread, profile, children }: { unread: number | null; profile: ProfileMenuProps; children: React.ReactNode }) {
+export function AppShell({ unread, profile, staleOrg = false, children }: { unread: number | null; profile: ProfileMenuProps; staleOrg?: boolean; children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
 
   // Links here don't prefetch. Each prefetch renders a page and spends the person's gateway rate limit, and this is on every screen.
   // A session slides forward on this read, and a server render can't pass the new cookie on to the browser.
   useEffect(() => {
     fetch("/api/auth/get-session").catch(() => undefined);
   }, []);
+
+  // Someone who left or was removed may still have that organization selected, and the gateway refuses every room read
+  // while they do. Only a server render knows, and only a browser can drop the cookie.
+  useEffect(() => {
+    if (!staleOrg) return;
+    document.cookie = `${ORG_COOKIE}=; path=/; max-age=0`;
+    router.refresh();
+  }, [staleOrg, router]);
 
   return (
     <TooltipProvider>
@@ -54,7 +64,8 @@ export function AppShell({ unread, profile, children }: { unread: number | null;
           </SidebarFooter>
         </Sidebar>
         {/* This is the page's <main>. */}
-        <SidebarInset id="main-content" tabIndex={-1} className="outline-none">
+        {/* min-w-0, or wide content sets this flex item's width and the page scrolls sideways under the fixed Sidebar. */}
+        <SidebarInset id="main-content" tabIndex={-1} className="min-w-0 outline-none">
           <header className="flex h-12 items-center gap-2 border-b px-4 md:hidden">
             <SidebarTrigger className="size-11" aria-label="Open menu" />
             <span className="font-semibold">Podster</span>

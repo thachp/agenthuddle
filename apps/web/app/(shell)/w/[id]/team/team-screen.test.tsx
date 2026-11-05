@@ -93,8 +93,8 @@ describe("Team, as the owner", () => {
 
   it("doesn't claim there are no agents left when the list was cut short", () => {
     render(<TeamScreen {...props} agents={[]} agentsPartial />);
-    expect(screen.getByText(/some may be missing/)).toBeInTheDocument();
-    expect(screen.queryByText(/None of your organizations' agents/)).not.toBeInTheDocument();
+    expect(screen.getByText(/may be missing/)).toBeInTheDocument();
+    expect(screen.queryByText(/None of this workroom's organization's agents/)).not.toBeInTheDocument();
   });
 
   it("explains a stale page and offers the latest", async () => {

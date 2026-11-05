@@ -13,7 +13,7 @@ import { TaskSheet } from "../w/[id]/tasks/task-sheet";
 import { acknowledgeUpTo, describeEvent, type InboxEvent } from "./attention-model";
 import type { Attention } from "./load-attention";
 
-export function AttentionScreen({ attention, me, names }: { attention: Attention; me: string; names: Names }) {
+export function AttentionScreen({ attention, me, names, orgNames }: { attention: Attention; me: string; names: Names; orgNames?: Names }) {
   return (
     <section className="max-w-3xl space-y-6">
       <div className="space-y-1">
@@ -24,7 +24,7 @@ export function AttentionScreen({ attention, me, names }: { attention: Attention
       <Updates attention={attention} me={me} names={names} />
       {/* These are real items in the design, and this says so rather than letting an empty screen mean there are none. */}
       <p className="text-xs text-muted-foreground">Role invitations and wake or connection problems on your agents don't show here yet. Check the Agents page for those.</p>
-      <TaskSheet me={me} names={names} resolve={parseCrossRoomTarget} />
+      <TaskSheet me={me} names={names} orgNames={orgNames} resolve={parseCrossRoomTarget} />
     </section>
   );
 }

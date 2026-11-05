@@ -117,12 +117,35 @@ describe("what the Sheet shows", () => {
     expect(calls.some((call) => call.url.includes("evil.example"))).toBe(false);
   });
 
+  it("names an organization the viewer can name, and keeps the ID of one it can't", async () => {
+    const user = userEvent.setup();
+    answer = () => json(200, detail({}, { messages: [{ id: "msg_2", seq: 1, from: { id: "per_r", org: "org_a" }, external: false, body: "Hello", created_at: 3 }, { id: "msg_3", seq: 2, from: { id: "agt_a", org: "org_b" }, external: true, body: "Hi", created_at: 3 }] }));
+    render(
+      <>
+        <TaskSheet me="per_me" names={{ agt_a: "Architect" }} orgNames={{ org_a: "Acme" }} room={ROOM} resolve={(target) => ({ workspace: ROOM.id, task: target })} />
+      </>,
+    );
+    await user.click(await screen.findByRole("tab", { name: /Discussion/ }));
+    const panel = screen.getByRole("tabpanel");
+    expect(within(panel).getByText("Acme")).toBeInTheDocument();
+    expect(within(panel).queryByText("org_a")).toBeNull();
+    expect(within(panel).getByText("org_b")).toBeInTheDocument();
+  });
+
   it("gives no External badge to someone in the viewer's own organization", async () => {
     const user = userEvent.setup();
     answer = () => json(200, detail({}, { messages: [{ id: "msg_2", seq: 1, from: { id: "per_r", org: "org_a" }, external: false, body: "Hello", created_at: 3 }] }));
     await open();
     await user.click(screen.getByRole("tab", { name: /Discussion/ }));
     expect(within(screen.getByRole("tabpanel")).queryByText("External")).toBeNull();
+  });
+
+  it("labels a person whose name could pass for the viewer, and not the viewer", async () => {
+    answer = () => json(200, detail({ requester: "per_me", reviewer: "per_r" }));
+    render(<TaskSheet me="per_me" names={{ per_r: "You" }} room={ROOM} resolve={(target) => ({ workspace: ROOM.id, task: target })} />);
+    await screen.findByRole("heading", { name: "Design the API" });
+    expect(screen.getByTitle("per_r").parentElement).toHaveTextContent("Name chosen by this person");
+    expect(screen.getByTitle("per_me").parentElement).not.toHaveTextContent("Name chosen");
   });
 
   it("labels an agent whose name could pass for the viewer or an authority, everywhere it's named", async () => {

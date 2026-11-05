@@ -25,7 +25,9 @@ describe("creating a workroom", () => {
   it("says a refusal created nothing", async () => {
     answer(403, { error: { code: "not_allowed" } });
     await submit();
-    expect(await screen.findByRole("alert")).toHaveTextContent("no workroom was created");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("no workroom was created");
+    expect(alert).toHaveTextContent("admins");
   });
 
   it("can't say a server error created nothing, because it may have come after the commit", async () => {
