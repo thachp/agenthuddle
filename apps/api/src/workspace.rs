@@ -43,7 +43,10 @@ const DELIVERY_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
 };
 const INVITATIONS_LISTED: i64 = 200;
 const DENIAL_ROWS: i64 = 5000;
-/// Different refusals held in memory before they're written. Past this, a new actor counts as an outsider's refusal.
+/// Different refusals held in memory before they're written. Past this, a new actor counts as an outsider's refusal, and
+/// the outsider's own keys are bounded by the lists of actions and codes, so this stays under about 1,000 keys. Around 21
+/// busy actors can fill it and lose attribution until the next flush a few seconds later, which is accepted: counts stay
+/// right, and only who is named changes.
 const DENIALS_HELD: usize = 512;
 const DENIAL_FLUSH_SECS: u64 = 5;
 const DENIALS_PAGE: i64 = 100;
@@ -1654,6 +1657,8 @@ pub struct Workspace {
     /// Refusals not yet written. They wait here so the answer to a refusal does the same work for a real room and an
     /// unknown one, and repeats cost nothing. A restart loses them.
     denials_held: RefCell<HeldDenials>,
+    /// Whether an alarm is set for what's held, so a failure to set one is tried again on the next refusal.
+    denial_alarm_set: std::cell::Cell<bool>,
 }
 
 type HeldDenials = std::collections::HashMap<DenialKey, HeldDenial>;
@@ -2271,9 +2276,8 @@ impl Workspace {
     /// storage, to set the alarm, and that's the same in either case. The alarm writes what's held.
     async fn hold_denial(&self, identity: &Identity, action: &'static str, code: &'static str) {
         let now = now_ms();
-        let start_flush = {
+        {
             let mut held = self.denials_held.borrow_mut();
-            let was_empty = held.is_empty();
             let mut key = DenialKey {
                 actor: identity.id.clone(),
                 kind: identity.kind.clone(),
@@ -2291,9 +2295,10 @@ impl Workspace {
             });
             entry.count += 1;
             entry.last_at = now;
-            was_empty
-        };
-        if start_flush {
+        }
+        if !self.denial_alarm_set.get() {
+            // Set before the await, so a burst only asks once. A failure below clears it for the next refusal.
+            self.denial_alarm_set.set(true);
             let storage = self.state.storage();
             let due = now + (DENIAL_FLUSH_SECS as i64) * 1000;
             let sooner = match storage.get_alarm().await {
@@ -2305,6 +2310,7 @@ impl Workspace {
                     .set_alarm(std::time::Duration::from_secs(DENIAL_FLUSH_SECS))
                     .await
                 {
+                    self.denial_alarm_set.set(false);
                     console_error!("couldn't schedule the denial record: {:?}", error);
                 }
             }
@@ -2315,12 +2321,15 @@ impl Workspace {
     /// was never in the room shares a row. Past the cap, the oldest row of whoever has the most rows goes, so one actor
     /// can't push out another's record. An unknown room stays empty. On failure the counts wait for the next attempt.
     fn flush_denials(&self) -> R<()> {
-        let held = std::mem::take(&mut *self.denials_held.borrow_mut());
-        if held.is_empty() {
+        self.denial_alarm_set.set(false);
+        if self.denials_held.borrow().is_empty() {
             return Ok(());
         }
         let sql = self.state.storage().sql();
-        if !store::is_initialized(&sql)? {
+        // Before the counts are taken, so an error here keeps them for the next attempt.
+        let initialized = store::is_initialized(&sql)?;
+        let held = std::mem::take(&mut *self.denials_held.borrow_mut());
+        if !initialized {
             return Ok(());
         }
         let keep = held.clone();
@@ -2789,6 +2798,7 @@ impl DurableObject for Workspace {
             env,
             test_generation: RefCell::new(None),
             denials_held: RefCell::new(HeldDenials::new()),
+            denial_alarm_set: std::cell::Cell::new(false),
         }
     }
 

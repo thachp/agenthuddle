@@ -63,6 +63,13 @@ const DEPARTURE_RETRY_MAX_MS: i64 = 60 * 60 * 1000;
 /// Long enough for one alarm's calls, so an eviction partway still comes back.
 const DEPARTURE_REARM_SECS: u64 = 300;
 
+/// An organization's rooms, in a Principal named for the organization, so a limit has one writer. Rooms can't be deleted
+/// yet, so this only grows, apart from a creation that failed.
+const ORG_ROOMS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS org_room (workspace_id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS org_room_seeded (id INTEGER PRIMARY KEY CHECK (id = 1));
+";
+const MAX_ROOMS_PER_ORG: i64 = 20;
 const AGENT_ROOMS_LISTED: i32 = 200;
 const REMOVAL_NOTICE: &str = "member.revoked";
 const INBOX_CAPACITY: i64 = 10_000;
@@ -649,6 +656,24 @@ fn retry_delay_ms(failures: i64) -> i64 {
     (DEPARTURE_RETRY_MIN_MS << doublings).min(DEPARTURE_RETRY_MAX_MS)
 }
 
+/// Takes one of an organization's room slots, or refuses at the limit.
+pub async fn reserve_org_room(env: &Env, org: &str, workspace: &str) -> R<()> {
+    let body = json!({ "org": org, "workspace": workspace });
+    let response = internal(env, org, "/internal/org-room-reserve", &body).await?;
+    match response.status_code() {
+        200 => Ok(()),
+        409 => Err(ApiError::limit_exceeded()),
+        _ => Err(ApiError::internal("couldn't reserve a room")),
+    }
+}
+
+/// Gives a slot back when the room wasn't created.
+pub async fn release_org_room(env: &Env, org: &str, workspace: &str) -> R<()> {
+    let body = json!({ "org": org, "workspace": workspace });
+    internal(env, org, "/internal/org-room-release", &body).await?;
+    Ok(())
+}
+
 /// Hands a departure to the person's Principal, which carries it to their rooms until each has answered.
 pub async fn record_org_departure(
     env: &Env,
@@ -982,6 +1007,55 @@ impl Principal {
         let sql = self.state.storage().sql();
         let path = req.path();
         match path.as_str() {
+            "/internal/org-room-reserve" => {
+                let body: Value = req.json().await?;
+                let org = body["org"].as_str().unwrap_or_default().to_string();
+                let workspace = body["workspace"].as_str().unwrap_or_default().to_string();
+                exec(&sql, ORG_ROOMS_SCHEMA, vec![])?;
+                // Rooms from before this limit are counted once, from the listing. After that this table decides.
+                if rows(&sql, "SELECT id FROM org_room_seeded", vec![])?.is_empty() {
+                    let existing = self.env.d1("DB")?
+                        .prepare("SELECT DISTINCT workspace_id FROM membership_index WHERE org_id = ? AND role = 'owner' LIMIT ?")
+                        .bind(&[org.as_str().into(), ((MAX_ROOMS_PER_ORG + 1) as i32).into()])?
+                        .all()
+                        .await?
+                        .results::<Value>()?;
+                    for room in &existing {
+                        exec(
+                            &sql,
+                            "INSERT OR IGNORE INTO org_room (workspace_id) VALUES (?)",
+                            vec![room["workspace_id"].as_str().unwrap_or_default().into()],
+                        )?;
+                    }
+                    exec(
+                        &sql,
+                        "INSERT OR IGNORE INTO org_room_seeded (id) VALUES (1)",
+                        vec![],
+                    )?;
+                }
+                let held = rows(&sql, "SELECT count(*) AS n FROM org_room", vec![])?
+                    .first()
+                    .map_or(0, |row| int(&row["n"]));
+                if held >= MAX_ROOMS_PER_ORG {
+                    return Err(ApiError::limit_exceeded());
+                }
+                exec(
+                    &sql,
+                    "INSERT OR IGNORE INTO org_room (workspace_id) VALUES (?)",
+                    vec![workspace.as_str().into()],
+                )?;
+                return Ok(json!({ "reserved": true }));
+            }
+            "/internal/org-room-release" => {
+                let body: Value = req.json().await?;
+                exec(&sql, ORG_ROOMS_SCHEMA, vec![])?;
+                exec(
+                    &sql,
+                    "DELETE FROM org_room WHERE workspace_id = ?",
+                    vec![body["workspace"].as_str().unwrap_or_default().into()],
+                )?;
+                return Ok(json!({ "released": true }));
+            }
             "/internal/org-departure" => {
                 let body: Value = req.json().await?;
                 exec(&sql, DEPARTURE_SCHEMA, vec![])?;

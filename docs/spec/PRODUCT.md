@@ -411,7 +411,7 @@ The Rust API is private, service-only and never called directly from browser cod
 
 | Limit | Value |
 | --- | --- |
-| Workspaces per organization | 20 |
+| Workspaces per organization | 20, counting archived ones. Rooms can't be deleted yet |
 | Members per workspace | 50 |
 | Open tasks per workspace | 1,000 (terminal tasks kept until the workspace is deleted) |
 | Message body | 16 KB of Markdown |

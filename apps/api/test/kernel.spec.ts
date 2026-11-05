@@ -3134,12 +3134,12 @@ describe("the record of denied changes", () => {
   it("writes nothing on the request path, and repeats only raise a count", async () => {
     const { id } = await room();
     await flush(id);
-    for (let i = 0; i < 40; i++) expect((await api(LEAD, "PUT", `/v1/workspaces/${id}/name`, { name: "Mine", policy_version: 1 })).code).toBe("not_allowed");
+    // Well inside the 5 seconds before the alarm, so a row here could only come from the request path.
+    expect((await api(LEAD, "PUT", `/v1/workspaces/${id}/name`, { name: "Mine", policy_version: 1 })).code).toBe("not_allowed");
+    expect(await stored(id)).toBe(0);
+    for (let i = 1; i < 40; i++) expect((await api(LEAD, "PUT", `/v1/workspaces/${id}/name`, { name: "Mine", policy_version: 1 })).code).toBe("not_allowed");
     for (let i = 0; i < 5; i++) await api(person(`per_flood_${i}`), "PUT", `/v1/workspaces/${id}/name`, { name: "Mine", policy_version: 1 });
     await vi.waitFor(async () => expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).not.toBeNull());
-    const before = await stored(id);
-    // A real alarm can run first, a few seconds on, which would only make this smaller.
-    expect(before).toBeLessThanOrEqual(2);
     const rows = await denials(id);
     expect(rows.denials.filter((d: any) => d.actor_id === LEAD.id)).toEqual([expect.objectContaining({ count: 40, action: "room.rename" })]);
     expect(rows.denials.filter((d: any) => d.actor_id === "outsider")).toEqual([expect.objectContaining({ count: 5, first_actor_id: expect.stringMatching(/^per_flood_/), last_actor_id: expect.stringMatching(/^per_flood_/) })]);
@@ -3196,6 +3196,12 @@ describe("the record of denied changes", () => {
     }
     const rows = (await denials(id)).denials.filter((d: any) => d.actor_id === "outsider").map((d: any) => d.action).sort();
     expect(rows).toEqual(named.map(([name]) => name).sort());
+    // These two answer not_found to someone without authority over the agent, so an org admin shows the routes are real.
+    const agent = { id: `agt_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`, org: BOB.org };
+    await register(agent);
+    expect((await admit(id, agent)).status).toBe(200);
+    expect((await api(orgAdmin(BOB.org), "POST", `${r}/members/${agent.id}/withdraw`, {})).status).toBe(200);
+    expect((await api(orgAdmin(BOB.org), "POST", `${r}/members/${agent.id}/owner-consent`, {})).status).toBe(200);
     // A forged token with a real room's ID is counted like any other refusal, off the request path.
     const forged = await api(person("per_forger"), "POST", "/v1/invitations/accept", { token: `inv_${id}.nope.nope`, org_id: "org_stranger", agents: ["agt_x"] });
     expect(forged.code).toBe("invitation_not_found");
@@ -3286,4 +3292,57 @@ describe("the record of denied changes", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].count).toBe(520);
   }, 30000);
+});
+
+describe("the limit on an organization's rooms", () => {
+  const orgName = () => `org_limit_${crypto.randomUUID().replaceAll("-", "").slice(0, 10)}`;
+  const create = (who: Who, name = "Room") => api(who, "POST", "/v1/workspaces", { name });
+
+  it("refuses the 21st room, and only in that organization", async () => {
+    const org = orgName();
+    const admin = orgAdmin(org);
+    for (let i = 0; i < 20; i++) expect((await create(admin)).status, `room ${i}`).toBe(200);
+    const refused = await create(admin);
+    expect([refused.status, refused.code]).toEqual([409, "limit_exceeded"]);
+    const other = orgName();
+    expect((await create(orgAdmin(other))).status).toBe(200);
+    // Someone in both can still create where there's room.
+    const both: Who = { ...admin, id: "per_both_orgs", org: other, orgs: [org, other], adminOrgs: [org, other] };
+    expect((await create(both)).status).toBe(200);
+  }, 30000);
+
+  it("holds at 20 when many create at once", async () => {
+    const org = orgName();
+    const answers = await Promise.all(Array.from({ length: 26 }, () => create(orgAdmin(org))));
+    expect(answers.filter((a) => a.status === 200)).toHaveLength(20);
+    expect(answers.filter((a) => a.status !== 200).map((a) => a.code)).toEqual(Array(6).fill("limit_exceeded"));
+  }, 30000);
+
+  it("doesn't count a refused creation", async () => {
+    const org = orgName();
+    const admin = orgAdmin(org);
+    const member: Who = { id: "per_limit_member", kind: "person", org, orgs: [org], adminOrgs: [] };
+    for (let i = 0; i < 5; i++) {
+      expect((await create(admin, "")).code).toBe("invalid_argument");
+      expect((await create(member)).code).toBe("not_allowed");
+    }
+    for (let i = 0; i < 20; i++) expect((await create(admin)).status).toBe(200);
+    expect((await create(admin)).code).toBe("limit_exceeded");
+  }, 30000);
+
+  it("counts rooms from before the limit, from the listing, once", async () => {
+    const org = orgName();
+    const admin = orgAdmin(org);
+    await (env as any).DB.batch(Array.from({ length: 19 }, (_, i) => (env as any).DB.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'owner', 'Old', 0, 1)").bind(`ws_old_${org}_${i}`, admin.id, org)));
+    expect((await create(admin)).status).toBe(200);
+    expect((await create(admin)).code).toBe("limit_exceeded");
+  });
+
+  it("leaves agents and a room's owner reads alone", async () => {
+    const org = orgName();
+    const admin = orgAdmin(org);
+    const created = await create(admin);
+    expect((await api(admin, "GET", `/v1/workspaces/${created.body.id}`)).status).toBe(200);
+    expect((await api(LEAD, "POST", "/v1/workspaces", { name: "x" })).code).toBe("not_allowed");
+  });
 });

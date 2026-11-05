@@ -154,7 +154,7 @@ This builds the API's release build, starts it and the gateway under `wrangler d
 
 ## Running it on staging
 
-This needs two people with different GitHub accounts, about five minutes, and the steps below. Or the driver can make its own people, [with test people](#with-test-people), which proves less. Staging has no delete route, so each run leaves about 5 rooms, 15 agents and their tasks behind, plus organizations called "Podster e2e outsiders" and "Podster e2e team" on the first person's account. It may pause for up to a minute if it reaches a rate limit.
+This needs two people with different GitHub accounts, about five minutes, and the steps below. Or the driver can make its own people, [with test people](#with-test-people), which proves less. Staging has no delete route. A run with pasted sign-ins makes its own organization for each person, because an organization holds at most 20 rooms, and leaves those behind too. Each run leaves about 5 rooms, 15 agents and their tasks behind, plus organizations called "Podster e2e outsiders" and "Podster e2e team" on the first person's account. It may pause for up to a minute if it reaches a rate limit.
 
 The driver stays on the gateway's host with either kind of person, including its `POST`s to `/authorize` and `/claim`, which ADR 0001 keeps there. A session works on both hosts, and the origin it sends is the gateway's. Only sign-in itself moved to the application host.
 
@@ -255,7 +255,7 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 | 7 | **Closed locally for the rooms and invitations.** Rooms can be renamed and archived. A room's pending invitations, a link's preview and an agent's rooms can be read, and the room read has `owner_org`, `guest_can_create` and removed members. Still missing are in `apps/web/README.md`. The screens don't use these yet. | Done, staging check open | `apps/api/src/workspace.rs`, `queries`; `apps/api/src/principal.rs` | Screens using them |
 | 8 | **A failed sign-up hook could leave a person with no organization.** Fixed in code: the person's next request restores it, and one index keeps it to one organization. Proven for email sign-up, locally only. It stays open until migration `0003_one_personal_org.sql` is applied on staging and an OAuth sign-up has created its organization there. | S, for the staging check | `apps/gateway/src/index.ts` `ensurePersonalOrg` | Decision 23 on a deployment |
 | 9 | **No Coordinator.** `set_requester` is for owners and admins only. The rest of decision 24 needs the Coordinator preset, which comes with decision 20, so it's M1 work ([ruling](#gate-rulings-2026-11-05-utc)). | S once presets exist | `authorize_task` in `crates/policy/src/lib.rs` | Nothing in M0 |
-| 10 | **Smaller baseline items.** The limit of 20 workspaces per organization isn't enforced. Rooms can't be deleted, though PRODUCT.md mentions it. Email magic-link sign-in isn't built. | S each | `apps/api/src/workspace.rs:1657`; `apps/gateway/src/index.ts` | Limits, AC-26's deleted case |
+| 10 | **The workspace limit is built locally. Rooms can't be deleted.** An organization has at most 20 rooms, counted in one place so concurrent creations can't pass it. Deleting a room isn't built, because it needs choices about retention, so AC-26's deleted case stays open. Email magic-link sign-in is another session's work. | S to M, for deletion once decided | `apps/api/src/principal.rs` `/internal/org-room-reserve` | AC-26's deleted case |
 
 ## Leaving an organization
 

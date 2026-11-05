@@ -74,7 +74,11 @@ async function people() {
     console.error("A deployed run needs PODSTER_E2E_COOKIE_A and PODSTER_E2E_COOKIE_B, each from a different person's sign-in. See docs/m0-gate.md.");
     process.exit(2);
   }
-  return [await Person.fromCookie(target, "Person A", a), await Person.fromCookie(target, "Person B", b)];
+  // These people run again and again, and rooms can't be deleted, so each run uses its own organizations.
+  const stamp = new Date().toISOString().slice(0, 19);
+  const [first, second] = [await Person.fromCookie(target, "Person A", a), await Person.fromCookie(target, "Person B", b)];
+  if (first.id === second.id) return [first, second];
+  return [await first.useNewOrg(`Podster e2e A ${stamp}`), await second.useNewOrg(`Podster e2e B ${stamp}`)];
 }
 
 /**
@@ -346,7 +350,7 @@ async function acceptance() {
     const version = () => personA.policyVersion(teamRoom);
 
     refused(await personB.dash("POST", `/orgs/${team.id}/invitations`, { role: "member" }), "not_found", "someone outside inviting");
-    refused(await personA.dash("POST", `/orgs/${personA.org}/invitations`, { role: "member" }), "personal_organization", "inviting into a personal organization");
+    refused(await personA.dash("POST", `/orgs/${personA.personalOrg}/invitations`, { role: "member" }), "personal_organization", "inviting into a personal organization");
     refused(await personA.dash("POST", teamMembers, { principal_id: personB.id, kind: "person", org_id: team.id, role: "admin", policy_version: await version() }, inTeam), "not_in_organization", "appointing them before they've joined");
 
     const { token } = await personA.must("POST", `/orgs/${team.id}/invitations`, { role: "member" });

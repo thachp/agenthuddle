@@ -121,9 +121,20 @@ export class Person {
     ok(orgs.ok, `${this.label}'s session wasn't accepted (HTTP ${orgs.status}). Sign in again and copy a fresh cookie.`);
     this.orgs = orgs.body.organizations;
     this.org = (this.orgs.find((o) => o.personal) ?? this.orgs[0]).id;
+    this.personalOrg = this.org;
     const me = await this.dash("GET", "/v1/me");
     ok(me.ok, `${this.label}: /v1/me answered ${me.status}`);
     this.id = me.body.id;
+    return this;
+  }
+
+  /**
+   * Acts in a new organization from here on. A deployed run reuses the same people, and leaves rooms behind that can't be
+   * deleted, so each run gets its own organization rather than reaching the limit of 20 in the personal one.
+   */
+  async useNewOrg(name) {
+    this.org = (await this.must("POST", "/orgs", { name })).id;
+    this.actingOrg = this.org;
     return this;
   }
 
@@ -136,7 +147,7 @@ export class Person {
         cookie: this.cookie,
         origin: this.target.base,
         ...(hasBody ? { "content-type": "application/json", "idempotency-key": idempotencyKey ?? key() } : {}),
-        ...(org ? { "x-podster-org": org } : {}),
+        ...((org ?? this.actingOrg) ? { "x-podster-org": org ?? this.actingOrg } : {}),
         ...headers,
       },
       body: hasBody ? JSON.stringify(body ?? {}) : undefined,
