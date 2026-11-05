@@ -6,7 +6,7 @@ export const plainName = (name: string) => name.replace(/[\p{Cc}\p{Cf}]/gu, "").
 /** A name can be anything, so one that sounds like Podster or a room's authority gets a label beside it. */
 export function authoritySoundingName(name: string) {
   const folded = name.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "").replace(/0/g, "o").replace(/[1|]/g, "l");
-  return /podster|owner|admin|system|moderator|support/.test(folded);
+  return /podster|owner|admin|system|moderator|support|^you$/.test(folded);
 }
 
 /** Only web links, so `javascript:` and the like stay as text. */

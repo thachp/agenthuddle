@@ -910,7 +910,7 @@ describe("after a disconnect", () => {
     const linked = await mcpAgent(a, { link_agent_id: agent.id });
     const me = await person(a);
     // The API commits, and the gateway never gets to run its part.
-    const lost = await callApi(e, { kind: "person", id: me.id, org: a.org, orgs: me.orgs, adminOrgs: me.admin_orgs }, { method: "POST", path: `/v1/agents/${agent.id}/disconnect`, body: "{}" });
+    const lost = await callApi(e, { kind: "person", id: me.id, org: a.org, orgs: me.orgs, adminOrgs: me.admin_orgs, orgSince: {} }, { method: "POST", path: `/v1/agents/${agent.id}/disconnect`, body: "{}" });
     expect(lost.status).toBe(200);
     expect((await dash(a, "POST", `/agents/${agent.id}/reconnect`)).status).toBe(200);
     expect((await execute(agent, "get_identity")).status).toBe(403);
