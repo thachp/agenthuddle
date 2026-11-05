@@ -2,7 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { cache } from "react";
 import { gatewayQuery, signInPath } from "./gateway/server";
 
-export type Workroom = { id: string; name: string; owner: string; status: string; members?: unknown[]; policy_version: number | null };
+export type Workroom = { id: string; name: string; owner: string; status: string; owner_org?: string | null; members?: unknown[]; policy_version: number | null };
 
 const VALID_ID = /^[\w-]{1,128}$/;
 
@@ -21,3 +21,6 @@ export const loadWorkroom = cache(async (id: string): Promise<Workroom> => {
 
 /** The API sends `policy_version` only to those who may manage access. This shows or hides a tab, and decides nothing. */
 export const canManageWorkroom = (room: Pick<Workroom, "policy_version">) => room.policy_version !== null && room.policy_version !== undefined;
+
+/** Display only. In an archived room Rust refuses every new command with `workspace_archived`. */
+export const isArchived = (room: Pick<Workroom, "status">) => room.status === "archived";

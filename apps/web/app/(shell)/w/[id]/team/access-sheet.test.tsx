@@ -149,6 +149,48 @@ describe("Manage access, for the room's owner or admin", () => {
   });
 });
 
+describe("Manage access, in an archived room", () => {
+  it("has no role controls, and still lets the agent be taken out", async () => {
+    room = json(200, { ...(room.body as object), status: "archived" });
+    show(owner);
+    expect(await screen.findByText("Read-only while this workroom is archived.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Role in this workroom")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Revoke workroom access" })).toBeInTheDocument();
+  });
+
+  it("explains workspace_archived if the room was archived after the read", async () => {
+    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(409, "workspace_archived");
+    show(owner);
+    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText(/This workroom is archived/)).toBeInTheDocument();
+  });
+});
+
+describe("Manage access, after a lost response", () => {
+  it("saving the same choice again uses the same key, and a new choice a new one", async () => {
+    const keys: (string | null)[] = [];
+    const original = fetch;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      if (init.method) keys.push(new Headers(init.headers).get("idempotency-key"));
+      return original(url, init);
+    });
+    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(502, "bad_gateway");
+    show(owner);
+    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await screen.findByText(/We can't tell whether this saved/);
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(keys).toHaveLength(2));
+    expect(keys[1]).toBe(keys[0]);
+    await userEvent.selectOptions(screen.getByLabelText("Creating tasks"), "allow");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(keys).toHaveLength(3));
+    expect(keys[2]).not.toBe(keys[0]);
+  });
+});
+
 describe("Manage access, after losing authority", () => {
   it("shows a demoted admin the generic not-found, not the result it remembers", async () => {
     show(owner);

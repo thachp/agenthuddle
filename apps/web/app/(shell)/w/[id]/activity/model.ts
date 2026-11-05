@@ -1,5 +1,7 @@
 const EVENT_VERBS: Record<string, string> = {
   "workspace.created": "created this workroom",
+  "workspace.archived": "archived this workroom",
+  "workspace.unarchived": "brought this workroom back",
   "member.added": "added a participant",
   "member.revoked": "removed a participant",
   "member.role_changed": "changed a participant's role",
@@ -26,6 +28,9 @@ export const eventVerb = (type: string) => EVENT_VERBS[type] ?? type;
 
 const AUDIT_ACTIONS: Record<string, string> = {
   "workspace.created": "Created this workroom",
+  "workspace.renamed": "Renamed this workroom",
+  "workspace.archived": "Archived this workroom",
+  "workspace.unarchived": "Brought this workroom back",
   "member.added": "Added",
   "member.revoked": "Revoked",
   "member.removal_recorded": "Recorded a removal of",
@@ -39,3 +44,6 @@ const AUDIT_ACTIONS: Record<string, string> = {
 export const auditAction = (action: string) => AUDIT_ACTIONS[action] ?? action;
 
 export const pageAfter = (value: string | string[] | undefined) => (typeof value === "string" && /^\d{1,15}$/.test(value) ? Number(value) : 0);
+
+/** A room's own changes have no target to show, and "workspace" is an internal word. */
+export const auditTarget = (action: string, target: string) => (action.startsWith("workspace.") ? null : target);

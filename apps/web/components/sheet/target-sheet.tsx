@@ -347,7 +347,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
             ) : null}
             {failedCode ? (
               <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-                {failedCode === "unknown" ? "We can't tell whether this saved. Refresh before trying again." : "That didn't save, and nothing changed. You may no longer be allowed to do this."}
+                {failedCode === "unknown" ? "We can't tell whether this saved. Refresh before trying again." : failedCode === "workspace_archived" ? "This workroom is archived, so nothing new can happen in it. Nothing changed. Its owner or an admin can bring it back." : "That didn't save, and nothing changed. You may no longer be allowed to do this."}
               </p>
             ) : null}
             {data !== null ? children({ data, binding, dirty, setDirty, saving, run, close: requestClose }) : null}
