@@ -1,0 +1,169 @@
+# M0 gate
+
+What proves each M0 requirement, and how far that proof has got. The requirements come from [PRODUCT.md](spec/PRODUCT.md#product-direction-and-delivery-scope) and [ACCESS-CONTROL.md](spec/ACCESS-CONTROL.md#proposed-acceptance-and-denial-tests).
+
+**Nothing has passed on a deployment yet, so M0 isn't met.**
+
+A status is one of these, and an item only moves when the run has actually happened:
+
+- **Not covered:** no test proves it.
+- **Local only:** a test passes under Miniflare or `wrangler dev`.
+- **Passed on a deployment:** the test passed against a real hostname, with two separate people where people are involved.
+
+Last updated from commit `c30f51a` plus this change, on 2026-11-05 UTC. `journey` means [e2e/journey.mjs](../e2e/journey.mjs), and the ID after it is the check's ID in its output. "Partial" means the journey reaches only part of the item from outside, and the rest runs only in the named tests.
+
+## Kernel success criteria
+
+The November 4 staging run doesn't count here. Its driver was never committed, one person held every organization, and it predates later changes.
+
+| Criterion | Test | Status |
+| --- | --- | --- |
+| 1. Two organizations, two connection methods | journey `SEP`, `C1` | Local only |
+| 2. Offer reaches B's inbox with no public URL | journey `C2` | Local only |
+| 3. Accept, message, submit | journey `C3` | Local only |
+| 4. Changes, resubmit, verify | journey `C4` | Local only |
+| 5. Same state and history after reconnecting | journey `C5` | Local only |
+| 6. Outsiders and guests see only their own tasks | journey `C6` | Local only |
+| 7. Org A revokes Org B | journey `C7`, by revoking each agent. The whole-organization route isn't built (gap `C7-org`) | Local only, and incomplete |
+| 8. A retry creates nothing new | journey `C2` to `C4` retry each command, and `C8` counts the result | Local only |
+| Connected to first accepted task in under 5 tool calls | journey `P1` (3 calls) | Local only |
+| No mutation without its event, or the reverse | journey `P2` for concurrency. Failure mid-write needs failpoints: apps/api "rolls back task, event, outbox and idempotency when a command fails after writing" | Local only |
+| A message reaches only agents allowed to see it | journey `P3`, and the race in `C7` | Local only |
+
+## Acceptance tests
+
+"apps/api" is `apps/api/test/kernel.spec.ts`, and "gateway" is `apps/gateway/test/gateway.spec.ts`.
+
+| ID | Test | Status | What's missing |
+| --- | --- | --- | --- |
+| AC-01 | journey `AC-01`; apps/api "only people create rooms, and the creator owns it whatever the body says" | Local only | |
+| AC-02 | journey `AC-02` is partial; apps/api "only the owner appoints admins, and agents can't be admins" | Local only | A real second person can't act as admin on a deployment, because no route adds a person to an organization (gap 1) |
+| AC-03 | journey `AC-03` is partial; apps/api "members, guests and agents can't use any access command" | Local only | |
+| AC-04 | journey `AC-04`; apps/api "uses one key per route, moves the policy version, and pages the whole audit log" | Local only | The owner only: an admin needs gap 1 |
+| AC-05 | journey `AC-05`; apps/api "keeps rooms apart" | Local only | Assets and provider IDs arrive in M2 and M5 |
+| AC-06 | journey `AC-06`; apps/api "the agent's own organization withdraws it without room authority, and nobody else can" | Local only | |
+| AC-07 | journey `AC-07` | Local only | |
+| AC-09 | journey `AC-09`; apps/api "an unknown room and a private room look identical to outsiders, and the unknown one stays empty" | Local only | Discovery and graph data arrive in M1 and M4 |
+| AC-12 | journey `AC-12`; `crates/assertion/tests/verify.rs`; apps/api "refuses forged, expired, wrong-audience and over-long assertions before routing" | Local only | A2A arrives in M3 |
+| AC-13 | journey `AC-13` is partial; apps/api "a stale form can't restore revoked access or apply over newer changes", "orders revocation against concurrent commands" | Local only | Timing against a live admin revocation can't be arranged from outside. An admin needs gap 1 |
+| AC-14 | journey `AC-14` is partial; apps/api "refuses an assertion minted before the disconnect on every route" | Local only | A pre-minted assertion can't be made from outside, so this half can only run in tests |
+| AC-15 | journey `AC-15`; apps/api "returns the first result on retry" | Local only | |
+| AC-16 | apps/api "rolls back task, event, outbox and idempotency when a command fails after writing" | Local only | Failpoints never ship, so this can't pass on a deployment. The owner needs to accept the local proof, or the gate can't close. External providers arrive in M5 |
+| AC-17 | journey `AC-17`; `crates/core/tests/transitions.rs` `nobody_signs_off_their_own_work` | Local only | |
+| AC-19 | [e2e/probe-api.mjs](../e2e/probe-api.mjs). See [below](#ac-19-the-apis-public-reachability) | Local only | The deployment probes are clean but incomplete |
+| AC-20 | Server half: journey `AC-13`, apps/api "a stale form can't restore revoked access" | Not covered | The Sheet is in `apps/web`, which isn't merged |
+| AC-21 | None | Not covered | The Sheet is in `apps/web`, which isn't merged |
+| AC-22 | journey `AC-22`; apps/api "lets only human owners and admins read the event log" | Local only | Denied changes aren't recorded (gap 3) |
+| AC-25 | journey `AC-25`; `transitions.rs` departure tests; apps/api "applies the departure rules to submissions, reviewers and requesters" | Local only | |
+| AC-26 | journey `AC-26` is partial; apps/api "an unknown room and a private room look identical to outsiders" | Local only | Rooms can't be deleted, so a previously deleted ID can't be tried |
+| AC-29 | journey `AC-29` is partial; apps/api "a join begun before a disconnect can't commit after the room acknowledges it, even after reconnect", "a second disconnect needs a new acknowledgment" | Local only | A delayed join needs a failpoint, so that half can only run in tests |
+| AC-30 | journey `AC-30` for the swap; `crates/policy/tests/matrix.rs` `a_requester_cant_swap_the_reviewer_of_a_submitted_task` | Local only, and incomplete | Rooms can't yet require a person as reviewer (decision 5, M1), so two of the three cases can't run. The owner needs to rule whether they wait for M1 |
+
+Wake is part of M0's scope and has no AC of its own. PR [#22](https://github.com/thachp/podster/pull/22) merged while this was being written, so it's no longer blocked on that PR. Its tests in apps/api and gateway are **local only**, a real send hasn't been checked on a deployment by this work, and the journey doesn't drive it because that would send requests to a third-party URL.
+
+## AC-19: the API's public reachability
+
+`apps/api/wrangler.jsonc` sets `workers_dev: false` and `preview_urls: false` at the top level and again in `env.staging`, with no route or custom domain in either. `node probe-api.mjs --config-only` checks this on every CI run, through `run-local.mjs`.
+
+On 2026-11-05 UTC, read-only probes of staging found no answer from the API:
+
+| Probed | Result |
+| --- | --- |
+| `gateway-staging.podster.dev`: `/health`, `/v1/*`, `/internal/*`, `/test/consume-wake` | 404 from the gateway |
+| The same paths under `/api` with no session | 401 `sign_in_required` |
+| `api.podster.dev`, `api-staging.podster.dev`, `podster-api.podster.dev`, `podster-api-staging.podster.dev` | No connection |
+| `podster-api-staging.agentlater.workers.dev`, `podster-api.agentlater.workers.dev` | 404 from Cloudflare |
+
+What keeps this from passing:
+
+- **The account's `workers.dev` subdomain isn't confirmed.** `agentlater` came from an old session's log of a temporary Worker on this account, and a made-up subdomain also answers 404, so that result proves little. Step 5 below uses the real one.
+- **An untrusted service calling the API can't be tried without deploying one.** The proof is local: assertions from any other key are refused, and the probe's fingerprints were tested against a fake API that answers like the real one.
+
+Also, `apps/gateway/wrangler.jsonc` doesn't set `workers_dev` at its top level, only in `env.staging`. A production deploy from that config would get a `workers.dev` address for the gateway. That isn't the API, but it should be settled before production.
+
+## Running it
+
+Locally, with `worker-build` 0.8.7, `npm ci` in `apps/gateway` and `e2e`, and rustup's Rust first on your `PATH`, because a Homebrew `rustc` has no Wasm target:
+
+```bash
+cd e2e && node run-local.mjs
+```
+
+This builds the API's release build, starts it and the gateway under `wrangler dev` with throwaway keys and empty databases, then runs the journey and the probe. CI runs the same thing. A check marked `GAP` is something the product doesn't do yet. It doesn't fail the run unless you pass `--strict`.
+
+`--rehearse-cookies` runs the path a deployed run uses, with cookies rather than sign-up, and `--rehearse-same-person` checks that it refuses one person's cookie used twice.
+
+## Running it on staging
+
+This needs two people with different GitHub accounts, about five minutes, and the steps below. Staging has no delete route, so each run leaves about 5 rooms, 15 agents and their tasks behind, plus an organization called "Podster e2e outsiders" on the first person's account. It may pause for up to a minute if it reaches a rate limit.
+
+1. **Check what's deployed.** The result only counts for the commit that's running. From `apps/api`, and then from `apps/gateway`:
+
+   ```bash
+   npx wrangler deployments list --env staging
+   ```
+
+2. **The owner signs in.** Open `https://gateway-staging.podster.dev/sign-in` and continue with GitHub. In the browser's developer tools, open Application, then Cookies, and copy the value of `__Secure-better-auth.session_token`. Then run this and paste `__Secure-better-auth.session_token=<value>` when it waits:
+
+   ```bash
+   read -rs PODSTER_E2E_COOKIE_A && export PODSTER_E2E_COOKIE_A
+   ```
+
+3. **The second person does the same, with their own GitHub account in their own browser.** They should send the owner their cookie privately, or type it in themselves at the owner's machine. It stops working when the run ends, because the driver signs both sessions out. They shouldn't put it in chat or a file that lasts.
+
+   ```bash
+   read -rs PODSTER_E2E_COOKIE_B && export PODSTER_E2E_COOKIE_B
+   ```
+
+4. **Run the journey.** It stops before writing anything if both cookies are the same person's.
+
+   ```bash
+   cd e2e && npm ci && node journey.mjs --base-url https://gateway-staging.podster.dev
+   ```
+
+5. **Run the probe.** Find the account's subdomain in the Cloudflare dashboard, under Workers & Pages, where it's shown as `<subdomain>.workers.dev`. Replace `<subdomain>` below.
+
+   ```bash
+   node probe-api.mjs --gateway https://gateway-staging.podster.dev --workers-subdomain <subdomain> --with-posts
+   ```
+
+6. **Record the result.** The journey writes `e2e/results/gateway-staging.podster.dev-<time>.json`, which holds IDs and outcomes only. For each check that passed, change its status above to **Passed on a deployment**, with the date and commit. A "partial" item passes on a deployment only for the part that ran there, so say which.
+
+## Decision audit
+
+Each was checked against the code on commit `c30f51a`, by a test that ran or by reading.
+
+| Decision | Result | Evidence |
+| --- | --- | --- |
+| 4. Material edits need re-acceptance | Holds | journey `D4`; `crates/core/src/lib.rs:407`; `transitions.rs` `material_edits_need_acceptance_again` |
+| 6. Departure table | Holds | journey `AC-25`; `crates/core/src/lib.rs:646`; `apps/api/src/workspace.rs:911`. The person-review part of eligibility waits on decision 5 |
+| 8. Ownership transfer and recovery | **Not built** | Gap 2 |
+| 14. Guests creating tasks | Holds | journey `D14`; `apps/api/src/workspace.rs:708`; `crates/policy/src/lib.rs:107` |
+| 21. Person inboxes | **Half built** | The API stores and serves them, and a person's unread count works (journey `D21`). People can't read or ack them through the gateway (gap 4) |
+| 22. Who creates tasks from the dashboard | Holds for owners on a real run. Admin and member people only in tests | journey `D22`; `crates/policy/src/lib.rs:107`. Reaching them needs gap 1 |
+| 23. Personal accounts | Holds, with one failure case | journey `D23`; `apps/gateway/src/index.ts:303`. See gap 8 |
+| 24. Taking over a task when its requester leaves | Holds for owner and admin. **Coordinator not built** | journey `AC-25`; `crates/policy/src/lib.rs:154`. See gap 9 |
+
+## Backend gaps
+
+In the order to do them, because earlier ones unblock later ones. Sizes: S is under a day, M is a few days, L is a week or more. These are estimates.
+
+| # | Gap | Size | Where | Blocks |
+| --- | --- | --- | --- | --- |
+| 1 | **Organizations can't have a second person.** The only inserts into `org_member` are at sign-up and organization creation. Workroom admins must be in the owner's organization, so nobody can act as one on a deployment. The owner's add still answers 200 and records an admin who can't act, for any person ID. | M, with contract | `apps/gateway/src/index.ts:308`, `:777`; `apps/api/src/workspace.rs:104`, `:574` | AC-02, AC-04, AC-13, decisions 8 and 22 |
+| 2 | **No ownership transfer or recovery.** `owner_person_id` is written once, and there's no contract, policy action or command for either. Recovery needs an organization admin other than the owner, so it depends on gap 1, and a personal organization has nobody else: that case needs a ruling. | L, with contract and audit | `apps/api/src/workspace.rs:1669`, `:80`; `crates/policy/src/lib.rs` | Decision 8 |
+| 3 | **Denied changes aren't recorded.** `audit_event` has an `outcome` column, and the only value ever written is `allowed`. ACCESS-CONTROL.md asks for a protected denial stream. Needs a design that can't be flooded, because a refused request rolls back its transaction. | M | `apps/api/src/workspace.rs:490` | AC-22 |
+| 4 | **People can't reach their inbox, or an agent's.** `allowedPassthrough` refuses `/v1/inbox` and `/v1/agents`, and the gateway has no route for `GET /v1/agents/{agent}/inbox`. | S | `apps/gateway/src/index.ts:383` | Decision 21, dashboard |
+| 5 | **Revoking a whole organization isn't built.** The route is in ARCHITECTURE.md's internal API list, and it's in neither the code nor `openapi.yaml`. Criterion 7 currently needs one call per agent. Either build it or change the spec. | S, with contract | `apps/api/src/workspace.rs:1871` | Criterion 7 as written |
+| 6 | **A person in an invited organization can't see the room.** Only the agent is a member, so that person gets `workspace_not_found` even when their own agents are in it, and the room isn't in their list. PRODUCT.md's baseline says they see what their agents see, while decision 7 changes this in M1. Needs a ruling on M0, then a route. | M | `apps/api/src/workspace.rs:104`; `apps/api/src/lib.rs:75` | Dashboard for Org B |
+| 7 | **Dashboard reads that don't exist.** No route lists an organization's agents, or a room's invitations. No route renames or archives a room, which PRODUCT.md gives admins. Confirm with the dashboard's needs first. | S to M | `apps/gateway/src/index.ts`; `apps/api/src/workspace.rs` | Dashboard |
+| 8 | **A failed sign-up hook leaves a person with no organization.** The personal organization is written in an `after` hook. If that write fails, every later request answers 403 and nothing retries it. | S | `apps/gateway/src/index.ts:303` | Decision 23 |
+| 9 | **No Coordinator.** `set_requester` is for owners and admins only. The rest of decision 24 needs the Coordinator preset, which comes with decision 20 in M1, so it can wait for M1 if the owner agrees. | S once presets exist | `crates/policy/src/lib.rs:154` | Decision 24 |
+| 10 | **Smaller baseline items.** The limit of 20 workspaces per organization isn't enforced. Rooms can't be deleted, though PRODUCT.md mentions it. Email magic-link sign-in isn't built. | S each | `apps/api/src/workspace.rs:1657`; `apps/gateway/src/index.ts` | Limits, AC-26's deleted case |
+
+Decisions for the owner, none of them blocking gaps 1, 3, 4 and 5:
+
+- Can AC-16, and the failpoint halves of AC-14 and AC-29, close on local proof? They can't run on a deployment.
+- Do AC-30's person-review cases wait for M1, along with decision 5?
+- How does recovery work for a personal organization, where the owner is the only person?
+- What should an invited organization's person see in M0?
