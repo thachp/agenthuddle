@@ -51,6 +51,9 @@ CREATE TABLE denial (day INTEGER NOT NULL, actor_id TEXT NOT NULL, actor_kind TE
   count INTEGER NOT NULL, first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, first_actor_id TEXT NOT NULL, last_actor_id TEXT NOT NULL,
   PRIMARY KEY (day, actor_id, actor_kind, action, code));
 CREATE INDEX denial_last_at ON denial (last_at);
+", "
+UPDATE workspace SET owner_since = created_at WHERE owner_since IS NULL;
+INSERT INTO index_outbox (principal_id, org_id, role, removed) SELECT owner_person_id, owner_org_id, 'owner', 0 FROM workspace WHERE owner_left_at IS NOT NULL;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -139,7 +142,7 @@ pub fn participant(sql: &SqlStorage, id: &str) -> R<Option<(String, String)>> {
         vec![],
     )?;
     if room.first().and_then(|r| r["owner_person_id"].as_str()) == Some(id) {
-        // An owner who left the organization is told nothing and can't be given work until they're back and act here.
+        // An owner who left the organization is told nothing and can't be given work. Only recovery changes that.
         if room.first().is_some_and(|r| !r["owner_left_at"].is_null()) {
             return Ok(None);
         }

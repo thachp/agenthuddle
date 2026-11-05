@@ -1,6 +1,6 @@
 # ADR 0005: Ownership transfer and recovery
 
-**Status:** On 2026-11-05 the owner accepted the five choices below, the risk in "Takeover", the ownerless list ([decision 40](../spec/PRODUCT.md#decisions-needed)) and recovery in archived rooms ([decision 41](../spec/PRODUCT.md#decisions-needed)). The rest of this design follows from them and wasn't separately approved. Not built yet.
+**Status:** On 2026-11-05 the owner accepted the five choices below, the risk in "Takeover", the ownerless list ([decision 40](../spec/PRODUCT.md#decisions-needed)) and recovery in archived rooms ([decision 41](../spec/PRODUCT.md#decisions-needed)). The rest of this design follows from them and wasn't separately approved. Built, locally only, with no screens for transfer or recovery yet.
 
 ## The owner's choices
 
@@ -58,7 +58,9 @@ Transfer doesn't need this exception, because the owner is there to unarchive th
 
 ### A departed owner under choice 1
 
-The room stops giving owner authority to someone whose `owner_left_at` is set, or whose current membership began after the room's `owner_since`. So a departure that hasn't reached the room yet doesn't matter. Today's `owner.returned` path goes away. For that check to hold, `owner_since` must be set when a room is created and at each transfer and recovery. Today it's only learned from the owner's commands.
+The room stops giving owner authority to someone whose `owner_left_at` is set, or whose current membership began after the room's `owner_since`. So a departure that hasn't reached the room yet doesn't matter. The `owner.returned` path is gone. For that check to hold, `owner_since` is set when a room is created and at each transfer and recovery, to the start of that person's membership, from the assertion. Commands no longer change it.
+
+Rooms from before this take `owner_since` from when they were made, in a forward-only migration that runs the next time the room is used, because the creator was in the organization then. So an owner who rejoined after making the room, and hasn't been recovered, is refused. A room with no value at all refuses too.
 
 ### Personal organizations
 
@@ -68,12 +70,16 @@ Nothing to build. A personal organization has one person, and they can't be remo
 
 Today nobody can manage its access or take over its tasks. Recovery fixes this, because it doesn't need a role in the room. Two things are needed for an admin to find these rooms, since they can't read them:
 
-- `GET /v1/oversight/ownerless`: rooms of organizations this person administers whose owner has left, archived or not, from the listing read model, for showing only. Each row has the room's ID and name, the departed owner's ID and when they left. The room still decides when recovery runs. This needs one new column on `membership_index`. Departure doesn't queue an index update for the owner today, so the build must add that, or a room would never reach this list.
+- `GET /v1/oversight/ownerless`: rooms of organizations this person administers whose owner has left, archived or not, from the listing read model, for showing only. Each row has the room's ID and name, the departed owner's ID and when they left. The room still decides when recovery runs. This needs one new column on `membership_index`, and departure queues an index update for the owner so a room reaches this list. A room whose owner left before this reaches the list the next time the room is used.
 
   This is a new use of `admin_orgs`, and a new exception to the rule against revealing a private room: it shows a room's ID and name, its departed owner's ID and when they left to someone outside it. It's limited to rooms their own organization owns, and shows no content, members or tasks.
 - Removing someone from an organization should say which rooms they own. The gateway can ask the same listing before removal. This is a screen's job, and the route should exist first.
 
 An organization can't lose its last admin, because the gateway refuses that. So every room in a team organization has someone who can run recovery.
+
+### What's built, and what isn't
+
+Everything above is built in the API, with `AC-33` in the journey. There are no screens yet for transfer, recovery or the ownerless list, and removing someone doesn't yet say which rooms they own. The note about personal organizations is on the create form.
 
 ### Audit
 

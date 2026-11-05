@@ -22,6 +22,14 @@ describe("creating a workroom", () => {
     await vi.waitFor(() => expect(currentUrl()).toBe("/w/ws_1/overview"));
   });
 
+  it("says a workroom in a personal organization has no successor, and only there", () => {
+    const { unmount } = render(<CreateWorkroomForm organization="Pat" personal />);
+    expect(screen.getByText(/nobody can take this workroom over/)).toBeInTheDocument();
+    unmount();
+    render(<CreateWorkroomForm organization="Org A" />);
+    expect(screen.queryByText(/nobody can take this workroom over/)).toBeNull();
+  });
+
   it("says a refusal created nothing", async () => {
     answer(403, { error: { code: "not_allowed" } });
     await submit();

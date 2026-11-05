@@ -58,6 +58,8 @@ Nothing shared needs editing. In particular, there's no route table, no API clie
 
 `app/(shell)/w/[id]/tasks/task-sheet.tsx` is a working example, including a Sheet opened from another screen (`/attention`).
 
+Ownership transfer, recovery and the list of rooms whose owner left have API routes and no screens yet.
+
 | Later work | Owns |
 | --- | --- |
 | Review | `app/(shell)/attention/`, `app/(shell)/w/[id]/tasks/` |

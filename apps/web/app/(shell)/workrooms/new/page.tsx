@@ -5,7 +5,8 @@ import { CreateWorkroomForm } from "./create-form";
 export default async function NewWorkroom() {
   const [identity, organizations] = await Promise.all([getIdentity(), getOrganizations()]);
   // The server takes the organization from who's asking, so this only says which one that is.
-  const organization = identity.ok && organizations.ok ? (organizations.data.organizations.find((org) => org.id === identity.data.org_id)?.name ?? null) : null;
+  const acting = identity.ok && organizations.ok ? organizations.data.organizations.find((org) => org.id === identity.data.org_id) : undefined;
+  const organization = acting?.name ?? null;
   const access = createAccess(identity, organizations);
   return (
     <section className="max-w-xl space-y-4">
@@ -15,7 +16,7 @@ export default async function NewWorkroom() {
       ) : (
         <>
           {access.state === "unknown" ? <p className="text-sm text-muted-foreground">We couldn't check your role just now. Only an organization's admins can create its workrooms, and Podster checks that when you create one.</p> : null}
-          <CreateWorkroomForm organization={organization} />
+          <CreateWorkroomForm organization={organization} personal={Boolean(acting?.personal)} />
         </>
       )}
     </section>

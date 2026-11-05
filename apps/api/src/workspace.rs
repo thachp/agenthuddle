@@ -19,8 +19,8 @@ use podster_core::{
 };
 use podster_policy::{
     authorize_reviewer_change, authorize_task, authorize_workroom, can_review, can_see_task,
-    denied_change_name, is_authority_refusal, org_departure_ends, Caller, PrincipalKind, Role,
-    TaskAction, Verdict, WorkroomAction,
+    denied_change_name, is_authority_refusal, may_recover_ownership, org_departure_ends,
+    owner_authority_holds, Caller, PrincipalKind, Role, TaskAction, Verdict, WorkroomAction,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -171,7 +171,7 @@ fn write_denials(sql: &SqlStorage, held: &HeldDenials) -> R<()> {
 fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
     let room = rows(
         sql,
-        "SELECT owner_person_id, owner_org_id FROM workspace",
+        "SELECT owner_person_id, owner_org_id, owner_left_at, owner_since FROM workspace",
         vec![],
     )?;
     let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
@@ -181,6 +181,13 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
         && room["owner_org_id"]
             .as_str()
             .is_some_and(|org| in_org(identity, org))
+        && owner_authority_holds(
+            room["owner_left_at"].as_i64(),
+            room["owner_since"].as_i64(),
+            room["owner_org_id"]
+                .as_str()
+                .and_then(|org| identity.org_since.get(org).copied()),
+        )
     {
         return Ok(Participant {
             caller: Caller {
@@ -1390,6 +1397,22 @@ fn handle_set_room_status(
         "workspace.unarchived"
     };
     audit(sql, caller, kind, "workspace", None, None, now)?;
+    let mut everyone = room_people(sql)?;
+    everyone.retain(|principal| *principal != caller.id);
+    record_event(
+        sql,
+        kind,
+        &caller.id,
+        None,
+        &Transition::NONE,
+        everyone,
+        now,
+    )?;
+    Ok(json!({ "status": status }))
+}
+
+/// Everyone currently in the room, including an owner who hasn't left.
+fn room_people(sql: &SqlStorage) -> R<Vec<String>> {
     let mut everyone: Vec<String> = rows(
         sql,
         "SELECT principal_id FROM member WHERE revoked_at IS NULL",
@@ -1407,17 +1430,150 @@ fn handle_set_room_status(
         .iter()
         .filter_map(|room| text(&room["owner_person_id"])),
     );
-    everyone.retain(|principal| *principal != caller.id);
+    Ok(everyone)
+}
+
+/// Makes someone the room's owner. An owner isn't a member row, so theirs goes, revoked or not. `since` is the start of
+/// their current membership, so rejoining later doesn't keep this authority, and an older departure doesn't end it.
+fn set_owner(sql: &SqlStorage, person: &str, since: i64) -> R<()> {
+    exec(
+        sql,
+        "DELETE FROM member WHERE principal_id = ?",
+        vec![person.into()],
+    )?;
+    exec(
+        sql,
+        "UPDATE workspace SET owner_person_id = ?, owner_since = ?, owner_left_at = NULL",
+        vec![person.into(), since.into()],
+    )
+}
+
+/// The owner hands the room to one of its human admins, who becomes owner at once, and they become an admin.
+/// `target_member` is what the gateway's directory says about the new owner.
+fn handle_transfer_owner(
+    sql: &SqlStorage,
+    caller: &Caller,
+    body: &Value,
+    target_member: Option<TargetMember>,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::TransferOwner))?;
+    require_policy_version(sql, body)?;
+    let to = required(body, "to")?;
+    let found = rows(
+        sql,
+        "SELECT kind, role, added_at FROM member WHERE principal_id = ? AND revoked_at IS NULL",
+        vec![to.as_str().into()],
+    )?;
+    let member = found.first().ok_or_else(ApiError::invalid_argument)?;
+    if member["kind"].as_str() != Some("person") || member["role"].as_str() != Some("admin") {
+        return Err(ApiError::invalid_argument());
+    }
+    let org = room_owner_org(sql)?;
+    // Someone who has left, or whose role predates their membership, can't act on it, so they can't own the room either.
+    let joined = joined_org(target_member.as_ref(), &to, &org)?;
+    if joined > int(&member["added_at"]) {
+        return Err(ApiError::not_in_organization());
+    }
+    let room = rows(sql, "SELECT owner_since FROM workspace", vec![])?;
+    // The former owner's role starts with their membership, so a departure from before now that hasn't arrived still ends it.
+    let former_since = room
+        .first()
+        .and_then(|room| room["owner_since"].as_i64())
+        .unwrap_or(now);
+    set_owner(sql, &to, joined)?;
+    exec(
+        sql,
+        "INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'person', ?, 'admin', ?, ?)",
+        vec![
+            caller.id.as_str().into(),
+            org.as_str().into(),
+            caller.id.as_str().into(),
+            former_since.into(),
+        ],
+    )?;
+    queue_index(sql, &to, &org, Some("owner"), now)?;
+    queue_index(sql, &caller.id, &org, Some("admin"), now)?;
+    audit(
+        sql,
+        caller,
+        "owner.transferred",
+        &to,
+        Some(json!({ "owner": caller.id }).to_string()),
+        Some(json!({ "owner": to }).to_string()),
+        now,
+    )?;
     record_event(
         sql,
-        kind,
+        "owner.transferred",
         &caller.id,
         None,
         &Transition::NONE,
-        everyone,
+        room_people(sql)?,
         now,
     )?;
-    Ok(json!({ "status": status }))
+    Ok(json!({ "owner": to }))
+}
+
+/// An organization's admin names a new owner for a room whose owner left. The caller checked who's asking, and that the
+/// room records the departure. The former owner has no place in the room afterwards, unless they're the one named.
+fn apply_recovery(
+    sql: &SqlStorage,
+    actor: &str,
+    body: &Value,
+    target_member: Option<&TargetMember>,
+    now: i64,
+) -> R<Value> {
+    let room = rows(
+        sql,
+        "SELECT owner_person_id, owner_org_id, owner_left_at FROM workspace",
+        vec![],
+    )?;
+    let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
+    let former = text(&room["owner_person_id"]).unwrap_or_default();
+    let org = text(&room["owner_org_id"]).unwrap_or_default();
+    // An admin outside the room can't read its policy version, so this is the check on an out-of-date view.
+    if required(body, "expected_owner")? != former {
+        return Err(ApiError::from_core(
+            &podster_core::CoreError::VersionConflict,
+        ));
+    }
+    let to = required(body, "to")?;
+    require_id(&to)?;
+    if to.starts_with(AGENT_ID_PREFIX) {
+        return Err(ApiError::invalid_argument());
+    }
+    let joined = joined_org(target_member, &to, &org)?;
+    set_owner(sql, &to, joined)?;
+    if to != former {
+        queue_index(sql, &former, &org, None, now)?;
+    }
+    queue_index(sql, &to, &org, Some("owner"), now)?;
+    let caller = Caller {
+        id: actor.to_string(),
+        kind: PrincipalKind::Person,
+        role: Role::None,
+        guest_can_create: false,
+    };
+    audit(
+        sql,
+        &caller,
+        "owner.recovered",
+        &to,
+        Some(json!({ "owner": former, "left_at": room["owner_left_at"] }).to_string()),
+        Some(json!({ "owner": to }).to_string()),
+        now,
+    )?;
+    record_event(
+        sql,
+        "owner.recovered",
+        actor,
+        None,
+        &Transition::NONE,
+        room_people(sql)?,
+        now,
+    )?;
+    Ok(json!({ "owner": to }))
 }
 
 /// Clears a room's removal, so the agent can return through an invitation. It's the room's decision alone.
@@ -1486,7 +1642,7 @@ mod queries {
     pub fn get_workspace(sql: &SqlStorage, caller: &Caller) -> R<Value> {
         let room = rows(
             sql,
-            "SELECT id, name, owner_person_id, owner_org_id, status, policy_version FROM workspace",
+            "SELECT id, name, owner_person_id, owner_org_id, owner_left_at, status, policy_version FROM workspace",
             vec![],
         )?;
         let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
@@ -1507,6 +1663,7 @@ mod queries {
         // Who has left and why, and which organization holds the room, are for those who manage its access.
         if manages {
             answer["owner_org"] = room["owner_org_id"].clone();
+            answer["owner_left_at"] = room["owner_left_at"].clone();
             answer["removed"] = json!(rows(sql, "SELECT principal_id, kind, org_id, revoked_at, revocation_reason FROM member WHERE revoked_at IS NOT NULL ORDER BY revoked_at DESC LIMIT ?", vec![REMOVED_LISTED.into()])?);
         }
         Ok(answer)
@@ -1678,6 +1835,45 @@ struct HeldDenial {
     last_at: i64,
 }
 
+/// What this actor's earlier request with this key was answered, if it's the same request.
+fn stored_answer(
+    sql: &SqlStorage,
+    actor: &str,
+    key: &str,
+    hash: &str,
+    now: i64,
+) -> R<Option<Value>> {
+    let prior = rows(sql, "SELECT request_hash, response_json FROM idempotency WHERE actor_id = ? AND key = ? AND expires_at > ?",
+        vec![actor.into(), key.into(), now.into()])?;
+    let Some(prior) = prior.first() else {
+        return Ok(None);
+    };
+    if prior["request_hash"].as_str() != Some(hash) {
+        return Err(ApiError::idempotency_mismatch());
+    }
+    Ok(Some(serde_json::from_str(
+        prior["response_json"].as_str().unwrap_or("null"),
+    )?))
+}
+
+/// Keeps a command's answer for a retry. A secret in a response is returned once and never stored, so a replay can't reveal it.
+fn store_answer(
+    sql: &SqlStorage,
+    actor: &str,
+    key: &str,
+    hash: &str,
+    value: &Value,
+    now: i64,
+) -> R<()> {
+    let mut stored = value.clone();
+    if let Some(map) = stored.as_object_mut() {
+        map.remove("token");
+    }
+    exec(sql, "INSERT OR REPLACE INTO idempotency (actor_id, key, request_hash, response_json, expires_at) VALUES (?, ?, ?, ?, ?)", vec![
+        actor.into(), key.into(), hash.into(), stored.to_string().into(), (now + IDEMPOTENCY_TTL_MS).into(),
+    ])
+}
+
 impl Workspace {
     /// Runs one command: authority, replay check, handler and idempotency record commit or roll back together.
     fn command(
@@ -1692,7 +1888,6 @@ impl Workspace {
         let key = key
             .filter(|k| !k.is_empty() && k.len() <= MAX_KEY_BYTES)
             .ok_or_else(ApiError::idempotency_required)?;
-        self.note_owner_membership(identity)?;
         let sql = self.state.storage().sql();
         let identity = identity.clone();
         let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
@@ -1701,29 +1896,15 @@ impl Workspace {
             // Authority first, so a revoked caller can't replay a stored response.
             let who = resolve_caller(&sql, &identity)?;
             let now = now_ms();
-            let prior = rows(&sql, "SELECT request_hash, response_json FROM idempotency WHERE actor_id = ? AND key = ? AND expires_at > ?",
-                vec![identity.id.as_str().into(), key.as_str().into(), now.into()])?;
-            if let Some(prior) = prior.first() {
-                if prior["request_hash"].as_str() != Some(hash.as_str()) {
-                    return Err(ApiError::idempotency_mismatch());
-                }
-                *slot.borrow_mut() = Some(serde_json::from_str(
-                    prior["response_json"].as_str().unwrap_or("null"),
-                )?);
+            if let Some(answer) = stored_answer(&sql, &identity.id, &key, &hash, now)? {
+                *slot.borrow_mut() = Some(answer);
                 return Ok(());
             }
             if stops_when_archived && room_archived(&sql)? {
                 return Err(ApiError::workspace_archived());
             }
             let value = handler(&sql, &who, now)?;
-            // A secret in a response is returned once and never stored, so a replay can't reveal it.
-            let mut stored = value.clone();
-            if let Some(map) = stored.as_object_mut() {
-                map.remove("token");
-            }
-            exec(&sql, "INSERT OR REPLACE INTO idempotency (actor_id, key, request_hash, response_json, expires_at) VALUES (?, ?, ?, ?, ?)", vec![
-                identity.id.as_str().into(), key.as_str().into(), hash.as_str().into(), stored.to_string().into(), (now + IDEMPOTENCY_TTL_MS).into(),
-            ])?;
+            store_answer(&sql, &identity.id, &key, &hash, &value, now)?;
             #[cfg(feature = "failpoints")]
             if test_fail {
                 return Err(ApiError::internal("injected failure"));
@@ -1735,6 +1916,70 @@ impl Workspace {
         })?;
         let value = out.borrow_mut().take();
         value.ok_or_else(|| ApiError::internal("command produced no result"))
+    }
+
+    /// Runs ownership recovery, for someone who may have no role in this room, so it can't go through `command`. An
+    /// organization's admin outside the room is told nothing until the room records that its owner left, so a refusal
+    /// can't confirm that the room exists or who owns it. Their own retry gets its stored answer, even though recovery
+    /// has cleared that record, and keys are per actor. It works in an archived room, which nobody could otherwise bring back.
+    fn recover_owner(
+        &self,
+        identity: &Identity,
+        key: Option<String>,
+        hash: String,
+        body: Value,
+        test_fail: bool,
+    ) -> R<Value> {
+        let sql = self.state.storage().sql();
+        let identity = identity.clone();
+        let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let slot = out.clone();
+        transaction_sync(&self.state, move || {
+            let now = now_ms();
+            let org = room_owner_org(&sql)?;
+            if !may_recover_ownership(
+                parse_kind(&identity.kind),
+                identity.admin_orgs.contains(&org),
+            ) {
+                // An outsider learns nothing, and someone in the room is told no.
+                resolve_caller(&sql, &identity)?;
+                return Err(ApiError::not_allowed());
+            }
+            let key = key.filter(|k| !k.is_empty() && k.len() <= MAX_KEY_BYTES);
+            if let Some(key) = &key {
+                if let Some(answer) = stored_answer(&sql, &identity.id, key, &hash, now)? {
+                    *slot.borrow_mut() = Some(answer);
+                    return Ok(());
+                }
+            }
+            let room = rows(&sql, "SELECT owner_left_at FROM workspace", vec![])?;
+            if room
+                .first()
+                .is_none_or(|room| room["owner_left_at"].is_null())
+            {
+                resolve_caller(&sql, &identity)?;
+                return Err(ApiError::not_allowed());
+            }
+            let key = key.ok_or_else(ApiError::idempotency_required)?;
+            let value = apply_recovery(
+                &sql,
+                &identity.id,
+                &body,
+                identity.target_member.as_ref(),
+                now,
+            )?;
+            store_answer(&sql, &identity.id, &key, &hash, &value, now)?;
+            #[cfg(feature = "failpoints")]
+            if test_fail {
+                return Err(ApiError::internal("injected failure"));
+            }
+            #[cfg(not(feature = "failpoints"))]
+            let _ = test_fail;
+            *slot.borrow_mut() = Some(value);
+            Ok(())
+        })?;
+        let value = out.borrow_mut().take();
+        value.ok_or_else(|| ApiError::internal("recovery produced no result"))
     }
 
     /// Applies a global disconnect in this room, and always leaves the floor behind, even for a non-member,
@@ -2053,7 +2298,11 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Ok(());
         }
-        let room = rows(&sql, "SELECT id, name, status FROM workspace", vec![])?;
+        let room = rows(
+            &sql,
+            "SELECT id, name, status, owner_person_id, owner_left_at FROM workspace",
+            vec![],
+        )?;
         let Some(room) = room.first() else {
             return Ok(());
         };
@@ -2076,9 +2325,16 @@ impl Workspace {
                 JsValue::from_f64(int(&row["removed"]) as f64),
                 JsValue::from_f64(int(&row["seq"]) as f64),
                 room["status"].as_str().unwrap_or(ACTIVE_ROOM).into(),
+                // Only the owner's row says the owner left, and it reads the room as it is now.
+                match room["owner_left_at"].as_i64() {
+                    Some(left_at) if !removed && row["principal_id"] == room["owner_person_id"] => {
+                        JsValue::from_f64(left_at as f64)
+                    }
+                    _ => JsValue::NULL,
+                },
             ];
-            db.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq, workspace_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT (workspace_id, principal_id) DO UPDATE SET org_id = excluded.org_id, role = excluded.role,
+            db.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq, workspace_status, owner_left_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT (workspace_id, principal_id) DO UPDATE SET org_id = excluded.org_id, role = excluded.role, owner_left_at = excluded.owner_left_at,
                 workspace_name = CASE WHEN excluded.removed = 1 THEN membership_index.workspace_name ELSE excluded.workspace_name END,
                 workspace_status = CASE WHEN excluded.removed = 1 THEN membership_index.workspace_status ELSE excluded.workspace_status END,
                 removed = excluded.removed, updated_seq = excluded.updated_seq WHERE excluded.updated_seq > membership_index.updated_seq")
@@ -2209,8 +2465,10 @@ impl Workspace {
         transaction_sync(&self.state, move || {
             let now = now_ms();
             store::migrate(&sql)?;
-            exec(&sql, "INSERT INTO workspace (id, name, owner_org_id, owner_person_id, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)", vec![
-                id.workspace_id.as_str().into(), name.as_str().into(), id.org.as_str().into(), id.id.as_str().into(), now.into(),
+            // Owner authority lasts as long as the membership it began under.
+            let since = id.org_since.get(&id.org).copied().unwrap_or(now);
+            exec(&sql, "INSERT INTO workspace (id, name, owner_org_id, owner_person_id, status, created_at, owner_since) VALUES (?, ?, ?, ?, 'active', ?, ?)", vec![
+                id.workspace_id.as_str().into(), name.as_str().into(), id.org.as_str().into(), id.id.as_str().into(), now.into(), since.into(),
             ])?;
             let owner = Caller {
                 id: id.id.clone(),
@@ -2354,59 +2612,6 @@ impl Workspace {
         written
     }
 
-    /// Keeps the start of the owner's latest membership, so a departure delayed past a rejoin can't take them out again,
-    /// and records that an owner who left is back and acting here. It's separate from the command it comes before, so a
-    /// refused command can't leave them out of the room's work.
-    fn note_owner_membership(&self, identity: &Identity) -> R<()> {
-        let sql = self.state.storage().sql();
-        let room = rows(
-            &sql,
-            "SELECT owner_person_id, owner_org_id, owner_left_at, owner_since FROM workspace",
-            vec![],
-        )?;
-        let Some(room) = room.first() else {
-            return Ok(());
-        };
-        let org = text(&room["owner_org_id"]).unwrap_or_default();
-        if room["owner_person_id"].as_str() != Some(identity.id.as_str()) || !in_org(identity, &org)
-        {
-            return Ok(());
-        }
-        let Some(since) = identity.org_since.get(&org).copied() else {
-            return Ok(());
-        };
-        let newer = room["owner_since"].as_i64().is_none_or(|seen| since > seen);
-        let back = !room["owner_left_at"].is_null() && since > int(&room["owner_left_at"]);
-        if !newer && !back {
-            return Ok(());
-        }
-        let person = identity.id.clone();
-        transaction_sync(&self.state, move || {
-            if newer {
-                exec(
-                    &sql,
-                    "UPDATE workspace SET owner_since = ?",
-                    vec![since.into()],
-                )?;
-            }
-            if back {
-                exec(&sql, "UPDATE workspace SET owner_left_at = NULL", vec![])?;
-                audit_as(
-                    &sql,
-                    &person,
-                    "person",
-                    "owner.returned",
-                    &person,
-                    None,
-                    None,
-                    now_ms(),
-                )?;
-            }
-            Ok(())
-        })?;
-        Ok(())
-    }
-
     /// Applies a person's departure from an organization, from this room's own state. Repeating it changes nothing.
     fn org_departure(&self, body: &Value) -> R<Value> {
         let sql = self.state.storage().sql();
@@ -2461,8 +2666,9 @@ impl Workspace {
                     )?;
                 }
             }
-            // The room keeps its owner, because nobody else can hold it yet. They stop being a participant, so their tasks
-            // follow the departure table and nothing more reaches their inbox. Each departure applies once.
+            // The room keeps its owner until recovery names another. They stop being a participant, so their tasks follow the
+            // departure table and nothing more reaches their inbox. Each departure applies once, and one from before they
+            // became owner under their current membership doesn't count.
             if is_owner(&sql, &person)? && room_org == org {
                 let since = rows(&sql, "SELECT owner_since FROM workspace", vec![])?;
                 let rejoined = since
@@ -2478,6 +2684,7 @@ impl Workspace {
                         vec![left_at.into()],
                     )?;
                     apply_departure_rules(&sql, &actor, &person, now)?;
+                    queue_index(&sql, &person, &org, Some("owner"), now)?;
                     audit(
                         &sql,
                         &actor,
@@ -2569,6 +2776,19 @@ impl Workspace {
                 }
             }
         }
+        // Recovery is for someone who may have no role here, and it decides what they're told.
+        if method == Method::Post && matches!(path_parts.get(3..), Some(["owner", "recover"])) {
+            let key = req.headers().get("idempotency-key")?;
+            // A malformed body can't answer differently before the room has decided what to say.
+            let body: Value = serde_json::from_str(&req.text().await?).unwrap_or(Value::Null);
+            let hash = format!(
+                "{:x}",
+                Sha256::digest(format!("{method:?} {path} {body}").as_bytes())
+            );
+            let test_fail =
+                cfg!(feature = "failpoints") && req.headers().get("x-test-fail")?.is_some();
+            return self.recover_owner(&identity, key, hash, body, test_fail);
+        }
         // Read-only oversight of an organization's own agent, for someone who may have no role here.
         if method == Method::Get {
             if let Some(["agents", agent, "tasks", rest @ ..]) = path_parts.get(3..) {
@@ -2596,7 +2816,8 @@ impl Workspace {
         let parts: Vec<&str> = segments.iter().map(String::as_str).collect();
         let tail = parts.get(3..).unwrap_or(&[]);
 
-        // An archived room can still lose participants and links, and can come back. Nothing new happens in it. `command`
+        // An archived room can still lose participants and links, and can come back. Nothing new happens in it, and only
+        // recovery, which doesn't come through here, can change its owner. `command`
         // checks this in its transaction, after the replay lookup, so a retry of something committed earlier gets its answer.
         let stops_when_archived = !matches!(
             (&method, tail),
@@ -2778,6 +2999,19 @@ impl Workspace {
                     handle_revoke_organization(sql, &who.caller, &target, &body, now)
                 },
             ),
+            (Method::Post, ["owner", "transfer"]) => {
+                let target_member = identity.target_member.clone();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        handle_transfer_owner(sql, &who.caller, &body, target_member, now)
+                    },
+                )
+            }
             (Method::Delete, ["members", _]) => self.command(
                 &identity,
                 key,

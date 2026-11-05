@@ -132,6 +132,33 @@ async fn list_oversight_rooms(
     )?)
 }
 
+/// Rooms of the organizations this person administers whose owner left, so they can run recovery. It only shows them,
+/// and each room decides for itself when recovery runs. It's for rooms in their own organization, and has no content.
+async fn list_ownerless_rooms(
+    env: &Env,
+    caller: &Caller,
+) -> std::result::Result<Response, ApiError> {
+    let db = env.d1("DB")?;
+    let mut rooms = Vec::new();
+    let mut truncated = caller.admin_orgs.len() > OVERSIGHT_ORGS;
+    for org in caller.admin_orgs.iter().take(OVERSIGHT_ORGS) {
+        let found = db
+            .prepare("SELECT workspace_id, workspace_name, workspace_status, principal_id, org_id, owner_left_at FROM membership_index WHERE org_id = ? AND removed = 0 AND role = 'owner' AND owner_left_at IS NOT NULL ORDER BY workspace_name LIMIT ?")
+            .bind(&[org.as_str().into(), (OVERSIGHT_ROOMS + 1).into()])?
+            .all()
+            .await?
+            .results::<Value>()?;
+        truncated |= found.len() > OVERSIGHT_ROOMS as usize;
+        rooms.extend(found.into_iter().take(OVERSIGHT_ROOMS as usize).map(|row| json!({
+            "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "status": row["workspace_status"],
+            "owner": row["principal_id"], "left_at": row["owner_left_at"], "org_id": row["org_id"],
+        })));
+    }
+    Ok(Response::from_json(
+        &json!({ "rooms": rooms, "truncated": truncated }),
+    )?)
+}
+
 async fn me(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiError> {
     if caller.kind == "agent" {
         let stub = env
@@ -232,6 +259,12 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
                 return Err(ApiError::not_allowed());
             }
             return list_oversight_rooms(&env, &caller).await;
+        }
+        ["v1", "oversight", "ownerless"] if method == Method::Get => {
+            if is_agent {
+                return Err(ApiError::not_allowed());
+            }
+            return list_ownerless_rooms(&env, &caller).await;
         }
         ["v1", "org-departures"] if method == Method::Post => {
             // Only the gateway's own removal states a departure. The person who left may have made the request.

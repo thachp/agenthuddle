@@ -22,12 +22,12 @@ The gateway tells the API, and each room decides from its own state.
 
 ## Departed room owners
 
-A room's owner isn't a member row, and nobody else can own the room until [ADR 0005](0005-ownership-transfer-and-recovery.md)'s recovery ships. So the owner stays the owner, and the room records their departure in `owner_left_at`, with `owner.left_organization` in its log. While that's set:
+A room's owner isn't a member row, and only [ADR 0005](0005-ownership-transfer-and-recovery.md)'s recovery can name another owner. So the owner stays the owner, and the room records their departure in `owner_left_at`, with `owner.left_organization` in its log. While that's set:
 
 - They aren't a participant. Their tasks follow the departure table, nothing more reaches their inbox, and they can't be given work. Their pending invitations are withdrawn.
-- If the room has no admin, nobody can manage its access or take over its tasks until the owner rejoins or ADR 0005's recovery ships. A task needing attention tells nobody in the meantime.
+- If the room has no admin, nobody can manage its access or take over its tasks until an organization admin runs recovery. A task needing attention tells nobody in the meantime.
 
-If they rejoin, they get full owner authority back, even from a member invitation. The first command they send in the room clears `owner_left_at` and records `owner.returned`, so a stale form they sent then may need one retry, because that changes the policy version. Reading doesn't record anything. The room keeps the start of their latest membership from their commands, so a departure delayed past their return doesn't take them out again, and an older departure can't lower `owner_left_at`. If the delayed departure arrives before their first command after rejoining, it does take them out until that command. Their old tasks don't return to them. [Decision 32](../spec/PRODUCT.md#decisions-needed) keeps this until ownership recovery ships, and then [decision 35](../spec/PRODUCT.md#decisions-needed) replaces it.
+Rejoining doesn't give the room back, under [decision 35](../spec/PRODUCT.md#decisions-needed), which replaced decision 32 when recovery was built. Until then, a rejoining owner got full owner authority back from their first command, which recorded `owner.returned`. Now the room refuses an owner whose current membership began after the one they became owner under, so a departure that hasn't arrived yet doesn't matter, and an organization admin has to run recovery and name them. A departure from before their membership doesn't take them out, and an older one can't lower `owner_left_at`. Their old tasks don't return to them.
 
 ## Consequences
 

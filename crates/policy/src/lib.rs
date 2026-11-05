@@ -48,6 +48,8 @@ pub enum WorkroomAction {
     ReadAuditLog,
     /// Renaming or archiving a room.
     ManageRoom,
+    /// Naming a new owner, from the current one.
+    TransferOwner,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +127,8 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("PUT", ["name"]) => "room.rename",
         ("POST", ["archive"]) => "room.archive",
         ("POST", ["unarchive"]) => "room.unarchive",
+        ("POST", ["owner", "transfer"]) => "owner.transfer",
+        ("POST", ["owner", "recover"]) => "owner.recover",
         _ => return None,
     })
 }
@@ -153,6 +157,24 @@ pub fn org_departure_ends(held_org: &str, departed_org: &str, began_at: i64, lef
     held_org == departed_org && began_at <= left_at
 }
 
+/// Whether the recorded owner holds owner authority now. They don't once the room records that they left, or if their
+/// current membership began after the one they became owner under, because rejoining doesn't restore it. A delayed
+/// departure therefore doesn't matter. An assertion with no start time for the room's organization has nothing to
+/// compare, as with a member's role. A room with no recorded start refuses.
+pub fn owner_authority_holds(
+    owner_left_at: Option<i64>,
+    owner_since: Option<i64>,
+    current_membership: Option<i64>,
+) -> bool {
+    owner_left_at.is_none()
+        && current_membership.is_none_or(|began| owner_since.is_some_and(|since| began <= since))
+}
+
+/// Who can run ownership recovery: a person who administers the room's organization, with or without a place in the room.
+pub fn may_recover_ownership(kind: PrincipalKind, administers_room_org: bool) -> bool {
+    kind == PrincipalKind::Person && administers_room_org
+}
+
 /// Admin authority is for people only, even if a stored role says otherwise.
 fn is_human_admin(caller: &Caller) -> bool {
     caller.kind == PrincipalKind::Person && matches!(caller.role, Role::Owner | Role::Admin)
@@ -169,7 +191,7 @@ pub fn authorize_workroom(caller: &Caller, action: WorkroomAction) -> Verdict {
             Role::Guest => caller.guest_can_create,
             Role::None => false,
         },
-        WorkroomAction::AppointAdmin => {
+        WorkroomAction::AppointAdmin | WorkroomAction::TransferOwner => {
             caller.kind == PrincipalKind::Person && caller.role == Role::Owner
         }
         WorkroomAction::ManageAccess

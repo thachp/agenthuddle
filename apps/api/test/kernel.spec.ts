@@ -323,10 +323,10 @@ describe("access management", () => {
       const res = await api(ADMIN, method, path, body, { token: await rejoined(ADMIN) });
       expect([path, res.code]).toEqual([path, "workspace_not_found"]);
     }
-    // A role that started within this membership keeps working, and the owner isn't a member row.
+    // A role that started within this membership keeps working. Owner authority ends the same way, under decision 35.
     const current = await api(ADMIN, "GET", `/v1/workspaces/${id}`, undefined, { token: await assertion(ADMIN, { claims: { org_since: { org_a: 1 } } }) });
     expect(current.status).toBe(200);
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`, undefined, { token: await rejoined(OWNER) })).status).toBe(200);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`, undefined, { token: await rejoined(OWNER) })).code).toBe("workspace_not_found");
     // Changing the ended role is refused, and adding them again is the recorded way back.
     const target_member = { person: ADMIN.id, orgs: { org_a: later } };
     const role = await api(OWNER, "POST", `${members}/${ADMIN.id}/role`, { role: "member" }, { token: await assertion(OWNER, { claims: { target_member } }) });
@@ -2453,13 +2453,13 @@ describe("a person leaving the room's organization", () => {
     expect((await api(asPerson(who), "DELETE", `/v1/workspaces/${id}/invitations/${invitation.body.id}`, {})).status).toBe(200);
   });
 
-  it("takes a departed owner out of the room's work, keeps them as owner, and records it once", async () => {
+  it("takes a departed owner out of the room's work, refuses them even after rejoining, and records it once", async () => {
     const founder: Who = { id: person(), kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
     const claimsFor = (since: number) => assertion(founder, { claims: { org_since: { org_a: since } } });
     const created = await api(founder, "POST", "/v1/workspaces", { name: "Owner leaves" });
     const id = created.body.id as string;
     const tasks = `/v1/workspaces/${id}/tasks`;
-    const version = async (token?: string) => (await api(founder, "GET", `/v1/workspaces/${id}`, undefined, { token })).body.policy_version as number;
+    const version = async () => (await api(founder, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
     const helper = person();
     expect((await api(founder, "POST", `/v1/workspaces/${id}/members`, { principal_id: helper, kind: "person", org_id: "org_a", role: "admin", policy_version: await version() })).status).toBe(200);
     await listRoom(id, founder.id);
@@ -2471,8 +2471,10 @@ describe("a person leaving the room's organization", () => {
     expect((await depart(asPerson(helper), leaving)).status).toBe(200);
     await makeDue(founder.id);
     await runDurableObjectAlarm(principal(founder.id));
-    expect((await api(founder, "GET", `/v1/workspaces/${id}`)).body.owner).toBe(founder.id);
-    const log = async () => (await api(founder, "GET", `/v1/workspaces/${id}/audit`)).body.audit as any[];
+    const seen = (await api(asPerson(helper), "GET", `/v1/workspaces/${id}`)).body;
+    expect(seen.owner).toBe(founder.id);
+    expect(seen.owner_left_at).toBe(leftAt);
+    const log = async () => (await api(asPerson(helper), "GET", `/v1/workspaces/${id}/audit`)).body.audit as any[];
     expect((await log()).filter((e) => e.action === "owner.left_organization").map((e) => e.actor_id)).toEqual([helper]);
     expect((await log()).filter((e) => e.action === "invitation.withdrawn" && e.target_id === invitation.body.id)).toHaveLength(1);
     // Their task follows the table, with nobody falling back to them.
@@ -2487,36 +2489,31 @@ describe("a person leaving the room's organization", () => {
     expect((await api(asPerson(helper), "POST", `${tasks}/${lone.body.id}/messages`, { body: "After they left" })).status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(await unread()).toBe(before);
-    // An assertion from before they left records nothing, and a command after rejoining does, even if it's refused.
-    const stale = await api(founder, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: await version() }, { token: await claimsFor(leftAt - 1) });
-    expect(stale.status).toBe(200);
-    expect((await log()).filter((e) => e.action === "owner.returned")).toHaveLength(0);
-    const v = await version();
-    const first = await api(founder, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: v }, { token: await claimsFor(leftAt + 1) });
-    expect(first.code).toBe("version_conflict");
-    expect((await log()).filter((e) => e.action === "owner.returned").map((e) => e.actor_id)).toEqual([founder.id]);
-    // A retry of the same departure doesn't take them out again, and they're a participant again.
+    // Neither an assertion from before they left nor rejoining gives it back, and nothing they send changes that.
+    for (const since of [leftAt - 1, leftAt + 1]) {
+      const token = await claimsFor(since);
+      expect((await api(founder, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: seen.policy_version }, { token })).code).toBe("workspace_not_found");
+      expect((await api(founder, "GET", `/v1/workspaces/${id}`, undefined, { token })).code).toBe("workspace_not_found");
+    }
+    expect((await api(asPerson(helper), "GET", `/v1/workspaces/${id}`)).body.owner_left_at).toBe(leftAt);
+    expect((await log()).filter((e) => e.action === "owner.returned")).toEqual([]);
+    // A retry of the same departure records nothing more.
     expect((await depart(asPerson(helper), leaving, false)).status).toBe(200);
     await makeDue(founder.id);
     await runDurableObjectAlarm(principal(founder.id));
-    const again = await api(founder, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", policy_version: await version() }, { token: await claimsFor(leftAt + 1) });
-    expect(again.status).toBe(200);
-    const newcomer = { id: `agt_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`, org: BOB.org };
-    await register(newcomer);
-    const accepted = await api(orgAdmin(BOB.org), "POST", "/v1/invitations/accept", { token: again.body.token, org_id: BOB.org, agents: [newcomer.id] });
-    expect(accepted.status).toBe(200);
+    expect((await log()).filter((e) => e.action === "owner.left_organization")).toHaveLength(1);
   });
 
-  it("doesn't take out an owner who rejoined before a delayed departure arrived, and keeps the newest", async () => {
+  it("doesn't take out an owner over a departure from before their membership, and keeps the newest", async () => {
     const founder: Who = { id: person(), kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
-    const id = (await api(founder, "POST", "/v1/workspaces", { name: "Delayed" })).body.id as string;
-    const tasks = `/v1/workspaces/${id}/tasks`;
-    await listRoom(id, founder.id);
     const leftOlder = Date.now();
     const leftNewer = leftOlder + 1000;
     const rejoinedAt = leftOlder + 500;
     const token = () => assertion(founder, { claims: { org_since: { org_a: rejoinedAt } } });
-    // They rejoined and acted before the departure from before that rejoin reached the room.
+    const id = (await api(founder, "POST", "/v1/workspaces", { name: "Delayed" }, { token: await token() })).body.id as string;
+    const tasks = `/v1/workspaces/${id}/tasks`;
+    await listRoom(id, founder.id);
+    // They made the room in a newer membership than the departure that's only reaching the room now.
     const task = await api(founder, "POST", tasks, { title: "After rejoining", instructions: "x", acceptance_criteria: "y" }, { token: await token() });
     expect(task.status).toBe(200);
     expect((await depart(OWNER, { person: founder.id, org: "org_a", left_at: leftOlder })).status).toBe(200);
@@ -2591,7 +2588,7 @@ describe("a person leaving the room's organization", () => {
       state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN owner_since");
       state.storage.sql.exec("DROP TABLE org_revocation");
       state.storage.sql.exec("DROP TABLE denial");
-      state.storage.sql.exec("UPDATE schema_version SET version = version - 3");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 4");
     });
     await downgrade();
     expect((await depart(OWNER, { person: who, org: "org_a", left_at: Date.now() })).status).toBe(200);
@@ -2600,6 +2597,356 @@ describe("a person leaving the room's organization", () => {
     const answer = await runInDurableObject(stub(id), (instance: any) => instance.fetch(new Request("https://workspace/internal/revoke", { method: "POST", body: JSON.stringify({ principal: LEAD.id, floor: 99 }) })));
     expect((answer as Response).status).toBe(200);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.members.map((m: any) => m.principal_id)).not.toContain(LEAD.id);
+  });
+});
+
+describe("transferring and recovering a room's ownership", () => {
+  const unique = () => crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+  const human = (adminOrgs: string[] = [], org = "org_a"): Who => ({ id: `per_${unique()}`, kind: "person", org, orgs: [org], adminOrgs });
+  const path = (id: string) => `/v1/workspaces/${id}`;
+  /** The gateway's statement about the person being named, on a fresh assertion. */
+  const naming = (who: Who, to: string, orgs: Record<string, number> = { org_a: 1 }, extra: object = {}) => assertion(who, { claims: { target_member: { person: to, orgs }, ...extra } });
+  const version = async (id: string, who: Who) => (await api(who, "GET", path(id))).body.policy_version as number;
+  const scene = async () => {
+    const founder = human(["org_a"]);
+    const helper = human();
+    const member = human();
+    const created = await api(founder, "POST", "/v1/workspaces", { name: "Handed over" }, { token: await assertion(founder, { claims: { org_since: { org_a: 1 } } }) });
+    expect(created.status).toBe(200);
+    const id = created.body.id as string;
+    for (const [who, role] of [[helper, "admin"], [member, "member"]] as const) {
+      const added = await api(founder, "POST", `${path(id)}/members`, { principal_id: who.id, kind: "person", org_id: "org_a", role, policy_version: await version(id, founder) });
+      expect(added.status).toBe(200);
+    }
+    return { id, founder, helper, member };
+  };
+  const departs = (id: string, person: string, left_at: number, actor = "per_remover") =>
+    runInDurableObject(stub(id), (instance: any) => instance.fetch(new Request("https://workspace/internal/org-departure", { method: "POST", body: JSON.stringify({ person, org: "org_a", left_at, actor }) })));
+  const log = (id: string, who: Who, action: string) => api(who, "GET", `${path(id)}/audit`).then((r) => (r.body.audit as any[]).filter((e) => e.action === action));
+  const indexRow = (id: string, who: string) => (env as any).DB.prepare("SELECT role, removed, owner_left_at FROM membership_index WHERE workspace_id = ? AND principal_id = ?").bind(id, who).first();
+  const ownerless = async (who: Who, id: string) => ((await api(who, "GET", "/v1/oversight/ownerless")).body.rooms as any[]).filter((r) => r.workspace_id === id);
+  const ownerRow = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT owner_person_id, owner_since, owner_left_at, policy_version FROM workspace").one() as any);
+  const memberRow = (id: string, who: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT role, revoked_at, added_at FROM member WHERE principal_id = ?", who).toArray()[0] as any);
+  const recover = (id: string, admin: Who, to: string, expected_owner: string, opts: { key?: string; since?: Record<string, number>; fail?: boolean } = {}) =>
+    naming(admin, to, opts.since).then((token) => api(admin, "POST", `${path(id)}/owner/recover`, { to, expected_owner }, { token, key: opts.key, fail: opts.fail }));
+
+  describe("transfer", () => {
+    it("makes a human admin the owner at once, and the former owner an admin", async () => {
+      const { id, founder, helper } = await scene();
+      const before = await version(id, founder);
+      const done = await api(founder, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: before }, { token: await naming(founder, helper.id, { org_a: 1 }, { org_since: { org_a: 1 } }) });
+      expect(done.status).toBe(200);
+      expect(done.body.owner).toBe(helper.id);
+      const read = (await api(helper, "GET", path(id))).body;
+      expect(read.owner).toBe(helper.id);
+      expect(read.members.find((m: any) => m.principal_id === founder.id).role).toBe("admin");
+      expect(read.members.find((m: any) => m.principal_id === helper.id)).toBeUndefined();
+      expect(read.policy_version).toBeGreaterThan(before);
+      // They can no longer do what only an owner can.
+      expect((await api(founder, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: read.policy_version }, { token: await naming(founder, helper.id) })).code).toBe("not_allowed");
+      const [entry, ...others] = await log(id, helper, "owner.transferred");
+      expect(others).toEqual([]);
+      expect(entry.actor_id).toBe(founder.id);
+      expect(JSON.parse(entry.prior_json)).toEqual({ owner: founder.id });
+      expect(JSON.parse(entry.new_json)).toEqual({ owner: helper.id });
+      const events = (await api(helper, "GET", `${path(id)}/events`)).body.events as any[];
+      expect(events.filter((e) => e.type === "owner.transferred").map((e) => e.body ?? e.reason ?? null)).toEqual([null]);
+      await vi.waitFor(async () => {
+        expect(await indexRow(id, helper.id)).toMatchObject({ role: "owner", removed: 0 });
+        expect(await indexRow(id, founder.id)).toMatchObject({ role: "admin", removed: 0 });
+      }, { timeout: 5000 });
+    });
+
+    it("tells both of them and the room's people", async () => {
+      const { id, founder, helper, member } = await scene();
+      await api(founder, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: await version(id, founder) }, { token: await naming(founder, helper.id) });
+      for (const who of [founder, helper, member]) {
+        await vi.waitFor(async () => {
+          const events = (await api(who, "GET", "/v1/inbox")).body.events as any[];
+          expect(events.map((e) => e.type)).toContain("owner.transferred");
+        }, { timeout: 5000 });
+      }
+    });
+
+    it("refuses anyone but the owner, anyone but an active human admin, and a stale form, changing nothing", async () => {
+      const { id, founder, helper, member } = await scene();
+      const agent = { id: `agt_${unique()}`, org: "org_a" };
+      await api(founder, "POST", `${path(id)}/members`, { principal_id: agent.id, kind: "agent", org_id: "org_a", role: "member", policy_version: await version(id, founder) });
+      const gone = human();
+      await api(founder, "POST", `${path(id)}/members`, { principal_id: gone.id, kind: "person", org_id: "org_a", role: "admin", policy_version: await version(id, founder) });
+      await api(founder, "DELETE", `${path(id)}/members/${gone.id}`, { policy_version: await version(id, founder) });
+      const before = await ownerRow(id);
+      const v = before.policy_version;
+      const send = async (who: Who, to: string, body: object = {}, orgs: Record<string, number> = { org_a: 1 }) => (await api(who, "POST", `${path(id)}/owner/transfer`, { to, policy_version: v, ...body }, { token: await naming(who, to, orgs) })).code;
+      expect(await send(helper, member.id)).toBe("not_allowed");
+      expect(await send(member, helper.id)).toBe("not_allowed");
+      expect(await send(human(), helper.id)).toBe("workspace_not_found");
+      expect((await api(agent, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: v })).code).toBe("not_allowed");
+      expect(await send(founder, member.id)).toBe("invalid_argument");
+      expect(await send(founder, agent.id)).toBe("invalid_argument");
+      expect(await send(founder, gone.id)).toBe("invalid_argument");
+      expect(await send(founder, founder.id)).toBe("invalid_argument");
+      expect(await send(founder, helper.id, { policy_version: v - 1 })).toBe("version_conflict");
+      // The directory has them gone, or their role is from an earlier membership.
+      expect((await api(founder, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: v })).code).toBe("not_in_organization");
+      expect(await send(founder, helper.id, {}, { org_a: Date.now() + 60_000 })).toBe("not_in_organization");
+      expect(await ownerRow(id)).toEqual(before);
+      expect(await log(id, founder, "owner.transferred")).toEqual([]);
+    });
+
+    it("is refused in an archived room", async () => {
+      const { id, founder, helper } = await scene();
+      expect((await api(founder, "POST", `${path(id)}/archive`, { policy_version: await version(id, founder) })).status).toBe(200);
+      const refused = await api(founder, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: await version(id, founder) }, { token: await naming(founder, helper.id) });
+      expect(refused.code).toBe("workspace_archived");
+    });
+
+    it("leaves nothing behind when it fails partway, and a retry gets one answer", async () => {
+      const { id, founder, helper } = await scene();
+      const body = { to: helper.id, policy_version: await version(id, founder) };
+      const failed = await api(founder, "POST", `${path(id)}/owner/transfer`, body, { token: await naming(founder, helper.id), fail: true, key: "transfer-key" });
+      expect(failed.status).toBe(500);
+      expect((await ownerRow(id)).owner_person_id).toBe(founder.id);
+      expect((await memberRow(id, helper.id)).role).toBe("admin");
+      expect(await memberRow(id, founder.id)).toBeUndefined();
+      expect(await log(id, founder, "owner.transferred")).toEqual([]);
+      expect((await api(founder, "POST", `${path(id)}/owner/transfer`, body, { token: await naming(founder, helper.id), key: "transfer-key" })).status).toBe(200);
+      const again = await api(founder, "POST", `${path(id)}/owner/transfer`, body, { token: await naming(founder, helper.id), key: "transfer-key" });
+      expect(again.body.owner).toBe(helper.id);
+      expect(await log(id, helper, "owner.transferred")).toHaveLength(1);
+    });
+
+    it("isn't undone by a delayed departure of the former owner, which ends only their role, and doesn't take out the new owner", async () => {
+      const { id, founder, helper } = await scene();
+      await api(founder, "POST", `${path(id)}/owner/transfer`, { to: helper.id, policy_version: await version(id, founder) }, { token: await naming(founder, helper.id, { org_a: 5000 }) });
+      await departs(id, founder.id, 6000);
+      const row = await ownerRow(id);
+      expect(row.owner_person_id).toBe(helper.id);
+      expect(row.owner_left_at).toBeNull();
+      expect((await memberRow(id, founder.id)).revoked_at).not.toBeNull();
+      // This one is from before the new owner's current membership.
+      await departs(id, helper.id, 4000);
+      expect((await ownerRow(id)).owner_left_at).toBeNull();
+      expect((await api(helper, "GET", path(id))).status).toBe(200);
+    });
+  });
+
+  describe("recovery", () => {
+    it("lets an organization admin who was never in the room recover it when the owner left and no admin remains", async () => {
+      const founder = human(["org_a"]);
+      const id = (await api(founder, "POST", "/v1/workspaces", { name: "Stranded" }, { token: await assertion(founder, { claims: { org_since: { org_a: 1 } } }) })).body.id as string;
+      const boss = human(["org_a"]);
+      const successor = human();
+      const leftAt = Date.now();
+      await departs(id, founder.id, leftAt);
+      const before = await ownerRow(id);
+      await vi.waitFor(async () => expect(await ownerless(boss, id)).toEqual([{ workspace_id: id, workspace_name: "Stranded", status: "active", owner: founder.id, left_at: leftAt, org_id: "org_a" }]), { timeout: 5000 });
+      expect((await api(boss, "GET", path(id))).code).toBe("workspace_not_found");
+      const done = await recover(id, boss, successor.id, founder.id);
+      expect(done.status).toBe(200);
+      expect(done.body.owner).toBe(successor.id);
+      const read = (await api(successor, "GET", path(id), undefined, { token: await assertion(successor, { claims: { org_since: { org_a: 1 } } }) })).body;
+      expect(read.owner).toBe(successor.id);
+      expect(read.owner_left_at).toBeNull();
+      expect(read.policy_version).toBeGreaterThan(before.policy_version);
+      const [entry, ...others] = await log(id, successor, "owner.recovered");
+      expect(others).toEqual([]);
+      expect(entry.actor_id).toBe(boss.id);
+      expect(JSON.parse(entry.prior_json)).toEqual({ owner: founder.id, left_at: leftAt });
+      expect(JSON.parse(entry.new_json)).toEqual({ owner: successor.id });
+      await vi.waitFor(async () => {
+        const events = (await api(successor, "GET", "/v1/inbox")).body.events as any[];
+        expect(events.map((e) => e.type)).toContain("owner.recovered");
+      }, { timeout: 5000 });
+      // The former owner's list and the ownerless list both lose it.
+      await vi.waitFor(async () => {
+        expect(await indexRow(id, founder.id)).toMatchObject({ removed: 1, owner_left_at: null });
+        expect(await indexRow(id, successor.id)).toMatchObject({ role: "owner", removed: 0, owner_left_at: null });
+        expect(await ownerless(boss, id)).toEqual([]);
+      }, { timeout: 5000 });
+      // Whatever they present, they're out.
+      for (const claims of [{}, { org_since: { org_a: 1 } }, { org_since: { org_a: Date.now() + 60_000 } }]) {
+        expect((await api(founder, "GET", path(id), undefined, { token: await assertion(founder, { claims }) })).code).toBe("workspace_not_found");
+      }
+    });
+
+    it("tells an organization admin outside the room nothing until the owner has left", async () => {
+      const { id, founder, helper } = await scene();
+      const boss = human(["org_a"]);
+      const nowhere = `ws_${unique()}`;
+      for (const expected of [founder.id, "per_wrong"]) {
+        const real = await recover(id, boss, helper.id, expected);
+        const none = await recover(nowhere, boss, helper.id, expected);
+        expect(real).toEqual(none);
+        expect(real.code).toBe("workspace_not_found");
+      }
+      // A missing key or a malformed body doesn't say more.
+      expect((await api(boss, "POST", `${path(id)}/owner/recover`, {}, { key: null })).code).toBe("workspace_not_found");
+      const malformed = await SELF.fetch(`https://api.internal${path(id)}/owner/recover`, { method: "POST", headers: { "x-podster-assertion": await assertion(boss), "idempotency-key": "x" }, body: "{" });
+      expect(malformed.status).toBe(404);
+      await departs(id, founder.id, Date.now());
+      expect((await recover(id, boss, helper.id, "per_wrong")).code).toBe("version_conflict");
+    });
+
+    it("refuses anyone but an admin of the room's organization, and an owner still in it", async () => {
+      const { id, founder, helper, member } = await scene();
+      const inRoomOrgAdmin = { ...member, adminOrgs: ["org_a"] };
+      const v = (await ownerRow(id)).policy_version;
+      expect((await recover(id, helper, member.id, founder.id)).code).toBe("not_allowed");
+      expect((await recover(id, inRoomOrgAdmin, helper.id, founder.id)).code).toBe("not_allowed");
+      expect((await recover(id, founder, helper.id, founder.id)).code).toBe("not_allowed");
+      await departs(id, founder.id, Date.now());
+      const other = human(["org_b"], "org_b");
+      expect((await recover(id, other, helper.id, founder.id)).code).toBe("workspace_not_found");
+      expect((await recover(id, human(), helper.id, founder.id)).code).toBe("workspace_not_found");
+      expect((await recover(id, helper, member.id, founder.id)).code).toBe("not_allowed");
+      const agent = { id: `agt_${unique()}`, org: "org_a", adminOrgs: ["org_a"] } as Who;
+      await register(agent);
+      expect((await api(agent, "POST", `${path(id)}/owner/recover`, { to: helper.id, expected_owner: founder.id })).code).toBe("workspace_not_found");
+      const boss = human(["org_a"]);
+      expect((await recover(id, boss, `agt_${unique()}`, founder.id)).code).toBe("invalid_argument");
+      expect((await api(boss, "POST", `${path(id)}/owner/recover`, { to: helper.id, expected_owner: founder.id })).code).toBe("not_in_organization");
+      expect((await api(boss, "POST", `${path(id)}/owner/recover`, { to: helper.id, expected_owner: founder.id }, { key: null, token: await naming(boss, helper.id) })).code).toBe("idempotency_key_required");
+      expect((await recover(id, boss, helper.id, founder.id, { since: { org_other: 1 } })).code).toBe("not_in_organization");
+      const row = await ownerRow(id);
+      expect(row.owner_person_id).toBe(founder.id);
+      expect(row.policy_version).toBeGreaterThanOrEqual(v);
+      expect(await log(id, helper, "owner.recovered")).toEqual([]);
+    });
+
+    it("gives the same admin's retry its stored answer, and another admin nothing", async () => {
+      const { id, founder, helper } = await scene();
+      const boss = human(["org_a"]);
+      await departs(id, founder.id, Date.now());
+      const first = await recover(id, boss, helper.id, founder.id, { key: "lost-response" });
+      expect(first.status).toBe(200);
+      const retry = await recover(id, boss, helper.id, founder.id, { key: "lost-response" });
+      expect(retry).toEqual(first);
+      expect(await log(id, helper, "owner.recovered")).toHaveLength(1);
+      expect((await recover(id, human(["org_a"]), helper.id, founder.id, { key: "lost-response" })).code).toBe("workspace_not_found");
+      expect((await recover(id, boss, founder.id, founder.id, { key: "lost-response" })).code).toBe("idempotency_mismatch");
+      // Someone who no longer administers it gets no stored answer.
+      expect((await recover(id, { ...boss, adminOrgs: [] }, helper.id, founder.id, { key: "lost-response" })).code).toBe("workspace_not_found");
+    });
+
+    it("can name someone who left and rejoined, whom the room revoked, and the former owner, with a new membership", async () => {
+      const { id, founder, helper } = await scene();
+      const boss = human(["org_a"]);
+      const leftAt = Date.now();
+      await departs(id, helper.id, leftAt);
+      expect((await memberRow(id, helper.id)).revoked_at).not.toBeNull();
+      await departs(id, founder.id, leftAt);
+      const rejoined = leftAt + 1000;
+      expect((await recover(id, boss, helper.id, founder.id, { since: { org_a: rejoined } })).status).toBe(200);
+      expect(await memberRow(id, helper.id)).toBeUndefined();
+      expect((await api(helper, "GET", path(id), undefined, { token: await assertion(helper, { claims: { org_since: { org_a: rejoined } } }) })).body.owner).toBe(helper.id);
+      // The same departure arriving again doesn't take them out.
+      await departs(id, helper.id, leftAt);
+      expect((await ownerRow(id)).owner_left_at).toBeNull();
+      // They leave too, and the first owner, who rejoined, is named, so their own list keeps it.
+      await departs(id, helper.id, rejoined + 1);
+      const again = rejoined + 2000;
+      expect((await recover(id, boss, founder.id, helper.id, { since: { org_a: again } })).status).toBe(200);
+      expect((await api(founder, "GET", path(id), undefined, { token: await assertion(founder, { claims: { org_since: { org_a: again } } }) })).body.owner).toBe(founder.id);
+    });
+
+    it("refuses an older form once another admin has recovered the room", async () => {
+      const { id, founder, helper, member } = await scene();
+      await departs(id, founder.id, Date.now());
+      expect((await recover(id, human(["org_a"]), helper.id, founder.id)).status).toBe(200);
+      expect((await recover(id, human(["org_a"]), member.id, founder.id)).code).toBe("workspace_not_found");
+      const inRoom = { ...member, adminOrgs: ["org_a"] };
+      expect((await recover(id, inRoom, member.id, founder.id)).code).toBe("not_allowed");
+      await departs(id, helper.id, Date.now());
+      expect((await recover(id, human(["org_a"]), member.id, founder.id)).code).toBe("version_conflict");
+      expect((await ownerRow(id)).owner_person_id).toBe(helper.id);
+    });
+
+    it("works in an archived room and leaves it archived", async () => {
+      const { id, founder, helper } = await scene();
+      expect((await api(founder, "POST", `${path(id)}/archive`, { policy_version: await version(id, founder) })).status).toBe(200);
+      await departs(id, founder.id, Date.now());
+      const boss = human(["org_a"]);
+      await vi.waitFor(async () => expect((await ownerless(boss, id)).map((r) => r.status)).toEqual(["archived"]), { timeout: 5000 });
+      expect((await recover(id, boss, helper.id, founder.id)).status).toBe(200);
+      expect((await api(helper, "GET", path(id))).body.status).toBe("archived");
+    });
+
+    it("leaves nothing behind when it fails partway", async () => {
+      const { id, founder, helper } = await scene();
+      const boss = human(["org_a"]);
+      const leftAt = Date.now();
+      await departs(id, founder.id, leftAt);
+      expect((await recover(id, boss, helper.id, founder.id, { fail: true, key: "fails" })).status).toBe(500);
+      const row = await ownerRow(id);
+      expect(row.owner_person_id).toBe(founder.id);
+      expect(row.owner_left_at).toBe(leftAt);
+      expect((await memberRow(id, helper.id)).role).toBe("admin");
+      expect(await log(id, helper, "owner.recovered")).toEqual([]);
+      expect((await recover(id, boss, helper.id, founder.id, { key: "fails" })).status).toBe(200);
+    });
+
+    it("records refusals, and doesn't move the room's version when it refuses", async () => {
+      const { id, founder, helper } = await scene();
+      const v = (await ownerRow(id)).policy_version;
+      expect((await recover(id, human(), helper.id, founder.id)).code).toBe("workspace_not_found");
+      expect((await ownerRow(id)).policy_version).toBe(v);
+      await vi.waitFor(async () => {
+        await runInDurableObject(stub(id), async (instance: any) => { await instance.alarm(); });
+        const rows = (await api(founder, "GET", `${path(id)}/denials`)).body.denials as any[];
+        expect(rows.filter((d) => d.action === "owner.recover").map((d) => [d.actor_id, d.code])).toEqual([["outsider", "workspace_not_found"]]);
+      }, { timeout: 5000 });
+    });
+  });
+
+  describe("the ownerless list", () => {
+    it("is for people, shows only rooms of organizations they administer, and shows nothing while the owner is in the room", async () => {
+      const { id, founder, member } = await scene();
+      const boss = human(["org_a"]);
+      expect(await ownerless(boss, id)).toEqual([]);
+      await departs(id, founder.id, Date.now());
+      await vi.waitFor(async () => expect(await ownerless(boss, id)).toHaveLength(1), { timeout: 5000 });
+      expect(await ownerless(member, id)).toEqual([]);
+      expect(await ownerless(human(["org_b"], "org_b"), id)).toEqual([]);
+      const agent = { id: `agt_${unique()}`, org: "org_a", adminOrgs: ["org_a"] } as Who;
+      await register(agent);
+      expect((await api(agent, "GET", "/v1/oversight/ownerless")).code).toBe("not_allowed");
+      expect(Object.keys((await ownerless(boss, id))[0]).sort()).toEqual(["left_at", "org_id", "owner", "status", "workspace_id", "workspace_name"]);
+    });
+  });
+
+  describe("rooms from before this", () => {
+    const downgrade = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => {
+      state.storage.sql.exec("UPDATE workspace SET owner_since = NULL");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+
+    it("sets when a room's owner membership began from when the room was made", async () => {
+      const founder = human(["org_a"]);
+      const since = Date.now() - 5000;
+      const id = (await api(founder, "POST", "/v1/workspaces", { name: "New" }, { token: await assertion(founder, { claims: { org_since: { org_a: since } } }) })).body.id as string;
+      expect((await ownerRow(id)).owner_since).toBe(since);
+    });
+
+    it("takes it from when the room was made, keeps a continuing owner, and refuses one who rejoined since", async () => {
+      const { id, founder } = await scene();
+      const made = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT created_at AS t FROM workspace").one().t as number);
+      await downgrade(id);
+      expect((await api(founder, "GET", path(id), undefined, { token: await assertion(founder, { claims: { org_since: { org_a: made - 1000 } } }) })).status).toBe(200);
+      expect((await ownerRow(id)).owner_since).toBe(made);
+      expect((await api(founder, "GET", path(id), undefined, { token: await assertion(founder, { claims: { org_since: { org_a: made + 1000 } } }) })).code).toBe("workspace_not_found");
+    });
+
+    it("lists a room whose owner had already left, once it's touched", async () => {
+      const { id, founder, helper } = await scene();
+      await departs(id, founder.id, Date.now());
+      const boss = human(["org_a"]);
+      await vi.waitFor(async () => expect(await indexRow(id, founder.id)).toBeTruthy(), { timeout: 5000 });
+      await (env as any).DB.prepare("UPDATE membership_index SET owner_left_at = NULL WHERE workspace_id = ?").bind(id).run();
+      await downgrade(id);
+      expect((await api(helper, "POST", `${path(id)}/tasks`, { title: "x", instructions: "y", acceptance_criteria: "z" })).status).toBe(200);
+      await vi.waitFor(async () => expect(await ownerless(boss, id)).toHaveLength(1), { timeout: 5000 });
+    });
   });
 });
 
@@ -3187,6 +3534,8 @@ describe("the record of denied changes", () => {
       ["room.rename", "PUT", `${r}/name`, {}],
       ["room.archive", "POST", `${r}/archive`, {}],
       ["room.unarchive", "POST", `${r}/unarchive`, {}],
+      ["owner.transfer", "POST", `${r}/owner/transfer`, {}],
+      ["owner.recover", "POST", `${r}/owner/recover`, {}],
     ];
     const stranger = person("per_all_routes");
     for (const [, method, path, body] of named) {

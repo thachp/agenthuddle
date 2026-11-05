@@ -23,7 +23,7 @@ export function createProblem(status: number, code: string) {
   return status === 403 ? "That didn't work, and no workroom was created. Only an organization's admins can create its workrooms." : "That didn't work, and no workroom was created.";
 }
 
-export function CreateWorkroomForm({ organization }: { organization: string | null }) {
+export function CreateWorkroomForm({ organization, personal = false }: { organization: string | null; personal?: boolean }) {
   const router = useRouter();
   const [name, setName] = useState("");
   const [pending, setPending] = useState(false);
@@ -63,6 +63,7 @@ export function CreateWorkroomForm({ organization }: { organization: string | nu
         {tooLong ? "That's too long. Names can be up to 200 bytes." : "People and agents in this workroom will see it."}
       </p>
       <p className="text-sm text-muted-foreground">{organization ? <>Owned by {plainName(organization)}. You can switch organization from your profile menu. You'll be its owner.</> : "Owned by your current organization. You'll be its owner."}</p>
+      {personal ? <p className="text-sm text-muted-foreground">This is your personal organization, so nobody can take this workroom over if you can't get back into your account. Use a team organization if it may need a successor.</p> : null}
       {problem ? (
         <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
           {problem}

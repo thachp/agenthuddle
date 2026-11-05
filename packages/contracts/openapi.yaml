@@ -63,7 +63,7 @@ paths:
     post:
       operationId: archiveWorkspace
       tags: [commands]
-      summary: Archive a room. Owner or admin. Reads still work, access can still be withdrawn, and an agent's owner can still consent to its return. Anything else answers 409 `workspace_archived`, except a retry of something already committed, which gets its answer. Invitations can't be used or previewed
+      summary: Archive a room. Owner or admin. Reads still work, access can still be withdrawn, an agent's owner can still consent to its return, and an organization admin can still recover it once its owner has left. Anything else answers 409 `workspace_archived`, except a retry of something already committed, which gets its answer. Invitations can't be used or previewed
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -75,6 +75,24 @@ paths:
       summary: Bring an archived room back. Owner or admin
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/owner/transfer:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    post:
+      operationId: transferOwner
+      tags: [commands]
+      summary: The owner hands the room to one of its active human admins, who becomes owner at once and doesn't have to accept. The former owner becomes a room admin. Refused in an archived room. Naming anyone else answers 400 `invalid_argument`, and someone who has left the organization or whose role predates their membership answers `not_in_organization`
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [to, policy_version], properties: { to: { type: string }, policy_version: { type: integer } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/owner/recover:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    post:
+      operationId: recoverOwner
+      tags: [commands]
+      summary: An admin of the room's organization, who needn't be in the room, names a new owner once the room records that its owner left. It can name anyone now in that organization, and never an agent. It works in an archived room and leaves it archived. An organization admin outside the room gets 404 `workspace_not_found` until the owner has left, whatever the request says, so a refusal can't confirm that the room exists or who owns it. Once the owner has left, an `expected_owner` that isn't the recorded owner answers 409 `version_conflict`. The same admin's retry with the same key gets the stored answer
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [to, expected_owner], properties: { to: { type: string }, expected_owner: { type: string, description: "The departed owner the admin saw, from listOwnerlessRooms" } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/organizations/{org}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: org, in: path, required: true, schema: { type: string } }]
@@ -105,6 +123,8 @@ paths:
     get: { operationId: listAgentRooms, tags: [queries], summary: "Rooms an agent is in or has left, from the listing read model. Its organization's admins and the agent itself. A room it left shows the name it had, with no status. `truncated` says the list was cut", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/oversight/rooms:
     get: { operationId: listOversightRooms, tags: [queries], summary: "People only. Rooms the agents of the organizations this person administers are in, one row per agent, from the listing read model. At most 200 rows per organization and 50 organizations, and `truncated` says the list was cut. A row can include a room whose task reads refuse, such as the person's own organization's", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/oversight/ownerless:
+    get: { operationId: listOwnerlessRooms, tags: [queries], summary: "People only. Rooms of the organizations this person administers whose owner left, including private rooms they aren't in, archived or not. Each row has the room's ID, name and status, its organization, the departed owner's ID and when they left, from the listing read model, so it can lag. At most 200 rows per organization and 50 organizations, and `truncated` says the list was cut. The room decides when recovery runs", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/agents/{agent}/tasks:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: agent, in: path, required: true, schema: { type: string } }]
     get: { operationId: listOverseenTasks, tags: [queries], summary: "Read-only oversight, for an admin of an invited agent's organization while the agent is in the room. Only the tasks it's party to. It gives no role in the room, and it's not for the room's own organization, or anyone in the room or revoked from it. Someone outside the room gets `workspace_not_found`, someone in it `not_allowed`, someone it revoked `access_revoked`, and a disconnected agent `agent_disconnected`", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
