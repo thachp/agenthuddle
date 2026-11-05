@@ -1008,9 +1008,9 @@ describe("rate limits", () => {
   /** OAuth and Agent Auth clients each read their own error shape. */
   const expectLimitedFor = async (path: string, res: Response) => {
     expect(res.status, path).toBe(429);
-    expect(res.headers.get("retry-after"), path).toBe("60");
+    expect(Number(res.headers.get("retry-after")), path).toBeGreaterThan(0);
+    expect(Number(res.headers.get("retry-after")), path).toBeLessThanOrEqual(60);
     const body = await res.json<any>();
-    if (path.startsWith("/.well-known/")) throw new Error("discovery answers 503");
     if (path.startsWith("/oauth/")) expect(body, path).toEqual({ error: "temporarily_unavailable", error_description: "rate_limited" });
     else if (path.startsWith("/api/auth/")) expect(body, path).toEqual({ error: "rate_limited", message: "rate_limited" });
     else expect(body.error.code, path).toBe("rate_limited");
@@ -1072,26 +1072,59 @@ describe("rate limits", () => {
     const attempt = (env: object) => send("/oauth/token", { method: "POST", headers: { ...from(ip), "content-type": "application/json" }, body: "{}" }, env);
     const statuses = await Promise.all(Array.from({ length: 12 }, () => attempt({ STRICT_PER_MINUTE: "5" })));
     expect(statuses.filter((res) => res.status === 429)).toHaveLength(7);
-    const daily = `198.51.100.day${++counter}`;
-    const once = () => send("/oauth/token", { method: "POST", headers: { ...from(daily), "content-type": "application/json" }, body: "{}" }, { STRICT_PER_MINUTE: "100", STRICT_PER_DAY: "1" });
+  });
+
+  it("uses the real limits by default, whatever a bad setting says", async () => {
+    for (const limits of [{ STRICT_PER_MINUTE: undefined, STRICT_PER_DAY: undefined }, { STRICT_PER_MINUTE: "abc", STRICT_PER_DAY: "abc" }, { STRICT_PER_MINUTE: "-5", STRICT_PER_DAY: "" }, { STRICT_PER_MINUTE: "0", STRICT_PER_DAY: "Infinity" }]) {
+      const ip = `198.51.100.defaults${++counter}`;
+      const statuses: number[] = [];
+      for (let i = 0; i < 21; i++) statuses.push((await send("/oauth/token", { method: "POST", headers: { ...from(ip), "content-type": "application/json" }, body: "{}" }, limits)).status);
+      expect(statuses.slice(0, 20).filter((status) => status === 429), JSON.stringify(limits)).toEqual([]);
+      expect(statuses[20], JSON.stringify(limits)).toBe(429);
+    }
+    const stub = e.STRICT_COUNTER.get(e.STRICT_COUNTER.idFromName(unique("day")));
+    await runInDurableObject(stub, (_: unknown, state: DurableObjectState) => state.storage.put("count", { minuteStart: Date.now(), minute: 0, dayStart: Date.now(), day: 499 }));
+    expect(await stub.take(20, 500)).toBe(0);
+    expect(await stub.take(20, 500)).toBeGreaterThan(60);
+  });
+
+  it("limits a day only where requests leave long-lived records, and says how long to wait", async () => {
+    const lots = { STRICT_PER_MINUTE: "100", STRICT_PER_DAY: "1" };
+    const attempt = (path: string, ip: string) => send(path, { method: "POST", headers: { ...from(ip), origin: BASE, "content-type": "application/json" }, body: "{}" }, lots);
+    for (const path of ["/oauth/register", "/api/auth/agent/register"]) {
+      const ip = `198.51.100.day${++counter}`;
+      expect((await attempt(path, ip)).status, path).not.toBe(429);
+      const refused = await attempt(path, ip);
+      expect(refused.status, path).toBe(429);
+      expect(Number(refused.headers.get("retry-after")), path).toBeGreaterThan(86_000);
+    }
+    // A token refresh or sign-in isn't: refreshes must keep working all day, for everyone on an address.
+    for (const path of ["/oauth/token", "/sign-in", "/api/auth/sign-in/social"]) {
+      const ip = `198.51.100.noday${++counter}`;
+      for (let i = 0; i < 3; i++) expect((await attempt(path, ip)).status, path).not.toBe(429);
+    }
+    // A minute's refusal says when that minute ends.
+    const ip = `198.51.100.minute${++counter}`;
+    const once = () => send("/oauth/token", { method: "POST", headers: { ...from(ip), "content-type": "application/json" }, body: "{}" }, { STRICT_PER_MINUTE: "1" });
     expect((await once()).status).not.toBe(429);
-    expect((await once()).status).toBe(429);
+    const limited = await once();
+    expect(Number(limited.headers.get("retry-after"))).toBeLessThanOrEqual(60);
   });
 
   it("the strict counter resets by window, and removes itself after a day", async () => {
     const stub = e.STRICT_COUNTER.get(e.STRICT_COUNTER.idFromName(unique("window")));
-    expect(await stub.take(1, 2)).toBe(true);
-    expect(await stub.take(1, 2)).toBe(false);
+    expect(await stub.take(1, 2)).toBe(0);
+    expect(await stub.take(1, 2)).toBeGreaterThan(0);
     const age = (minuteMs: number, dayMs: number) => runInDurableObject(stub, async (_: unknown, state: DurableObjectState) => {
       const count = await state.storage.get<any>("count");
       await state.storage.put("count", { ...count, minuteStart: Date.now() - minuteMs, dayStart: Date.now() - dayMs });
     });
     await age(61_000, 1000);
-    expect(await stub.take(1, 2)).toBe(true);
+    expect(await stub.take(1, 2)).toBe(0);
     await age(61_000, 1000);
-    expect(await stub.take(1, 2)).toBe(false);
+    expect(await stub.take(1, 2)).toBeGreaterThan(60);
     await age(61_000, 86_401_000);
-    expect(await stub.take(1, 2)).toBe(true);
+    expect(await stub.take(1, 2)).toBe(0);
     expect(await runInDurableObject(stub, (_: unknown, state: DurableObjectState) => state.storage.getAlarm())).not.toBeNull();
     // A live count waits for its day to end, and an old one is deleted.
     await age(1000, 1000);
@@ -1123,6 +1156,11 @@ describe("rate limits", () => {
     const register = async (hostName: string) => post("/api/auth/agent/register", { name: "x", mode: "delegated", capabilities: ["get_identity"], preferred_method: "device_authorization" }, { authorization: `Bearer ${await signHostJWT({ hostKeypair: host, audience: BASE, agentPublicKey: key.publicKey, hostName } as never)}` });
     expect((await register("h".repeat(201))).status).toBe(400);
     expect((await register("h".repeat(200))).status).toBe(200);
+    // Padding a key doesn't change its thumbprint, but it's stored.
+    const [padHost, padAgent] = [await generateKeypair(), await generateKeypair()];
+    const padded = await post("/api/auth/agent/register", { name: "x", mode: "delegated", capabilities: ["get_identity"], preferred_method: "device_authorization" }, { authorization: `Bearer ${await signHostJWT({ hostKeypair: padHost, audience: BASE, agentPublicKey: { ...padAgent.publicKey, pad: "p".repeat(2000) }, hostName: "h" } as never)}` });
+    expect(padded.status).toBe(400);
+    expect((await padded.json<any>()).error.code).toBe("invalid_public_key");
   });
 
   it("the schedule runs the cleanup", async () => {
@@ -1160,6 +1198,49 @@ describe("rate limits", () => {
     expect((await execute(claimed, "get_identity")).status).toBe(200);
     expect(await e.DB.prepare("SELECT count(*) AS n FROM verification WHERE identifier = 'keep-me'").first()).toEqual({ n: 1 });
     expect(await e.DB.prepare("SELECT count(*) AS n FROM verification WHERE expiresAt < ?").bind(new Date().toISOString()).first()).toEqual({ n: 0 });
+    // Only old, unowned, unclaimed registrations with no live code go, in batches.
+    const shape = async (changes: string, ...values: unknown[]) => {
+      const agent = await registerAgent();
+      await e.DB.prepare("UPDATE approvalRequest SET expiresAt = ? WHERE agentId = ?").bind(old, agent.pluginId).run();
+      await e.DB.prepare(`UPDATE agent SET createdAt = ?${changes} WHERE id = ?`).bind(old, ...values, agent.pluginId).run();
+      return agent.pluginId;
+    };
+    const ownerUser = (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(owner.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId;
+    const activeUnowned = await shape(", status = 'active'");
+    const pendingOwned = await shape(", userId = ?", ownerUser);
+    const twoHours = await registerAgent();
+    await e.DB.prepare("UPDATE approvalRequest SET expiresAt = ? WHERE agentId = ?").bind(old, twoHours.pluginId).run();
+    await e.DB.prepare("UPDATE agent SET createdAt = ? WHERE id = ?").bind(new Date(Date.now() - 2 * 3_600_000).toISOString(), twoHours.pluginId).run();
+    const resolved = await registerAgent();
+    await e.DB.prepare("UPDATE agent SET createdAt = ? WHERE id = ?").bind(old, resolved.pluginId).run();
+    await e.DB.prepare("UPDATE approvalRequest SET status = 'approved', expiresAt = ? WHERE agentId = ?").bind(new Date(Date.now() + 60_000).toISOString(), resolved.pluginId).run();
+    const [one, two] = [await shape(""), await shape("")];
+    const total = async () => (await e.DB.prepare("SELECT count(*) AS n FROM agent").first<{ n: number }>())!.n;
+    const before = await total();
+    expect(await cleanUp(e, Date.now(), 1)).toBe(1);
+    expect(await total()).toBe(before - 1);
+    await cleanUp(e);
+    expect(await exists(one)).toBe(false);
+    expect(await exists(two)).toBe(false);
+    expect(await exists(activeUnowned)).toBe(true);
+    expect(await exists(pendingOwned)).toBe(true);
+    expect(await exists(twoHours.pluginId)).toBe(true);
+    expect(await exists(resolved.pluginId)).toBe(false);
+    // A host stays if it's young, owned or active, or still has an agent.
+    const hostShape = async (changes: string, ...values: unknown[]) => {
+      const id = unique("host");
+      await e.DB.prepare(`INSERT INTO agentHost (id, status, createdAt, updatedAt) VALUES (?, 'pending', ?, ?)`).bind(id, old, old).run();
+      if (changes) await e.DB.prepare(`UPDATE agentHost SET ${changes} WHERE id = ?`).bind(...values, id).run();
+      return id;
+    };
+    const hostGoes = await hostShape("");
+    const hostYoung = await hostShape("createdAt = ?", new Date().toISOString());
+    const hostOwned = await hostShape("userId = ?", ownerUser);
+    const hostActive = await hostShape("status = 'active'");
+    await cleanUp(e);
+    const hostExists = async (id: string) => (await e.DB.prepare("SELECT id FROM agentHost WHERE id = ?").bind(id).first()) !== null;
+    expect(await hostExists(hostGoes)).toBe(false);
+    for (const id of [hostYoung, hostOwned, hostActive]) expect(await hostExists(id), id).toBe(true);
     // Coming back afterward starts again.
     const again = await registerAgent({ host: abandoned.host, keypair: abandoned.keypair });
     expect(again.registered.status).toBe("pending");

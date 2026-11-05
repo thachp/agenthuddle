@@ -73,6 +73,8 @@ export const isPublicAuthRoute = (path: string) => PUBLIC_AUTH_ROUTES.some((rout
 async function honestKey(key: unknown) {
   if (key === undefined) return true;
   if (!key || typeof key !== "object") return false;
+  // Extra members don't change a key's thumbprint, but they're stored.
+  if (JSON.stringify(key).length > MAX_PUBLIC_KEY_LENGTH) return false;
   const { kid } = key as JWK;
   if (kid === undefined) return true;
   return await calculateJwkThumbprint(key as JWK, "sha256").then((thumbprint) => thumbprint === kid, () => false);
@@ -84,6 +86,7 @@ async function honestKey(key: unknown) {
  * and takes the host. Remote key URLs are refused too, since we'd fetch them and a host could change keys with them.
  */
 const MAX_HOST_NAME_LENGTH = 200;
+const MAX_PUBLIC_KEY_LENGTH = 1024;
 
 async function refusedRegistration(request: Request, text: string): Promise<Response | null> {
   let body: { force_approval?: unknown; capabilities?: unknown } | null;
@@ -126,18 +129,20 @@ const DAY_MS = 24 * 60 * MINUTE_MS;
  * itself after a day, so an attacker changing address doesn't leave storage behind.
  */
 export class StrictCounter extends DurableObject<Env> {
-  async take(perMinute: number, perDay: number): Promise<boolean> {
+  /** Returns 0 if allowed, or the seconds until the client may try again. */
+  async take(perMinute: number, perDay: number): Promise<number> {
     const now = Date.now();
     const stored = await this.ctx.storage.get<{ minuteStart: number; minute: number; dayStart: number; day: number }>("count");
     const count = stored ?? { minuteStart: now, minute: 0, dayStart: now, day: 0 };
     if (now - count.minuteStart >= MINUTE_MS) Object.assign(count, { minuteStart: now, minute: 0 });
     if (now - count.dayStart >= DAY_MS) Object.assign(count, { dayStart: now, day: 0 });
-    if (count.minute >= perMinute || count.day >= perDay) return false;
+    if (count.day >= perDay) return Math.ceil((count.dayStart + DAY_MS - now) / 1000);
+    if (count.minute >= perMinute) return Math.ceil((count.minuteStart + MINUTE_MS - now) / 1000);
     count.minute += 1;
     count.day += 1;
     await this.ctx.storage.put("count", count);
     if (!stored) await this.ctx.storage.setAlarm(now + DAY_MS);
-    return true;
+    return 0;
   }
 
   async alarm() {
@@ -147,15 +152,29 @@ export class StrictCounter extends DurableObject<Env> {
   }
 }
 
-/** Like the binding, a failure here lets the request through, because the limit shouldn't take the service down. */
-async function withinStrictLimit(env: Env, key: string) {
+/** A value that isn't a positive number falls back, so a bad setting can't turn the limit off or refuse everyone. */
+function configuredLimit(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return value && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * A day limit only where requests leave long-lived records. Elsewhere, anyone sharing an address could use up the day
+ * and lock everyone there out for hours: an agent refreshes its token up to 24 times a day, and sign-in state is
+ * short-lived anyway.
+ */
+const DAY_LIMITED_ROUTES = new Set(["oauth-register", "agent-register"]);
+
+/** Seconds until the client may try again, or 0. Like the binding, a failure lets the request through. */
+async function strictRetryAfter(env: Env, route: string, client: string) {
   try {
-    const stub = env.STRICT_COUNTER.get(env.STRICT_COUNTER.idFromName(key));
-    return await stub.take(Number(env.STRICT_PER_MINUTE ?? STRICT_PER_MINUTE), Number(env.STRICT_PER_DAY ?? STRICT_PER_DAY));
+    const stub = env.STRICT_COUNTER.get(env.STRICT_COUNTER.idFromName(`${route}:${client}`));
+    const perDay = DAY_LIMITED_ROUTES.has(route) ? configuredLimit(env.STRICT_PER_DAY, STRICT_PER_DAY) : Number.MAX_SAFE_INTEGER;
+    return await stub.take(configuredLimit(env.STRICT_PER_MINUTE, STRICT_PER_MINUTE), perDay);
   } catch (error) {
     if (!limiterFailureLogged) console.error("strict counter failed", error);
     limiterFailureLogged = true;
-    return true;
+    return 0;
   }
 }
 
@@ -166,11 +185,11 @@ const RETRY_AFTER_SECONDS = "60";
  * In the shape each kind of client reads. OAuth clients need a standard error: the MCP SDK treats anything else as
  * unrecoverable and starts a new consent, which a headless agent can't complete. The Agent Auth SDK reads `error`.
  */
-function rateLimited(path = "") {
+function rateLimited(path = "", retryAfter = RETRY_AFTER_SECONDS) {
   // A 503 on discovery makes OAuth clients stop and retry. They treat a 429 as no metadata, and head for a new consent.
-  if (path.startsWith("/.well-known/")) return new Response(JSON.stringify({ error: { code: "temporarily_unavailable", message: "rate_limited" } }), { status: 503, headers: { "content-type": "application/json", "retry-after": RETRY_AFTER_SECONDS } });
+  if (path.startsWith("/.well-known/")) return new Response(JSON.stringify({ error: { code: "temporarily_unavailable", message: "rate_limited" } }), { status: 503, headers: { "content-type": "application/json", "retry-after": retryAfter } });
   const body = path.startsWith("/oauth/") ? { error: "temporarily_unavailable", error_description: "rate_limited" } : path.startsWith("/api/auth/") ? { error: "rate_limited", message: "rate_limited" } : { error: { code: "rate_limited", message: "rate_limited" } };
-  return new Response(JSON.stringify(body), { status: 429, headers: { "content-type": "application/json", "retry-after": RETRY_AFTER_SECONDS } });
+  return new Response(JSON.stringify(body), { status: 429, headers: { "content-type": "application/json", "retry-after": retryAfter } });
 }
 
 let limiterFailureLogged = false;
@@ -879,20 +898,20 @@ const mcpHandler = {
 let provider: { base: string; instance: OAuthProvider<Env> } | undefined;
 
 const ABANDONED_AFTER_MS = 24 * 60 * 60 * 1000;
-const CLEANUP_BATCH = 200;
+const CLEANUP_BATCH = 1000;
 
 /**
  * Removes what anonymous callers left behind: sign-in state past its expiry, and agents nobody claimed. An agent stays
  * while it has a live code, and a registration that comes back afterward simply starts again.
  */
-export async function cleanUp(env: Pick<Env, "DB">, now = Date.now()) {
+export async function cleanUp(env: Pick<Env, "DB">, now = Date.now(), batch = CLEANUP_BATCH) {
   const nowIso = new Date(now).toISOString();
   await env.DB.prepare(`DELETE FROM verification WHERE expiresAt < ?`).bind(nowIso).run();
   const { results } = await env.DB.prepare(
     `SELECT id FROM agent WHERE status = 'pending' AND userId IS NULL AND createdAt < ? AND id NOT IN (SELECT agentId FROM approvalRequest WHERE agentId IS NOT NULL AND status = 'pending' AND expiresAt >= ?) LIMIT ?`,
-  ).bind(new Date(now - ABANDONED_AFTER_MS).toISOString(), nowIso, CLEANUP_BATCH).all<{ id: string }>();
-  // The agent's grants and approvals go with it, by the plugin's foreign keys.
-  for (const { id } of results) await env.DB.prepare(`DELETE FROM agent WHERE id = ?`).bind(id).run();
+  ).bind(new Date(now - ABANDONED_AFTER_MS).toISOString(), nowIso, batch).all<{ id: string }>();
+  // The agent's grants and approvals go with it, by the plugin's foreign keys. One batch is one query, and atomic.
+  if (results.length > 0) await env.DB.batch(results.map(({ id }) => env.DB.prepare(`DELETE FROM agent WHERE id = ?`).bind(id)));
   await env.DB.prepare(`DELETE FROM agentHost WHERE userId IS NULL AND status = 'pending' AND createdAt < ? AND id NOT IN (SELECT hostId FROM agent WHERE hostId IS NOT NULL)`).bind(new Date(now - ABANDONED_AFTER_MS).toISOString()).run();
   return results.length;
 }
@@ -910,7 +929,8 @@ async function limitByClient(request: Request, env: Env) {
   const path = new URL(request.url).pathname;
   if (!(await withinLimit(env.RL_GENERAL, `ip:${client}`))) return rateLimited(path);
   const route = sensitiveRoute(request.method, path);
-  if (route && !(await withinStrictLimit(env, `${route}:${client}`))) return rateLimited(path);
+  const retryAfter = route ? await strictRetryAfter(env, route, client) : 0;
+  if (retryAfter > 0) return rateLimited(path, String(retryAfter));
   return null;
 }
 
