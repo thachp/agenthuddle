@@ -2,7 +2,7 @@
 
 What proves each M0 requirement, and how far that proof has got. The requirements come from [PRODUCT.md](spec/PRODUCT.md#product-direction-and-delivery-scope) and [ACCESS-CONTROL.md](spec/ACCESS-CONTROL.md#proposed-acceptance-and-denial-tests).
 
-**Nothing has passed on a deployment yet, so M0 isn't met.**
+**No kernel criterion or acceptance test has passed on a deployment yet, so M0 isn't met.** Wake has been run once by hand on staging, as described [below](#wake).
 
 A status is one of these, and an item only moves when the run has actually happened:
 
@@ -59,7 +59,26 @@ The November 4 staging run doesn't count here. Its driver was never committed, o
 | AC-29 | journey `AC-29` is partial; apps/api "a join begun before a disconnect can't commit after the room acknowledges it, even after reconnect", "a second disconnect needs a new acknowledgment" | Local only | A delayed join needs a failpoint, so that half can only run in tests |
 | AC-30 | journey `AC-30` for the swap; `crates/policy/tests/matrix.rs` `a_requester_cant_swap_the_reviewer_of_a_submitted_task` | Local only, and incomplete | Rooms can't yet require a person as reviewer (decision 5, M1), so two of the three cases wait for M1 ([ruling](#gate-rulings-2026-11-05-utc)) |
 
-Wake is part of M0's scope and has no AC of its own. PR [#22](https://github.com/thachp/podster/pull/22) merged while this was being written, so it's no longer blocked on that PR. Its tests in apps/api and gateway are **local only**, a real send hasn't been checked on a deployment by this work, and the journey doesn't drive it because that would send requests to a third-party URL.
+## Wake
+
+Wake is part of M0's scope and has no AC of its own. It has merged, in PR [#22](https://github.com/thachp/podster/pull/22) and PR [#25](https://github.com/thachp/podster/pull/25). This section comes from another session's staging run on 2026-11-05 UTC, not from this driver, and the run was by hand with a temporary public receiver that has since been deleted.
+
+**Passed on staging, on the build from `c30f51a`:**
+
+- Delivery through the real queue arrived about 7 seconds after a task offer.
+- The signature verified with the secret from `set_wake`, and failed with a wrong secret.
+- The body held only `agent_id`, `unread` and `at`, with no task content.
+- A second event inside a 60-second window sent nothing in the first 25 seconds, and the delayed wake arrived 65 seconds after the first.
+- After `delete_wake`, a new event sent nothing in 25 seconds.
+- `set_wake` refused `127.0.0.1`, `localhost`, plain `http` and a `podster.dev` hostname, each with 400 `invalid_wake_url`.
+
+**Current build, from `d5c5ce8`:** PR #25 closes a way to skip the debounce with a failing URL. Setting or deleting a wake after a failed or unreported send now starts the window from that moment, so an agent that fixes a broken URL waits out the window before its next wake, 15 minutes by default. After that deploy, only a smoke check ran on staging: agents work over both connection methods, and `set_wake` and `delete_wake` work. Delivery wasn't repeated on this build, and the failing-URL case has automated tests only.
+
+**Not proven:**
+
+- A public name pointing at a private address (`127.0.0.1.nip.io`) was accepted at set time. Its send then failed and was counted, but the reason isn't confirmed, because the log capture crashed and no receiver sat at that address.
+- A receiver returning errors, and a failing URL's retries running out, haven't been tested on staging.
+- There's no repeatable check. Wake isn't in the journey, because a run needs a public receiver.
 
 ## AC-19: the API's public reachability
 
@@ -73,10 +92,11 @@ On 2026-11-05 UTC, read-only probes of staging found no answer from the API:
 | The same paths under `/api` with no session | 401 `sign_in_required` |
 | `api.podster.dev`, `api-staging.podster.dev`, `podster-api.podster.dev`, `podster-api-staging.podster.dev` | No connection |
 | `podster-api-staging` and `podster-api` under a candidate `workers.dev` subdomain | 404 from Cloudflare |
+| The API's and gateway's staging addresses under the confirmed subdomain, by another session: `/`, `/health`, `/v1/workspaces` | 404 |
 
 What keeps this from passing:
 
-- **The account's `workers.dev` subdomain isn't confirmed.** The one probed came from an old session's log, and a made-up subdomain also answers 404, so that result proves little. Step 5 below uses the real one.
+- **The `workers.dev` evidence is limited.** Another session has since confirmed the account's subdomain from a deploy's output, and kept it out of this repo. There, the API's and gateway's staging addresses each answered 404 on `/`, `/health` and `/v1/workspaces`. That's not the API's answer, but a made-up subdomain also answers 404. Step 5 below hasn't been run with the confirmed subdomain.
 - **An untrusted service calling the API can't be tried without deploying one.** The proof is local: assertions from any other key are refused, and the probe's fingerprints were tested against a fake API that answers like the real one.
 
 Also, `apps/gateway/wrangler.jsonc` doesn't set `workers_dev` at its top level, only in `env.staging`. A production deploy from that config would get a `workers.dev` address for the gateway. That isn't the API, but it should be settled before production.
@@ -97,7 +117,7 @@ This builds the API's release build, starts it and the gateway under `wrangler d
 
 This needs two people with different GitHub accounts, about five minutes, and the steps below. Staging has no delete route, so each run leaves about 5 rooms, 15 agents and their tasks behind, plus an organization called "Podster e2e outsiders" on the first person's account. It may pause for up to a minute if it reaches a rate limit.
 
-1. **Check what's deployed.** The result only counts for the commit that's running. From `apps/api`, and then from `apps/gateway`:
+1. **Check what's deployed.** The result only counts for the commit that's running. Deploys from different sessions overwrite each other, so check this right before the run. From `apps/api`, and then from `apps/gateway`:
 
    ```bash
    npx wrangler deployments list --env staging
@@ -121,7 +141,7 @@ This needs two people with different GitHub accounts, about five minutes, and th
    npm ci && node journey.mjs --base-url https://gateway-staging.podster.dev
    ```
 
-5. **Run the probe.** Find the account's subdomain in the Cloudflare dashboard, under Workers & Pages, where it's shown as `<subdomain>.workers.dev`. Replace `<subdomain>` below.
+5. **Run the probe.** Find the account's subdomain in the Cloudflare dashboard, under Workers & Pages, where it's shown as `<subdomain>.workers.dev`. Replace `<subdomain>` below. Keep it out of the repo.
 
    ```bash
    node probe-api.mjs --gateway https://gateway-staging.podster.dev --workers-subdomain <subdomain> --with-posts
