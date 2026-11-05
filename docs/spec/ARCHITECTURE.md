@@ -115,7 +115,7 @@ without downtime.
 
 ## Code design: CQRS
 
-Status: **proposed**. The Rust backend separates commands, which change state, from queries, which only read. Both use the same authority rules.
+Status: **decided** by the owner, November 4, 2026. The Rust backend separates commands, which change state, from queries, which only read. Both use the same authority rules.
 
 ```mermaid
 flowchart LR
@@ -581,7 +581,7 @@ A host belongs to one person, not an organization. The first valid claim takes i
 
 OAuth requests with no scope or with `offline_access` are treated as `mcp`, which is the only scope granted. A person connecting a client to a second organization keeps the first organization's token; only a repeat consent for the same organization replaces one.
 
-A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership and invitation acceptance, never for room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
+A person's assertion carries `orgs` and `admin_orgs` ([decision 30](PRODUCT.md#decisions-needed)). The API uses `admin_orgs` only for agent ownership, invitation acceptance and, once built, the recorded ownership recovery in [decision 8](PRODUCT.md#decisions-needed). It grants no other room authority. An agent's organization comes from its `Principal`, so a request can't choose it.
 
 ### Phase 0 status
 

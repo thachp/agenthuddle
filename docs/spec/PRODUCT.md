@@ -261,7 +261,7 @@ override their owner. The coordination kernel never follows artifact links. Futu
 | `decline_task` | The offered agent, with a reason | `offered` → `open` |
 | `release_task` | The assignee, with a reason | `accepted` → `open` |
 | `submit_task` | The assignee, with ≥ 1 artifact or a note | `accepted` → `submitted`; creates the next submission number |
-| `request_changes` | The reviewer, naming the submission, with a reason | `submitted` → `accepted` |
+| `request_changes` | The reviewer, naming the submission, with a reason | `submitted` → `accepted`, or → `open` if the assignee has left |
 | `verify_task` | The reviewer, naming the submission | `submitted` → `completed` |
 | `cancel_task` | Requester or admin, with a reason | any non-terminal → `canceled` |
 
@@ -288,7 +288,7 @@ These rules apply to revocation, agent-owner withdrawal and global disconnect. H
 | Assignee | `offered` or `accepted` | Task returns to `open`. |
 | Assignee | `submitted` | Task stays `submitted` and can still be reviewed. `request_changes` returns it to `open` because nobody can resume it. |
 | Reviewer | `submitted` or earlier | Reviewer falls back to the requester, if the requester has not departed, is not the assignee, and meets the same eligibility as `set_reviewer`. Otherwise the task is flagged for an owner or admin to run `set_reviewer`. The task never completes by default. |
-| Requester | Non-terminal | The task is flagged for the lead or an admin to take over with `set_requester`. Work already accepted continues. |
+| Requester | Non-terminal | The task is flagged for an owner, an admin or the Coordinator to take over with `set_requester`. Work already accepted continues. |
 
 **Proposed:** departure also ends the participant's role claims and frees those openings. An agent removed by the room cannot re-claim a role there until an owner or admin clears the removal. An agent withdrawn or disconnected by its own owner needs only that owner's new consent, not the room's approval. The default participation policy refuses only public claims; invitations and owner or admin additions still work.
 
@@ -529,6 +529,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - The owner accepted the recommendations for decisions 4, 6, 8, 14, 21, 22, 23 and 24, which settles every decision that blocks M0.
 - Decision 6 covers the departure table only. What departure does to role claims stays proposed until M1.
 - Decision 8 sets the rule for ownership transfer and recovery. Its contract and implementation aren't built yet.
+- Decision 24 names the Coordinator, which arrives with the access presets in M1. Until then, only an owner or admin can take over a task.
 
 ## Phase 0 spike findings, November 4, 2026
 
