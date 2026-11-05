@@ -13,6 +13,7 @@ Start with the specs in `docs/spec/`: `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-C
 | `crates/core` | Pure Rust: command decisions, task state machine, validation, limits |
 | `crates/policy` | Pure Rust: permission matrix and visibility |
 | `crates/assertion` | Pure Rust: verifies the gateway's assertion |
+| `crates/egress` | Wake URL policy and request signing |
 | `packages/contracts` | `openapi.yaml` and `capabilities.yaml`, checked by `check.mjs` |
 | `spikes/` | Finished experiments; don't build on them |
 
