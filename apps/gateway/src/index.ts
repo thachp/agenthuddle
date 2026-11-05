@@ -4,11 +4,13 @@ import { authorizationErrorRedirect, OAuthProvider, type OAuthHelpers } from "@c
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { betterAuth } from "better-auth";
+import { magicLink } from "better-auth/plugins/magic-link";
 import { APIError } from "better-auth/api";
 import { calculateJwkThumbprint, decodeJwt, type JWK } from "jose";
 import { handleOrgPeople, retryDepartures } from "./organizations";
 import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
+import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, handleEmailVerify, linkMustNotReach, linkTokenHash, sendSignInLink, type EmailBinding } from "./email-sign-in";
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
 
 export interface Env {
@@ -33,6 +35,10 @@ export interface Env {
   /** Overrides the counter's limits. Tests only. */
   STRICT_PER_MINUTE?: string;
   STRICT_PER_DAY?: string;
+  /** Email sign-in, off unless all three are set, and only on the application host. See email-sign-in.ts. */
+  ENABLE_EMAIL_SIGNIN?: string;
+  EMAIL?: EmailBinding;
+  EMAIL_FROM?: string;
   /** Test environments only. Never set in staging or production. */
   ENABLE_PASSWORD_SIGNIN?: string;
   /** Staging's test sign-up, set only in env.staging. See test-people.ts. */
@@ -77,7 +83,7 @@ const PUBLIC_AUTH_ROUTES = [
 export const isPublicAuthRoute = (path: string) => PUBLIC_AUTH_ROUTES.some((route) => route.test(path));
 
 /** The routes that start a session. With an application host, only it may, so no browser gets a session on the gateway's host. */
-const STARTS_SESSION = /^\/(sign-in\/(social|email)|sign-up\/email|callback\/[\w-]+)$/;
+const STARTS_SESSION = /^\/(sign-in\/(social|email|magic-link)|magic-link\/verify|sign-up\/email|callback\/[\w-]+)$/;
 
 /** A key's `kid` must be its own thumbprint, because the plugin finds hosts by the `kid` a caller supplies. */
 async function honestKey(key: unknown) {
@@ -233,7 +239,7 @@ export function clientKey(request: Request) {
 
 /** Anonymous routes that start something, each counted separately for each client. */
 export function sensitiveRoute(method: string, path: string) {
-  if (path.startsWith("/api/auth/sign-in/") || path.startsWith("/api/auth/sign-up/") || path.startsWith("/api/auth/callback/")) return "auth";
+  if (path.startsWith("/api/auth/sign-in/") || path.startsWith("/api/auth/sign-up/") || path.startsWith("/api/auth/callback/") || path.startsWith("/api/auth/magic-link/")) return "auth";
   if (method !== "POST") return null;
   return ({ "/sign-in": "sign-in", "/oauth/register": "oauth-register", "/oauth/token": "oauth-token", "/api/auth/agent/register": "agent-register" } as Record<string, string>)[path] ?? null;
 }
@@ -311,6 +317,11 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
     socialProviders: social,
     databaseHooks: {
       session: {
+        create: {
+          // Checked here as well as before sending, because someone can sign up with GitHub while a link is on its way.
+          // A link never signs in to a person who has another way in: see docs/adr/0004-email-sign-in.md.
+          before: async (session, ctx) => (ctx?.path === EMAIL_VERIFY_ROUTE && (await linkMustNotReach(env, "u.id", session.userId)) ? false : undefined),
+        },
         update: {
           // Refreshing moves a session's expiry a full term out, and any route that reads a session can do it. A test
           // session keeps the end it started with, on every instance, so a killed run's session really does end.
@@ -332,6 +343,8 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
       },
     },
     plugins: [
+      // Always loaded, because no route reaches it until appHandler's checks pass.
+      magicLink({ expiresIn: EMAIL_LINK_SECONDS, storeToken: { type: "custom-hasher", hash: linkTokenHash }, sendMagicLink: ({ email, url, token }) => sendSignInLink(env, email, token, new URL(url).searchParams.get("callbackURL")) as Promise<void> }),
       agentAuth({
         providerName: "podster",
         providerDescription: "Podster coordinates work between independently run agents.",
@@ -438,7 +451,7 @@ async function personIdentity(env: Env, request: Request, userId: string): Promi
 const forPublicHost = (request: Request, env: Env): Env => (env.APP_URL && new URL(request.url).origin === new URL(env.APP_URL).origin ? { ...env, BASE_URL: env.APP_URL } : env);
 
 /** Session requests that change something must come from our own origin. */
-const sameOrigin = (request: Request, env: Env) => request.headers.get("origin") === new URL(env.BASE_URL).origin;
+export const sameOrigin = (request: Request, env: Env) => request.headers.get("origin") === new URL(env.BASE_URL).origin;
 
 /** Dashboard routes people may reach through the session. Agent registration and connection have their own handlers. */
 export function allowedPassthrough(path: string) {
@@ -680,9 +693,32 @@ function consentPage(choices: ConsentChoices) {
 </form>`);
 }
 
+/**
+ * A client's address is somewhere else by definition. On one of our hosts, the consent page would navigate to any of our
+ * routes from our own origin, even on Decline, and an authorization code would land on our own page.
+ */
+function namesOurHost(env: Env, redirectUri: unknown, ...others: string[]) {
+  if (typeof redirectUri !== "string") return false;
+  const hostOf = (value: string) => new URL(value).hostname.replace(/\.+$/, "");
+  try {
+    return [env.BASE_URL, env.APP_URL, ...others].some((ours) => ours && hostOf(ours) === hostOf(redirectUri));
+  } catch {
+    // What this can't read, it can't say is somewhere else.
+    return true;
+  }
+}
+
+/** The provider has no check for this, and handles registration before our routes, so it's asked here first. */
+async function registersOurHost(request: Request, env: Env) {
+  const body = await request.clone().json<{ redirect_uris?: unknown }>().catch(() => null);
+  return Array.isArray(body?.redirect_uris) && body.redirect_uris.some((uri) => namesOurHost(env, uri));
+}
+
 async function parseOAuth(env: Env, request: Request) {
   try {
     const parsed = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+    // `request` is for the gateway's host even when `env` is the application host's, so this covers both.
+    if (namesOurHost(env, parsed.redirectUri, request.url)) return null;
     // MCP clients often send no scope, and refresh tokens are issued anyway, so both of those mean plain `mcp` access.
     if (parsed.scope.some((scope) => scope !== "mcp" && scope !== "offline_access")) return null;
     return parsed;
@@ -998,7 +1034,7 @@ function publicConfiguration(configuration: any) {
 }
 
 const appHandler = {
-  async fetch(request: Request, publicEnv: Env): Promise<Response> {
+  async fetch(request: Request, publicEnv: Env, ctx: ExecutionContext): Promise<Response> {
     const env = forPublicHost(request, publicEnv);
     const url = new URL(request.url);
     const onApplicationHost = env !== publicEnv;
@@ -1011,6 +1047,11 @@ const appHandler = {
     if (url.pathname.startsWith("/api/auth/")) {
       const route = url.pathname.slice("/api/auth".length);
       if (route === TEST_SIGNUP_ROUTE) return handleTestSignUp(request, publicEnv);
+      if (route === EMAIL_LINK_ROUTE || route === EMAIL_VERIFY_ROUTE) {
+        if (!onApplicationHost || !emailSignInEnabled(publicEnv)) return denied("not_found", 404);
+        if (route === EMAIL_LINK_ROUTE) return request.method === "POST" ? handleEmailLink(request, env, ctx) : denied("not_found", 404);
+        return handleEmailVerify(request, env);
+      }
       if (!isPublicAuthRoute(route)) return denied("not_found", 404);
       if (publicEnv.APP_URL && !onApplicationHost && STARTS_SESSION.test(route)) return denied("not_found", 404);
       if (route === "/agent/register" && request.method === "POST") {
@@ -1222,6 +1263,9 @@ export default {
       const body = (request.headers.get("authorization")?.length ?? 0) > MAX_STORED_BODY_BYTES ? null : await boundedBody(request, MAX_STORED_BODY_BYTES);
       if (!body) return withHsts(json({ error: "invalid_client_metadata", error_description: "body_too_large", message: "body_too_large" }, 413), env);
       request = new Request(request, { body });
+    }
+    if (request.method === "POST" && new URL(request.url).pathname === "/oauth/register" && (await registersOurHost(request, env))) {
+      return withHsts(json({ error: "invalid_redirect_uri", error_description: "redirect_uri_on_our_host" }, 400), env);
     }
     if (provider?.base !== env.BASE_URL) {
       provider = {

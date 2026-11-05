@@ -147,11 +147,11 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
   );
 }
 
-type SectionProps = { data: LoadedTask; me: string; names: Names; orgNames: Names };
+type SectionProps = { data: TaskDetail; me: string; names: Names; orgNames: Names };
 
-const author = (from: From, me: string, names: Names, orgNames: Names) => ({ name: nameOf(from.id, me, names), kind: kindOf(from.id), organization: orgNames[from.org] ?? from.org, viewer: from.id === me });
+export const author = (from: From, me: string, names: Names, orgNames: Names) => ({ name: nameOf(from.id, me, names), kind: kindOf(from.id), organization: orgNames[from.org] ?? from.org, viewer: from.id === me });
 
-function Details({ data, me, names, orgNames }: SectionProps) {
+export function Details({ data, me, names, orgNames }: SectionProps) {
   const { task } = data;
   const brief = briefAuthor(data);
   const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org ? (orgNames[brief.org] ?? brief.org) : undefined, viewer: brief.id === me };
@@ -246,7 +246,7 @@ function Discussion({ data, me, names, orgNames }: SectionProps) {
   );
 }
 
-function Activity({ data, me, names, orgNames }: SectionProps) {
+export function Activity({ data, me, names, orgNames }: SectionProps) {
   if (data.history.length === 0) return <p className="text-sm text-muted-foreground">Nothing has happened yet.</p>;
   return (
     <ol className="space-y-3">

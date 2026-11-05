@@ -10,124 +10,77 @@ import { Button } from "@/components/ui/button";
 import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import type { GatewayResult } from "@/lib/gateway/result";
 import { ConnectionBadge } from "./connection-badge";
-import { INBOX_PAGE, InboxOversight, readInbox } from "./inbox-oversight";
-import { announceStatus, newestAfter, roomsOf, wakeHost, wakeLabel, type AgentConnection, type AgentRoom, type InboxEvent, type InboxPage, type ReadableRoom } from "./model";
+import { InboxOversight, readInbox } from "./inbox-oversight";
+import { announceStatus, announceWithdrawn, oversightPath, wakeHost, wakeLabel, type AgentConnection, type AgentRoom, type InboxPage } from "./model";
 
-/** No route lists an agent's rooms, so each of the viewer's own rooms takes a read. This caps what one Sheet can spend. */
-export const MAX_ROOM_READS = 10;
-/** An inbox holds up to 10,000 events, so finding its newest rooms takes a few reads at most, not a walk through all of it. */
-const MAX_NEWEST_READS = 2;
 /** The server keeps retrying unreachable rooms on its own, so this only notices when it's finished. */
 export const DISCONNECT_CHECK_MS = 15_000;
 
-type Member = { principal_id: string; role: string };
 type Organization = { id: string; name: string };
 
 export type AgentDetail = AgentConnection & {
   inbox: InboxPage | null;
-  rooms: AgentRoom[];
-  /** The rooms the viewer can open, which are the only ones to link to. */
-  openable: string[];
-  /** The viewer has more rooms than one Sheet reads. */
-  roomsCapped: boolean;
-  /** A read that could have shown a room failed, so a short list says nothing. */
-  roomReadFailed: boolean;
+  /** Null when the read failed, which says nothing about where the agent is. */
+  rooms: AgentRoom[] | null;
+  roomsTruncated: boolean;
+  /** The rooms the viewer belongs to, which open as themselves. Null when the read failed, and then nothing is offered. */
+  ownRooms: string[] | null;
 };
-
-type OwnRooms = { readable: ReadableRoom[]; capped: boolean; failed: boolean };
 
 const outage = (result: GatewayResult<unknown>) => !result.ok && (result.status >= 500 || result.status === 429);
 
-async function readOwnRooms(agent: string, signal: AbortSignal): Promise<OwnRooms> {
-  const list = await clientQuery<{ workspaces: { workspace_id: string; workspace_name: string }[] }>("/api/v1/workspaces", { signal });
-  if (!list.ok) return { readable: [], capped: false, failed: true };
-  const asked = list.data.workspaces.slice(0, MAX_ROOM_READS);
-  let failed = false;
-  const answers = await Promise.all(
-    asked.map(async (room) => {
-      const result = await clientQuery<{ id: string; name: string; members?: Member[] }>(`/api/v1/workspaces/${encodeURIComponent(room.workspace_id)}`, { signal });
-      if (!result.ok) {
-        // A room the viewer has just lost access to isn't a failed read.
-        failed ||= outage(result);
-        return null;
-      }
-      const member = result.data.members?.find((entry) => entry.principal_id === agent);
-      return { id: result.data.id, name: result.data.name, role: member?.role ?? null, lists_agent: member !== undefined };
-    }),
-  );
-  return { readable: answers.filter((answer) => answer !== null), capped: list.data.workspaces.length > asked.length, failed };
-}
-
-/** Reads come oldest first, so a full first page can't show a room the agent joined recently. This reads the newest too. */
-async function readNewestEvents(agent: string, first: InboxPage, signal: AbortSignal) {
-  const events: InboxEvent[] = [];
-  if (first.events.length < INBOX_PAGE) return { events, failed: false };
-  let after = newestAfter(first, INBOX_PAGE);
-  for (let reads = 0; reads < MAX_NEWEST_READS; reads++) {
-    const page = await readInbox(agent, after, signal);
-    if (!page.ok) return { events, failed: true };
-    events.push(...page.data.events);
-    if (page.data.events.length < INBOX_PAGE) break;
-    after = page.data.events.at(-1)?.seq ?? after;
-  }
-  return { events, failed: false };
-}
-
-/** One per open Sheet, so a reload after a command spends two or three reads rather than every room's again. */
-type RoomCache = Map<string, OwnRooms>;
-
-async function loadAgent(id: string, signal: AbortSignal, cache: RoomCache): Promise<AgentDetail | null> {
-  const agent = await clientQuery<AgentConnection>(`/api/agents/${encodeURIComponent(id)}`, { signal });
+async function loadAgent(id: string, signal: AbortSignal): Promise<AgentDetail | null> {
+  const path = `/api/agents/${encodeURIComponent(id)}`;
+  const agent = await clientQuery<AgentConnection>(path, { signal });
   if (!agent.ok) {
     if (outage(agent)) throw new Error(agent.code);
     // Missing, hidden and not allowed look the same.
     return null;
   }
-  const active = agent.data.status === "active";
-  // A room can't be withdrawn from unless the agent is connected, and coming back to connected starts fresh.
-  if (!active) cache.delete(id);
-  const [inbox, own] = await Promise.all([readInbox(id, 0, signal), active ? (cache.get(id) ?? readOwnRooms(id, signal)) : ({ readable: [], capped: false, failed: false } satisfies OwnRooms)]);
-  if (active && !own.failed) cache.set(id, own);
-  const newest = inbox.ok && active ? await readNewestEvents(id, inbox.data, signal) : { events: [], failed: false };
+  const [inbox, rooms, own] = await Promise.all([
+    readInbox(id, 0, signal),
+    clientQuery<{ rooms: AgentRoom[]; truncated: boolean }>(`/api/v1/agents/${encodeURIComponent(id)}/rooms`, { signal }),
+    clientQuery<{ workspaces: { workspace_id: string }[] }>("/api/v1/workspaces", { signal }),
+  ]);
   return {
     ...agent.data,
     inbox: inbox.ok ? inbox.data : null,
-    rooms: roomsOf(own.readable, [...(inbox.ok ? inbox.data.events : []), ...newest.events]),
-    openable: own.readable.map((room) => room.id),
-    roomsCapped: own.capped,
-    roomReadFailed: own.failed || !inbox.ok || newest.failed,
+    rooms: rooms.ok ? rooms.data.rooms : null,
+    roomsTruncated: rooms.ok && rooms.data.truncated,
+    ownRooms: own.ok ? own.data.workspaces.map((room) => room.workspace_id) : null,
   };
 }
 
 export function AgentSheet({ organizations, descriptions }: { organizations: Organization[]; descriptions: Record<string, string> | null }) {
   const organization = (id: string) => organizations.find((org) => org.id === id)?.name;
-  const rooms = useRef<RoomCache>(new Map());
   return (
     <TargetSheet<AgentDetail>
       param="agent"
       size="md"
       noun="agent"
-      load={(id, { signal }) => loadAgent(id, signal, rooms.current)}
+      load={(id, { signal }) => loadAgent(id, signal)}
       title={(agent) => plainName(agent.name)}
       description={(agent) => `Organization: ${plainName(organization(agent.org_id) ?? agent.org_id)}`}
       version={(agent) => agent.generation}
     >
-      {(api) => <AgentDetails api={api} organization={organization(api.data.org_id)} description={descriptions === null ? null : (descriptions[api.data.id] ?? "")} cache={rooms.current} />}
+      {(api) => <AgentDetails api={api} organization={organization(api.data.org_id)} description={descriptions === null ? null : (descriptions[api.data.id] ?? "")} />}
     </TargetSheet>
   );
 }
 
 type Confirming = { kind: "disconnect" } | { kind: "withdraw"; room: AgentRoom };
 
-const roomLabel = (room: Pick<AgentRoom, "id" | "name">) => (room.name === null ? room.id : plainName(room.name));
+const roomLabel = (room: Pick<AgentRoom, "workspace_name">) => plainName(room.workspace_name);
 
-function AgentDetails({ api, organization, description, cache }: { api: SheetApi<AgentDetail>; organization: string | undefined; description: string | null; cache: RoomCache }) {
+function AgentDetails({ api, organization, description }: { api: SheetApi<AgentDetail>; organization: string | undefined; description: string | null }) {
   const { data: agent, run, saving } = api;
   const [confirming, setConfirming] = useState<Confirming | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // A command whose answer was lost. It may have happened, so neither "done" nor "nothing changed" would be true.
   const [unconfirmed, setUnconfirmed] = useState(false);
   const refreshing = useRef(false);
+  // The listing follows a room's own state a moment later, so a confirmed withdrawal shows now.
+  const [withdrawn, setWithdrawn] = useState<string[]>([]);
   const name = plainName(agent.name);
 
   const runRef = useRef(run);
@@ -141,9 +94,6 @@ function AgentDetails({ api, organization, description, cache }: { api: SheetApi
     if (latest?.ok && latest.data.status !== shownStatus.current) await reload();
   }
 
-  // Sheets are bound to one target, so this runs when this agent's is finished with.
-  useEffect(() => () => void cache.delete(agent.id), [cache, agent.id]);
-
   // A new status answers the question. So does a refresh the person asked for, once it has read something.
   useEffect(() => setUnconfirmed(false), [agent.status]);
   useEffect(() => {
@@ -154,7 +104,6 @@ function AgentDetails({ api, organization, description, cache }: { api: SheetApi
 
   function refresh() {
     refreshing.current = true;
-    cache.delete(agent.id);
     void reload();
   }
 
@@ -182,7 +131,6 @@ function AgentDetails({ api, organization, description, cache }: { api: SheetApi
     await run(async ({ target }) => {
       const result = await clientCommand<unknown>(path(target), {}).catch(() => null);
       if (result === null || outage(result)) {
-        cache.delete(target);
         setUnconfirmed(true);
         return { ok: true as const, data: null };
       }
@@ -197,13 +145,16 @@ function AgentDetails({ api, organization, description, cache }: { api: SheetApi
 
   async function withdraw(room: AgentRoom) {
     const left = () => {
-      const own = cache.get(agent.id);
-      if (own) cache.set(agent.id, { ...own, readable: own.readable.map((entry) => (entry.id === room.id ? { ...entry, lists_agent: false } : entry)) });
+      setWithdrawn((previous) => [...previous, room.workspace_id]);
+      announceWithdrawn(agent.id, room.workspace_id);
     };
-    if (await attempt((target) => `/api/v1/workspaces/${encodeURIComponent(room.id)}/members/${encodeURIComponent(target)}/withdraw`, left)) setNotice(`Withdrawn from ${roomLabel(room)}.`);
+    if (await attempt((target) => `/api/v1/workspaces/${encodeURIComponent(room.workspace_id)}/members/${encodeURIComponent(target)}/withdraw`, left)) setNotice(`Withdrawn from ${roomLabel(room)}.`);
   }
 
   const active = agent.status === "active";
+  const rooms = agent.rooms?.map((room) => (withdrawn.includes(room.workspace_id) ? { ...room, left: true, status: null } : room)) ?? null;
+  const current = rooms?.filter((room) => !room.left) ?? [];
+  const past = rooms?.filter((room) => room.left) ?? [];
   const host = wakeHost(agent.wake);
 
   return (
@@ -281,47 +232,71 @@ function AgentDetails({ api, organization, description, cache }: { api: SheetApi
         <h3 id="agent-rooms" className="font-medium">
           Workrooms
         </h3>
-        {active ? (
-          agent.rooms.length > 0 ? (
-            <ul className="divide-y rounded-lg border">
-              {agent.rooms.map((room) => (
-                <li key={room.id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
+        {rooms === null ? (
+          <p role="alert" className="text-sm">
+            Couldn't read this agent's workrooms.{" "}
+            <Button variant="link" className="h-auto p-0" disabled={saving} onClick={() => void reload()}>
+              Try again
+            </Button>
+          </p>
+        ) : !active ? (
+          <p className="text-sm text-muted-foreground">{agent.status === "disconnected" ? "It has no workroom access while disconnected." : "Its workroom access is being removed."}</p>
+        ) : current.length > 0 ? (
+          <ul className="divide-y rounded-lg border">
+            {current.map((room) => {
+              const mine = agent.ownRooms?.includes(room.workspace_id) ?? false;
+              return (
+                <li key={room.workspace_id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
                   <div className="min-w-0">
-                    {agent.openable.includes(room.id) ? (
-                      <Link href={`/w/${encodeURIComponent(room.id)}/overview`} prefetch={false} className="break-words text-primary underline">
-                        {roomLabel(room)}
+                    <p className="break-words font-medium">{roomLabel(room)}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {room.status === "archived" ? "Archived · " : "Active · "}
+                      {room.role}
+                    </p>
+                    {agent.ownRooms === null ? null : (
+                      <Link href={mine ? `/w/${encodeURIComponent(room.workspace_id)}/overview` : oversightPath(room.workspace_id, agent.id)} prefetch={false} className="text-xs text-primary underline" aria-label={mine ? `Open workroom: ${roomLabel(room)}` : `View its tasks, read-only: ${roomLabel(room)}`}>
+                        {mine ? "Open workroom" : "View its tasks, read-only"}
                       </Link>
-                    ) : (
-                      <p className="font-mono break-all">{roomLabel(room)}</p>
                     )}
-                    <p className="text-xs text-muted-foreground">{room.source === "listed" ? `Active · ${room.role}` : "Seen in this agent's inbox"}</p>
                   </div>
                   <Button variant="outline" size="sm" className="min-h-11 sm:min-h-8" disabled={saving} aria-label={`Withdraw from ${roomLabel(room)}`} onClick={() => setConfirming({ kind: "withdraw", room })}>
                     Withdraw
                   </Button>
                 </li>
-              ))}
-            </ul>
-          ) : agent.roomReadFailed ? null : (
-            <p className="text-sm text-muted-foreground">We didn't find this agent in any workroom.</p>
-          )
+              );
+            })}
+          </ul>
         ) : (
-          <p className="text-sm text-muted-foreground">{agent.status === "disconnected" ? "It has no workroom access while disconnected." : "Its workroom access is being removed."}</p>
+          <p className="text-sm text-muted-foreground">This agent isn't in any workroom.</p>
         )}
-        {active && agent.roomReadFailed ? (
+        {active && agent.ownRooms === null && current.length > 0 ? (
           <p role="alert" className="text-sm">
-            Couldn't read all of this agent's workrooms, so there may be more.{" "}
+            Couldn't check which workrooms you're in, so their links are hidden.{" "}
             <Button variant="link" className="h-auto p-0" disabled={saving} onClick={() => void reload()}>
               Try again
             </Button>
           </p>
         ) : null}
+        {/* The rows don't say whose room it is, so the link can't be hidden for the viewer's own organization's. */}
+        {active && current.some((room) => agent.ownRooms !== null && !agent.ownRooms.includes(room.workspace_id)) ? <p className="text-xs text-muted-foreground">You can read an agent's tasks in another organization's workroom. A workroom of your own organization that you're not in shows as not found.</p> : null}
+        {agent.roomsTruncated ? <p className="text-sm text-muted-foreground">This list was cut, so this agent is in or has left more workrooms than show here.</p> : null}
+        {past.length > 0 ? (
+          <div className="space-y-1">
+            <h4 className="text-sm font-medium">Left</h4>
+            <ul className="space-y-1 text-sm text-muted-foreground">
+              {past.map((room) => (
+                <li key={room.workspace_id} className="break-words">
+                  {roomLabel(room)}
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-muted-foreground">Each shows the name it had when this agent left. This says nothing about the workroom since.</p>
+          </div>
+        ) : null}
         <p className="text-xs text-muted-foreground">Workroom scopes are managed by each workroom's owner and admins.</p>
-        {/* Podster can't list an agent's rooms yet, so a room you're not in shows only if those events mention it. */}
-        {active ? <p className="text-xs text-muted-foreground">This list covers {agent.roomsCapped ? `the first ${MAX_ROOM_READS} of the workrooms` : "the workrooms"} you belong to, and others in this agent's oldest and newest inbox events, so it may be incomplete.</p> : null}
       </section>
 
-      <InboxOversight key={agent.id} agent={agent} name={name} openable={agent.openable} />
+      <InboxOversight key={agent.id} agent={agent} name={name} openable={agent.ownRooms ?? []} />
 
       <AlertDialog open={confirming !== null}>
         <AlertDialogContent onEscapeKeyDown={() => setConfirming(null)}>
