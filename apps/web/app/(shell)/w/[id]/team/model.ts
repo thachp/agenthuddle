@@ -64,6 +64,8 @@ export function explainRefusal(code: string, status = 400) {
   switch (code) {
     case "invitation_required":
       return "Only the workroom's own organization can be added directly. Send an invitation for anyone else.";
+    case "not_in_organization":
+      return "That person isn't in this workroom's organization, so they couldn't act on the role. Invite them to the organization first. Nothing changed.";
     case "already_member":
       return "They're already in this workroom.";
     case "limit_exceeded":

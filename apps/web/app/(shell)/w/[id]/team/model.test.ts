@@ -45,5 +45,6 @@ describe("isExternal", () => {
 
 describe("explainRefusal", () => {
   it("sends cross-organization additions to an invitation", () => expect(explainRefusal("invitation_required")).toMatch(/invitation/));
+  it("says a person must join the organization first", () => expect(explainRefusal("not_in_organization")).toMatch(/organization/));
   it("never admits more than a refusal for anything it doesn't know", () => expect(explainRefusal("workspace_not_found")).toBe(explainRefusal("something_else")));
 });
