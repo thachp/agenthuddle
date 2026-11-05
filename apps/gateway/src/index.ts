@@ -471,12 +471,16 @@ function allowedInbox(method: string, path: string, search: URLSearchParams) {
 }
 
 /**
- * The API can't see the directory, so when a room adds a person, the assertion states what the directory says about them.
+ * The API can't see the directory, so when a room adds a person or names an owner, the assertion states what the directory says about them.
  * It's a fact from our own rows, present only if true. The API decides what follows from it.
  */
 async function withTargetMember(env: Env, identity: Identity, method: string, path: string, body: string | undefined): Promise<Identity> {
   if (identity.kind !== "person" || method !== "POST") return identity;
-  const person = /^\/v1\/workspaces\/[^/]+\/members$/.test(path) ? addedPerson(body) : path.match(/^\/v1\/workspaces\/[^/]+\/members\/(per_[\w-]+)\/role$/)?.[1];
+  const person = /^\/v1\/workspaces\/[^/]+\/members$/.test(path)
+    ? addedPerson(body)
+    : /^\/v1\/workspaces\/[^/]+\/owner\/(transfer|recover)$/.test(path)
+      ? namedOwner(body)
+      : path.match(/^\/v1\/workspaces\/[^/]+\/members\/(per_[\w-]+)\/role$/)?.[1];
   if (!person) return identity;
   const { results } = await env.DB.prepare(`SELECT org_id, created_at FROM org_member WHERE person_id = ?`).bind(person).all<{ org_id: string; created_at: number }>();
   return results.length ? { ...identity, targetMember: { person, orgs: Object.fromEntries(results.map((r) => [r.org_id, r.created_at])) } } : identity;
@@ -486,6 +490,15 @@ function addedPerson(body: string | undefined) {
   try {
     const target = JSON.parse(body ?? "") as { kind?: unknown; principal_id?: unknown };
     return target?.kind === "person" && typeof target.principal_id === "string" ? target.principal_id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function namedOwner(body: string | undefined) {
+  try {
+    const target = JSON.parse(body ?? "") as { to?: unknown };
+    return typeof target?.to === "string" ? target.to : undefined;
   } catch {
     return undefined;
   }

@@ -1,6 +1,6 @@
 # ADR 0005: Ownership transfer and recovery
 
-**Status:** On 2026-11-05 the owner accepted the five choices below, the risk in "Takeover", the ownerless list ([decision 40](../spec/PRODUCT.md#decisions-needed)) and recovery in archived rooms ([decision 41](../spec/PRODUCT.md#decisions-needed)). The rest of this design follows from them and wasn't separately approved. Not built yet.
+**Status:** On 2026-11-05 the owner accepted the five choices below, the risk in "Takeover", the ownerless list ([decision 40](../spec/PRODUCT.md#decisions-needed)) and recovery in archived rooms ([decision 41](../spec/PRODUCT.md#decisions-needed)). The rest of this design follows from them and wasn't separately approved. Built, locally only, with no screens for transfer or recovery yet.
 
 ## The owner's choices
 
@@ -58,7 +58,9 @@ Transfer doesn't need this exception, because the owner is there to unarchive th
 
 ### A departed owner under choice 1
 
-The room stops giving owner authority to someone whose `owner_left_at` is set, or whose current membership began after the room's `owner_since`. So a departure that hasn't reached the room yet doesn't matter. Today's `owner.returned` path goes away. For that check to hold, `owner_since` must be set when a room is created and at each transfer and recovery. Today it's only learned from the owner's commands.
+The room stops giving owner authority to someone whose `owner_left_at` is set, or whose current membership began after the room's `owner_since`. So a departure that hasn't reached the room yet doesn't matter. The `owner.returned` path is gone. For that check to hold, `owner_since` is set when a room is created and at each transfer and recovery, to the start of that person's membership, from the assertion. Commands no longer change it.
+
+Rooms from before this take `owner_since` from when they were made, in a forward-only migration that runs the next time the room is used, because the creator was in the organization then. So an owner who rejoined after making the room, and hasn't been recovered, is refused. A room with no value at all refuses too.
 
 ### Personal organizations
 
@@ -68,12 +70,28 @@ Nothing to build. A personal organization has one person, and they can't be remo
 
 Today nobody can manage its access or take over its tasks. Recovery fixes this, because it doesn't need a role in the room. Two things are needed for an admin to find these rooms, since they can't read them:
 
-- `GET /v1/oversight/ownerless`: rooms of organizations this person administers whose owner has left, archived or not, from the listing read model, for showing only. Each row has the room's ID and name, the departed owner's ID and when they left. The room still decides when recovery runs. This needs one new column on `membership_index`. Departure doesn't queue an index update for the owner today, so the build must add that, or a room would never reach this list.
+- `GET /v1/oversight/ownerless`: rooms of organizations this person administers whose owner has left, archived or not, from the listing read model, for showing only. Each row has exactly the room's ID and name, the departed owner's ID and when they left. The room still decides when recovery runs. This needs one new column on `membership_index`, and departure queues an index update for the owner so a room reaches this list. A room whose owner left before this reaches the list the next time the room is used.
 
-  This is a new use of `admin_orgs`, and a new exception to the rule against revealing a private room: it shows a room's ID and name, its departed owner's ID and when they left to someone outside it. It's limited to rooms their own organization owns, and shows no content, members or tasks.
+  This is a new use of `admin_orgs`, and a new exception to the rule against revealing a private room: it shows a room's ID and name, its departed owner's ID and when they left to someone outside it. It's limited to rooms their own organization owns, and shows no content, members, tasks or archived status.
 - Removing someone from an organization should say which rooms they own. The gateway can ask the same listing before removal. This is a screen's job, and the route should exist first.
 
-An organization can't lose its last admin, because the gateway refuses that. So every room in a team organization has someone who can run recovery.
+An organization can't lose its last admin, because the gateway refuses that. So a room in a team organization has someone who can run recovery, once a departure reaches it. The person's `Principal` looks for their rooms for about 30 days, further and further apart, so an index write that fails for a while doesn't lose it. A refused request never records a departure, because a denied request changes nothing.
+
+**If no departure has reached a room,** nobody can recover it yet. If its owner is in the organization, an organization admin can remove them again. That writes a new departure, which reaches the room if it has an index row, and recovery can then name anyone in the organization, including that person once they've rejoined. This also works for an old room made within clock skew of its owner's membership, whose `owner_since` comes from when it was made, on a different clock, so an owner who never left can be refused. New rooms take it from the assertion and can't hit this. An organization's last admin can't be removed, so another admin has to exist first.
+
+**What's truly stuck:**
+
+- A room whose owner is out of the organization and doesn't rejoin, where the departure was lost. That takes index writes failing for more than 30 days, or an owner removed before departures existed, which only staging's test data can have.
+- Any room with no index row, because a departure finds rooms from the index.
+- An old room in a personal organization, made within clock skew, because removal is refused there. Only staging has rooms that old.
+
+Nobody can recover these rooms, they still count toward the 20, and the only way out is a change by hand.
+
+**Until a departure arrives,** the room still treats its owner as a participant, and pending invitations they made still work. An owner who has rejoined gets not-found from the room but still sees it on their list, including later renames. That's brief when a departure is on its way, and lasts indefinitely in the stuck cases.
+
+### What's built, and what isn't
+
+Everything above is built in the API, with `AC-33` in the journey. There are no screens yet for transfer, recovery or the ownerless list, and removing someone doesn't yet say which rooms they own. The note about personal organizations is on the create form.
 
 ### Audit
 
@@ -100,4 +118,8 @@ These aren't in the acceptance tests yet, so they become a new AC:
 - A delayed departure doesn't undo a transfer, or take out a new owner.
 - A room with no admin and a departed owner is recovered by an organization admin who was never in it.
 - A personal organization's room never reaches recovery.
+- A departure reaches a room whose listing appears only after the first sweeps.
+- A rejoined owner being refused changes nothing in the room, and the room learns only from a departure.
+- Removing a rejoined owner again reaches a room the first departure missed, and recovery can then name them once they've rejoined.
+- A departed owner who rejoins doesn't see the room in their list until recovery names them.
 - Each case leaves one audit entry, one event and nothing partial when a command fails partway.

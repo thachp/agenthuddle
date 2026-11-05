@@ -314,3 +314,52 @@ fn only_a_lack_of_authority_counts_as_a_denial() {
     assert!(is_authority_refusal("member.withdraw", "not_found"));
     assert!(is_authority_refusal("member.owner_consent", "not_found"));
 }
+
+#[test]
+fn owner_authority_ends_when_the_owner_left_or_rejoined() {
+    assert!(owner_authority_holds(None, Some(10), Some(10)));
+    assert!(owner_authority_holds(None, Some(10), Some(5)));
+    assert!(!owner_authority_holds(None, Some(10), Some(11)));
+    assert!(!owner_authority_holds(Some(20), Some(10), Some(10)));
+    assert!(!owner_authority_holds(Some(20), Some(10), None));
+    // With nothing to compare, a recorded departure still counts, and a room with no start refuses a known membership.
+    assert!(owner_authority_holds(None, Some(10), None));
+    assert!(!owner_authority_holds(None, None, Some(1)));
+}
+
+#[test]
+fn only_an_organizations_admin_who_is_a_person_can_recover() {
+    assert!(may_recover_ownership(Person, true));
+    assert!(!may_recover_ownership(Person, false));
+    assert!(!may_recover_ownership(Agent, true));
+}
+
+#[test]
+fn only_the_owner_who_is_a_person_can_transfer() {
+    let caller = |kind, role| Caller {
+        id: "x".into(),
+        kind,
+        role,
+        guest_can_create: false,
+    };
+    let allowed = |kind, role| {
+        authorize_workroom(&caller(kind, role), WorkroomAction::TransferOwner) == Verdict::Allow
+    };
+    assert!(allowed(Person, Role::Owner));
+    assert!(!allowed(Agent, Role::Owner));
+    assert!(!allowed(Person, Role::Admin));
+    assert!(!allowed(Person, Role::Member));
+    assert!(!allowed(Person, Role::Guest));
+}
+
+#[test]
+fn ownership_changes_are_named_in_the_denial_record() {
+    assert_eq!(
+        denied_change_name("POST", &["owner", "transfer"]),
+        Some("owner.transfer")
+    );
+    assert_eq!(
+        denied_change_name("POST", &["owner", "recover"]),
+        Some("owner.recover")
+    );
+}

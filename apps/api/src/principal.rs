@@ -51,9 +51,12 @@ CREATE TABLE IF NOT EXISTS org_departure (org_id TEXT NOT NULL, left_at INTEGER 
 CREATE TABLE IF NOT EXISTS org_departure_room (org_id TEXT NOT NULL, left_at INTEGER NOT NULL, workspace_id TEXT NOT NULL,
   applied INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (org_id, left_at, workspace_id));
 ";
-/// The room index lags behind commits, so a room joined just before a removal can be missing from the first sweep.
-const DEPARTURE_SWEEPS: i64 = 3;
+/// The room index lags behind commits, so a room joined just before a removal can be missing from the first sweep, and
+/// a failing index write can keep it missing for much longer. A room that never hears can't reach recovery, so sweeps
+/// carry on for about 30 days, further and further apart. An upper bound keeps a departure from running forever.
+const DEPARTURE_SWEEPS: i64 = 40;
 const DEPARTURE_SWEEP_GAP_MS: i64 = 60_000;
+const DEPARTURE_SWEEP_GAP_MAX_MS: i64 = 24 * 60 * 60 * 1000;
 const DEPARTURE_INDEX_PAGE: i32 = 500;
 /// Room calls in one alarm. Anything left goes in the next one, which runs straight away.
 const DEPARTURE_ROOM_CALLS: usize = 100;
@@ -650,6 +653,14 @@ pub async fn register_room(env: &Env, agent: &str, org: &str, workspace_id: &str
     Ok(int(&body["generation"]) as u64)
 }
 
+/// The wait after a sweep with this many left: it doubles from a minute up to a day.
+fn sweep_gap_ms(sweeps_left: i64) -> i64 {
+    let done = (DEPARTURE_SWEEPS - sweeps_left).clamp(0, 20) as u32;
+    DEPARTURE_SWEEP_GAP_MS
+        .saturating_mul(1 << done)
+        .min(DEPARTURE_SWEEP_GAP_MAX_MS)
+}
+
 /// Doubles from the minimum with each failure, up to the maximum.
 fn retry_delay_ms(failures: i64) -> i64 {
     let doublings = (failures - 1).clamp(0, 20) as u32;
@@ -910,8 +921,9 @@ impl Principal {
                     key(),
                 )?;
             } else {
+                let gap = sweep_gap_ms(int(&departure["sweeps_left"]));
                 exec(&sql, "UPDATE org_departure SET sweeps_left = sweeps_left - 1, failures = 0, next_sweep_at = ? WHERE org_id = ? AND left_at = ?", vec![
-                    (now + DEPARTURE_SWEEP_GAP_MS).into(), org.as_str().into(), left_at.into(),
+                    (now + gap).into(), org.as_str().into(), left_at.into(),
                 ])?;
             }
         }

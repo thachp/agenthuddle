@@ -338,6 +338,59 @@ async function acceptance() {
     eq((await personA.audit(room)).filter((e) => e.target_id === personB.id), [], "audit entries for a refused add");
   });
 
+  await check("AC-33", "an owner transfers a room, and an organization admin outside a room recovers it once its owner has left", async () => {
+    const org = (await personA.must("POST", "/orgs", { name: `Podster e2e owners ${Date.now()}` })).id;
+    const inOrg = { org };
+    const joinAs = async (role) => personB.must("POST", "/org-invitations/accept", { token: (await personA.must("POST", `/orgs/${org}/invitations`, { role })).token });
+    await joinAs("admin");
+    const handed = (await personB.must("POST", "/v1/workspaces", { name: roomName("handed over") }, inOrg)).id;
+    const path = `/v1/workspaces/${handed}`;
+    const recover = (to, expected_owner) => personA.dash("POST", `${path}/owner/recover`, { to, expected_owner }, inOrg);
+    const transfer = async (from, to) => from.dash("POST", `${path}/owner/transfer`, { to: to.id, policy_version: (await from.must("GET", path, undefined, inOrg)).policy_version }, inOrg);
+
+    // Person A administers the organization but isn't in the room, so nothing they send can tell them about it yet.
+    refused(await personA.dash("GET", path, undefined, inOrg), "workspace_not_found", "an organization admin outside the room reading it");
+    refused(await recover(personA.id, personB.id), "workspace_not_found", "recovery while the owner is in the organization");
+    refused(await recover(personA.id, "per_wrong"), "workspace_not_found", "recovery naming the wrong owner while the owner is in the organization");
+    refused(await transfer(personB, personA), "invalid_argument", "transferring to someone who isn't a room admin");
+
+    await personB.must("POST", `${path}/members`, { principal_id: personA.id, kind: "person", org_id: org, role: "admin", policy_version: (await personB.must("GET", path, undefined, inOrg)).policy_version }, inOrg);
+    eq((await transfer(personB, personA)).body?.owner, personA.id, "the new owner");
+    const handedOver = await personA.must("GET", path, undefined, inOrg);
+    eq(handedOver.owner, personA.id, "the stored owner");
+    eq(handedOver.members.find((m) => m.principal_id === personB.id)?.role, "admin", "the former owner's role");
+    refused(await transfer(personB, personA), "not_allowed", "the former owner transferring it again");
+    eq((await transfer(personA, personB)).body?.owner, personB.id, "handing it back");
+
+    const seen = async (who, test, label) => {
+      for (let tries = 0; tries < 20; tries++) {
+        if (await test()) return;
+        await sleep(isLocal ? 200 : 1000);
+      }
+      ok(false, `${label}, for ${who}`);
+    };
+    const listedFor = async () => (await personB.must("GET", "/v1/workspaces")).workspaces.some((w) => w.workspace_id === handed);
+    await seen("Person B", listedFor, "the room should be listed");
+
+    await personA.must("DELETE", `/orgs/${org}/members/${personB.id}`);
+    const ownerless = async () => (await personA.must("GET", "/v1/oversight/ownerless")).rooms.filter((r) => r.workspace_id === handed);
+    await seen("Person A", async () => (await ownerless()).length === 1, "the room should be on the ownerless list");
+    eq((await ownerless())[0].owner, personB.id, "the departed owner");
+    refused(await personB.dash("GET", path), "workspace_not_found", "the departed owner reading the room");
+
+    await joinAs("member");
+    refused(await personB.dash("GET", path, undefined, inOrg), "workspace_not_found", "the departed owner, after rejoining");
+    refused(await recover(personA.id, "per_wrong"), "version_conflict", "recovery from an out-of-date list");
+    refused(await recover("per_not_in_the_organization", personB.id), "not_in_organization", "recovery naming someone outside the organization");
+    eq((await recover(personA.id, personB.id)).body?.owner, personA.id, "the recovered owner");
+    refused(await personB.dash("GET", path, undefined, inOrg), "workspace_not_found", "the former owner, after recovery");
+    eq((await personA.audit(handed)).filter((e) => e.action === "owner.recovered").map((e) => e.actor_id), [personA.id], "the room's record of the recovery");
+    eq((await personA.audit(handed)).filter((e) => e.action === "owner.transferred").length, 2, "the room's record of the transfers");
+    await seen("Person A", async () => (await ownerless()).length === 0, "the room should leave the ownerless list");
+    refused(await personA.dash("POST", `/v1/workspaces/${room}/owner/recover`, { to: personA.id, expected_owner: personA.id }), "not_allowed", "recovering a room whose owner hasn't left");
+    return "an admin outside the room recovering it, an archived room and a retry run in apps/api tests, because this run has two people";
+  });
+
   await check("AC-02+", "a second person joins by a link, acts as a room admin, and loses the room when removed", async () => {
     // Reused between runs, because organizations can't be deleted. A run that died midway may have left Person B in it.
     const orgs = (await personA.must("GET", "/orgs")).organizations;
