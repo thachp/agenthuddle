@@ -2,11 +2,11 @@
 
 import { NewTask } from "./new-task";
 import { TaskList } from "./task-list";
-import { canCreateTask, roleOf, type Names, type Room, type Task } from "./task-model";
+import { canCreateTask, isArchivedRoom, roleOf, type Names, type Room, type Task } from "./task-model";
 import { TaskSheet } from "./task-sheet";
 
 export function TasksScreen({ room, tasks, more, me, names, orgNames }: { room: Room; tasks: Task[]; more: boolean; me: string; names: Names; orgNames?: Names }) {
-  const canCreate = canCreateTask(roleOf(room, me));
+  const canCreate = canCreateTask(roleOf(room, me)) && !isArchivedRoom(room);
   return (
     <section className="max-w-5xl space-y-4">
       <div className="space-y-1">

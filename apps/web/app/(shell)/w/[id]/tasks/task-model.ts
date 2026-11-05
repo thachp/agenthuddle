@@ -29,7 +29,10 @@ export type HistoryEvent = { seq: number; id: string; type: string; from: From; 
 export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Artifact[]; messages: Message[]; history: HistoryEvent[] };
 
 export type Member = { principal_id: string; kind: string; org_id: string; role: string };
-export type Room = { id: string; name: string; owner: string; members?: Member[] };
+export type Room = { id: string; name: string; owner: string; status?: string; members?: Member[] };
+
+/** Display only. In an archived room Rust refuses every new command with `workspace_archived`. */
+export const isArchivedRoom = (room: Pick<Room, "status">) => room.status === "archived";
 
 /** IDs, and what we know to call them. Only the viewer's own organizations have names so far, so everyone else shows as an ID. */
 export type Names = Record<string, string>;
@@ -83,28 +86,41 @@ const VERBS: Record<string, string> = {
   "task.message": "posted a message",
 };
 
+/** An edit to the instructions or criteria of an accepted task (decision 4). It's recorded as an offer, and no actual offer starts from `accepted`. */
+const isReofferingEdit = (event: Pick<HistoryEvent, "type" | "prior_status">) => event.type === "task.offered" && event.prior_status === "accepted";
+
 /** The API can add event types before this does. A new one reads as what it is, not as something it isn't. */
-export const verbFor = (type: string) => VERBS[type] ?? "changed this task";
+export const verbFor = (event: Pick<HistoryEvent, "type" | "prior_status">) => (isReofferingEdit(event) ? "edited the instructions or criteria, so this needs accepting again" : (VERBS[event.type] ?? "changed this task"));
 
 /** Who wrote the brief: the last person to create or edit it. The history is the only place that carries an organization and `external` for it. */
 export function briefAuthor(detail: Pick<TaskDetail, "task" | "history">) {
   // The first event creates the task, and it's `task.offered` when the task starts with an assignee. Later offers change nothing in the brief.
-  const event = detail.history.findLast((entry) => entry.type === "task.updated") ?? detail.history[0];
+  const event = detail.history.findLast((entry) => entry.type === "task.updated" || isReofferingEdit(entry)) ?? detail.history[0];
   return event ? { id: event.from.id, org: event.from.org, external: event.external } : { id: detail.task.requester, org: undefined, external: false };
 }
 
 const isTerminal = (status: TaskStatus) => status === "completed" || status === "canceled";
 
+const isAdmin = (role: string | undefined) => role === "owner" || role === "admin";
+
 /**
  * Which controls to show. This mirrors crates/policy so people aren't offered what would fail, and it grants nothing:
  * the server decides each request again.
  */
-export function viewerActions(task: Task, me: string, role: string | undefined) {
-  const manages = task.requester === me || role === "owner" || role === "admin";
+export function viewerActions(task: Task, me: string, role: string | undefined, archived = false) {
+  if (archived) return { review: false, cancel: false, assign: false, edit: false, setReviewer: false, setRequester: false };
+  const admin = isAdmin(role);
+  const manages = task.requester === me || admin;
+  const live = !isTerminal(task.status);
   return {
     review: task.status === "submitted" && task.reviewer === me && task.assignee !== me,
-    cancel: manages && !isTerminal(task.status),
+    cancel: manages && live,
     assign: manages && (task.status === "open" || task.status === "offered"),
+    edit: manages && live && task.status !== "submitted",
+    // Once there's a submission to judge, a requester can't choose who judges it.
+    setReviewer: live && (admin || (manages && task.status !== "submitted")),
+    // Decision 24. The Coordinator's own takeover arrives with access presets in M1.
+    setRequester: live && admin,
   };
 }
 
@@ -116,6 +132,140 @@ export const roleOf = (room: Pick<Room, "owner" | "members">, me: string) => (ro
 
 /** Who can be named reviewer: the owner and every member, never the assignee. The server checks again. */
 export const reviewerChoices = (room: Pick<Room, "owner" | "members">, assignee: string) => [...new Set([room.owner, ...(room.members ?? []).map((member) => member.principal_id)])].filter((id) => id !== assignee);
+
+/**
+ * What a flagged task needs. The API only says that it needs something, so this looks at who has left. A guest sees only
+ * itself in `members`, and a departed owner stays listed, so this can come back with neither.
+ */
+export function flagged(task: Pick<Task, "needs_attention" | "requester" | "reviewer">, room: Pick<Room, "owner" | "members">, role: string | undefined) {
+  if (!task.needs_attention || role === "guest") return { requester: false, reviewer: false };
+  const present = new Set(reviewerChoices(room, ""));
+  return { requester: !present.has(task.requester), reviewer: !present.has(task.reviewer) };
+}
+
+/**
+ * Who could become the reviewer or requester. Choosing the same one again is pointless, except on a flag nobody can place:
+ * someone who left and came back still has the flag, and naming them again is what clears it.
+ */
+function choicesFor(ids: string[], current: string, task: Pick<Task, "needs_attention" | "requester" | "reviewer">, room: Pick<Room, "owner" | "members">, role: string | undefined) {
+  const need = flagged(task, room, role);
+  const keepCurrent = task.needs_attention && !need.requester && !need.reviewer;
+  return ids.filter((id) => keepCurrent || id !== current);
+}
+export const newReviewerChoices = (room: Pick<Room, "owner" | "members">, task: Pick<Task, "assignee" | "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(reviewerChoices(room, task.assignee ?? ""), task.reviewer, task, room, role);
+export const newRequesterChoices = (room: Pick<Room, "owner" | "members">, task: Pick<Task, "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(reviewerChoices(room, ""), task.requester, task, room, role);
+
+/** The flag in words, including who can fix it, because that's often not the person reading. */
+export function flagText(task: Task, room: Pick<Room, "owner" | "members" | "status">, me: string, role: string | undefined) {
+  const can = viewerActions(task, me, role);
+  const need = flagged(task, room, role);
+  const whom = need.requester && need.reviewer ? "a new reviewer and a new requester" : need.requester ? "a new requester" : need.reviewer ? "a new reviewer" : "a new reviewer or requester";
+  const opening = `Someone left this workroom, so this task needs ${whom}.`;
+  if (isArchivedRoom(room)) return `${opening} It can be fixed once the workroom is back.`;
+  const fixable = need.requester === need.reviewer ? can.setRequester || can.setReviewer : need.requester ? can.setRequester : can.setReviewer;
+  return `${opening} ${fixable ? "You can choose below." : "An owner or admin of this workroom can fix it."}`;
+}
+
+/** What the edit form holds. Dates are in the form a date-and-time field uses, so an untouched one compares equal. */
+export type TaskDraft = { title: string; instructions: string; criteria: string; due: string };
+
+/** The viewer's own clock, which is what a date-and-time field shows. */
+export function toLocalInput(at: number) {
+  const local = new Date(at - new Date(at).getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+export const draftOf = (task: Task): TaskDraft => ({ title: task.title, instructions: task.instructions, criteria: task.acceptance_criteria ?? "", due: task.due_at === null ? "" : toLocalInput(task.due_at) });
+
+export type TaskPatch = { title?: string; instructions?: string; acceptance_criteria?: string; due_at?: number };
+
+/**
+ * Only what changed, because Rust compares what it's sent, and resending the same words mustn't look like a change. There's no
+ * way to remove a due date: the API treats a missing one as "leave it alone".
+ */
+export function taskPatch(task: Task, draft: TaskDraft): TaskPatch {
+  const base = draftOf(task);
+  const patch: TaskPatch = {};
+  if (draft.title.trim() !== base.title.trim()) patch.title = draft.title.trim();
+  if (draft.instructions.trim() !== base.instructions.trim()) patch.instructions = draft.instructions.trim();
+  if (draft.criteria.trim() !== base.criteria.trim()) patch.acceptance_criteria = draft.criteria.trim();
+  if (draft.due !== "" && draft.due !== base.due) patch.due_at = new Date(draft.due).getTime();
+  return patch;
+}
+
+/** Decision 4: this edit would send accepted work back to be accepted again. Rust decides the same way, and the result says what happened. */
+export const reoffers = (task: Pick<Task, "status">, patch: TaskPatch) => task.status === "accepted" && (patch.instructions !== undefined || patch.acceptance_criteria !== undefined);
+
+/** Only what the person changed: the rest may be someone else's words, which can't show here as if they were the person's. */
+export function ownWords(saved: { readAt: Task; draft: TaskDraft }) {
+  const before = draftOf(saved.readAt);
+  const fields: [string, string, string][] = [
+    ["Title", saved.draft.title, before.title],
+    ["Instructions", saved.draft.instructions, before.instructions],
+    ["Acceptance criteria", saved.draft.criteria, before.criteria],
+  ];
+  return fields.filter(([, mine, theirs]) => mine.trim() !== theirs.trim() && mine.trim() !== "").map(([label, mine]) => ({ label, text: mine }));
+}
+
+/** Limits from crates/core, in bytes, so a form can say so before the server refuses. */
+export const LIMITS = { title: 500, instructions: 64 * 1024, criteria: 16 * 1024, message: 16 * 1024 };
+export const tooLong = (text: string, limit: number) => new TextEncoder().encode(text.trim()).length > limit;
+
+/** Keeps what the person typed over what someone else just changed, without undoing changes to fields they never touched. */
+export function rebaseDraft(draft: TaskDraft, readAt: Task, latest: Task): TaskDraft {
+  const before = draftOf(readAt);
+  const now = draftOf(latest);
+  return { title: draft.title === before.title ? now.title : draft.title, instructions: draft.instructions === before.instructions ? now.instructions : draft.instructions, criteria: draft.criteria === before.criteria ? now.criteria : draft.criteria, due: draft.due === before.due ? now.due : draft.due };
+}
+
+/** What moved between two reads of a task, in words, for a person whose edit just lost a race. */
+export function changedSince(readAt: Task, latest: Task) {
+  const before = draftOf(readAt);
+  const now = draftOf(latest);
+  const changed = [before.title !== now.title && "title", before.instructions !== now.instructions && "instructions", before.criteria !== now.criteria && "acceptance criteria", before.due !== now.due && "due date", readAt.status !== latest.status && "status", readAt.assignee !== latest.assignee && "assignee", readAt.reviewer !== latest.reviewer && "reviewer", readAt.requester !== latest.requester && "requester"];
+  return changed.filter((item): item is string => item !== false);
+}
+
+export type TaskChange = "edit" | "reviewer" | "requester" | "message";
+
+const LOST: Record<TaskChange, string> = {
+  edit: "We can't tell whether your edit saved. Save again without changing it: that can't apply it twice.",
+  reviewer: "We can't tell whether the reviewer changed, so we read the task again. Check the reviewer above before trying again.",
+  requester: "We can't tell whether the requester changed, so we read the task again. Check the requester above before trying again.",
+  message: "We can't tell whether this posted. Post it again without changing it: that can't post it twice.",
+};
+
+const REFUSED: Record<TaskChange, Record<string, string>> = {
+  edit: {
+    invalid_argument: "A title and instructions are required, and each has a length limit.",
+    not_allowed: "Only this task's requester, or an owner or admin of this workroom, can edit it.",
+  },
+  reviewer: {
+    self_sign_off: "The reviewer can't be the person doing the work. Choose someone else, or offer the task to someone else first.",
+    invalid_argument: "That person isn't in this workroom any more, or can't review here. Choose someone else.",
+    not_allowed: "Only this task's requester, or an owner or admin of this workroom, can change the reviewer. Once work is submitted, only an owner or admin can.",
+  },
+  requester: {
+    invalid_argument: "That person isn't in this workroom any more. Choose someone else.",
+    not_allowed: "Only an owner or admin of this workroom can change the requester.",
+  },
+  message: {
+    invalid_argument: "A message can't be empty, and it can be at most 16 KB.",
+  },
+};
+
+/** A refusal can't rule out an earlier attempt: access and rate limits answer before the replay lookup. Its key is still good, so posting again is still safe. */
+export const messageStillUnknown = (status: number) => (status === 401 ? "You've been signed out, so we still can't tell whether this posted. Copy your text, then sign in again." : "We still can't tell whether this posted. Check the thread above, and post it again without changing it: that can't post it twice.");
+
+/** What to say when a change fails. A refusal says why, except that anything about access stays general. */
+export function changeProblem(change: TaskChange, code: string, status: number) {
+  if (code === "unknown" || status >= 500) return LOST[change];
+  const nothingChanged = change === "message" ? "That didn't post." : "That didn't save, and nothing changed.";
+  if (status === 401) return `${nothingChanged} Your session has ended. Copy anything you want to keep, then sign in again.`;
+  if (status === 429) return `${nothingChanged} Too many requests, so wait a minute and try again.`;
+  if (code === "workspace_archived") return `${nothingChanged} This workroom is archived, so nothing new can happen in it. Its owner or an admin can bring it back.`;
+  return `${nothingChanged} ${REFUSED[change][code] ?? "You may no longer be allowed to do this."}`;
+}
 
 /** A workroom and task named together, for a Sheet that isn't on its workroom's own page. Neither ID can hold a dot. */
 export const crossRoomTarget = (workspace: string, task: string) => `${workspace}.${task}`;
