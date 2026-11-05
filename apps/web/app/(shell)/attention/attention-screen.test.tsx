@@ -14,6 +14,7 @@ const attention = (over: Partial<Attention> = {}): Attention => ({
   inbox: { events: [], acked_seq: 0, unread: 0, dropped: 0 },
   reviews: [],
   failedRooms: 0,
+  fullRooms: 0,
   uncheckedRooms: 0,
   roomNames: { ws_1: "Billing" },
   taskTitles: { tsk_1: "Design the API" },
@@ -56,6 +57,12 @@ describe("Needs attention", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/Try again/);
   });
 
+  it("doesn't claim there's nothing when a room has more than it read", () => {
+    show({ fullRooms: 1 });
+    expect(screen.queryByText(/No submissions are waiting/)).toBeNull();
+    expect(screen.getByText(/1 workroom has more submissions/)).toBeInTheDocument();
+  });
+
   it("a failed read is never an empty list", () => {
     show({ reviews: null, inbox: null });
     expect(screen.queryByText(/No submissions are waiting/)).toBeNull();
@@ -86,7 +93,7 @@ describe("Needs attention", () => {
 describe("acknowledging", () => {
   const inbox = { events: [event(1), event(3)], acked_seq: 0, unread: 2, dropped: 0 };
 
-  it("moves the cursor to the newest shown and refreshes, which updates the Sidebar count", async () => {
+  it("moves the cursor to the newest shown, reports the server's unread count, and re-reads the page", async () => {
     const user = userEvent.setup();
     show({ inbox });
     await user.click(screen.getByRole("button", { name: "Acknowledge these 2 updates" }));
@@ -102,6 +109,11 @@ describe("acknowledging", () => {
     await user.click(screen.getByRole("button", { name: "Acknowledge these 2 updates" }));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/That didn't save/));
     expect(routerCalls.refresh).toBe(0);
+  });
+
+  it("says reviews aren't what it clears", () => {
+    show({ inbox });
+    expect(screen.getByText(/Reviews stay listed until you decide them/)).toBeInTheDocument();
   });
 
   it("isn't offered with nothing to acknowledge, and reviews don't depend on it", () => {

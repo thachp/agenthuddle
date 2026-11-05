@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Task } from "../w/[id]/tasks/task-model";
 import { acknowledgeUpTo, describeEvent, type InboxEvent } from "./attention-model";
-import { loadAttention, MAX_ROOMS } from "./load-attention";
+import { loadAttention, MAX_ROOMS, MAX_TITLE_READS } from "./load-attention";
 
 const task = (id: string, over: Partial<Task> = {}) => ({ id, title: `Title ${id}`, status: "submitted", reviewer: "per_me", submission_no: 1, ...over });
 const ok = (data: unknown) => ({ ok: true as const, data });
@@ -86,6 +86,27 @@ describe("loadAttention", () => {
     expect(result.reviews?.[0]).toMatchObject({ workspace: "ws_new", workspaceName: "New room" });
     expect(result.roomNames.ws_new).toBe("New room");
     expect(result.taskTitles.a).toBe("Title a");
+  });
+
+  it("reads one page of submissions per room, and says when there's more", async () => {
+    const { query, asked } = stub({
+      "/api/v1/inbox": ok(emptyInbox),
+      "/api/v1/workspaces/ws_1/tasks": ok({ tasks: [task("a")], next_cursor: 9 }),
+      "/api/v1/workspaces": ok({ workspaces: [{ workspace_id: "ws_1", workspace_name: "One", role: "member" }] }),
+    });
+    const result = await loadAttention(query, "per_me");
+    expect(result.fullRooms).toBe(1);
+    expect(result.failedRooms).toBe(0);
+    expect(result.reviews).toHaveLength(1);
+    expect(asked.filter((path) => path.includes("/tasks"))).toHaveLength(1);
+  });
+
+  it("keeps a full page within its budget, however many rooms have unread updates", async () => {
+    const workspaces = Array.from({ length: MAX_ROOMS }, (_, i) => ({ workspace_id: `ws_${i}`, workspace_name: `Room ${i}`, role: "member" }));
+    const events = workspaces.map((room, i) => event({ seq: i + 1, event_id: `e${i}`, workspace_id: room.workspace_id }));
+    const { query, asked } = stub({ "/api/v1/inbox": ok({ ...emptyInbox, events, unread: events.length }), "/api/v1/workspaces/": page([]), "/api/v1/workspaces": ok({ workspaces }) });
+    await loadAttention(query, "per_me");
+    expect(asked).toHaveLength(2 + MAX_ROOMS + MAX_TITLE_READS);
   });
 
   it("stops at its limit and says how many it didn't ask", async () => {

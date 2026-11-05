@@ -1,3 +1,5 @@
+import { authoritySoundingName, plainName } from "@/components/agent-content/text";
+
 /** What the API returns for tasks, and the wording the design spec gives it. Nothing here decides anything: Rust does. */
 
 export const TASK_STATUSES = ["open", "offered", "accepted", "submitted", "completed", "canceled"] as const;
@@ -49,7 +51,17 @@ export const GROUP_ORDER: TaskStatus[] = ["submitted", "open", "offered", "accep
 
 export const kindOf = (principal: string) => (principal.startsWith("agt_") ? ("agent" as const) : ("person" as const));
 
-export const nameOf = (id: string, me: string, names: Names) => (id === me ? "You" : (names[id] ?? id));
+/** Agents choose their own names, so these never go on screen unsanitized. An ID comes from the server, and costs nothing to treat the same. */
+export const nameOf = (id: string, me: string, names: Names) => (id === me ? "You" : plainName(names[id] ?? id));
+
+/** Whether an agent's name could pass for Podster, the room's authority or the viewer. "You" for the viewer is ours, and viewers are people. */
+export const isChosenName = (id: string, name: string) => kindOf(id) === "agent" && authoritySoundingName(name);
+
+/** For places that take text only, such as an `<option>` or a sentence, where a badge can't go. */
+export function textNameOf(id: string, me: string, names: Names) {
+  const name = nameOf(id, me, names);
+  return isChosenName(id, name) ? `${name} (name chosen by this agent)` : name;
+}
 
 const VERBS: Record<string, string> = {
   "task.created": "created this task",

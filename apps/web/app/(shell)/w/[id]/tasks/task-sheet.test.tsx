@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { currentUrl, navigate, routerCalls, setUrl } from "@/test/next-navigation";
 import type { Room, Task, TaskDetail } from "./task-model";
+import { goToSignIn } from "./go-to-sign-in";
 import { TaskSheet } from "./task-sheet";
+
+vi.mock("./go-to-sign-in", () => ({ goToSignIn: vi.fn() }));
 
 const ROOM: Room = {
   id: "ws_1",
@@ -122,6 +125,19 @@ describe("what the Sheet shows", () => {
     expect(within(screen.getByRole("tabpanel")).queryByText("External")).toBeNull();
   });
 
+  it("labels an agent whose name could pass for the viewer or an authority, everywhere it's named", async () => {
+    render(<TaskSheet me="per_me" names={{ agt_a: "You", agt_b: "Owner" }} room={ROOM} resolve={(target) => ({ workspace: ROOM.id, task: target })} />);
+    await screen.findByRole("heading", { name: "Design the API" });
+    expect(screen.getByTitle("agt_a").parentElement).toHaveTextContent("Name chosen by this agent");
+    expect(screen.getByTitle("per_me").parentElement).not.toHaveTextContent("Name chosen");
+  });
+
+  it("strips invisible characters from a link that isn't a web link", async () => {
+    answer = () => json(200, detail({}, { artifacts: [{ id: "art_3", submission_no: 2, uri: "ftp://a\u202Eb", label: "File", from: { id: "agt_a", org: "org_b" }, external: true, created_at: 2 }] }));
+    await open();
+    expect(screen.getByText("(ftp://ab)")).toBeInTheDocument();
+  });
+
   it("uses the design's verbs in the history", async () => {
     const user = userEvent.setup();
     await open();
@@ -144,7 +160,6 @@ describe("who sees what (AC-20, UI-05)", () => {
   it.each([
     [404, "task_not_found"],
     [403, "not_a_participant"],
-    [401, "unauthorized"],
   ])("a %i shows the generic not-found, with no title", async (status, code) => {
     answer = () => refused(status, code);
     render(<Screen />);
@@ -152,6 +167,14 @@ describe("who sees what (AC-20, UI-05)", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByText("Design the API")).toBeNull();
     await waitFor(() => expect(currentUrl()).toBe("/w/ws_1/tasks"));
+  });
+
+  it("a lapsed session goes to sign-in, and doesn't say the task may not exist", async () => {
+    answer = () => refused(401, "unauthorized");
+    render(<Screen />);
+    await waitFor(() => expect(goToSignIn).toHaveBeenCalled());
+    expect(screen.queryByText(/We can't find that/)).toBeNull();
+    expect(currentUrl()).toBe("/w/ws_1/tasks?task=tsk_1");
   });
 
   it("a failed read says so, and isn't not-found", async () => {

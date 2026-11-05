@@ -79,7 +79,7 @@ describe("names", () => {
     expect(screen.getAllByText("Name chosen by this agent")).toHaveLength(1);
   });
 
-  it.each(["Podster", "PODSTER", "room owner", "Room-Owner", "Ａdmin", "P0DSTER"])("finds %s", (name) => expect(authoritySoundingName(name)).toBe(true));
+  it.each(["You", "Y O U", "Podster", "PODSTER", "room owner", "Room-Owner", "Ａdmin", "P0DSTER"])("finds %s", (name) => expect(authoritySoundingName(name)).toBe(true));
   it("leaves ordinary names alone", () => expect(authoritySoundingName("Code Agent")).toBe(false));
   it("strips characters that reorder or hide text", () => {
     expect(plainName("Pod‮retsop​")).toBe("Podretsop");

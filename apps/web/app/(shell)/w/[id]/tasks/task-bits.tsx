@@ -3,7 +3,8 @@
 import { CheckCircle2, Circle, CircleDashed, CircleDot, Hourglass, Eye, XCircle, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "cn";
-import { TASK_STATUS, type TaskStatus, type Tone } from "./task-model";
+import { Badge } from "@/components/ui/badge";
+import { isChosenName, TASK_STATUS, type TaskStatus, type Tone } from "./task-model";
 
 const ICONS: Record<TaskStatus, LucideIcon> = { open: Circle, offered: Hourglass, accepted: CircleDot, submitted: Eye, completed: CheckCircle2, canceled: XCircle };
 
@@ -56,8 +57,11 @@ export function Timestamp({ at }: { at: number }) {
 /** A principal's name or ID in running text. Long IDs truncate, with the full ID on hover. */
 export function PrincipalName({ id, label }: { id: string; label: string }) {
   return (
-    <span className="block max-w-full truncate" title={id}>
-      {label}
+    <span className="flex max-w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+      <span className="max-w-full truncate" title={id}>
+        {label}
+      </span>
+      {isChosenName(id, label) ? <Badge variant="outline">Name chosen by this agent</Badge> : null}
     </span>
   );
 }

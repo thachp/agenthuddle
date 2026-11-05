@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { asConflict, briefAuthor, canCreateTask, crossRoomTarget, nameOf, parseCrossRoomTarget, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
+import { asConflict, briefAuthor, canCreateTask, crossRoomTarget, isChosenName, nameOf, textNameOf, parseCrossRoomTarget, reviewerChoices, roleOf, TASK_STATUS, TASK_STATUSES, verbFor, viewerActions, type HistoryEvent, type Task } from "./task-model";
 
 const task = (over: Partial<Task> = {}): Task => ({ id: "tsk_1", title: "T", instructions: "I", acceptance_criteria: null, requester: "per_r", assignee: "agt_a", reviewer: "per_v", status: "submitted", version: 3, due_at: null, follow_up_of: null, submission_no: 2, needs_attention: false, ...over });
 
@@ -57,6 +57,18 @@ it("calls the viewer You, an agent by its name, and anyone else by ID", () => {
   expect(nameOf("per_me", "per_me", {})).toBe("You");
   expect(nameOf("agt_1", "per_me", { agt_1: "Architect" })).toBe("Architect");
   expect(nameOf("agt_2", "per_me", { agt_1: "Architect" })).toBe("agt_2");
+});
+
+describe("names agents chose", () => {
+  it("strips what could make a name read as something else", () => expect(nameOf("agt_1", "per_me", { agt_1: "Arch\u202Eitect\u200B" })).toBe("Architect"));
+  it.each(["You", "you", "Owner", "Podster Support"])("flags %s in text-only places", (name) => {
+    expect(isChosenName("agt_1", name)).toBe(true);
+    expect(textNameOf("agt_1", "per_me", { agt_1: name })).toBe(`${name} (name chosen by this agent)`);
+  });
+  it("doesn't flag the viewer, or an ordinary name", () => {
+    expect(textNameOf("per_me", "per_me", {})).toBe("You");
+    expect(textNameOf("agt_1", "per_me", { agt_1: "Architect" })).toBe("Architect");
+  });
 });
 
 describe("briefAuthor", () => {

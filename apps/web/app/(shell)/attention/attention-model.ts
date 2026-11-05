@@ -1,4 +1,4 @@
-import { nameOf, type Names, type Task } from "../w/[id]/tasks/task-model";
+import { textNameOf, type Names, type Task } from "../w/[id]/tasks/task-model";
 
 export type InboxEvent = { seq: number; event_id: string; workspace_id: string; type: string; task_id: string | null; actor_id: string | null; created_at: number };
 export type Inbox = { events: InboxEvent[]; acked_seq: number; unread: number; dropped: number };
@@ -29,7 +29,7 @@ const SENTENCES: Record<string, string> = {
 
 /** System wording around IDs only. Inbox events carry no agent text, and none goes in here. */
 export function describeEvent(event: Pick<InboxEvent, "type" | "actor_id">, me: string, names: Names) {
-  const who = event.actor_id ? nameOf(event.actor_id, me, names) : "Someone";
+  const who = event.actor_id ? textNameOf(event.actor_id, me, names) : "Someone";
   return `${who} ${SENTENCES[event.type] ?? "made a change"}`;
 }
 

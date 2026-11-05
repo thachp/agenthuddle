@@ -30,8 +30,8 @@ export function AttentionScreen({ attention, me, names }: { attention: Attention
 }
 
 function Reviews({ attention }: { attention: Attention }) {
-  const { reviews, failedRooms, uncheckedRooms } = attention;
-  const partial = failedRooms > 0 || uncheckedRooms > 0;
+  const { reviews, failedRooms, fullRooms, uncheckedRooms } = attention;
+  const partial = failedRooms > 0 || fullRooms > 0 || uncheckedRooms > 0;
   return (
     <section aria-labelledby="reviews-heading" className="space-y-2">
       <h2 id="reviews-heading" className="text-lg font-medium">
@@ -44,6 +44,7 @@ function Reviews({ attention }: { attention: Attention }) {
           <ReadFailure />
         </div>
       ) : null}
+      {fullRooms > 0 ? <p className="text-sm text-muted-foreground">{fullRooms === 1 ? "1 workroom has" : `${fullRooms} workrooms have`} more submissions than this reads, so there may be more reviews. Use Needs my review on its Tasks tab.</p> : null}
       {uncheckedRooms > 0 ? <p className="text-sm text-muted-foreground">Checked your first workrooms only. {uncheckedRooms === 1 ? "1 more wasn't" : `${uncheckedRooms} more weren't`} checked, so open those from Workrooms.</p> : null}
       {reviews?.length === 0 && !partial ? <p className="text-muted-foreground">No submissions are waiting for your review. When an agent submits work you're the reviewer of, it shows up here.</p> : null}
       {reviews && reviews.length > 0 ? (
@@ -151,7 +152,7 @@ function Acknowledge({ events }: { events: InboxEvent[] }) {
       <Button variant="outline" className="min-h-11 sm:min-h-9" disabled={saving} onClick={acknowledge}>
         {saving ? "Acknowledging…" : events.length === 1 ? "Acknowledge this update" : `Acknowledge these ${events.length} updates`}
       </Button>
-      <p className="text-xs text-muted-foreground">This clears them from your queue only, and changes nothing for anyone else.</p>
+      <p className="text-xs text-muted-foreground">This clears them from your queue only, and changes nothing for anyone else. Reviews stay listed until you decide them.</p>
       {failed ? (
         <p role="alert" className="text-sm text-status-danger">
           That didn't save, and nothing changed. Try again.

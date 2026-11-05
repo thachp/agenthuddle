@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { FIELD_CLASS } from "./task-bits";
-import { nameOf, refusalMessage, reviewerChoices, type Names, type Room, type Task } from "./task-model";
+import { refusalMessage, textNameOf, reviewerChoices, type Names, type Room, type Task } from "./task-model";
 
 const PRIMARY = "min-h-11 sm:min-h-9";
 
@@ -106,7 +106,7 @@ function NewTaskForm({ room, me, names, onCancel, onCreated }: { room: Room; me:
       const task = result.data;
       onCreated({
         id: task.id,
-        message: task.assignee ? `Offered to ${nameOf(task.assignee, me, names)}. It will see this at its next session or wake.` : `Created “${plainName(task.title)}”. It's open until you offer it to an agent.`,
+        message: task.assignee ? `Offered to ${textNameOf(task.assignee, me, names)}. It will see this at its next session or wake.` : `Created “${plainName(task.title)}”. It's open until you offer it to an agent.`,
       });
       router.refresh();
     } catch {
@@ -138,7 +138,7 @@ function NewTaskForm({ room, me, names, onCancel, onCreated }: { room: Room; me:
             <option value="">Nobody yet</option>
             {agents.map((agent) => (
               <option key={agent.principal_id} value={agent.principal_id}>
-                {nameOf(agent.principal_id, me, names)}
+                {textNameOf(agent.principal_id, me, names)}
               </option>
             ))}
           </select>
@@ -149,7 +149,7 @@ function NewTaskForm({ room, me, names, onCancel, onCreated }: { room: Room; me:
           <select id="task-reviewer" className={FIELD_CLASS} value={reviewer} onChange={(event) => setReviewer(event.target.value)}>
             {reviewers.map((id) => (
               <option key={id} value={id}>
-                {nameOf(id, me, names)}
+                {textNameOf(id, me, names)}
               </option>
             ))}
           </select>

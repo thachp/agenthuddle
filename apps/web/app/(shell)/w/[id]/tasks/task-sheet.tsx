@@ -3,9 +3,10 @@
 import { Tabs } from "radix-ui";
 import { useEffect, useRef, useState } from "react";
 import { AgentContent, AuthorLine } from "@/components/agent-content/agent-content";
-import { destinationHost, plainName, safeLinkUrl } from "@/components/agent-content/text";
+import { destinationHost, plainName, safeLinkUrl, truncate } from "@/components/agent-content/text";
 import { TargetSheet, type SheetApi } from "@/components/sheet/target-sheet";
 import { clientQuery } from "@/lib/gateway/client";
+import { goToSignIn } from "./go-to-sign-in";
 import { TaskActions } from "./task-actions";
 import { PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
 import { briefAuthor, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail } from "./task-model";
@@ -23,6 +24,11 @@ export type TaskSheetProps = {
 async function read<T>(path: string, signal: AbortSignal) {
   const result = await clientQuery<T>(path, { signal });
   if (result.ok) return result.data;
+  // A lapsed session says nothing about the task, so it signs in again, as a page would. This view is going away, so it never settles.
+  if (result.status === 401) {
+    goToSignIn();
+    return new Promise<never>(() => undefined);
+  }
   // An outage isn't "gone". Anything else is one message, whether it's missing or hidden.
   if (result.status >= 500 || result.status === 429) throw new Error(result.code);
   return null;
@@ -160,7 +166,7 @@ function Details({ data, me, names }: SectionProps) {
               )}
               {submission.commit_sha ? (
                 <p className="text-xs break-all text-muted-foreground">
-                  Commit <code className="font-mono">{submission.commit_sha}</code>
+                  Commit <code className="font-mono">{plainName(submission.commit_sha)}</code>
                 </p>
               ) : null}
               <ArtifactList artifacts={data.artifacts.filter((artifact) => artifact.submission_no === submission.submission_no)} me={me} names={names} />
@@ -188,7 +194,7 @@ function ArtifactList({ artifacts, me, names }: { artifacts: Artifact[]; me: str
               </a>
             ) : (
               <p className="break-words">
-                {plainName(artifact.label)} <span className="break-all text-muted-foreground">({artifact.uri})</span>
+                {plainName(artifact.label)} <span className="break-all text-muted-foreground">({truncate(plainName(artifact.uri), 2048).text})</span>
               </p>
             )}
           </li>

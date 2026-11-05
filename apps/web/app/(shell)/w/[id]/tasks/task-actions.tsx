@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { FIELD_CLASS } from "./task-bits";
-import { asConflict, nameOf, viewerActions, type Names } from "./task-model";
+import { asConflict, textNameOf, viewerActions, type Names } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
 
 type Props = { api: SheetApi<LoadedTask>; me: string; names: Names; role: string | undefined; onNotice: (notice: string | null) => void };
@@ -32,8 +32,8 @@ export function TaskActions({ api, me, names, role, onNotice }: Props) {
 /** Who this is waiting on, for someone who can't act on it. An agent being offline is normal, so nothing here reads as a problem. */
 function Waiting({ api, me, names }: Pick<Props, "api" | "me" | "names">) {
   const { task } = api.data;
-  const reviewer = nameOf(task.reviewer, me, names);
-  const assignee = task.assignee ? nameOf(task.assignee, me, names) : null;
+  const reviewer = textNameOf(task.reviewer, me, names);
+  const assignee = task.assignee ? textNameOf(task.assignee, me, names) : null;
   const text =
     task.status === "submitted" ? `Waiting for ${reviewer} to review submission ${task.submission_no}.` : task.status === "offered" && assignee ? `Waiting for ${assignee} to accept. It will see this at its next session or wake.` : task.status === "accepted" && assignee ? `${assignee} is working on this.` : null;
   return text ? <p className="min-w-0 border-t pt-4 text-sm break-words text-muted-foreground">{text}</p> : null;
@@ -140,7 +140,7 @@ function OfferTask({ api, me, names, role, onNotice }: Props) {
   const offer = async () => {
     if (!assignee) return;
     onNotice(null);
-    const offeredTo = nameOf(assignee, me, names);
+    const offeredTo = textNameOf(assignee, me, names);
     const result = await run(async (binding) => asConflict(await clientCommand(taskPath(data, "assign"), { version: binding.version, assignee }, { idempotencyKey: key })));
     if (result?.ok) onNotice(`Offered to ${offeredTo}. It will see this at its next session or wake.`);
   };
@@ -153,7 +153,7 @@ function OfferTask({ api, me, names, role, onNotice }: Props) {
           <option value="">Choose an agent</option>
           {agents.map((agent) => (
             <option key={agent.principal_id} value={agent.principal_id}>
-              {nameOf(agent.principal_id, me, names)}
+              {textNameOf(agent.principal_id, me, names)}
             </option>
           ))}
         </select>

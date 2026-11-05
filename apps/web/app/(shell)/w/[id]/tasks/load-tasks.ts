@@ -6,11 +6,11 @@ type Query = <T>(path: string) => Promise<GatewayResult<T>>;
 /** Pages are 50 tasks. Past this many a person's rate limit matters more, and the screen says it stopped. */
 const MAX_PAGES = 4;
 
-/** Every task the viewer may see, as far as `MAX_PAGES`. A failure on any page fails the read, rather than looking like a shorter list. */
-export async function loadTasks(query: Query, workspace: string, filter = ""): Promise<GatewayResult<{ tasks: Task[]; more: boolean }>> {
+/** Every task the viewer may see, as far as `maxPages`. A failure on any page fails the read, rather than looking like a shorter list. */
+export async function loadTasks(query: Query, workspace: string, filter = "", maxPages = MAX_PAGES): Promise<GatewayResult<{ tasks: Task[]; more: boolean }>> {
   const tasks: Task[] = [];
   let cursor: number | null = 0;
-  for (let page = 0; page < MAX_PAGES && cursor !== null; page += 1) {
+  for (let page = 0; page < maxPages && cursor !== null; page += 1) {
     const result: GatewayResult<{ tasks: Task[]; next_cursor: number | null }> = await query(`/api/v1/workspaces/${encodeURIComponent(workspace)}/tasks?cursor=${cursor}${filter}`);
     if (!result.ok) return result;
     tasks.push(...result.data.tasks);
