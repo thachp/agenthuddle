@@ -22,6 +22,23 @@ function stub(routes: Record<string, unknown>) {
 const page = (tasks: unknown[]) => ok({ tasks, next_cursor: null });
 
 describe("loadAttention", () => {
+  it("leaves out reviews in an archived room, where nothing can be decided", async () => {
+    const { query } = stub({
+      "/api/v1/inbox": ok(emptyInbox),
+      "/api/v1/workspaces/ws_1/tasks": page([task("a")]),
+      "/api/v1/workspaces/ws_2/tasks": page([task("b")]),
+      "/api/v1/workspaces": ok({
+        workspaces: [
+          { workspace_id: "ws_1", workspace_name: "One", role: "member", status: "archived" },
+          { workspace_id: "ws_2", workspace_name: "Two", role: "member", status: "active" },
+        ],
+      }),
+    });
+    const result = await loadAttention(query, "per_me");
+    expect(result.reviews?.map((item) => item.task.id)).toEqual(["b"]);
+    expect(result.taskTitles.a).toBe("Title a");
+  });
+
   it("finds reviews by asking each room's current state, newest first, for this person only", async () => {
     const { query, asked } = stub({
       "/api/v1/inbox": ok(emptyInbox),
