@@ -1,0 +1,164 @@
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { routerCalls, setUrl } from "@/test/next-navigation";
+import { TeamScreen, type TeamProps } from "./team-screen";
+
+const props: TeamProps = {
+  roomId: "ws_1",
+  roomName: "Launch room",
+  owner: "per_owner",
+  policyVersion: 4,
+  members: [
+    { principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member" },
+    { principal_id: "agt_x", kind: "agent", org_id: "org_b", role: "guest" },
+    { principal_id: "per_m", kind: "person", org_id: "org_a", role: "member" },
+    { principal_id: "per_adm", kind: "person", org_id: "org_a", role: "admin" },
+  ],
+  viewer: { id: "per_owner", orgs: ["org_a"], adminOrgs: ["org_a"] },
+  names: { agt_1: "Code Agent", agt_2: "Spare Agent" },
+  orgNames: { org_a: "Org A" },
+  orgs: [{ id: "org_a", name: "Org A" }],
+  agents: [
+    { id: "agt_1", name: "Code Agent", org_id: "org_a" },
+    { id: "agt_2", name: "Spare Agent", org_id: "org_a" },
+  ],
+  invitations: { pending: [{ id: "ivt_1", role: "guest", invitedOrg: null, createdBy: "per_owner", createdAt: 0, expiresAt: 1 }], complete: true },
+};
+
+const sent: { method: string; url: string; body: unknown }[] = [];
+let reply: { status: number; body: unknown };
+
+beforeEach(() => {
+  setUrl("/w/ws_1/team");
+  sent.length = 0;
+  reply = { status: 200, body: {} };
+  vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+    sent.push({ method: init.method ?? "GET", url, body: init.body ? JSON.parse(String(init.body)) : null });
+    return new Response(JSON.stringify(reply.body), { status: reply.status });
+  });
+});
+
+afterEach(() => vi.unstubAllGlobals());
+
+const row = (text: string) => screen.getByText(text).closest("li") as HTMLElement;
+
+describe("Team, as the owner", () => {
+  it("marks another organization's participants External, and only them", () => {
+    render(<TeamScreen {...props} />);
+    expect(within(row("agt_x")).getByText("External")).toBeInTheDocument();
+    expect(within(row("Code Agent")).queryByText("External")).not.toBeInTheDocument();
+  });
+
+  it("offers Manage access for agents, and appointing for people only", () => {
+    render(<TeamScreen {...props} />);
+    expect(within(row("Code Agent")).getByRole("link", { name: "Manage access" })).toHaveAttribute("href", "/w/ws_1/team?agent=agt_1");
+    expect(within(row("Code Agent")).queryByRole("button", { name: "Make admin" })).not.toBeInTheDocument();
+    expect(within(row("per_m")).getByRole("button", { name: "Make admin" })).toBeInTheDocument();
+    expect(within(row("per_adm")).getByRole("button", { name: "Remove admin" })).toBeInTheDocument();
+  });
+
+  it("appoints an admin only after confirming, and shows the server's answer", async () => {
+    render(<TeamScreen {...props} />);
+    await userEvent.click(within(row("per_m")).getByRole("button", { name: "Make admin" }));
+    expect(sent).toEqual([]);
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Make admin" }));
+    expect(await screen.findByText("They're now an admin of this workroom.")).toBeInTheDocument();
+    expect(sent).toEqual([{ method: "POST", url: "/api/v1/workspaces/ws_1/members/per_m/role", body: { policy_version: 4, role: "admin" } }]);
+    expect(routerCalls.refresh).toBe(1);
+  });
+
+  it("doesn't change the list until the server's state comes back, and keeps a refusal visible", async () => {
+    reply = { status: 403, body: { error: { code: "not_allowed" } } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(within(row("per_m")).getByRole("button", { name: "Revoke" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Revoke access" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("nothing changed");
+    expect(screen.getByText("per_m")).toBeInTheDocument();
+    expect(routerCalls.refresh).toBe(0);
+  });
+
+  it("explains a stale page and offers the latest", async () => {
+    reply = { status: 409, body: { error: { code: "version_conflict" } } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(within(row("per_m")).getByRole("button", { name: "Revoke" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Revoke access" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Review latest" }));
+    expect(routerCalls.refresh).toBe(1);
+  });
+
+  it("offers only agents not already here, and sends the agent's own organization", async () => {
+    render(<TeamScreen {...props} />);
+    const select = screen.getByLabelText("Agent");
+    expect(within(select).queryByRole("option", { name: /Code Agent/ })).not.toBeInTheDocument();
+    await userEvent.selectOptions(select, "agt_2");
+    await userEvent.click(screen.getByRole("button", { name: "Add agent" }));
+    expect(await screen.findByText(/Agent added/)).toBeInTheDocument();
+    expect(sent[0]).toEqual({ method: "POST", url: "/api/v1/workspaces/ws_1/members", body: { policy_version: 4, principal_id: "agt_2", kind: "agent", org_id: "org_a", role: "member" } });
+  });
+
+  it("sends another organization to an invitation", async () => {
+    reply = { status: 403, body: { error: { code: "invitation_required" } } };
+    render(<TeamScreen {...props} />);
+    await userEvent.selectOptions(screen.getByLabelText("Agent"), "agt_2");
+    await userEvent.click(screen.getByRole("button", { name: "Add agent" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Send an invitation");
+    expect(screen.getByLabelText("Agent")).toHaveValue("agt_2");
+  });
+
+  it("shows a new invitation's link once, and defaults to guest", async () => {
+    reply = { status: 200, body: { id: "ivt_2", token: "inv_ws_1.ivt_2.secret", role: "guest", expires_at: 1 } };
+    render(<TeamScreen {...props} />);
+    await userEvent.click(screen.getByRole("button", { name: "Create invitation" }));
+    const link = await screen.findByLabelText(/shown only once/);
+    expect(link).toHaveValue(`${window.location.origin}/invitations/inv_ws_1.ivt_2.secret`);
+    expect(link).toHaveFocus();
+    expect(sent[0].body).toEqual({ policy_version: 4, role: "guest", guest_can_create: false });
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.queryByLabelText(/shown only once/)).not.toBeInTheDocument();
+  });
+
+  it("withdraws a pending invitation by its ID", async () => {
+    render(<TeamScreen {...props} />);
+    await userEvent.click(within(row("ivt_1")).getByRole("button", { name: "Withdraw" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Withdraw invitation" }));
+    expect(await screen.findByText(/Invitation withdrawn/)).toBeInTheDocument();
+    expect(sent[0]).toEqual({ method: "DELETE", url: "/api/v1/workspaces/ws_1/invitations/ivt_1", body: { policy_version: 4 } });
+  });
+
+  it("says when the invitation list can't be trusted, instead of showing it as empty", () => {
+    render(<TeamScreen {...props} invitations={null} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
+    expect(screen.queryByText(/No invitations are pending/)).not.toBeInTheDocument();
+  });
+});
+
+describe("Team, for others", () => {
+  it("an admin can't appoint or touch another admin", () => {
+    render(<TeamScreen {...props} viewer={{ id: "per_adm", orgs: ["org_a"], adminOrgs: [] }} />);
+    expect(screen.queryByRole("button", { name: "Make admin" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove admin" })).not.toBeInTheDocument();
+    expect(within(row("per_m")).getByRole("button", { name: "Revoke" })).toBeInTheDocument();
+    expect(within(row("You")).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText("Role").at(-1)).not.toHaveTextContent("Admin");
+  });
+
+  it("a member has no controls at all", () => {
+    render(<TeamScreen {...props} policyVersion={null} invitations={null} viewer={{ id: "per_m", orgs: ["org_a"], adminOrgs: [] }} />);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Invitations" })).not.toBeInTheDocument();
+  });
+
+  it("an agent's organization admin can open that agent, read-only", () => {
+    render(<TeamScreen {...props} policyVersion={null} invitations={null} viewer={{ id: "per_b", orgs: ["org_b"], adminOrgs: ["org_b"] }} />);
+    expect(within(row("agt_x")).getByRole("link", { name: "View access" })).toBeInTheDocument();
+    expect(within(row("Code Agent")).queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it("UI-07: a hostile agent name stays plain text and gets its label", () => {
+    const { container } = render(<TeamScreen {...props} names={{ agt_1: '<img src="https://evil.example/x.png"> Podster Admin' }} />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(within(row('<img src="https://evil.example/x.png"> Podster Admin')).getByText("Name chosen by this agent")).toBeInTheDocument();
+  });
+});

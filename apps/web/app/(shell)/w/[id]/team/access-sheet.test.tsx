@@ -1,0 +1,195 @@
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { currentUrl, navigate, setUrl } from "@/test/next-navigation";
+import { AccessSheet } from "./access-sheet";
+import type { Member, Viewer } from "./model";
+
+const ROOM = "ws_1";
+const AGENT = "agt_1";
+const agentRow = (id = AGENT, org = "org_a", role: Member["role"] = "member"): Member => ({ principal_id: id, kind: "agent", org_id: org, role });
+
+const owner: Viewer = { id: "per_owner", orgs: ["org_a"], adminOrgs: ["org_a"] };
+const agentOwner: Viewer = { id: "per_b", orgs: ["org_b"], adminOrgs: ["org_b"] };
+
+type Reply = { status: number; body: unknown };
+const json = (status: number, body: unknown): Reply => ({ status, body });
+const refusal = (status: number, code: string) => json(status, { error: { code } });
+
+let room: Reply;
+let connections: Record<string, Reply>;
+let commands: Record<string, Reply | (() => Promise<Reply>)>;
+const sent: { method: string; url: string; body: unknown }[] = [];
+
+function stubFetch() {
+  vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+    const method = init.method ?? "GET";
+    let reply: Reply;
+    if (method === "GET") {
+      if (url === `/api/v1/workspaces/${ROOM}`) reply = room;
+      else reply = connections[url.replace("/api/agents/", "")] ?? refusal(404, "agent_not_found");
+    } else {
+      sent.push({ method, url, body: JSON.parse(String(init.body)) });
+      const planned = commands[`${method} ${url}`];
+      reply = typeof planned === "function" ? await planned() : (planned ?? json(200, {}));
+    }
+    return new Response(JSON.stringify(reply.body), { status: reply.status });
+  });
+}
+
+const show = (viewer: Viewer) => render(<main id="main-content" tabIndex={-1}><AccessSheet roomId={ROOM} roomName="Launch room" viewer={viewer} names={{ [AGENT]: "Code Agent" }} orgNames={{ org_a: "Org A" }} /></main>);
+
+beforeEach(() => {
+  setUrl(`/w/${ROOM}/team?agent=${AGENT}`);
+  room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: 7, members: [agentRow()] });
+  connections = {};
+  commands = {};
+  sent.length = 0;
+  stubFetch();
+});
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("Manage access, for the room's owner or admin", () => {
+  it("names the agent and the workroom, says who can manage, and keeps external grants apart", async () => {
+    show(owner);
+    expect(await screen.findByRole("heading", { name: "Code Agent" })).toBeInTheDocument();
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).getByText("Workroom: Launch room")).toBeInTheDocument();
+    expect(within(sheet).getByText("The owner and appointed admins of this workroom.")).toBeInTheDocument();
+    expect(within(sheet).getByText("Owner and admins only; can't be granted to agents.")).toBeInTheDocument();
+    expect(within(sheet).getByRole("heading", { name: "Connected services" })).toBeInTheDocument();
+    expect(within(sheet).getByText("Saving workroom access doesn't grant GitHub, merge or deployment access.")).toBeInTheDocument();
+    // No selector that could change the target: only the role.
+    expect(within(sheet).getAllByRole("combobox")).toHaveLength(1);
+  });
+
+  it("marks an agent from another organization External", async () => {
+    room = json(200, { ...(room.body as object), members: [agentRow(AGENT, "org_b", "guest")] });
+    show(owner);
+    expect(await screen.findByText("External")).toBeInTheDocument();
+    expect(screen.getByLabelText("Role in this workroom")).toHaveValue("guest");
+  });
+
+  it("saves the role against the version it read, without touching a guest's task setting", async () => {
+    show(owner);
+    const role = await screen.findByLabelText("Role in this workroom");
+    await userEvent.selectOptions(role, "guest");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toEqual({ method: "POST", url: `/api/v1/workspaces/${ROOM}/members/${AGENT}/role`, body: { policy_version: 7, role: "guest" } });
+  });
+
+  it("AC-20: Cancel saves nothing", async () => {
+    show(owner);
+    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
+    await waitFor(() => expect(currentUrl()).toBe(`/w/${ROOM}/team`));
+    expect(sent).toEqual([]);
+  });
+
+  it("AC-20: a stale form keeps the person's choice and offers the latest, and doesn't overwrite", async () => {
+    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(409, "version_conflict");
+    show(owner);
+    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByRole("button", { name: "Review latest" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Role in this workroom")).toHaveValue("guest");
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+  });
+
+  it("AC-20: a refusal from the server shows as a refusal, and nothing changed", async () => {
+    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(403, "not_allowed");
+    show(owner);
+    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText(/nothing changed/)).toBeInTheDocument();
+  });
+
+  it("AC-21: a save stays bound to its own target after the URL moves on", async () => {
+    room = json(200, { ...(room.body as object), members: [agentRow(), agentRow("agt_2")] });
+    let release!: (reply: Reply) => void;
+    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = () => new Promise((resolve) => (release = resolve));
+    show(owner);
+    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    act(() => navigate(`/w/${ROOM}/team?agent=agt_2`));
+    expect(screen.getByRole("heading", { name: "Code Agent" })).toBeInTheDocument();
+    await act(async () => release(json(200, {})));
+    expect(await screen.findByRole("heading", { name: "agt_2" })).toBeInTheDocument();
+    expect(sent.map((request) => request.url)).toEqual([`/api/v1/workspaces/${ROOM}/members/${AGENT}/role`]);
+  });
+
+  it("UI-10: revoking by keyboard asks first, names both, and reports the server's result", async () => {
+    show(owner);
+    await screen.findByRole("heading", { name: "Code Agent" });
+    room = json(200, { ...(room.body as object), policy_version: 8, members: [] });
+    const user = userEvent.setup();
+    screen.getByRole("button", { name: "Revoke workroom access" }).focus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("alertdialog", { name: "Revoke “Code Agent” from “Launch room”?" })).toBeInTheDocument();
+    expect(sent).toEqual([]);
+    screen.getByRole("button", { name: "Revoke access" }).focus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText(/^Access revoked\./)).toBeInTheDocument();
+    expect(sent).toEqual([{ method: "DELETE", url: `/api/v1/workspaces/${ROOM}/members/${AGENT}`, body: { policy_version: 7 } }]);
+    expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Manage access, for others", () => {
+  const external = () => {
+    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: null, members: [agentRow(AGENT, "org_b")] });
+  };
+
+  it("UI-06: the agent's own organization reads it, with no grant controls, and can withdraw or disconnect", async () => {
+    external();
+    connections[AGENT] = json(200, { id: AGENT, status: "active", generation: 1 });
+    show(agentOwner);
+    await screen.findByText(/Read-only for you/);
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Revoke workroom access" })).not.toBeInTheDocument();
+    expect(screen.queryByText("External")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect everywhere" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Withdraw from workroom" }));
+    room = json(200, { ...(room.body as object), members: [] });
+    await userEvent.click(await screen.findByRole("button", { name: "Withdraw agent" }));
+    expect(await screen.findByText(/^Withdrawn by agent owner\./)).toBeInTheDocument();
+    expect(sent).toEqual([{ method: "POST", url: `/api/v1/workspaces/${ROOM}/members/${AGENT}/withdraw`, body: {} }]);
+  });
+
+  it("UI-13: disconnecting doesn't claim completion until the agent says so", async () => {
+    external();
+    connections[AGENT] = json(200, { id: AGENT, status: "active", generation: 1 });
+    show(agentOwner);
+    await userEvent.click(await screen.findByRole("button", { name: "Disconnect everywhere" }));
+    connections[AGENT] = json(200, { id: AGENT, status: "disconnecting", generation: 2 });
+    await userEvent.click(await screen.findByRole("button", { name: "Disconnect agent" }));
+    expect(await screen.findByText("Disconnecting")).toBeInTheDocument();
+    expect(screen.queryByText("Disconnected")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["an ordinary member", () => (room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: null, members: [agentRow()] }))],
+    ["a guest, whose read holds only their own row", () => (room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: null, members: [] }))],
+    ["someone with no access to the room", () => (room = refusal(404, "workspace_not_found"))],
+  ])("UI-05, AC-20: %s gets the generic not-found, with no title", async (_who, arrange) => {
+    arrange();
+    show({ id: "per_x", orgs: ["org_a"], adminOrgs: [] });
+    expect(await screen.findByRole("alert")).toHaveTextContent("We can't find that.");
+    expect(screen.queryByText("Code Agent")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(currentUrl()).toBe(`/w/${ROOM}/team`));
+  });
+
+  it("an outage isn't a missing agent", async () => {
+    room = refusal(503, "unavailable");
+    show(owner);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't refresh.");
+    expect(screen.queryByText(/can't find/)).not.toBeInTheDocument();
+  });
+});
