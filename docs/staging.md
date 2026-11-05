@@ -122,6 +122,20 @@ npx wrangler secret put GITHUB_CLIENT_ID --env staging
 npx wrangler secret put GITHUB_CLIENT_SECRET --env staging
 ```
 
+## Deploying the dashboard
+
+The dashboard runs at `app-staging.podster.dev`. Its build reads the environment, so set it when building, and deploy the file the build writes. From `apps/web`:
+
+```bash
+CLOUDFLARE_ENV=staging npm run build
+```
+
+```bash
+npx wrangler deploy --config dist/server/wrangler.json
+```
+
+Deploy in the order API, gateway, web. The gateway's `APP_URL` moves sign-in to the application host, so GitHub's callback has to be `https://app-staging.podster.dev/api/auth/callback/github`. An OAuth app has one callback host, so sign-in fails until the two match.
+
 ## After a deploy
 
 Run the journey in the [kernel success criteria](spec/PRODUCT.md#coordination-kernel-success-criteria) against the real hostname, and probe that the API has no public route.
