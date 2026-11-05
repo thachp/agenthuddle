@@ -63,6 +63,7 @@ const DEPARTURE_RETRY_MAX_MS: i64 = 60 * 60 * 1000;
 /// Long enough for one alarm's calls, so an eviction partway still comes back.
 const DEPARTURE_REARM_SECS: u64 = 300;
 
+const AGENT_ROOMS_LISTED: i32 = 200;
 const REMOVAL_NOTICE: &str = "member.revoked";
 const INBOX_CAPACITY: i64 = 10_000;
 const UNREAD_KEPT_MS: i64 = 30 * 24 * 60 * 60 * 1000;
@@ -1192,6 +1193,21 @@ impl Principal {
                 self.wake_command(method, &mut req).await
             }
             // Oversight: the agent or an authorized person can look, and looking never moves the cursor.
+            // Rooms this agent is in or has left, from the listing read model. This shows them and decides nothing.
+            (Method::Get, Some("rooms")) => {
+                let found = self.env.d1("DB")?
+                    .prepare("SELECT workspace_id, workspace_name, role, removed, workspace_status FROM membership_index WHERE principal_id = ? AND org_id = ? ORDER BY removed, workspace_name LIMIT ?")
+                    .bind(&[agent_id.as_str().into(), org.into(), AGENT_ROOMS_LISTED.into()])?
+                    .all()
+                    .await?
+                    .results::<Value>()?;
+                let truncated = found.len() >= AGENT_ROOMS_LISTED as usize;
+                let rooms: Vec<Value> = found.iter().map(|row| json!({
+                    "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "role": row["role"],
+                    "status": row["workspace_status"], "left": row["removed"].as_i64() == Some(1),
+                })).collect();
+                Ok(json!({ "rooms": rooms, "truncated": truncated }))
+            }
             (Method::Get, Some("inbox")) => {
                 let query = parse_inbox_query(&req.url()?)?;
                 if query.ack {

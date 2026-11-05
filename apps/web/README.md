@@ -125,5 +125,6 @@ These need `apps/api` or `packages/contracts`, which this PR doesn't touch.
 | Settings: Organization | The routes now exist, and the screens don't: `/api/orgs/{org}/members`, `/invitations`, `/audit`, and `/api/org-invitations/{preview,accept}`. See `packages/contracts/organizations.yaml`. `GET /api/agents` now has `credentials_owner_left`, and nothing shows it yet. |
 | Settings: Notifications | Podster delivers no email, so there are no choices to offer. |
 | Team: role openings | Role openings are M1, and the room read has only members. |
+| Team: pending invitations, removed members; `/invitations/:token`: preview; Settings: rename and archive; Agents: an agent's workrooms | The routes now exist, and these screens don't use them: `GET /api/v1/workspaces/{ws}/invitations`, the room read's `removed`, `owner_org` and each member's `guest_can_create`, `POST /api/v1/invitations/preview`, `PUT /api/v1/workspaces/{ws}/name`, `POST .../archive` and `.../unarchive`, `GET /api/v1/agents/{agent}/rooms`. See `packages/contracts/openapi.yaml`. |
 | Team: **Revoke organization** | The route now exists, and no screen calls it: `DELETE /api/v1/workspaces/{ws}/organizations/{org}`. |
 | Sign-in | Which providers are configured isn't exposed, so `SIGN_IN_PROVIDERS` repeats it here. Magic links need an email provider. |

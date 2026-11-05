@@ -18,6 +18,7 @@ use worker::*;
 pub const CALLER_HEADER: &str = "x-podster-caller";
 pub const INTERNAL_INIT_PATH: &str = "/internal/init";
 pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
+pub const INTERNAL_PREVIEW_PATH: &str = "/internal/invitation-preview";
 pub const AGENT_ID_PREFIX: &str = "agt_";
 const MAX_ID_BYTES: usize = 128;
 
@@ -79,7 +80,7 @@ async fn forward(
 async fn list_workspaces(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiError> {
     let db = env.d1("DB")?;
     let found = db
-        .prepare("SELECT workspace_id, workspace_name, role, org_id FROM membership_index WHERE principal_id = ? AND removed = 0 ORDER BY workspace_name")
+        .prepare("SELECT workspace_id, workspace_name, role, org_id, workspace_status FROM membership_index WHERE principal_id = ? AND removed = 0 ORDER BY workspace_name")
         .bind(&[caller.id.as_str().into()])?
         .all()
         .await?
@@ -92,7 +93,7 @@ async fn list_workspaces(env: &Env, caller: &Caller) -> std::result::Result<Resp
                 .as_str()
                 .is_some_and(|org| org == caller.org || caller.orgs.iter().any(|o| o == org))
         })
-        .map(|row| json!({ "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "role": row["role"] }))
+        .map(|row| json!({ "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "role": row["role"], "status": row["workspace_status"] }))
         .collect();
     Ok(Response::from_json(&json!({ "workspaces": current }))?)
 }
@@ -223,6 +224,18 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
                 format!("ws_{}", uuid::Uuid::new_v4().simple()),
                 INTERNAL_INIT_PATH.to_string(),
             )
+        }
+        ["v1", "invitations", "preview"] if method == Method::Post => {
+            if is_agent {
+                return Err(ApiError::not_allowed());
+            }
+            let parsed: Value = serde_json::from_str(body.as_deref().unwrap_or(""))
+                .map_err(|_| ApiError::invalid_argument())?;
+            let workspace = parsed["token"]
+                .as_str()
+                .and_then(workspace::workspace_of_token)
+                .ok_or_else(ApiError::invitation_not_found)?;
+            (workspace, INTERNAL_PREVIEW_PATH.to_string())
         }
         ["v1", "invitations", "accept"] if method == Method::Post => {
             if is_agent {

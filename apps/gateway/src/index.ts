@@ -234,8 +234,8 @@ export function sensitiveRoute(method: string, path: string) {
   return ({ "/sign-in": "sign-in", "/oauth/register": "oauth-register", "/oauth/token": "oauth-token", "/api/auth/agent/register": "agent-register" } as Record<string, string>)[path] ?? null;
 }
 
-/** Dashboard commands that create something, or that invite others. */
-const sensitiveCommand = (method: string, path: string) => method === "POST" && /^\/v1\/(workspaces|workspaces\/[^/]+\/invitations|invitations\/accept)$/.test(path);
+/** Dashboard commands that create something, or that invite others, and previews, because a preview checks a token. */
+const sensitiveCommand = (method: string, path: string) => method === "POST" && /^\/v1\/(workspaces|workspaces\/[^/]+\/invitations|invitations\/accept|invitations\/preview)$/.test(path);
 
 const ERROR_NAMES: Record<number, "BAD_REQUEST" | "UNAUTHORIZED" | "FORBIDDEN" | "NOT_FOUND" | "CONFLICT" | "UNPROCESSABLE_ENTITY" | "INTERNAL_SERVER_ERROR" | "NOT_IMPLEMENTED" | "GATEWAY_TIMEOUT"> = {
   400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND", 409: "CONFLICT", 422: "UNPROCESSABLE_ENTITY", 500: "INTERNAL_SERVER_ERROR", 501: "NOT_IMPLEMENTED", 504: "GATEWAY_TIMEOUT",
@@ -437,7 +437,7 @@ export function allowedPassthrough(path: string) {
 function allowedInbox(method: string, path: string, search: URLSearchParams) {
   if (method === "POST") return path === "/v1/inbox/ack";
   if (method !== "GET" || search.has("ack")) return false;
-  return path === "/v1/inbox" || /^\/v1\/agents\/[\w-]+\/inbox$/.test(path);
+  return path === "/v1/inbox" || /^\/v1\/agents\/[\w-]+\/(inbox|rooms)$/.test(path);
 }
 
 /**

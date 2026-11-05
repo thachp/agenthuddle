@@ -370,6 +370,26 @@ async function acceptance() {
     return "an admin appointing a real third person runs in the gateway's tests, because this run has two people";
   });
 
+  await check("ROOM", "a room can be renamed and archived, and archiving stops new work but not reads or leaving", async () => {
+    const managed = await personA.createRoom(roomName("managed"));
+    const agent = await McpAgent.connect(target, personA, "Managed agent");
+    await personA.addAgent(managed, agent);
+    const version = () => personA.policyVersion(managed);
+    eq((await personA.must("PUT", `/v1/workspaces/${managed}/name`, { name: roomName("renamed"), policy_version: await version() })).name.endsWith("renamed"), true, "the new name");
+    refused(await personB.dash("POST", `/v1/workspaces/${managed}/archive`, { policy_version: 1 }), "workspace_not_found", "a stranger archiving it");
+    const link = await personA.must("POST", `/v1/workspaces/${managed}/invitations`, { role: "guest", policy_version: await version() });
+    eq((await personA.must("GET", `/v1/workspaces/${managed}/invitations`)).invitations.map((i) => i.role), ["guest"], "pending invitations");
+    eq((await personB.must("POST", "/v1/invitations/preview", { token: link.token })).role, "guest", "the link's preview");
+    await personA.must("POST", `/v1/workspaces/${managed}/archive`, { policy_version: await version() });
+    refused(await agent.call("create_task", { workspace_id: managed, title: "New", instructions: "x", idempotency_key: key() }), "workspace_archived", "new work in an archived room");
+    eq((await agent.must("get_workspace", { workspace_id: managed }, false)).status, "archived", "the status an agent reads");
+    refused(await personB.dash("POST", "/v1/invitations/preview", { token: link.token }), "invitation_not_found", "a link to an archived room");
+    await personA.must("POST", `/v1/workspaces/${managed}/unarchive`, { policy_version: await version() });
+    ok((await agent.call("create_task", { workspace_id: managed, title: "Back", instructions: "x", idempotency_key: key() })).ok, "work resumes");
+    await personA.revoke(managed, agent.id);
+    await agent.close();
+  });
+
   await check("AC-03", "people outside the room and agents can't reach access commands, whatever their label", async () => {
     const tools = await lead.tools();
     ok(!tools.some((t) => /member|invit|role|revoke|disconnect|withdraw|admin|grant|scope/.test(t)), `an access tool is exposed: ${tools.join(", ")}`);

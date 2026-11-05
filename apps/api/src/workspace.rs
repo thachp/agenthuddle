@@ -10,6 +10,7 @@ use crate::store::{
 };
 use crate::{
     Caller as Verified, AGENT_ID_PREFIX, CALLER_HEADER, INTERNAL_ACCEPT_PATH, INTERNAL_INIT_PATH,
+    INTERNAL_PREVIEW_PATH,
 };
 use podster_assertion::TargetMember;
 use podster_core::{
@@ -39,6 +40,10 @@ const DELIVERY_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
 } else {
     10_000
 };
+const INVITATIONS_LISTED: i64 = 200;
+const REMOVED_LISTED: i64 = 200;
+const ARCHIVED: &str = "archived";
+const ACTIVE_ROOM: &str = "active";
 const MAX_MEMBERS: i64 = 50;
 const MAX_OPEN_TASKS: i64 = 1000;
 const MAX_NAME_BYTES: usize = 200;
@@ -601,6 +606,10 @@ fn handle_add_member(
 ) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
     require_policy_version(sql, body)?;
+    // Checked again here, because adding an agent awaits its Principal after the check in `dispatch`.
+    if room_archived(sql)? {
+        return Err(ApiError::workspace_archived());
+    }
     let principal = required(body, "principal_id")?;
     let kind = required(body, "kind")?;
     let org = required(body, "org_id")?;
@@ -803,6 +812,9 @@ fn find_invitation(sql: &SqlStorage, id: &str, secret: &str, now: i64) -> R<Opti
     };
     // A pending invitation lasts only as long as its creator can still invite here. An accepted one is only replayed.
     if row["status"].as_str() == Some("pending") {
+        if room_archived(sql)? {
+            return Ok(None);
+        }
         let creator = row["created_by"].as_str().unwrap_or_default();
         let can_invite =
             participant(sql, creator)?.is_some_and(|(_, role)| role == "owner" || role == "admin");
@@ -1207,6 +1219,127 @@ fn barred_by_revocation(sql: &SqlStorage, org: &str, invitation: &Value) -> R<bo
         .is_some_and(|row| int(&invitation["created_at"]) <= int(&row["revoked_at"])))
 }
 
+fn room_archived(sql: &SqlStorage) -> R<bool> {
+    Ok(rows(sql, "SELECT status FROM workspace", vec![])?
+        .first()
+        .and_then(|room| room["status"].as_str().map(|status| status == ARCHIVED))
+        .unwrap_or(false))
+}
+
+/// Queues a listing update for everyone the room lists, because its name and status are on each of their rows.
+fn requeue_listing(sql: &SqlStorage, now: i64) -> R<()> {
+    let room = rows(
+        sql,
+        "SELECT owner_person_id, owner_org_id FROM workspace",
+        vec![],
+    )?;
+    if let Some(room) = room.first() {
+        queue_index(
+            sql,
+            room["owner_person_id"].as_str().unwrap_or_default(),
+            room["owner_org_id"].as_str().unwrap_or_default(),
+            Some("owner"),
+            now,
+        )?;
+    }
+    for member in rows(
+        sql,
+        "SELECT principal_id, org_id, role, revoked_at FROM member",
+        vec![],
+    )? {
+        queue_index(
+            sql,
+            member["principal_id"].as_str().unwrap_or_default(),
+            member["org_id"].as_str().unwrap_or_default(),
+            member["revoked_at"]
+                .is_null()
+                .then(|| member["role"].as_str().unwrap_or_default()),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+fn handle_rename_room(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))?;
+    require_policy_version(sql, body)?;
+    let name = required(body, "name")?;
+    if name.trim().is_empty() || name.len() > MAX_NAME_BYTES {
+        return Err(ApiError::invalid_argument());
+    }
+    let prior = rows(sql, "SELECT name FROM workspace", vec![])?;
+    let prior = prior.first().map(|room| room["name"].clone());
+    exec(
+        sql,
+        "UPDATE workspace SET name = ?",
+        vec![name.as_str().into()],
+    )?;
+    requeue_listing(sql, now)?;
+    audit(
+        sql,
+        caller,
+        "workspace.renamed",
+        "workspace",
+        prior.map(|name| json!({ "name": name }).to_string()),
+        Some(json!({ "name": name }).to_string()),
+        now,
+    )?;
+    Ok(json!({ "name": name }))
+}
+
+/// Archives a room or brings it back. Everyone in the room hears, so agents can stop working in it.
+fn handle_set_room_status(
+    sql: &SqlStorage,
+    caller: &Caller,
+    status: &str,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))?;
+    require_policy_version(sql, body)?;
+    if room_archived(sql)? == (status == ARCHIVED) {
+        return Err(ApiError::from_core(
+            &podster_core::CoreError::InvalidTransition,
+        ));
+    }
+    exec(sql, "UPDATE workspace SET status = ?", vec![status.into()])?;
+    requeue_listing(sql, now)?;
+    let kind = if status == ARCHIVED {
+        "workspace.archived"
+    } else {
+        "workspace.unarchived"
+    };
+    audit(sql, caller, kind, "workspace", None, None, now)?;
+    let mut everyone: Vec<String> = rows(
+        sql,
+        "SELECT principal_id FROM member WHERE revoked_at IS NULL",
+        vec![],
+    )?
+    .iter()
+    .filter_map(|member| text(&member["principal_id"]))
+    .collect();
+    everyone.extend(
+        rows(
+            sql,
+            "SELECT owner_person_id FROM workspace WHERE owner_left_at IS NULL",
+            vec![],
+        )?
+        .iter()
+        .filter_map(|room| text(&room["owner_person_id"])),
+    );
+    everyone.retain(|principal| *principal != caller.id);
+    record_event(
+        sql,
+        kind,
+        &caller.id,
+        None,
+        &Transition::NONE,
+        everyone,
+        now,
+    )?;
+    Ok(json!({ "status": status }))
+}
+
 /// Clears a room's removal, so the agent can return through an invitation. It's the room's decision alone.
 fn handle_clear_removal(
     sql: &SqlStorage,
@@ -1273,18 +1406,42 @@ mod queries {
     pub fn get_workspace(sql: &SqlStorage, caller: &Caller) -> R<Value> {
         let room = rows(
             sql,
-            "SELECT id, name, owner_person_id, status, policy_version FROM workspace",
+            "SELECT id, name, owner_person_id, owner_org_id, status, policy_version FROM workspace",
             vec![],
         )?;
         let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
         let members = if caller.role == Role::Guest {
-            rows(sql, "SELECT principal_id, kind, org_id, role FROM member WHERE principal_id = ? AND revoked_at IS NULL", vec![caller.id.as_str().into()])?
+            rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create FROM member WHERE principal_id = ? AND revoked_at IS NULL", vec![caller.id.as_str().into()])?
         } else {
-            rows(sql, "SELECT principal_id, kind, org_id, role FROM member WHERE revoked_at IS NULL ORDER BY added_at", vec![])?
+            rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create FROM member WHERE revoked_at IS NULL ORDER BY added_at", vec![])?
         };
-        Ok(
-            json!({ "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"], "policy_version": (authorize_workroom(caller, WorkroomAction::ManageAccess) == Verdict::Allow).then(|| room["policy_version"].clone()), "members": members }),
-        )
+        let manages = authorize_workroom(caller, WorkroomAction::ManageAccess) == Verdict::Allow;
+        let members: Vec<Value> = members.iter().map(|m| json!({
+            "principal_id": m["principal_id"], "kind": m["kind"], "org_id": m["org_id"], "role": m["role"],
+            "guest_can_create": int(&m["guest_can_create"]) != 0,
+        })).collect();
+        let mut answer = json!({
+            "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "owner_org": room["owner_org_id"], "status": room["status"],
+            "policy_version": manages.then(|| room["policy_version"].clone()), "members": members,
+        });
+        // Who has left, and why, is for those who decide whether they can return.
+        if manages {
+            answer["removed"] = json!(rows(sql, "SELECT principal_id, kind, org_id, revoked_at, revocation_reason FROM member WHERE revoked_at IS NOT NULL ORDER BY revoked_at DESC LIMIT ?", vec![REMOVED_LISTED.into()])?);
+        }
+        Ok(answer)
+    }
+
+    /// Invitations still usable, for those who manage access. The token was shown once and isn't kept.
+    pub fn list_invitations(sql: &SqlStorage, caller: &Caller, now: i64) -> R<Value> {
+        ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+        let found = rows(sql, "SELECT id, invited_org_id, role, guest_can_create, created_by, created_at, expires_at FROM invitation WHERE status = 'pending' AND expires_at > ? ORDER BY created_at DESC LIMIT ?",
+            vec![now.into(), (INVITATIONS_LISTED + 1).into()])?;
+        let truncated = found.len() as i64 > INVITATIONS_LISTED;
+        let invitations: Vec<Value> = found.into_iter().take(INVITATIONS_LISTED as usize).map(|row| json!({
+            "id": row["id"], "invited_org_id": row["invited_org_id"], "role": row["role"], "guest_can_create": int(&row["guest_can_create"]) != 0,
+            "created_by": row["created_by"], "created_at": row["created_at"], "expires_at": row["expires_at"],
+        })).collect();
+        Ok(json!({ "invitations": invitations, "truncated": truncated }))
     }
 
     pub fn list_tasks(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
@@ -1559,6 +1716,27 @@ impl Workspace {
         Ok(Some(json!({ "status": "ok" })))
     }
 
+    /// What a link offers, for the person holding it. It needs the secret, and every failure looks the same.
+    fn preview_invitation(&self, body: &Value) -> R<Value> {
+        let sql = self.state.storage().sql();
+        let token = required(body, "token").map_err(|_| ApiError::invitation_not_found())?;
+        let (id, secret) = parse_token(&token).ok_or_else(ApiError::invitation_not_found)?;
+        if !store::is_initialized(&sql)? {
+            return Err(ApiError::invitation_not_found());
+        }
+        self.migrate_if_needed()?;
+        let invitation = find_invitation(&sql, &id, &secret, now_ms())?
+            .filter(|row| row["status"].as_str() == Some("pending"))
+            .ok_or_else(ApiError::invitation_not_found)?;
+        let room = rows(&sql, "SELECT id, name, owner_org_id FROM workspace", vec![])?;
+        let room = room.first().ok_or_else(ApiError::invitation_not_found)?;
+        Ok(json!({
+            "workspace_id": room["id"], "workspace_name": room["name"], "owner_org": room["owner_org_id"],
+            "role": invitation["role"], "guest_can_create": int(&invitation["guest_can_create"]) != 0,
+            "invited_org_id": invitation["invited_org_id"], "invited_by": invitation["created_by"], "expires_at": invitation["expires_at"],
+        }))
+    }
+
     /// Accepts an invitation for agents of the caller's organization. Both sides are people.
     async fn accept_invitation(&self, identity: &Identity, body: &Value) -> R<Value> {
         let sql = self.state.storage().sql();
@@ -1743,7 +1921,7 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Ok(());
         }
-        let room = rows(&sql, "SELECT id, name FROM workspace", vec![])?;
+        let room = rows(&sql, "SELECT id, name, status FROM workspace", vec![])?;
         let Some(room) = room.first() else {
             return Ok(());
         };
@@ -1758,10 +1936,11 @@ impl Workspace {
                 room["name"].as_str().unwrap_or("").into(),
                 JsValue::from_f64(int(&row["removed"]) as f64),
                 JsValue::from_f64(int(&row["seq"]) as f64),
+                room["status"].as_str().unwrap_or(ACTIVE_ROOM).into(),
             ];
-            db.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, ?, ?, ?, ?)
+            db.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq, workspace_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT (workspace_id, principal_id) DO UPDATE SET org_id = excluded.org_id, role = excluded.role, workspace_name = excluded.workspace_name,
-                removed = excluded.removed, updated_seq = excluded.updated_seq WHERE excluded.updated_seq > membership_index.updated_seq")
+                removed = excluded.removed, workspace_status = excluded.workspace_status, updated_seq = excluded.updated_seq WHERE excluded.updated_seq > membership_index.updated_seq")
                 .bind(&args)?.run().await?;
             exec(
                 &sql,
@@ -2108,6 +2287,11 @@ impl Workspace {
                 .map_err(|_| ApiError::invalid_argument())?;
             return self.accept_invitation(&identity, &body).await;
         }
+        if path == INTERNAL_PREVIEW_PATH {
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return self.preview_invitation(&body);
+        }
         if path == INTERNAL_INIT_PATH {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
@@ -2152,9 +2336,24 @@ impl Workspace {
         let parts: Vec<&str> = segments.iter().map(String::as_str).collect();
         let tail = parts.get(3..).unwrap_or(&[]);
 
+        // An archived room can still lose participants and links, and can come back. Nothing new happens in it.
+        let still_allowed = matches!(
+            (&method, tail),
+            (Method::Get, _)
+                | (Method::Post, ["unarchive"])
+                | (
+                    Method::Delete,
+                    ["members" | "organizations" | "invitations", _]
+                )
+        );
+        if !still_allowed && room_archived(&sql)? {
+            return Err(ApiError::workspace_archived());
+        }
+
         if method == Method::Get {
             return match tail {
                 [] => queries::get_workspace(&sql, &who.caller),
+                ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
@@ -2245,6 +2444,21 @@ impl Workspace {
                 let target_member = identity.target_member.clone();
                 self.command(&identity, key, hash, test_fail, move |sql, who, now| {
                     handle_change_role(sql, &who.caller, &target, &body, target_member, now)
+                })
+            }
+            (Method::Put, ["name"]) => {
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_rename_room(sql, &who.caller, &body, now)
+                })
+            }
+            (Method::Post, ["archive"]) => {
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_set_room_status(sql, &who.caller, ARCHIVED, &body, now)
+                })
+            }
+            (Method::Post, ["unarchive"]) => {
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_set_room_status(sql, &who.caller, ACTIVE_ROOM, &body, now)
                 })
             }
             (Method::Delete, ["organizations", _]) => {

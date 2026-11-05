@@ -40,7 +40,7 @@ export default defineConfig({
         bindings: {
           ASSERTION_KEYS: JSON.stringify({ test: pub.x }),
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
-          TEST_D1_SCHEMA: readFileSync(new URL("./migrations/0001_membership_index.sql", import.meta.url), "utf8").replace(/--.*$/gm, ""),
+          TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),
         },
       },

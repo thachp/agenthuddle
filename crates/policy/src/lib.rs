@@ -46,6 +46,8 @@ pub enum WorkroomAction {
     AppointAdmin,
     ManageAccess,
     ReadAuditLog,
+    /// Renaming or archiving a room.
+    ManageRoom,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,7 +121,9 @@ pub fn authorize_workroom(caller: &Caller, action: WorkroomAction) -> Verdict {
         WorkroomAction::AppointAdmin => {
             caller.kind == PrincipalKind::Person && caller.role == Role::Owner
         }
-        WorkroomAction::ManageAccess | WorkroomAction::ReadAuditLog => is_human_admin(caller),
+        WorkroomAction::ManageAccess
+        | WorkroomAction::ReadAuditLog
+        | WorkroomAction::ManageRoom => is_human_admin(caller),
     };
     if allowed {
         Verdict::Allow
