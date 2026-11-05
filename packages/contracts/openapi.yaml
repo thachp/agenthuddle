@@ -21,7 +21,7 @@ paths:
     post:
       operationId: createWorkspace
       tags: [commands]
-      summary: Create a room. People only, and the caller becomes its owner. Not idempotent until the gateway dedupes creation
+      summary: Create a room. People only, and only an admin of the organization being acted in, by decision 33. Anyone else gets 403 `not_allowed`. The caller becomes its owner. Not idempotent until the gateway dedupes creation
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string, minLength: 1, description: "At most 200 bytes." } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}:

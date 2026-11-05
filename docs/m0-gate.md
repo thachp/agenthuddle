@@ -169,6 +169,9 @@ Each was checked against the code by a test that ran or by reading, and the line
 | 22. Who creates tasks from the dashboard | Holds for owners in the local journey. Admin and member people only in apps/api tests | journey `D22`; `crates/policy/src/lib.rs:107`. Gap 1 makes them reachable, and the journey doesn't yet run them |
 | 23. Personal accounts | Holds for email sign-up, locally only, with one case open | journey `D23`; gateway "when the sign-up hook can't write the personal organization". Deployed sign-ups use OAuth because password sign-in only works on local hosts, and no test runs a failed write through OAuth. See gap 8 |
 | 24. Taking over a task when its requester leaves | Holds for owner and admin. Coordinator waits for M1 | journey `AC-25`; `crates/policy/src/lib.rs:154`. See gap 9 |
+| 32. A departed room owner who rejoins | Holds | gateway "gives a room's owner their room back when they rejoin"; apps/api "takes a departed owner out of the room's work". Local only |
+| 33. Who creates rooms | Holds | journey `AC-02+`; apps/api "only an admin of the organization creates a room in it"; gateway "lets only admins create rooms". Local only |
+| 34. Org admins removing each other | Holds | gateway "lets any admin remove another". Local only |
 
 ## Backend gaps
 
@@ -176,7 +179,7 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 
 | # | Gap | Size | Where | Blocks |
 | --- | --- | --- | --- | --- |
-| 1 | **Built locally, with a ruling and the screens open.** An org admin invites by a link, and a signed-in person accepts. Adding someone outside the organization to a room, or changing their role, is refused with `not_in_organization`. Leaving ends their credentials, room listings and room roles, and rejoining restores none of those, except a room they own. See [Leaving an organization](#leaving-an-organization). The dashboard screens aren't built. | S, once ruled | `apps/gateway/src/organizations.ts`; `apps/api/src/workspace.rs` `org_departure` | Dashboard screens for an organization's people, and the owner's ruling on a departed room owner |
+| 1 | **Built locally, with the screens open.** An org admin invites by a link, and a signed-in person accepts. Adding someone outside the organization to a room, or changing their role, is refused with `not_in_organization`. Leaving ends their credentials, room listings and room roles, and rejoining restores none of those, except a room they own. See [Leaving an organization](#leaving-an-organization). The dashboard screens aren't built. | S, for the screens | `apps/gateway/src/organizations.ts`; `apps/api/src/workspace.rs` `org_departure` | Dashboard screens for an organization's people |
 | 2 | **No ownership transfer or recovery.** `owner_person_id` is written once, and there's no contract, policy action or command for either. Recovery needs an organization admin other than the owner, so it depends on gap 1. Personal organizations have no recovery ([ruling](#gate-rulings-2026-11-05-utc)). | L, with contract and audit | `apps/api/src/workspace.rs:1669`, `:80`; `crates/policy/src/lib.rs` | Decision 8 |
 | 3 | **Denied changes aren't recorded.** `audit_event` has an `outcome` column, and the only value ever written is `allowed`. ACCESS-CONTROL.md asks for a protected denial stream. Needs a design that can't be flooded, because a refused request rolls back its transaction. | M | `apps/api/src/workspace.rs:490` | AC-22 |
 | 4 | **Closed by [#26](https://github.com/thachp/podster/pull/26).** People can reach their inbox and, as org admins, an agent's. | Done | `apps/gateway/src/index.ts` | Decision 21, dashboard |
@@ -191,7 +194,7 @@ In the order to do them, because earlier ones unblock later ones. Sizes: S is un
 
 Removing someone from an organization now reaches their rooms, as [ADR 0003](adr/0003-organization-departure.md) describes, locally only: their role ends with the departure rules, and their room invitations are withdrawn. What's still open:
 
-- **A departed room owner keeps the room,** and gets full owner authority back if they rejoin, even from a member invitation. While they're out they aren't a participant, so their tasks follow the departure table and their inbox stops. The room's log records both the departure and their first command after returning. The owner needs to rule on this, and it ties into gap 2.
+- **A departed room owner keeps the room,** and gets full owner authority back if they rejoin, even from a member invitation. While they're out they aren't a participant, so their tasks follow the departure table and their inbox stops. The room's log records both the departure and their first command after returning. [Decision 32](spec/PRODUCT.md#decisions-needed) keeps this until ownership transfer exists.
 - **A room with a departed owner and no admin** can't manage its access or take over tasks until the owner rejoins or gap 2's transfer exists, and a task needing attention tells nobody meanwhile.
 - **If the API can't be reached,** delivery waits for the cron, which takes 50 rows an hour, oldest first. So a backlog can take several hours, and rows that keep failing can hold up the rest. Authority doesn't wait for this.
 - **Very large room counts** are slow, and weren't tested beyond 130 rooms. ADR 0003 has the limits.

@@ -334,6 +334,7 @@ async function acceptance() {
     refused(await personB.dash("POST", "/org-invitations/accept", { token }), "invitation_not_found", "a used link");
     eq((await personB.must("GET", "/v1/me")).org_id, personB.org, "Person B's default organization");
     refused(await personB.dash("POST", `/orgs/${team.id}/invitations`, { role: "admin" }), "not_allowed", "a member inviting");
+    refused(await personB.dash("POST", "/v1/workspaces", { name: roomName("member's") }, inTeam), "not_allowed", "a member creating a room in the organization");
     refused(await personB.dash("PUT", `/orgs/${team.id}/members/${personB.id}`, { role: "admin" }), "not_allowed", "a member promoting themselves");
 
     await personA.must("POST", teamMembers, { principal_id: personB.id, kind: "person", org_id: team.id, role: "admin", policy_version: await version() }, inTeam);

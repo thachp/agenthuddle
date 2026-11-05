@@ -307,7 +307,7 @@ The consumer in `apps/api` rechecks everything before sending: the connection is
 ```
 GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
-POST   /v1/workspaces                               person only
+POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33)
 GET    /v1/workspaces/{ws}
 POST   /v1/workspaces/{ws}/members                  add a participant (owner or admin); only the owner adds admins
 POST   /v1/workspaces/{ws}/members/{principal}/role change a role; changes to or from admin are the owner's alone
