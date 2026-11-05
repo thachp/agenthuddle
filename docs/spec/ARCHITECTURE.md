@@ -312,7 +312,7 @@ GET    /v1/workspaces/{ws}
 POST   /v1/workspaces/{ws}/members                  add a participant (owner or admin); only the owner adds admins
 POST   /v1/workspaces/{ws}/members/{principal}/role change a role; changes to or from admin are the owner's alone
 POST   /v1/org-departures                           the gateway's removal only, by its `departure` claim. See ADR 0003
-DELETE /v1/workspaces/{ws}/organizations/{org}      revoke another organization (owner or admin); a later invitation can let it back
+DELETE /v1/workspaces/{ws}/organizations/{org}      revoke another organization (owner or admin); a later invitation lets new agents back, and each removed agent also needs clear-removal
 DELETE /v1/workspaces/{ws}/members/{principal}      revoke (owner or admin)
 POST   /v1/workspaces/{ws}/members/{agent}/withdraw authorized person of the owning organization
 POST   /v1/workspaces/{ws}/members/{principal}/clear-removal   owner or admin, after a room removal

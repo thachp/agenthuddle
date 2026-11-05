@@ -265,6 +265,8 @@ async function kernel() {
     await settle();
     const inbox = await architect.inbox();
     eq(typesFor(inbox, room), ["member.revoked"], "B's inbox from this room");
+    await second.waitFor("member.revoked");
+    eq(typesFor(await second.inbox(), room).filter((type) => type === "member.revoked").length, 1, "the second agent's removal notices");
     ok(!/SECRET/.test(JSON.stringify(inbox)), "B's inbox holds message content");
     const after = await lead.must("get_task", { workspace_id: room, task_id: scoped.id }, false);
     eq([after.task.status, after.task.assignee], ["open", null], "B's accepted-or-offered task returned to the room");

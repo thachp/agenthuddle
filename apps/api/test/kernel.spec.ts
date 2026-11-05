@@ -2588,6 +2588,7 @@ describe("revoking a whole organization", () => {
     return agent;
   };
   const memberIds = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.members.map((m: any) => m.principal_id);
+  const person_ = () => `per_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 
   it("ends every participant of that organization on their next request, and nobody else's", async () => {
     const { id, tasks } = await room();
@@ -2636,6 +2637,40 @@ describe("revoking a whole organization", () => {
     expect(await memberIds(id)).not.toContain(BOB.id);
   });
 
+  it("leaves only the owner able to revoke an organization holding an admin, and refuses it whole", async () => {
+    const { id } = await room();
+    // No route makes this now, but an older room could hold it.
+    const foreign = person_();
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'person', ?, 'admin', 'per_owner', 1)", foreign, BOB.org));
+    const refused = await api(ADMIN, "DELETE", whole(id), {});
+    expect([refused.status, refused.code]).toEqual([403, "not_allowed"]);
+    expect(await memberIds(id)).toEqual(expect.arrayContaining([BOB.id, foreign]));
+    const done = await api(OWNER, "DELETE", whole(id), {});
+    expect(done.body.revoked.sort()).toEqual([BOB.id, foreign].sort());
+  });
+
+  it("gives each agent one removal notice and nothing after it", async () => {
+    const { id, tasks } = await room();
+    // New agents, because a shared one's inbox is full of other tests' events.
+    const [first, second] = [await newcomer(), await newcomer()];
+    for (const agent of [first, second]) expect((await admit(id, agent)).status).toBe(200);
+    const notices = async (agent: Who) => {
+      const { events } = (await api(agent, "GET", "/v1/inbox?limit=50")).body;
+      return (events as any[]).filter((e) => e.workspace_id === id);
+    };
+    expect((await api(OWNER, "DELETE", whole(id), {})).status).toBe(200);
+    for (const agent of [first, second]) {
+      await vi.waitFor(async () => expect((await notices(agent)).some((e) => e.type === "member.revoked")).toBe(true), { timeout: 5000 });
+    }
+    await offer(tasks, { assignee: CAROL.id });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    for (const agent of [first, second]) {
+      const seen = await notices(agent);
+      expect(seen.filter((e) => e.type === "member.revoked")).toHaveLength(1);
+      expect(seen.at(-1).type).toBe("member.revoked");
+    }
+  });
+
   it("refuses the room's own organization, a bad ID and a stale form", async () => {
     const { id } = await room();
     expect((await api(OWNER, "DELETE", whole(id, "org_a"), {})).code).toBe("invalid_argument");
@@ -2673,8 +2708,16 @@ describe("revoking a whole organization", () => {
     expect((await accept(open.body.token, agent)).code).toBe("invitation_not_found");
     expect((await accept(named.body.token, agent)).code).toBe("invitation_not_found");
     expect(await memberIds(id)).not.toContain(agent.id);
+    // The one naming it is withdrawn outright, and the open one stays pending for everyone else.
+    const status = (invitation: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT status FROM invitation WHERE id = ?", invitation).one().status);
+    expect(await status(named.body.id)).toBe("withdrawn");
+    expect(await status(open.body.id)).toBe("pending");
+    expect(await status(forCarol.body.id)).toBe("pending");
+    const withdrawals = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((e: any) => e.action === "invitation.withdrawn");
+    expect(withdrawals.map((e: any) => [e.target_id, JSON.parse(e.new_json).reason])).toEqual([[named.body.id, "organization_revoked"]]);
     // Its own organization's consent isn't enough for the agent that was already out.
-    await api(orgAdmin(BOB.org), "POST", `/v1/workspaces/${id}/members/${withdrawing.id}/owner-consent`, {});
+    const consent = await api(orgAdmin(BOB.org), "POST", `/v1/workspaces/${id}/members/${withdrawing.id}/owner-consent`, {});
+    expect(consent.status).toBe(200);
     const fresh = await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", invited_org_id: BOB.org });
     await new Promise((resolve) => setTimeout(resolve, 2));
     expect((await accept(fresh.body.token, withdrawing)).code).toBe("not_allowed");

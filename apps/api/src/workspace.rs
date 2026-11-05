@@ -1118,9 +1118,16 @@ fn handle_revoke_organization(
     }
     let members = rows(
         sql,
-        "SELECT principal_id, kind, revoked_at, revocation_reason FROM member WHERE org_id = ? ORDER BY principal_id",
+        "SELECT principal_id, kind, role, revoked_at, revocation_reason FROM member WHERE org_id = ? ORDER BY principal_id",
         vec![org.into()],
     )?;
+    // Only the owner removes an admin, as with one member. An older room could hold another organization's person.
+    if members
+        .iter()
+        .any(|m| m["revoked_at"].is_null() && m["role"].as_str() == Some("admin"))
+    {
+        ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
+    }
     let actor_kind = kind_name(caller);
     let mut revoked = Vec::new();
     for member in &members {
