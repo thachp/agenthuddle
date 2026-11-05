@@ -423,6 +423,9 @@ describe("leaving an organization", () => {
     const id = await room(owner, org);
     const person = await joined(owner, org);
     expect((await addPerson(owner, id, org, person.id, "admin")).status).toBe(200);
+    // A sweep finds rooms from the index, which follows shortly after the add. If it isn't there yet, the next sweep a
+    // minute later finds it, which is longer than this test waits.
+    await vi.waitFor(async () => expect(await e.API_DB.prepare("SELECT 1 FROM membership_index WHERE workspace_id = ? AND principal_id = ? AND removed = 0").bind(id, person.id).first()).toBeTruthy(), { timeout: 5000 });
     expect((await dash(owner, "DELETE", `/orgs/${org}/members/${person.id}`)).status).toBe(200);
     await vi.waitFor(async () => expect((await dash(owner, "GET", `/v1/workspaces/${id}`)).body.members.map((m: any) => m.principal_id)).not.toContain(person.id), { timeout: 5000 });
     expect((await setRole(owner, id, person.id, "member")).code).toBe("invalid_argument");

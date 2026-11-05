@@ -1099,6 +1099,114 @@ fn handle_revoke_member(
     Ok(json!({ "principal_id": principal, "status": "revoked" }))
 }
 
+/// Revokes another organization from the room: its participants leave under the departure rules, an agent already out
+/// can't return on its owner's consent alone, and invitations from before now can't bring the organization back. A
+/// new invitation is the room's decision to let it return.
+fn handle_revoke_organization(
+    sql: &SqlStorage,
+    caller: &Caller,
+    org: &str,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    require_policy_version(sql, body)?;
+    require_id(org)?;
+    // The room's own organization holds its owner and admins. Its people leave through that organization instead.
+    if org == room_owner_org(sql)? {
+        return Err(ApiError::invalid_argument());
+    }
+    let members = rows(
+        sql,
+        "SELECT principal_id, kind, role, revoked_at, revocation_reason FROM member WHERE org_id = ? ORDER BY principal_id",
+        vec![org.into()],
+    )?;
+    // Only the owner removes an admin, as with one member. An older room could hold another organization's person.
+    if members
+        .iter()
+        .any(|m| m["revoked_at"].is_null() && m["role"].as_str() == Some("admin"))
+    {
+        ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
+    }
+    let actor_kind = kind_name(caller);
+    let mut revoked = Vec::new();
+    for member in &members {
+        let principal = text(&member["principal_id"]).unwrap_or_default();
+        if member["revoked_at"].is_null() {
+            remove_member(sql, caller, actor_kind, &principal, "room_removed", now)?;
+            revoked.push(principal);
+        } else if member["kind"].as_str() == Some("agent")
+            && member["revocation_reason"].as_str() != Some("room_removed")
+        {
+            exec(
+                sql,
+                "UPDATE member SET revocation_reason = 'room_removed' WHERE principal_id = ?",
+                vec![principal.as_str().into()],
+            )?;
+            audit(
+                sql,
+                caller,
+                "member.removal_recorded",
+                &principal,
+                Some(json!({ "reason": member["revocation_reason"] }).to_string()),
+                None,
+                now,
+            )?;
+        }
+    }
+    let named = rows(
+        sql,
+        "SELECT id FROM invitation WHERE invited_org_id = ? AND status = 'pending'",
+        vec![org.into()],
+    )?;
+    for invitation in &named {
+        let id = text(&invitation["id"]).unwrap_or_default();
+        exec(
+            sql,
+            "UPDATE invitation SET status = 'withdrawn' WHERE id = ?",
+            vec![id.as_str().into()],
+        )?;
+        let reason = json!({ "reason": "organization_revoked" }).to_string();
+        audit(
+            sql,
+            caller,
+            "invitation.withdrawn",
+            &id,
+            None,
+            Some(reason),
+            now,
+        )?;
+    }
+    exec(
+        sql,
+        "INSERT INTO org_revocation (org_id, revoked_at) VALUES (?, ?)
+          ON CONFLICT (org_id) DO UPDATE SET revoked_at = excluded.revoked_at",
+        vec![org.into(), now.into()],
+    )?;
+    audit(
+        sql,
+        caller,
+        "organization.revoked",
+        org,
+        None,
+        Some(json!({ "revoked": revoked }).to_string()),
+        now,
+    )?;
+    Ok(json!({ "org_id": org, "revoked": revoked }))
+}
+
+/// Whether this organization was revoked from the room at or after the invitation was made.
+fn barred_by_revocation(sql: &SqlStorage, org: &str, invitation: &Value) -> R<bool> {
+    let found = rows(
+        sql,
+        "SELECT revoked_at FROM org_revocation WHERE org_id = ?",
+        vec![org.into()],
+    )?;
+    Ok(found
+        .first()
+        .is_some_and(|row| int(&invitation["created_at"]) <= int(&row["revoked_at"])))
+}
+
 /// Clears a room's removal, so the agent can return through an invitation. It's the room's decision alone.
 fn handle_clear_removal(
     sql: &SqlStorage,
@@ -1501,6 +1609,9 @@ impl Workspace {
         if let Some(answer) = replay(&invitation)? {
             return Ok(answer);
         }
+        if barred_by_revocation(&sql, &org, &invitation)? {
+            return Err(ApiError::invitation_not_found());
+        }
         if !identity.admin_orgs.contains(&org)
             || invitation["invited_org_id"]
                 .as_str()
@@ -1540,6 +1651,10 @@ impl Workspace {
                     )?);
                     return Ok(());
                 }
+                return Err(ApiError::invitation_not_found());
+            }
+            // Again here, so a revocation that committed since the check above still holds.
+            if barred_by_revocation(&sql, &org, &found)? {
                 return Err(ApiError::invitation_not_found());
             }
             let role = text(&found["role"]).unwrap_or_else(|| "guest".to_string());
@@ -2130,6 +2245,11 @@ impl Workspace {
                 let target_member = identity.target_member.clone();
                 self.command(&identity, key, hash, test_fail, move |sql, who, now| {
                     handle_change_role(sql, &who.caller, &target, &body, target_member, now)
+                })
+            }
+            (Method::Delete, ["organizations", _]) => {
+                self.command(&identity, key, hash, test_fail, move |sql, who, now| {
+                    handle_revoke_organization(sql, &who.caller, &target, &body, now)
                 })
             }
             (Method::Delete, ["members", _]) => {
