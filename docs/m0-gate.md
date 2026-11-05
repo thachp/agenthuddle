@@ -4,7 +4,7 @@ What proves each M0 requirement, and how far that proof has got. The requirement
 
 **M0 accepted by the owner, journey not run on a deployment.** The owner made this call on 2026-11-05, saying "i don't need to because it looks good", after finding the steps below unclear to run. So no kernel criterion or acceptance test has passed on a deployment, and each stays as its status below says. The right description is "built and smoke-tested on staging", not "M0 met". The run should be raised again before any production deploy or public launch.
 
-Staging has had two checks by hand, and neither counts as a criterion passing: the [smoke test](#one-person-smoke-test-on-staging) and [wake](#wake).
+Staging has had three checks by hand, and none counts as a criterion passing: the [smoke test](#one-person-smoke-test-on-staging), [wake](#wake) and the [ownership check](#two-person-ownership-check-on-staging).
 
 A status is one of these, and an item only moves when the run has actually happened:
 
@@ -61,11 +61,34 @@ The November 4 staging run doesn't count here. Its driver was never committed, o
 | AC-29 | journey `AC-29` is partial; apps/api "a join begun before a disconnect can't commit after the room acknowledges it, even after reconnect", "a second disconnect needs a new acknowledgment" | Local only | A delayed join needs a failpoint, so that half can only run in tests |
 | AC-30 | journey `AC-30` for the swap; `crates/policy/tests/matrix.rs` `a_requester_cant_swap_the_reviewer_of_a_submitted_task` | Local only, and incomplete | Rooms can't yet require a person as reviewer (decision 5, M1), so two of the three cases wait for M1 ([ruling](#gate-rulings-2026-11-05-utc)) |
 | AC-32 | journey `OVERSIGHT` is partial; apps/api "an organization's oversight of its own agent" | Local only | A plain member, a removed admin and a whole-organization revocation run only in apps/api tests |
-| AC-33 | journey `AC-33` is partial; apps/api "transferring and recovering a room's ownership"; gateway "doesn't give a room's owner their room back when they rejoin, until recovery names them" | Local only | An admin outside the room whose owner left and no admin remains, an archived room, a retry and a partial failure run only in apps/api tests |
+| AC-33 | journey `AC-33` is partial; apps/api "transferring and recovering a room's ownership"; gateway "doesn't give a room's owner their room back when they rejoin, until recovery names them" | Local only | An admin outside the room whose owner left and no admin remains, an archived room, a retry and a partial failure run only in apps/api tests. Part of AC-33 ran by hand on staging: see [the ownership check](#two-person-ownership-check-on-staging) |
 
 ## One-person smoke test on staging
 
 The one-person smoke test passed on staging on 2026-11-05: dashboard offer, MCP sign-in, agent work, request changes, approve, retry, self-approval refused, inert agent HTML, disconnect. One person ran it by hand, so it doesn't count as any criterion passing, and it's what [ADR 0002](adr/0002-vinext-on-workers.md) was waiting on. Nothing here recorded which commit was deployed.
+
+## Two-person ownership check on staging
+
+On 2026-11-05, with `main` at `84c7c0c` deployed, the project's owner ran part of AC-33 on staging by hand, through the dashboard. It used two real GitHub accounts, called A and B here, in an organization made for it. It covers ownership only, so it doesn't move AC-33 or any kernel criterion to **Passed on a deployment**. B's side was reported in chat, not captured by a tool.
+
+**Worked:**
+
+- A owned a room and transferred it to B, a room admin in the organization. A became a room admin. The picker and confirmation told the two accounts apart by person ID, because they have the same name.
+- B, now the owner, revoked A from the room.
+- A, an organization admin, removed B from the organization. The room was on the ownerless list when checked about 10 seconds later.
+- With B gone, recovery refused a wrong `expected_owner` with `version_conflict`, and naming B while out of the organization with `not_in_organization`.
+- B rejoined, was refused the room, and didn't see it in their list.
+- A, by then outside the room, recovered it to themselves. The list dropped it, and the access history recorded each change.
+- B was still refused after recovery.
+
+**Not covered, among others:**
+
+- An organization admin who was never in the room. A had been revoked from it, so before B left they got `access_revoked`, not not-found.
+- Transfer's refusals, and recovery tried by a plain member, another organization's admin or an agent.
+- Recovery in an archived room, naming a rejoined former owner, and a retry after a lost response.
+- A room whose departure never arrives or arrives late, and a partial failure.
+- Whether each change leaves exactly one audit entry and one event.
+- These screens at phone width on staging.
 
 ## Accessibility (UI-10, UI-11)
 
@@ -231,7 +254,7 @@ Each was checked against the code by a test that ran or by reading.
 | --- | --- | --- |
 | 4. Material edits need re-acceptance | Holds | journey `D4`; `decide` in `crates/core/src/lib.rs`, `Command::Update`; `transitions.rs` `material_edits_need_acceptance_again` |
 | 6. Departure table | Holds | journey `AC-25`; `apply_departure` in `crates/core/src/lib.rs`; `remove_member` in `apps/api/src/workspace.rs`. The person-review part of eligibility waits on decision 5 |
-| 8. Ownership transfer and recovery | **Built, local only** | journey `AC-33`; apps/api "transferring and recovering a room's ownership"; apps/web `transfer-ownership.test.tsx`, `ownerless-rooms.test.tsx`; `e2e/a11y.mjs` "transfer ownership", "recover a workroom" |
+| 8. Ownership transfer and recovery | **Built, local only, with a [partial check on staging](#two-person-ownership-check-on-staging)** | journey `AC-33`; apps/api "transferring and recovering a room's ownership"; apps/web `transfer-ownership.test.tsx`, `ownerless-rooms.test.tsx`; `e2e/a11y.mjs` "transfer ownership", "recover a workroom" |
 | 14. Guests creating tasks | Holds | journey `D14`; `handle_create_invitation` in `apps/api/src/workspace.rs`; `authorize_workroom` in `crates/policy/src/lib.rs` |
 | 21. Person inboxes | **Built, local only** | The API stores and serves them, and people can read them through the gateway (journey `D21`). Acknowledging through the gateway has a gateway test only. Org admins have read-only oversight of an agent's inbox (journey `D21`, [decision 31](spec/PRODUCT.md#decisions-needed)). The Needs attention screen is `app/(shell)/attention/`, and apps/web's README lists what it can't yet show |
 | 22. Who creates tasks from the dashboard | Holds for owners in the local journey. Admin and member people only in apps/api tests | journey `D22`; `authorize_workroom` in `crates/policy/src/lib.rs`. Gap 1 makes them reachable, and the journey doesn't yet run them |
