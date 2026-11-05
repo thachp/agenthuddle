@@ -1369,12 +1369,6 @@ describe("inbox", () => {
     expect((await api(nobody, "POST", "/v1/inbox/ack", { up_to: 1 })).code).toBe("ack_beyond_inbox");
   });
 
-  it("wake waits for Phase 4", async () => {
-    const bob = await fresh();
-    expect((await api(bob, "PUT", "/v1/inbox/wake", { url: "https://example.test" })).status).toBe(501);
-    expect((await api(bob, "DELETE", "/v1/inbox/wake")).status).toBe(501);
-  });
-
   it("revocation leaves one removal notice, read or not, and nothing after it", async () => {
     const { id, tasks, bob } = await setup();
     const other = await room();
@@ -1792,3 +1786,415 @@ describe("agent token replay", () => {
     expect((await spend(a, "x".repeat(600))).status).toBe(403);
   });
 });
+
+describe("wake", () => {
+  const principalStub = (who: string) => BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(who));
+  const fresh = async (org = "org_b"): Promise<Who> => {
+    const who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org };
+    await register(who);
+    return who;
+  };
+  const hookLog = async (path: string) => (await (await fetch("https://hook-log.example.com/")).json() as any[]).filter((r) => r.path === path);
+  const unique = () => `/${crypto.randomUUID()}`;
+  const setWake = (who: Who, url: string, extra: object = {}) => api(who, "PUT", "/v1/inbox/wake", { url, ...extra }, { key: null });
+  const wakeRow = (who: Who) => runInDurableObject(principalStub(who.id), (_: any, state: any) => state.storage.sql.exec("SELECT * FROM wake").toArray()[0] as any);
+  const deliver = (who: Who, event_seq = 1) => principalStub(who.id).fetch("https://principal/internal/deliver", { method: "POST", body: JSON.stringify({ event_id: crypto.randomUUID(), workspace_id: `ws_${crypto.randomUUID().replaceAll("-", "")}`, type: "task.offered", actor_id: "agt_x", task_id: "tsk_secret_title", event_seq }) });
+  /** The queue's job: hand the consumer a message, and hand it back as often as the consumer asks. */
+  const consume = async (who: Who, rounds = 6) => {
+    let delays: number[] = [];
+    for (let i = 0; i < rounds; i++) {
+      const res = await SELF.fetch("https://api.internal/test/consume-wake", { method: "POST", body: JSON.stringify({ agent: who.id }) });
+      expect(res.status).toBe(200);
+      const { retry } = await res.json<{ retry: number | null }>();
+      if (retry === null) return delays;
+      delays = [...delays, retry];
+      if (retry > 5) return delays;
+    }
+    return delays;
+  };
+
+  it("sets a public HTTPS URL, shows the secret once, and identity never shows it", async () => {
+    const bob = await fresh();
+    const set = await setWake(bob, "https://hooks.example.com/a", { debounce: 120 });
+    expect(set.status).toBe(200);
+    expect(set.body).toMatchObject({ url: "https://hooks.example.com/a", debounce: 120, enabled: true });
+    expect(set.body.secret).toMatch(/^whsec_[0-9a-f]{64}$/);
+    const me = (await api(bob, "GET", "/v1/me")).body;
+    expect(me.wake).toMatchObject({ url: "https://hooks.example.com/a", debounce: 120, enabled: true });
+    expect(JSON.stringify(me)).not.toContain(set.body.secret);
+    expect(JSON.stringify((await api(orgAdmin(bob.org), "GET", `/v1/agents/${bob.id}`)).body)).not.toContain(set.body.secret);
+    // Setting again replaces the secret, and removing clears it.
+    const again = await setWake(bob, "https://hooks.example.com/a");
+    expect(again.body.secret).not.toBe(set.body.secret);
+    expect(again.body.debounce).toBe(900);
+    expect((await api(bob, "DELETE", "/v1/inbox/wake", {}, { key: null })).status).toBe(200);
+    expect((await api(bob, "GET", "/v1/me")).body.wake).toBeNull();
+  });
+
+  it("refuses private destinations and bad settings", async () => {
+    const bob = await fresh();
+    for (const url of ["https://gateway-staging.podster.dev/mcp", "http://hooks.example.com/", "https://127.0.0.1/", "https://169.254.169.254/latest", "https://[::1]/", "https://2130706433/", "https://localhost/", "https://db.internal/", "https://user:pw@hooks.example.com/", "https://hooks.example.com:8443/", "nonsense", ""]) {
+      const res = await setWake(bob, url);
+      expect(res.status, url).toBe(400);
+      expect(res.code, url).toBe("invalid_wake_url");
+    }
+    for (const debounce of [59, 86_401, "60", 1.5]) expect((await setWake(bob, "https://hooks.example.com/", { debounce })).status, String(debounce)).toBe(400);
+    expect((await api(bob, "PUT", "/v1/inbox/wake", { debounce: 60 }, { key: null })).status).toBe(400);
+    expect((await api(bob, "GET", "/v1/me")).body.wake).toBeNull();
+  });
+
+  it("only the agent and its organization's admins can set it", async () => {
+    const [bob, other] = [await fresh(), await fresh("org_x")];
+    const path = `/v1/agents/${bob.id}/wake`;
+    const body = { url: "https://hooks.example.com/" };
+    expect((await api(other, "PUT", path, body, { key: null })).status).toBe(404);
+    expect((await api(orgAdmin("org_x"), "PUT", path, body, { key: null })).status).toBe(404);
+    expect((await api({ id: "per_plain", kind: "person", org: bob.org }, "PUT", path, body, { key: null })).status).toBe(404);
+    expect((await api(orgAdmin(bob.org), "PUT", path, body, { key: null })).status).toBe(200);
+    expect((await api(bob, "PUT", path, body, { key: null })).status).toBe(200);
+    expect((await api(other, "DELETE", path, {}, { key: null })).status).toBe(404);
+    // A person has an inbox, and no wake.
+    const person: Who = { id: `per_${crypto.randomUUID()}`, kind: "person", org: "org_z" };
+    expect((await api(person, "PUT", "/v1/inbox/wake", body, { key: null })).status).toBe(404);
+  });
+
+  it("sends a signed nudge with no content when the inbox gets something", async () => {
+    const bob = await fresh();
+    const path = unique();
+    const { secret } = (await setWake(bob, `https://hooks.example.com${path}`)).body;
+    expect((await deliver(bob)).status).toBe(200);
+    expect((await wakeRow(bob)).queued_until).toBeGreaterThan(Date.now());
+    expect(await consume(bob)).toEqual([]);
+    const [received] = await hookLog(path);
+    expect(received).toBeDefined();
+    const body = JSON.parse(received.body);
+    expect(Object.keys(body).sort()).toEqual(["agent_id", "at", "unread"]);
+    expect(received.agent).toMatch(/^Podster-Wake\//);
+    expect(body).toMatchObject({ agent_id: bob.id, unread: 1 });
+    expect(received.body).not.toContain("tsk_secret_title");
+    const [t, v1] = received.signature.split(",").map((part: string) => part.split("=")[1]);
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const expected = [...new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${t}.${received.body}`)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    expect(v1).toBe(expected);
+    expect(Math.abs(Number(t) - Date.now() / 1000)).toBeLessThan(60);
+    const row = await wakeRow(bob);
+    expect(row.queued_until).toBeNull();
+    expect(row.last_sent_at).toBeGreaterThan(0);
+    expect(row.consecutive_failures).toBe(0);
+    expect((await api(bob, "GET", "/v1/me")).body.wake.last_sent_at).toBeGreaterThan(0);
+  });
+
+  it("sends at most once per window, and a burst queues only one", async () => {
+    const bob = await fresh();
+    const path = unique();
+    await setWake(bob, `https://hooks.example.com${path}`, { debounce: 60 });
+    await Promise.all([deliver(bob, 1), deliver(bob, 2), deliver(bob, 3)]);
+    // Only the first of a burst is queued, and a second run of the consumer sends nothing new.
+    const queued = (await wakeRow(bob)).queued_until;
+    await deliver(bob, 3);
+    expect((await wakeRow(bob)).queued_until).toBe(queued);
+    await consume(bob);
+    expect(await hookLog(path)).toHaveLength(1);
+    // Inside the window, a new event waits for it to end, rather than being dropped.
+    await deliver(bob, 4);
+    expect((await wakeRow(bob)).queued_until).toBeGreaterThan(Date.now());
+    const waits = await consume(bob);
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toBeGreaterThan(50);
+    expect(waits[0]).toBeLessThanOrEqual(61);
+    expect(await hookLog(path)).toHaveLength(1);
+    // Once the window has passed, the next wake goes.
+    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET last_sent_at = ?, queued_until = NULL", Date.now() - 61_000));
+    await deliver(bob, 5);
+    await consume(bob);
+    expect(await hookLog(path)).toHaveLength(2);
+    expect(JSON.parse((await hookLog(path))[1].body).unread).toBe(6);
+  });
+
+  it("a queued wake finds nothing to say if the agent has already read everything", async () => {
+    const bob = await fresh();
+    await setWake(bob, `https://hooks.example.com${unique()}`);
+    await deliver(bob);
+    await consume(bob);
+    const claimNow = () => principalStub(bob.id).fetch("https://principal/internal/wake-claim", { method: "POST", body: "{}" }).then((r: Response) => r.json());
+    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET last_sent_at = NULL"));
+    expect((await claimNow() as any).send).toBe(true);
+    await api(bob, "GET", "/v1/inbox?ack=true");
+    expect(await claimNow()).toEqual({ send: false, reason: "nothing_unread" });
+  });
+
+  it("retries failures, turns off after 3 in a row, and setting it again turns it back on", async () => {
+    for (const kind of ["fail", "redirect", "hang"]) {
+      const bob = await fresh();
+      const path = `/${kind}-${crypto.randomUUID()}`;
+      await setWake(bob, `https://hooks.example.com${path}`);
+      await deliver(bob);
+      expect(await consume(bob), kind).toEqual([1, 1]);
+      const row = await wakeRow(bob);
+      expect(row.enabled, kind).toBe(0);
+      expect(row.consecutive_failures, kind).toBe(3);
+      expect(row.queued_until, kind).toBeNull();
+      expect(await hookLog(path), kind).toHaveLength(3);
+      expect((await api(bob, "GET", "/v1/me")).body.wake, kind).toMatchObject({ enabled: false, consecutive_failures: 3 });
+      // Off means off.
+      await deliver(bob, 2);
+      expect((await wakeRow(bob)).queued_until, kind).toBeNull();
+      await consume(bob);
+      expect(await hookLog(path), kind).toHaveLength(3);
+      // Delivery itself never depended on any of this.
+      expect((await api(bob, "GET", "/v1/inbox")).body.unread, kind).toBe(2);
+      const okPath = unique();
+      await setWake(bob, `https://hooks.example.com${okPath}`);
+      await deliver(bob, 3);
+      await consume(bob);
+      expect(await hookLog(okPath), kind).toHaveLength(1);
+      expect((await wakeRow(bob)).consecutive_failures, kind).toBe(0);
+    }
+    // A redirect's target is never contacted.
+    expect(await hookLog("/")).toEqual([]);
+  });
+
+  it("one success resets the count of failures", async () => {
+    const bob = await fresh();
+    const path = unique();
+    await setWake(bob, `https://hooks.example.com${path}`);
+    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET consecutive_failures = 2"));
+    await deliver(bob);
+    await consume(bob);
+    expect(await hookLog(path)).toHaveLength(1);
+    expect((await wakeRow(bob)).consecutive_failures).toBe(0);
+  });
+
+  it("a disconnect ends wake, and reconnecting doesn't bring it back", async () => {
+    const bob = await fresh();
+    const path = unique();
+    await setWake(bob, `https://hooks.example.com${path}`);
+    expect((await api(orgAdmin(bob.org), "POST", `/v1/agents/${bob.id}/disconnect`)).status).toBe(200);
+    await deliver(bob);
+    await consume(bob);
+    expect(await hookLog(path)).toEqual([]);
+    expect((await api(orgAdmin(bob.org), "POST", `/v1/agents/${bob.id}/reconnect`)).status).toBe(200);
+    expect((await api({ ...bob, gen: 3 } as Who, "GET", "/v1/me")).body.wake).toBeNull();
+    await deliver(bob, 2);
+    await consume(bob);
+    expect(await hookLog(path)).toEqual([]);
+  });
+
+  it("a wake can't be set while disconnected, and one found there stays quiet", async () => {
+    const bob = await fresh();
+    const path = unique();
+    expect((await api(orgAdmin(bob.org), "POST", `/v1/agents/${bob.id}/disconnect`)).status).toBe(200);
+    const refused = await api(orgAdmin(bob.org), "PUT", `/v1/agents/${bob.id}/wake`, { url: `https://hooks.example.com${path}` }, { key: null });
+    expect([refused.status, refused.code]).toEqual([403, "agent_disconnected"]);
+    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => {
+      state.storage.sql.exec("CREATE TABLE IF NOT EXISTS wake (id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL, secret TEXT NOT NULL, debounce_s INTEGER NOT NULL, last_sent_at INTEGER, consecutive_failures INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, queued_until INTEGER, sending_until INTEGER)");
+      state.storage.sql.exec("INSERT INTO wake (id, url, secret, debounce_s) VALUES (1, ?, 'whsec_x', 60)", `https://hooks.example.com${path}`);
+    });
+    await deliver(bob);
+    expect((await wakeRow(bob)).queued_until).toBeNull();
+    await consume(bob);
+    expect(await hookLog(path)).toEqual([]);
+  });
+
+  it("what crosses the real queue names the agent", async () => {
+    const bob = await fresh();
+    await setWake(bob, `https://hooks.example.com${unique()}`);
+    await deliver(bob);
+    await vi.waitFor(async () => {
+      const bodies = (await hookLog("/__queue")).map((entry) => JSON.parse(entry.body));
+      expect(bodies).toContainEqual({ agent: bob.id });
+    }, { timeout: 10_000, interval: 50 });
+  });
+
+  it("setting it again can't skip the debounce window", async () => {
+    const bob = await fresh();
+    const path = unique();
+    await setWake(bob, `https://hooks.example.com${path}`, { debounce: 3600 });
+    await deliver(bob);
+    await consume(bob);
+    expect(await hookLog(path)).toHaveLength(1);
+    const sent = (await wakeRow(bob)).last_sent_at;
+    const again = unique();
+    await setWake(bob, `https://hooks.example.com${again}`, { debounce: 3600 });
+    expect((await wakeRow(bob)).last_sent_at).toBe(sent);
+    // It does start the count of failures over, and turns wake back on.
+    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET consecutive_failures = 2, enabled = 0"));
+    await setWake(bob, `https://hooks.example.com${again}`, { debounce: 3600 });
+    expect(await wakeRow(bob)).toMatchObject({ consecutive_failures: 0, enabled: 1, last_sent_at: sent });
+    await deliver(bob, 2);
+    const waits = await consume(bob);
+    expect(waits[0]).toBeGreaterThan(3000);
+    expect(await hookLog(again)).toEqual([]);
+    // Deleting first doesn't skip it either, and a deleted wake looks like none.
+    expect((await api(bob, "DELETE", "/v1/inbox/wake", {}, { key: null })).status).toBe(200);
+    expect((await api(bob, "GET", "/v1/me")).body.wake).toBeNull();
+    const third = unique();
+    await setWake(bob, `https://hooks.example.com${third}`, { debounce: 3600 });
+    await deliver(bob, 3);
+    expect((await consume(bob))[0]).toBeGreaterThan(3000);
+    expect(await hookLog(third)).toEqual([]);
+  });
+
+  it("shortening the window applies to a wake already waiting", async () => {
+    const bob = await fresh();
+    await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 3600 });
+    await deliver(bob);
+    await consume(bob);
+    await deliver(bob, 2);
+    const waiting = (await wakeRow(bob)).queued_until;
+    expect(waiting).toBeGreaterThan(Date.now() + 3_000_000);
+    // The same setting leaves it alone, and a new one clears it, so the next event queues for the new window.
+    await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 3600 });
+    expect((await wakeRow(bob)).queued_until).toBe(waiting);
+    await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 60 });
+    expect((await wakeRow(bob)).queued_until).toBeNull();
+    await deliver(bob, 3);
+    expect((await wakeRow(bob)).queued_until).toBeLessThan(waiting);
+  });
+
+  it("the consumer config stays within what a Worker can hold open", () => {
+    expect(BINDINGS.TEST_WRANGLER.match(/"max_batch_size": (\d+)/g)).toEqual(['"max_batch_size": 6', '"max_batch_size": 6']);
+  });
+
+  describe("around a send", () => {
+    const internalCall = (who: Who, path: string, body: object = {}) => principalStub(who.id).fetch(`https://principal/internal/${path}`, { method: "POST", body: JSON.stringify(body) }).then((r: Response) => r.json());
+
+    it("an event during a send still gets a nudge", async () => {
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 60 });
+      await deliver(bob);
+      const claim: any = await internalCall(bob, "wake-claim");
+      expect(claim.send).toBe(true);
+      await deliver(bob, 2);
+      const report: any = await internalCall(bob, "wake-report", { ok: true, secret: claim.secret, last_seq: claim.last_seq });
+      expect(report.requeue).toBe(true);
+      expect((await wakeRow(bob)).queued_until).toBeGreaterThan(Date.now());
+      // With nothing new, nothing more is queued.
+      const quiet = await fresh();
+      await setWake(quiet, `https://hooks.example.com${unique()}`);
+      await deliver(quiet);
+      const claimed: any = await internalCall(quiet, "wake-claim");
+      expect((await internalCall(quiet, "wake-report", { ok: true, secret: claimed.secret, last_seq: claimed.last_seq }) as any).requeue).toBe(false);
+      expect((await wakeRow(quiet)).queued_until).toBeNull();
+    });
+
+    it("two consumers holding the same wake send it once", async () => {
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`);
+      await deliver(bob);
+      const first: any = await internalCall(bob, "wake-claim");
+      expect(first.send).toBe(true);
+      // The second waits rather than being dropped, in case the first crashed.
+      const second: any = await internalCall(bob, "wake-claim");
+      expect(second).toMatchObject({ send: false, reason: "sending" });
+      expect(second.retry_after).toBeGreaterThan(0);
+      expect(second.retry_after).toBeLessThanOrEqual(31);
+      // A crash mid-send only delays the next: the lease runs out.
+      await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET sending_until = ?", Date.now() - 1));
+      expect((await internalCall(bob, "wake-claim") as any).send).toBe(true);
+      // A failed send releases it for the retry.
+      await internalCall(bob, "wake-report", { ok: false, secret: first.secret, last_seq: first.last_seq });
+      expect((await wakeRow(bob)).sending_until).toBeNull();
+    });
+
+    it("a late report about an old URL says nothing about the new one", async () => {
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`);
+      await deliver(bob);
+      const claim: any = await internalCall(bob, "wake-claim");
+      await setWake(bob, `https://hooks.example.com${unique()}`);
+      await internalCall(bob, "wake-report", { ok: false, secret: claim.secret, last_seq: claim.last_seq });
+      expect((await wakeRow(bob)).consecutive_failures).toBe(0);
+    });
+
+    it("a send counts against the window even if the URL changed during it", async () => {
+      // Re-setting a URL during each send would otherwise trigger another at once.
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 3600 });
+      await deliver(bob);
+      const claim: any = await internalCall(bob, "wake-claim");
+      const replaced = unique();
+      await setWake(bob, `https://hooks.example.com${replaced}`, { debounce: 3600 });
+      await internalCall(bob, "wake-report", { ok: false, secret: claim.secret, last_seq: claim.last_seq });
+      expect((await wakeRow(bob)).last_sent_at).toBeGreaterThan(0);
+      expect((await consume(bob))[0]).toBeGreaterThan(3000);
+      expect(await hookLog(replaced)).toEqual([]);
+      // The same if it was deleted during the send.
+      const gone = await fresh();
+      await setWake(gone, `https://hooks.example.com${unique()}`, { debounce: 3600 });
+      await deliver(gone);
+      const held: any = await internalCall(gone, "wake-claim");
+      await api(gone, "DELETE", "/v1/inbox/wake", {}, { key: null });
+      await internalCall(gone, "wake-report", { ok: true, secret: held.secret, last_seq: held.last_seq });
+      const after = unique();
+      await setWake(gone, `https://hooks.example.com${after}`, { debounce: 3600 });
+      await deliver(gone, 2);
+      expect((await consume(gone))[0]).toBeGreaterThan(3000);
+      expect(await hookLog(after)).toEqual([]);
+    });
+
+    it("replacing a URL during a send doesn't silence the new one", async () => {
+      const bob = await fresh();
+      await setWake(bob, `https://hooks.example.com${unique()}`, { debounce: 60 });
+      await deliver(bob);
+      const claim: any = await internalCall(bob, "wake-claim");
+      const fresher = unique();
+      await setWake(bob, `https://hooks.example.com${fresher}`, { debounce: 60 });
+      const report: any = await internalCall(bob, "wake-report", { ok: true, secret: claim.secret, last_seq: claim.last_seq });
+      expect(report.requeue).toBe(true);
+      const row = await wakeRow(bob);
+      expect(row.sending_until).toBeNull();
+      expect(row.queued_until).toBeGreaterThan(Date.now());
+      // It waits out the window, and then the new URL hears about what's unread.
+      expect((await consume(bob))[0]).toBeGreaterThan(50);
+      await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET last_sent_at = ?", Date.now() - 61_000));
+      await consume(bob);
+      expect(await hookLog(fresher)).toHaveLength(1);
+      // With nothing unread, an old report queues nothing.
+      const read = await fresh();
+      await setWake(read, `https://hooks.example.com${unique()}`);
+      await deliver(read);
+      const old: any = await internalCall(read, "wake-claim");
+      await setWake(read, `https://hooks.example.com${unique()}`);
+      await api(read, "GET", "/v1/inbox?ack=true");
+      expect((await internalCall(read, "wake-report", { ok: true, secret: old.secret, last_seq: old.last_seq }) as any).requeue).toBe(false);
+    });
+  });
+
+  it("a disconnect while a wake is queued sends nothing", async () => {
+    const bob = await fresh();
+    const path = unique();
+    await setWake(bob, `https://hooks.example.com${path}`);
+    await deliver(bob);
+    await api(orgAdmin(bob.org), "POST", `/v1/agents/${bob.id}/disconnect`);
+    await consume(bob);
+    expect(await hookLog(path)).toEqual([]);
+  });
+
+  it("a stale queued flag doesn't stop later wakes", async () => {
+    const bob = await fresh();
+    await setWake(bob, `https://hooks.example.com${unique()}`);
+    await deliver(bob);
+    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET queued_until = ?", Date.now() - 1000));
+    await deliver(bob, 2);
+    expect((await wakeRow(bob)).queued_until).toBeGreaterThan(Date.now());
+  });
+
+  it("a wake queued before a URL became unacceptable, or for an agent with none, sends nothing", async () => {
+    const bob = await fresh();
+    const claimNow = () => principalStub(bob.id).fetch("https://principal/internal/wake-claim", { method: "POST", body: "{}" }).then((r: Response) => r.json());
+    expect(await claimNow()).toEqual({ send: false, reason: "no_wake" });
+    await setWake(bob, "https://hooks.example.com/");
+    await runInDurableObject(principalStub(bob.id), (_: any, state: any) => void state.storage.sql.exec("UPDATE wake SET url = 'https://169.254.169.254/latest'"));
+    expect(await claimNow()).toEqual({ send: false, reason: "url_refused" });
+    expect((await wakeRow(bob)).enabled).toBe(0);
+  });
+
+  it("an agent with no wake gets its events the same way", async () => {
+    const bob = await fresh();
+    expect((await deliver(bob)).status).toBe(200);
+    expect((await api(bob, "GET", "/v1/inbox")).body.unread).toBe(1);
+    expect((await api(bob, "GET", "/v1/me")).body.wake).toBeNull();
+  });
+});
+

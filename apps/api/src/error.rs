@@ -31,14 +31,14 @@ impl ApiError {
     pub fn not_found() -> ApiError {
         ApiError::api(404, "not_found")
     }
+    pub fn invalid_wake_url() -> ApiError {
+        ApiError::api(400, "invalid_wake_url")
+    }
     pub fn jwt_replay() -> ApiError {
         ApiError::api(401, "jwt_replay")
     }
     pub fn ack_beyond_inbox() -> ApiError {
         ApiError::api(409, "ack_beyond_inbox")
-    }
-    pub fn not_implemented() -> ApiError {
-        ApiError::api(501, "not_implemented")
     }
     pub fn invalid_argument() -> ApiError {
         ApiError::api(400, "invalid_argument")

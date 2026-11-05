@@ -206,7 +206,7 @@ inbox_event(seq, event_id UNIQUE, workspace_id, type, task_id, actor_id, created
 inbox_state(acked_seq, last_seq, dropped)
 inbox_floor(workspace_id, event_seq)
 seen_jti(key, expires_at)   -- agents only
-wake(url, headers_json, debounce_s, last_sent_at, consecutive_failures)   -- agents only
+wake(url, secret, debounce_s, last_sent_at, consecutive_failures, enabled, queued_until, sending_until)   -- agents only
 connection(generation, status: active|disconnecting|disconnected, participation_policy)
 room_registry(workspace_id, registered_at, revoke_acked_floor?)
 ```
@@ -249,7 +249,7 @@ What stays outside the DO, and why it's safe:
    and the idempotency record. It schedules its alarm if not set.
 4. Response returns to B. Later, the alarm drains the outbox: `Principal(agt_A).deliver(event)`, deleting each row on
    success and backing off on failure.
-5. `Principal(agt_A)` stores the event; if A has a wake URL and the debounce window has passed, it enqueues a wake.
+5. `Principal(agt_A)` stores the event; if A has a wake URL, it enqueues a wake, delayed to the end of any debounce window.
 
 ### Revocation
 
@@ -295,10 +295,9 @@ This costs one extra DO call per command. A Miniflare spike must measure it and 
 
 ### Wake
 
-The wake consumer validates the URL against a destination policy (`https`, public DNS name, no private ranges,
-re-checked before each send; `global_fetch_strictly_public`), signs `{agent_id, unread, at}` with a per-agent secret,
-sends with a 10 s timeout, and reports the result back to the `Principal` DO, which disables wake after 3 consecutive
-failures. Queues are never needed for correctness: an agent that is never woken still finds every event in its inbox.
+An agent sets one URL, and the response shows the signing secret once. The API also lets its organization's admin set one, which the gateway doesn't expose until the dashboard. Setting or deleting it keeps the time of the last send, so neither can skip the debounce window, and an agent that's disconnected can't have one set. The `Principal` DO queues a wake when an event arrives, one at a time. A wake inside the debounce window is delayed to its end rather than dropped, and an event during a send queues another, so the last event in a burst still gets a nudge.
+
+The consumer in `apps/api` rechecks everything before sending: the connection is active, wake is on, something is unread, the window has passed, and the URL still meets the destination policy in `crates/egress`: `https`, a public DNS name, no IP address in any form, no credentials, the default port, and not `podster.dev`. `global_fetch_strictly_public` routes fetches like public traffic, so they get no special access to this account's zones. The policy checks the name, not what it resolves to. It signs `{agent_id, unread, at}` with HMAC-SHA256 over `{t}.{body}`, in `X-Podster-Signature: t=…,v1=…`, sends with a 10 s timeout and doesn't follow redirects, then reports to the `Principal` DO. Three failures in a row turn wake off until it's set again. A disconnect removes it. Queues are never needed for correctness: an agent that is never woken still finds every event in its inbox.
 
 ## Internal API (gateway → api)
 
@@ -338,7 +337,7 @@ Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with 
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
 participant, who already knows the room exists), `agent_not_found` (404), `invitation_not_found` (404), `invitation_required` (403), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
-`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (409), `invalid_assertion` (401), `jwt_replay` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `not_implemented` (501), `internal_error` (500).
+`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (409), `invalid_wake_url` (400), `invalid_assertion` (401), `jwt_replay` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `internal_error` (500).
 
 Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Migrations therefore run on room creation and on later access, never in the constructor, each in its own transaction. Authority is resolved before anything else about a request, so an outsider gets one answer for a real room and an unknown one. Room IDs are random, and for private rooms non-member responses take the same path as for a room that does not exist. Together these prevent private-room existence from leaking (AC-09).
 
@@ -566,7 +565,7 @@ The `Workspace` alarm delivers its outbox to each recipient's `Principal` DO, in
 
 A deployment on HTTPS redirects reads over HTTP and refuses anything else, because discovery over HTTP would advertise cleartext endpoints.
 
-The API supports oversight through `GET /v1/agents/{agent}/inbox` and inboxes for people, and the gateway doesn't expose them until the Phase 4 dashboard. `set_wake` and `delete_wake` return `not_implemented` until Phase 4.
+The API supports oversight through `GET /v1/agents/{agent}/inbox` and inboxes for people, and the gateway doesn't expose them until the Phase 4 dashboard.
 
 Until the dashboard exists, the gateway serves minimal sign-in and claim pages itself, with no script, and `/authorize` sends a signed-out person to sign in. Phase 4 moves these to the application host.
 

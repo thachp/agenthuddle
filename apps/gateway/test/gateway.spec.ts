@@ -966,9 +966,9 @@ describe("resilience and schema", () => {
   it("passes the API's status through to agents", async () => {
     const a = await signUp();
     const agent = await claimedAgent(a);
-    const wake = await execute(agent, "set_wake", { url: "https://example.test/wake" });
-    expect(wake.status).toBe(501);
-    expect(wake.raw.message).toBe("not_implemented");
+    const wake = await execute(agent, "set_wake", { url: "https://127.0.0.1/wake" });
+    expect(wake.status).toBe(400);
+    expect(wake.raw.message).toBe("invalid_wake_url");
     const missing = await execute(agent, "get_workspace", { workspace_id: "ws_none" });
     expect(missing.status).toBe(404);
   });
@@ -1787,6 +1787,20 @@ describe("kernel journey across two organizations", () => {
     const read = await execute(architect, "get_task", { workspace_id: event.workspace_id, task_id: event.task_id });
     const accepted = await execute(architect, "accept_task", { workspace_id: event.workspace_id, task_id: event.task_id, version: read.data.task.version, idempotency_key: unique("k") });
     expect(accepted.data.status).toBe("accepted");
+  });
+
+  it("an agent sets its own wake over either connection, and only it sees the secret", async () => {
+    const { personB, architect } = await setup();
+    const linked = await mcpAgent(personB, { link_agent_id: architect.id });
+    const set = await execute(architect, "set_wake", { url: "https://hooks.example.com/wake", debounce: 120 });
+    expect(set.data).toMatchObject({ url: "https://hooks.example.com/wake", debounce: 120, enabled: true });
+    expect(set.data.secret).toMatch(/^whsec_/);
+    const seen = (await linked.tool("get_identity")).data;
+    expect(seen.wake).toMatchObject({ url: "https://hooks.example.com/wake", debounce: 120, enabled: true });
+    expect(JSON.stringify(seen)).not.toContain(set.data.secret);
+    expect((await linked.tool("set_wake", { url: "http://hooks.example.com/" })).code).toBe("invalid_wake_url");
+    expect((await linked.tool("delete_wake")).data).toEqual({ deleted: true });
+    expect((await execute(architect, "get_identity")).data.wake).toBeNull();
   });
 
   it("both connection methods share one inbox and cursor", async () => {
