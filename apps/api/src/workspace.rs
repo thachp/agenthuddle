@@ -14,13 +14,15 @@ use crate::{
 };
 use podster_assertion::TargetMember;
 use podster_core::{
-    apply_departure, decide, decide_create, Artifact, Command, NewTask, Observed, Task, TaskPatch,
-    TaskStatus, MAX_MESSAGE_BYTES,
+    apply_departure, apply_review_ended, decide, decide_create, validate_brief, Artifact, Command,
+    NewTask, Observed, Task, TaskPatch, TaskStatus, MAX_MESSAGE_BYTES,
 };
 use podster_policy::{
     authorize_reviewer_change, authorize_task, authorize_workroom, can_review, can_see_task,
-    denied_change_name, is_authority_refusal, may_recover_ownership, org_departure_ends,
-    owner_authority_holds, Caller, PrincipalKind, Role, TaskAction, Verdict, WorkroomAction,
+    denied_change_name, effective_scopes, is_authority_refusal, may_recover_ownership,
+    org_departure_ends, owner_authority_holds, sees_whole_room, task_view, ArtifactScope,
+    ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope, Role, Scopes,
+    TaskAction, TaskScope, Verdict, WorkroomAction,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -94,8 +96,8 @@ fn in_org(identity: &Identity, org: &str) -> bool {
     identity.org == org || (identity.kind == "person" && identity.orgs.iter().any(|o| o == org))
 }
 
-/// What an admin of an invited organization sees of its agent here: what a guest in its place would, which is only the
-/// tasks it's party to. It gives them no role in the room, and it ends when the agent is no longer in the room. It's not
+/// What an admin of an invited organization sees of its agent here: only the tasks it's party to, and never more of
+/// them than the agent itself can read. It gives them no role in the room, and it ends when the agent is no longer in the room. It's not
 /// for the room's own organization, whose people are in the room or were left out of it by its owner, and it's not for
 /// someone already in the room or revoked from it, who have their own answers.
 fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Option<Participant>> {
@@ -127,7 +129,7 @@ fn oversight_view(sql: &SqlStorage, identity: &Identity, agent: &str) -> R<Optio
             id: agent.to_string(),
             kind: PrincipalKind::Agent,
             role: Role::Guest,
-            guest_can_create: false,
+            scopes: store::granted_scopes(sql, agent)?.for_oversight(),
         },
         org,
     }))
@@ -168,6 +170,9 @@ fn write_denials(sql: &SqlStorage, held: &HeldDenials) -> R<()> {
 }
 
 /// Reads the caller's current authority. Assertions and read models never supply a role.
+///
+/// A person's place here comes only from being its owner or from their own member row (decision 7). What their
+/// organization's agents can see gives them nothing, and read-only oversight is the separate `oversight_view`.
 fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
     let room = rows(
         sql,
@@ -194,12 +199,16 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
                 id: identity.id.clone(),
                 kind,
                 role: Role::Owner,
-                guest_can_create: false,
+                scopes: Scopes::PUBLIC_PARTICIPANT,
             },
             org: text(&room["owner_org_id"]).unwrap_or_default(),
         });
     }
-    let member = rows(sql, "SELECT kind, org_id, role, guest_can_create, revoked_at, added_at FROM member WHERE principal_id = ?", vec![identity.id.as_str().into()])?;
+    let member = rows(
+        sql,
+        "SELECT kind, org_id, role, revoked_at, added_at FROM member WHERE principal_id = ?",
+        vec![identity.id.as_str().into()],
+    )?;
     let Some(member) = member.first() else {
         return Err(ApiError::workspace_not_found());
     };
@@ -237,17 +246,30 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
             id: identity.id.clone(),
             kind,
             role: member["role"].as_str().map_or(Role::None, parse_role),
-            guest_can_create: int(&member["guest_can_create"]) != 0,
+            scopes: store::granted_scopes(sql, &identity.id)?,
         },
         org,
     })
 }
 
+/// Whether someone could be named reviewer now. The per-room person setting (decision 5) isn't built, so nothing requires one yet.
+fn eligible_reviewer(sql: &SqlStorage, id: &str) -> R<bool> {
+    Ok(match participant(sql, id)? {
+        Some((kind, role)) => can_review(
+            parse_kind(&kind),
+            parse_role(&role),
+            store::granted_scopes(sql, id)?,
+            false,
+        ),
+        None => false,
+    })
+}
+
 fn require_eligible_reviewer(sql: &SqlStorage, id: &str) -> R<()> {
-    match participant(sql, id)? {
-        // Room-level person review is an M1 setting, so kernel rooms don't require it.
-        Some((kind, role)) if can_review(parse_kind(&kind), parse_role(&role), false) => Ok(()),
-        _ => Err(ApiError::invalid_argument()),
+    if eligible_reviewer(sql, id)? {
+        Ok(())
+    } else {
+        Err(ApiError::invalid_argument())
     }
 }
 
@@ -673,6 +695,14 @@ fn write_member(
         join_generation = excluded.join_generation, added_by = excluded.added_by, added_at = excluded.added_at, revoked_at = NULL, revocation_reason = NULL, owner_consented_at = NULL", vec![
         principal.into(), kind.into(), org.into(), role.into(), flag(guest_can_create), generation.map_or(worker::SqlStorageValue::Null, |g| (g as i64).into()), added_by.into(), now.into(),
     ])?;
+    // Joining starts from the role's preset, so scopes someone held before they left don't come back with them.
+    store::write_grant(
+        sql,
+        principal,
+        Scopes::for_role(parse_role(role), guest_can_create),
+        added_by,
+        now,
+    )?;
     queue_index(sql, principal, org, Some(role), now)
 }
 
@@ -762,9 +792,8 @@ fn handle_add_member(
     if active_count(sql)? + 1 >= MAX_MEMBERS {
         return Err(ApiError::limit_exceeded());
     }
-    let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
-        v.as_bool().ok_or_else(ApiError::invalid_argument)
-    })?;
+    let guest_can_create = guest_switch(&role, body, false)?;
+    let prior_scopes = store::granted_scopes(sql, &principal)?;
     write_member(
         sql,
         &caller.id,
@@ -777,11 +806,29 @@ fn handle_add_member(
         // The gateway's clock may be ahead, and this must not look older than the membership it belongs to.
         joined.map_or(now, |since| now.max(since)),
     )?;
+    let scopes = Scopes::for_role(parse_role(&role), guest_can_create);
+    let mut new_json =
+        json!({ "role": role, "kind": kind, "org_id": org, "guest_can_create": guest_can_create });
     let prior_json = prior.map(|p| {
-        json!({ "role": p["role"], "kind": p["kind"], "org_id": p["org_id"], "revoked": !p["revoked_at"].is_null() })
-            .to_string()
+        let mut before = json!({ "role": p["role"], "kind": p["kind"], "org_id": p["org_id"], "revoked": !p["revoked_at"].is_null() });
+        // Coming back starts from the role's preset, which can widen what they held, so the audit says what moved.
+        if prior_scopes != scopes {
+            let prior_kind = p["kind"].as_str().map_or(PrincipalKind::Agent, parse_kind);
+            let prior_role = p["role"].as_str().map_or(Role::None, parse_role);
+            before["access"] = access_json(prior_kind, prior_role, prior_scopes);
+            new_json["access"] = access_json(parse_kind(&kind), parse_role(&role), scopes);
+        }
+        before.to_string()
     });
-    audit(sql, caller, "member.added", &principal, prior_json, Some(json!({ "role": role, "kind": kind, "org_id": org, "guest_can_create": guest_can_create }).to_string()), now)?;
+    audit(
+        sql,
+        caller,
+        "member.added",
+        &principal,
+        prior_json,
+        Some(new_json.to_string()),
+        now,
+    )?;
     record_event(
         sql,
         "member.added",
@@ -830,9 +877,7 @@ fn handle_create_invitation(
     if let Some(org) = &invited_org {
         require_id(org)?;
     }
-    let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
-        v.as_bool().ok_or_else(ApiError::invalid_argument)
-    })?;
+    let guest_can_create = guest_switch(&role, body, false)?;
     let id = format!("ivt_{}", uuid::Uuid::new_v4().simple());
     let secret = format!(
         "{}{}",
@@ -943,10 +988,8 @@ fn handle_change_role(
             return Err(ApiError::not_in_organization());
         }
     }
-    let guest_can_create = match body.get("guest_can_create") {
-        None => int(&member["guest_can_create"]) != 0,
-        Some(v) => v.as_bool().ok_or_else(ApiError::invalid_argument)?,
-    };
+    let stored_switch = int(&member["guest_can_create"]) != 0;
+    let guest_can_create = guest_switch(&role, body, stored_switch)?;
     if role != "admin" && member["role"].as_str() == Some("admin") {
         end_invitations_of(
             sql,
@@ -957,6 +1000,29 @@ fn handle_change_role(
             now,
         )?;
     }
+    // A changed role starts again from its preset, which can widen as well as narrow, so the audit says what moved.
+    // Saving the same role keeps any scopes adjusted since.
+    let prior_scopes = store::granted_scopes(sql, principal)?;
+    let mut scopes = prior_scopes;
+    if member["role"].as_str() != Some(role.as_str())
+        || (role == "guest" && stored_switch != guest_can_create)
+    {
+        scopes = Scopes::for_role(parse_role(&role), guest_can_create);
+        store::write_grant(sql, principal, scopes, &caller.id, now)?;
+    }
+    let target_kind = member["kind"]
+        .as_str()
+        .map_or(PrincipalKind::Agent, parse_kind);
+    let moved = (scopes != prior_scopes).then(|| {
+        (
+            access_json(
+                target_kind,
+                member["role"].as_str().map_or(Role::None, parse_role),
+                prior_scopes,
+            ),
+            access_json(target_kind, parse_role(&role), scopes),
+        )
+    });
     exec(
         sql,
         "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
@@ -975,14 +1041,19 @@ fn handle_change_role(
     .and_then(|m| text(&m["org_id"]))
     .unwrap_or_default();
     queue_index(sql, principal, &org, Some(&role), now)?;
-    let prior = json!({ "role": member["role"], "guest_can_create": int(&member["guest_can_create"]) != 0 }).to_string();
+    let mut prior = json!({ "role": member["role"], "guest_can_create": int(&member["guest_can_create"]) != 0 });
+    let mut new = json!({ "role": role, "guest_can_create": guest_can_create });
+    if let Some((before, after)) = moved {
+        prior["access"] = before;
+        new["access"] = after;
+    }
     audit(
         sql,
         caller,
         "member.role_changed",
         principal,
-        Some(prior),
-        Some(json!({ "role": role, "guest_can_create": guest_can_create }).to_string()),
+        Some(prior.to_string()),
+        Some(new.to_string()),
         now,
     )?;
     record_event(
@@ -995,6 +1066,201 @@ fn handle_change_role(
         now,
     )?;
     Ok(json!({ "principal_id": principal, "role": role }))
+}
+
+/// The caller's or a participant's access as the API shows it. A human owner or admin holds everything by their role, so
+/// they have no preset.
+fn access_json(kind: PrincipalKind, role: Role, stored: Scopes) -> Value {
+    let scopes = effective_scopes(kind, role, stored);
+    let by_role = matches!(role, Role::Owner | Role::Admin);
+    json!({
+        "preset": if by_role { None } else { scopes.preset().map(Preset::name) },
+        "tasks": scopes.tasks.name(), "artifacts": scopes.artifacts.name(),
+        "conversations": scopes.conversations.name(), "review": scopes.review.name(),
+    })
+}
+
+/// A guest's task-creating switch from a request. It means nothing for any other role, so it's always false for them,
+/// whatever was sent.
+fn guest_switch(role: &str, body: &Value, otherwise: bool) -> R<bool> {
+    let given = match body.get("guest_can_create") {
+        None => otherwise,
+        Some(value) => value.as_bool().ok_or_else(ApiError::invalid_argument)?,
+    };
+    Ok(role == "guest" && given)
+}
+
+/// Applies a named scope from a request. Only these four exist, so anything else, such as managing access, is refused.
+fn adjust_scope(scopes: &mut Scopes, name: &str, value: &Value) -> R<()> {
+    let value = value.as_str().ok_or_else(ApiError::invalid_argument)?;
+    let bad = ApiError::invalid_argument;
+    match name {
+        "tasks" => scopes.tasks = TaskScope::from_name(value).ok_or_else(bad)?,
+        "artifacts" => scopes.artifacts = ArtifactScope::from_name(value).ok_or_else(bad)?,
+        "conversations" => {
+            scopes.conversations = ConversationScope::from_name(value).ok_or_else(bad)?;
+        }
+        "review" => scopes.review = ReviewScope::from_name(value).ok_or_else(bad)?,
+        _ => return Err(bad()),
+    }
+    Ok(())
+}
+
+/// Applies a preset to an agent, adjusts its scopes, or both. Only the server's values are stored, and a preset's role is
+/// never an administrator's. People's access follows their role here, because decision 20 is about agents.
+fn handle_change_access(
+    sql: &SqlStorage,
+    caller: &Caller,
+    principal: &str,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
+    require_policy_version(sql, body)?;
+    let found = rows(sql, "SELECT kind, org_id, role, guest_can_create FROM member WHERE principal_id = ? AND revoked_at IS NULL", vec![principal.into()])?;
+    let member = found.first().ok_or_else(ApiError::invalid_argument)?;
+    if member["kind"].as_str() != Some("agent") {
+        return Err(ApiError::invalid_argument());
+    }
+    let preset = match body.get("preset") {
+        None => None,
+        Some(name) => Some(
+            name.as_str()
+                .and_then(Preset::from_name)
+                .ok_or_else(ApiError::invalid_argument)?,
+        ),
+    };
+    let adjustments = match body.get("scopes") {
+        None => None,
+        Some(given) => Some(given.as_object().ok_or_else(ApiError::invalid_argument)?),
+    };
+    if preset.is_none() && adjustments.is_none() {
+        return Err(ApiError::invalid_argument());
+    }
+    let prior = store::granted_scopes(sql, principal)?;
+    let mut next = preset.map_or(prior, Preset::scopes);
+    for (name, value) in adjustments.into_iter().flatten() {
+        adjust_scope(&mut next, name, value)?;
+    }
+    if !next.is_grantable() {
+        return Err(ApiError::invalid_argument());
+    }
+    let prior_role = text(&member["role"]).unwrap_or_default();
+    let role = preset.map_or(prior_role.clone(), |p| p.role_name().to_string());
+    let answer = |scopes| json!({ "principal_id": principal, "role": role, "access": access_json(PrincipalKind::Agent, parse_role(&role), scopes) });
+    if next == prior && role == prior_role {
+        return Ok(answer(prior));
+    }
+    let org = text(&member["org_id"]).unwrap_or_default();
+    store::write_grant(sql, principal, next, &caller.id, now)?;
+    exec(
+        sql,
+        "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
+        vec![
+            role.as_str().into(),
+            flag(role == "guest" && next.tasks.can_create()),
+            principal.into(),
+        ],
+    )?;
+    if role != prior_role {
+        queue_index(sql, principal, &org, Some(&role), now)?;
+    }
+    audit(
+        sql,
+        caller,
+        "member.access_changed",
+        principal,
+        Some(json!({ "role": prior_role, "access": access_json(PrincipalKind::Agent, parse_role(&prior_role), prior) }).to_string()),
+        Some(json!({ "role": role, "access": access_json(PrincipalKind::Agent, parse_role(&role), next) }).to_string()),
+        now,
+    )?;
+    record_event(
+        sql,
+        "member.access_changed",
+        &caller.id,
+        None,
+        &Transition::NONE,
+        [principal.to_string()],
+        now,
+    )?;
+    // Someone who can't review any more can't stay named on open tasks, or they'd wait forever.
+    if prior.reviews() && !next.reviews() {
+        let named = rows(
+            sql,
+            "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled') AND reviewer_id = ?",
+            vec![principal.into()],
+        )?;
+        for row in &named {
+            let task = store::task_from_row(row)?;
+            let requester_ok = eligible_reviewer(sql, &task.requester)?;
+            if let Some(decision) = apply_review_ended(&task, principal, requester_ok) {
+                save_task(sql, &decision.task, now)?;
+                record_decision(sql, &decision, task.status, &caller.id, now)?;
+            }
+        }
+    }
+    Ok(answer(next))
+}
+
+/// A brief field in a request: absent leaves it alone, null clears it, and anything but text is refused.
+fn brief_change(body: &Value, name: &str) -> R<Option<Option<String>>> {
+    match body.get(name) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(given)) => Ok(Some(Some(given.clone()))),
+        Some(_) => Err(ApiError::invalid_argument()),
+    }
+}
+
+/// Changes a room's goal or context. They're text for participants to read, and nothing in Podster acts on them, so the
+/// audit entry and the event say only what changed, never what it says.
+fn handle_set_brief(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))?;
+    require_policy_version(sql, body)?;
+    let goal = brief_change(body, "goal")?;
+    let context = brief_change(body, "context")?;
+    if goal.is_none() && context.is_none() {
+        return Err(ApiError::invalid_argument());
+    }
+    validate_brief(
+        goal.as_ref().and_then(|g| g.as_deref()),
+        context.as_ref().and_then(|c| c.as_deref()),
+    )
+    .map_err(|e| ApiError::from_core(&e))?;
+    exec(
+        sql,
+        "UPDATE workspace SET brief_by = ?",
+        vec![caller.id.as_str().into()],
+    )?;
+    if let Some(goal) = &goal {
+        exec(sql, "UPDATE workspace SET goal = ?", vec![opt(goal)])?;
+    }
+    if let Some(context) = &context {
+        exec(sql, "UPDATE workspace SET context = ?", vec![opt(context)])?;
+    }
+    audit(
+        sql,
+        caller,
+        "workspace.brief_changed",
+        "workspace",
+        None,
+        Some(json!({ "goal": goal.is_some(), "context": context.is_some() }).to_string()),
+        now,
+    )?;
+    let mut everyone = room_people(sql)?;
+    everyone.retain(|principal| *principal != caller.id);
+    record_event(
+        sql,
+        "workspace.brief_changed",
+        &caller.id,
+        None,
+        &Transition::NONE,
+        everyone,
+        now,
+    )?;
+    let room = rows(sql, "SELECT goal, context FROM workspace", vec![])?;
+    let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
+    Ok(json!({ "goal": room["goal"], "context": room["context"] }))
 }
 
 /// Tests hold delivery by creating this table, so they can look at what a command queued.
@@ -1080,8 +1346,7 @@ fn apply_departure_rules(sql: &SqlStorage, actor: &Caller, principal: &str, now:
         vec![principal.into(), principal.into(), principal.into()])?;
     for row in &affected {
         let task = store::task_from_row(row)?;
-        let requester_ok = participant(sql, &task.requester)?
-            .is_some_and(|(kind, role)| can_review(parse_kind(&kind), parse_role(&role), false));
+        let requester_ok = eligible_reviewer(sql, &task.requester)?;
         if let Some(decision) = apply_departure(&task, principal, requester_ok) {
             save_task(sql, &decision.task, now)?;
             record_decision(sql, &decision, task.status, &actor.id, now)?;
@@ -1492,6 +1757,7 @@ fn handle_transfer_owner(
             former_since.into(),
         ],
     )?;
+    store::write_grant(sql, &caller.id, Scopes::MEMBER, &caller.id, now)?;
     queue_index(sql, &to, &org, Some("owner"), now)?;
     queue_index(sql, &caller.id, &org, Some("admin"), now)?;
     audit(
@@ -1553,7 +1819,7 @@ fn apply_recovery(
         id: actor.to_string(),
         kind: PrincipalKind::Person,
         role: Role::None,
-        guest_can_create: false,
+        scopes: Scopes::PUBLIC_PARTICIPANT,
     };
     audit(
         sql,
@@ -1639,26 +1905,41 @@ fn query_str(url: &Url, name: &str) -> Option<String> {
 mod queries {
     use super::*;
 
-    pub fn get_workspace(sql: &SqlStorage, caller: &Caller) -> R<Value> {
+    pub fn get_workspace(sql: &SqlStorage, who: &Participant) -> R<Value> {
+        let caller = &who.caller;
         let room = rows(
             sql,
-            "SELECT id, name, owner_person_id, owner_org_id, owner_left_at, status, policy_version FROM workspace",
+            "SELECT id, name, goal, context, brief_by, owner_person_id, owner_org_id, owner_left_at, status, policy_version FROM workspace",
             vec![],
         )?;
         let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
-        let members = if caller.role == Role::Guest {
+        let members = if !sees_whole_room(caller) {
             rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create FROM member WHERE principal_id = ? AND revoked_at IS NULL", vec![caller.id.as_str().into()])?
         } else {
             rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create FROM member WHERE revoked_at IS NULL ORDER BY added_at", vec![])?
         };
         let manages = authorize_workroom(caller, WorkroomAction::ManageAccess) == Verdict::Allow;
-        let members: Vec<Value> = members.iter().map(|m| json!({
-            "principal_id": m["principal_id"], "kind": m["kind"], "org_id": m["org_id"], "role": m["role"],
-            "guest_can_create": int(&m["guest_can_create"]) != 0,
-        })).collect();
+        let mut listed = Vec::with_capacity(members.len());
+        for m in &members {
+            let mut entry = json!({
+                "principal_id": m["principal_id"], "kind": m["kind"], "org_id": m["org_id"], "role": m["role"],
+                "guest_can_create": int(&m["guest_can_create"]) != 0,
+            });
+            // Someone's scopes are for them and those who manage access.
+            let id = m["principal_id"].as_str().unwrap_or_default();
+            if manages || id == caller.id {
+                let kind = m["kind"].as_str().map_or(PrincipalKind::Agent, parse_kind);
+                let role = m["role"].as_str().map_or(Role::None, parse_role);
+                entry["access"] = access_json(kind, role, store::granted_scopes(sql, id)?);
+            }
+            listed.push(entry);
+        }
         let mut answer = json!({
             "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"],
-            "policy_version": manages.then(|| room["policy_version"].clone()), "members": members,
+            // Written by the room's owner or admins, and for reading only. `brief_external` marks it as another organization's.
+            "goal": room["goal"], "context": room["context"], "brief_by": room["brief_by"], "brief_external": room["owner_org_id"].as_str() != Some(who.org.as_str()),
+            "access": access_json(caller.kind, caller.role, caller.scopes),
+            "policy_version": manages.then(|| room["policy_version"].clone()), "members": listed,
         });
         // Who has left and why, and which organization holds the room, are for those who manage its access.
         if manages {
@@ -1705,8 +1986,8 @@ mod queries {
                 return Err(ApiError::invalid_argument());
             }
         }
-        // Guests only ever receive their own tasks, so the query itself is narrowed before policy re-checks each row.
-        let narrow = mine || caller.role == Role::Guest;
+        // Someone limited to their own tasks only ever receives those, so the query itself is narrowed before policy re-checks each row.
+        let narrow = mine || !sees_whole_room(caller);
         let found = rows(sql, "SELECT * FROM task WHERE seq > ? AND (? IS NULL OR status = ?)
             AND (? = 0 OR requester_id = ? OR assignee_id = ? OR reviewer_id = ?) ORDER BY seq LIMIT ?", vec![
             cursor.into(), opt(&status), opt(&status), i64::from(narrow).into(), caller.id.as_str().into(), caller.id.as_str().into(), caller.id.as_str().into(), PAGE_SIZE.into(),
@@ -1734,8 +2015,14 @@ mod queries {
     pub fn get_task(sql: &SqlStorage, who: &Participant, id: &str) -> R<Value> {
         let task = load_task(sql, id)?.ok_or_else(ApiError::task_not_found)?;
         ApiError::from_verdict(authorize_task(&who.caller, &task, TaskAction::Read))?;
+        let view = task_view(&who.caller, &task);
+        // A narrow artifact scope leaves only what the caller submitted, so nothing else's note or link reaches them.
+        let readable = |row: &&Value| {
+            view.artifacts == ArtifactView::All
+                || row["submitted_by"].as_str() == Some(who.caller.id.as_str())
+        };
         let artifacts = rows(sql, "SELECT id, submission_no, uri, label, submitted_by, submitted_org, created_at FROM artifact WHERE task_id = ? ORDER BY submission_no, id", vec![id.into()])?;
-        let artifacts: Vec<Value> = artifacts.iter().map(|a| json!({
+        let artifacts: Vec<Value> = artifacts.iter().filter(readable).map(|a| json!({
             "id": a["id"], "submission_no": a["submission_no"], "uri": a["uri"], "label": a["label"],
             "from": { "id": a["submitted_by"], "org": a["submitted_org"] },
             "external": a["submitted_org"].as_str() != Some(who.org.as_str()), "created_at": a["created_at"],
@@ -1747,6 +2034,9 @@ mod queries {
             vec![id.into()],
         )?;
         messages.reverse();
+        if !view.conversation {
+            messages.clear();
+        }
         let messages: Vec<Value> = messages.iter().map(|m| message_json(m, &who.org)).collect();
         let history = rows(sql, "SELECT seq, id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ? ORDER BY seq", vec![id.into()])?;
         let marked = |row: &Value, id: &str, org: &str| -> Value {
@@ -1757,11 +2047,16 @@ mod queries {
                     "external".into(),
                     json!(row[org].as_str() != Some(who.org.as_str())),
                 );
+                // A history entry's reason is something someone wrote, so it follows the thread's scope.
+                if !view.conversation && map.contains_key("reason") {
+                    map.insert("reason".into(), Value::Null);
+                }
             }
             out
         };
         let submissions: Vec<Value> = submissions
             .iter()
+            .filter(readable)
             .map(|r| marked(r, "submitted_by", "submitted_org"))
             .collect();
         let history: Vec<Value> = history
@@ -1769,12 +2064,18 @@ mod queries {
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
         Ok(json!({
-            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "messages": messages, "history": history }))
+            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "messages": messages, "history": history,
+            // Says what's limited, so empty lists and null reasons aren't read as "none exist".
+            "visible": { "submissions": if view.artifacts == ArtifactView::All { "all" } else { "own" }, "conversation": view.conversation },
+        }))
     }
 
     pub fn list_messages(sql: &SqlStorage, who: &Participant, id: &str, url: &Url) -> R<Value> {
         let task = load_task(sql, id)?.ok_or_else(ApiError::task_not_found)?;
         ApiError::from_verdict(authorize_task(&who.caller, &task, TaskAction::Read))?;
+        if !task_view(&who.caller, &task).conversation {
+            return Err(ApiError::not_allowed());
+        }
         let after = query_int(url, "after")?.unwrap_or(0);
         let found = rows(
             sql,
@@ -2013,7 +2314,7 @@ impl Workspace {
                     id: "system".to_string(),
                     kind: PrincipalKind::Agent,
                     role: Role::None,
-                    guest_can_create: false,
+                    scopes: Scopes::PUBLIC_PARTICIPANT,
                 };
                 remove_member(
                     &sql,
@@ -2056,7 +2357,7 @@ impl Workspace {
                 id: actor.clone(),
                 kind: PrincipalKind::Person,
                 role: Role::None,
-                guest_can_create: false,
+                scopes: Scopes::PUBLIC_PARTICIPANT,
             };
             if verb == "withdraw" && active {
                 remove_member(&sql, &person, "person", &agent, "owner_withdrawn", now)?;
@@ -2213,12 +2514,12 @@ impl Workspace {
                 return Err(ApiError::invitation_not_found());
             }
             let role = text(&found["role"]).unwrap_or_else(|| "guest".to_string());
-            let guest_can_create = int(&found["guest_can_create"]) != 0;
+            let guest_can_create = role == "guest" && int(&found["guest_can_create"]) != 0;
             let actor = Caller {
                 id: person.clone(),
                 kind: PrincipalKind::Person,
                 role: Role::None,
-                guest_can_create: false,
+                scopes: Scopes::PUBLIC_PARTICIPANT,
             };
             let mut joined = Vec::new();
             for (agent, generation) in &registered {
@@ -2228,6 +2529,7 @@ impl Workspace {
                 require_past_fence(&sql, agent, *generation)?;
                 let existing = rows(&sql, "SELECT kind, org_id, revoked_at, revocation_reason FROM member WHERE principal_id = ?", vec![agent.as_str().into()])?;
                 let mut returning = false;
+                let prior_scopes = store::granted_scopes(&sql, agent)?;
                 if let Some(row) = existing.first() {
                     if row["revoked_at"].is_null() {
                         continue;
@@ -2255,14 +2557,31 @@ impl Workspace {
                     Some(*generation),
                     now,
                 )?;
+                // The agent's own organization is bringing it back, and that organization has no authority in this
+                // room, so it can't undo what the room narrowed. A room's owner or admin can widen it again.
+                let parsed_role = parse_role(&role);
+                let mut scopes = Scopes::for_role(parsed_role, guest_can_create);
+                if returning {
+                    scopes = prior_scopes.narrower(scopes);
+                    store::write_grant(&sql, agent, scopes, &person, now)?;
+                    exec(
+                        &sql,
+                        "UPDATE member SET guest_can_create = ? WHERE principal_id = ?",
+                        vec![
+                            flag(guest_can_create && scopes.tasks.can_create()),
+                            agent.as_str().into(),
+                        ],
+                    )?;
+                }
+                let access = access_json(PrincipalKind::Agent, parsed_role, scopes);
                 audit(
                     &sql,
                     &actor,
                     "member.added",
                     agent,
-                    returning.then(|| json!({ "revoked": true }).to_string()),
+                    returning.then(|| json!({ "revoked": true, "access": access_json(PrincipalKind::Agent, parsed_role, prior_scopes) }).to_string()),
                     Some(
-                        json!({ "role": role, "kind": "agent", "org_id": org, "invitation": id })
+                        json!({ "role": role, "kind": "agent", "org_id": org, "invitation": id, "access": access })
                             .to_string(),
                     ),
                     now,
@@ -2449,7 +2768,10 @@ impl Workspace {
         Ok(())
     }
 
-    fn init(&self, identity: &Identity, name: String) -> R<Value> {
+    fn init(&self, identity: &Identity, body: &Value) -> R<Value> {
+        let name = required(body, "name")?;
+        let goal = field(body, "goal")?;
+        let context = field(body, "context")?;
         let sql = self.state.storage().sql();
         // Decision 33: only an admin of the organization the room would belong to can create it.
         if !identity.admin_orgs.contains(&identity.org) {
@@ -2461,20 +2783,21 @@ impl Workspace {
         if name.trim().is_empty() || name.len() > MAX_NAME_BYTES {
             return Err(ApiError::invalid_argument());
         }
+        validate_brief(goal.as_deref(), context.as_deref()).map_err(|e| ApiError::from_core(&e))?;
         let id = identity.clone();
         transaction_sync(&self.state, move || {
             let now = now_ms();
             store::migrate(&sql)?;
             // Owner authority lasts as long as the membership it began under.
             let since = id.org_since.get(&id.org).copied().unwrap_or(now);
-            exec(&sql, "INSERT INTO workspace (id, name, owner_org_id, owner_person_id, status, created_at, owner_since) VALUES (?, ?, ?, ?, 'active', ?, ?)", vec![
-                id.workspace_id.as_str().into(), name.as_str().into(), id.org.as_str().into(), id.id.as_str().into(), now.into(), since.into(),
+            exec(&sql, "INSERT INTO workspace (id, name, goal, context, brief_by, owner_org_id, owner_person_id, status, created_at, owner_since) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)", vec![
+                id.workspace_id.as_str().into(), name.as_str().into(), opt(&goal), opt(&context), (goal.is_some() || context.is_some()).then(|| id.id.clone()).as_deref().map_or(V::Null, V::from), id.org.as_str().into(), id.id.as_str().into(), now.into(), since.into(),
             ])?;
             let owner = Caller {
                 id: id.id.clone(),
                 kind: PrincipalKind::Person,
                 role: Role::Owner,
-                guest_can_create: false,
+                scopes: Scopes::PUBLIC_PARTICIPANT,
             };
             audit(
                 &sql,
@@ -2631,7 +2954,7 @@ impl Workspace {
                 id: actor_id.clone(),
                 kind: PrincipalKind::Person,
                 role: Role::None,
-                guest_can_create: false,
+                scopes: Scopes::PUBLIC_PARTICIPANT,
             };
             let found = rows(&sql, "SELECT org_id, added_at FROM member WHERE principal_id = ? AND kind = 'person' AND revoked_at IS NULL", vec![person.as_str().into()])?;
             if let Some(member) = found.first() {
@@ -2746,7 +3069,7 @@ impl Workspace {
         if path == INTERNAL_INIT_PATH {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
-            return self.init(&identity, required(&body, "name")?);
+            return self.init(&identity, &body);
         }
 
         // An unknown room answers from a read, so it stays empty.
@@ -2830,7 +3153,7 @@ impl Workspace {
 
         if method == Method::Get {
             return match tail {
-                [] => queries::get_workspace(&sql, &who.caller),
+                [] => queries::get_workspace(&sql, &who),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
@@ -2963,6 +3286,22 @@ impl Workspace {
                     },
                 )
             }
+            (Method::Put, ["members", _, "access"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_change_access(sql, &who.caller, &target, &body, now),
+            ),
+            (Method::Put, ["brief"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_set_brief(sql, &who.caller, &body, now),
+            ),
             (Method::Put, ["name"]) => self.command(
                 &identity,
                 key,

@@ -22,11 +22,11 @@ paths:
       operationId: createWorkspace
       tags: [commands]
       summary: Create a room. People only, and only an admin of the organization being acted in, by decision 33. Anyone else gets 403 `not_allowed`. An organization has at most 20 rooms, archived ones included, then 409 `limit_exceeded`. The caller becomes its owner. Not idempotent until the gateway dedupes creation
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string, minLength: 1, description: "At most 200 bytes." } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string, minLength: 1, description: "At most 200 bytes." }, goal: { type: string, minLength: 1, description: "Optional. At most 2048 bytes, and not only whitespace. Text for participants to read, never instructions or permissions." }, context: { type: string, minLength: 1, description: "Optional. At most 32768 bytes, and not only whitespace. Text for participants to read, never instructions or permissions." } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}:
     parameters: [{ $ref: "#/components/parameters/ws" }]
-    get: { operationId: getWorkspace, tags: [queries], summary: One workspace, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getWorkspace, tags: [queries], summary: "One workspace, with its goal and context (null when unset, with `brief_by` naming who last changed them, and `brief_external` when they're from another organization), the caller's `access`, and the members they can see. A member's `access` goes only to that member and to those who manage access, and it's the authority on what they can do. `guest_can_create` is kept in step with it for a guest, and is always false for anyone else, whatever was sent. Someone limited to their own tasks sees only their own row", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/members:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     post:
@@ -57,6 +57,24 @@ paths:
       summary: Rename a room. Owner or admin
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, name], properties: { policy_version: { type: integer }, name: { type: string, minLength: 1, description: "At most 200 bytes." } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/brief:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    put:
+      operationId: setWorkspaceBrief
+      tags: [commands]
+      summary: Change a room's goal or context. Owner or admin. A missing field stays as it is, and null clears it. They're text for participants to read, and they never become instructions or permissions
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer }, goal: { type: [string, "null"], minLength: 1, description: "At most 2048 bytes, and not only whitespace." }, context: { type: [string, "null"], minLength: 1, description: "At most 32768 bytes, and not only whitespace." } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/members/{principal}/access:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: principal, in: path, required: true, schema: { type: string } }]
+    put:
+      operationId: setMemberAccess
+      tags: [commands]
+      summary: "Apply a preset to an agent, adjust its scopes, or both, with scopes applied after the preset. Owner or admin. A preset also sets the matching kernel role, which is never admin. People's access follows their role. Managing access isn't a scope, and an unknown preset or scope is refused, as is `review: when_named` with `artifacts: shared`, because nobody reviews work they can't read. Taking review or reading away moves that agent's open tasks to their requester if the requester can review, and otherwise flags them for an owner or admin"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer }, preset: { type: string, enum: [public_participant, guest, member, coordinator] }, scopes: { type: object, additionalProperties: false, properties: { tasks: { type: string, enum: [own, own_create, all, all_create, coordinate], description: "`coordinate` is `all_create` for now. Taking over a task whose requester left arrives with work roles." }, artifacts: { type: string, enum: [shared, own, all], description: "`shared` is only what the agent submitted, until M2 can share anything." }, conversations: { type: string, enum: [own, all] }, review: { type: string, enum: [none, when_named] } } } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/archive:
     parameters: [{ $ref: "#/components/parameters/ws" }]
@@ -255,7 +273,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
-    get: { operationId: getTask, tags: [queries], summary: "One task with submissions, artifacts, recent messages and history", responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getTask, tags: [queries], summary: "One task with submissions, artifacts, recent messages and history. `visible` says what the caller's access leaves out: when `submissions` is `own`, `submissions` and `artifacts` hold only what the caller submitted, and when `conversation` is false, `messages` is empty and each history `reason` is null. Those values then don't mean none exist", responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/tasks/{t}/update:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
     post:
@@ -410,13 +428,14 @@ components:
         application/json:
           schema:
             type: object
-            required: [task, submissions, artifacts, messages, history]
+            required: [task, submissions, artifacts, messages, history, visible]
             properties:
               task: { $ref: "#/components/schemas/Task" }
               submissions: { type: array, items: { type: object } }
               artifacts: { type: array, items: { type: object } }
               messages: { type: array, items: { type: object } }
               history: { type: array, items: { type: object } }
+              visible: { type: object, required: [submissions, conversation], properties: { submissions: { type: string, enum: [all, own] }, conversation: { type: boolean } } }
     Task: { description: The task after the command, content: { application/json: { schema: { $ref: "#/components/schemas/Task" } } } }
     Error: { description: A stable error code, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   schemas:

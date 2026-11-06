@@ -125,7 +125,7 @@ function TaskBody({ api, me, names, orgNames, outside }: { api: SheetApi<LoadedT
             Details
           </Tabs.Trigger>
           <Tabs.Trigger value="discussion" className={TAB_CLASS}>
-            Discussion ({data.messages.length})
+            {data.visible?.conversation === false ? "Discussion" : `Discussion (${data.messages.length})`}
           </Tabs.Trigger>
           <Tabs.Trigger value="activity" className={TAB_CLASS}>
             Activity
@@ -137,7 +137,7 @@ function TaskBody({ api, me, names, orgNames, outside }: { api: SheetApi<LoadedT
         {/* Stays mounted, so a draft or a post in flight outlives a look at another tab. */}
         <Tabs.Content value="discussion" forceMount hidden={tab !== "discussion"} className="mt-4 space-y-3 outline-none">
           <Discussion data={data} me={me} names={names} orgNames={orgNames} />
-          {isArchivedRoom(data.room) ? null : <TaskComposer api={api} />}
+          {isArchivedRoom(data.room) || data.visible?.conversation === false ? null : <TaskComposer api={api} />}
         </Tabs.Content>
         <Tabs.Content value="activity" className="mt-4 outline-none">
           <Activity data={data} me={me} names={names} orgNames={orgNames} />
@@ -154,8 +154,11 @@ type SectionProps = { data: TaskDetail; me: string; names: Names; orgNames: Name
 
 export const author = (from: From, me: string, names: Names, orgNames: Names) => ({ name: nameOf(from.id, me, names), kind: kindOf(from.id), organization: orgNames[from.org] ?? from.org, viewer: from.id === me });
 
-export function Details({ data, me, names, orgNames }: SectionProps) {
+/** `overseen` means an admin is looking through an agent's access, so what's limited is the agent's and not theirs. */
+export function Details({ data, me, names, orgNames, overseen = false }: SectionProps & { overseen?: boolean }) {
   const { task } = data;
+  // Submissions are numbered, so the task already shows how many there are. Saying "may" would be coy.
+  const hiddenSubmissions = data.visible?.submissions === "own" && task.submission_no > data.submissions.length;
   const brief = briefAuthor(data);
   const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org ? (orgNames[brief.org] ?? brief.org) : undefined, viewer: brief.id === me };
   return (
@@ -171,7 +174,7 @@ export function Details({ data, me, names, orgNames }: SectionProps) {
       </section>
       <section className="space-y-2">
         <h3 className="font-medium">Submissions</h3>
-        {data.submissions.length === 0 ? <p className="text-sm text-muted-foreground">Nothing submitted yet.</p> : null}
+        {hiddenSubmissions ? <p className="text-sm text-muted-foreground">{overseen ? "This task has submissions this agent's access doesn't show. Only what it submitted is listed." : "This task has submissions your access doesn't show. Only what you submitted is listed."}</p> : data.submissions.length === 0 ? <p className="text-sm text-muted-foreground">Nothing submitted yet.</p> : null}
         <ol className="space-y-3">
           {data.submissions.toReversed().map((submission) => (
             <li key={submission.submission_no} className="space-y-2 rounded-lg border p-3">
@@ -231,6 +234,7 @@ function ArtifactList({ artifacts, me, names, orgNames }: { artifacts: Artifact[
 const RECENT_MESSAGES = 20;
 
 function Discussion({ data, me, names, orgNames }: SectionProps) {
+  if (data.visible?.conversation === false) return <p className="text-sm text-muted-foreground">Your access here doesn't include this task's discussion. Its activity shows when messages were posted.</p>;
   if (data.messages.length === 0) return <p className="text-sm text-muted-foreground">No messages yet. Agents post their progress here, and you can too.</p>;
   return (
     <>
@@ -252,6 +256,8 @@ function Discussion({ data, me, names, orgNames }: SectionProps) {
 export function Activity({ data, me, names, orgNames }: SectionProps) {
   if (data.history.length === 0) return <p className="text-sm text-muted-foreground">Nothing has happened yet.</p>;
   return (
+    <>
+    {data.visible?.conversation === false ? <p className="mb-3 text-sm text-muted-foreground">Your access here doesn't include the reasons people gave.</p> : null}
     <ol className="space-y-3">
       {data.history.toReversed().map((event) => (
         <li key={event.id} className="space-y-1 border-b pb-3 text-sm last:border-b-0">
@@ -266,6 +272,7 @@ export function Activity({ data, me, names, orgNames }: SectionProps) {
         </li>
       ))}
     </ol>
+    </>
   );
 }
 

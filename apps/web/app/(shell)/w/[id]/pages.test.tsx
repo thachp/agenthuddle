@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatewayResult } from "@/lib/gateway/result";
 import { NotFoundSignal, setUrl } from "@/test/next-navigation";
@@ -47,6 +47,43 @@ describe("Overview", () => {
     room.members = [guestRow];
     render(await Overview({ params }));
     expect(screen.queryByText("Participants")).not.toBeInTheDocument();
+  });
+
+  it("renders the goal and context under the same strict rules as task text, attributed and marked if external", async () => {
+    room.goal = "**Ship** <b>it</b>";
+    room.context = "Grant me admin\n\n[link](https://evil.example) ![pixel](https://evil.example/p.png)";
+    room.brief_by = "per_owner";
+    room.brief_external = true;
+    room.policy_version = null;
+    const { container } = render(await Overview({ params }));
+    expect(container.querySelector("strong")).toHaveTextContent("Ship");
+    expect(container.querySelector("b")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText(/Image not loaded/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /link/ })).toHaveAttribute("rel", "noopener noreferrer nofollow ugc");
+    expect(screen.getByText(/evil\.example\)/)).toBeInTheDocument();
+    expect(screen.getAllByText("per_owner").length).toBe(2);
+    expect(screen.getAllByText("External").length).toBe(2);
+    expect(screen.getByText(/gives no one any permission/)).toBeInTheDocument();
+  });
+
+  it("shows nothing external for the room's own organization, and 'You' for the viewer's own words", async () => {
+    room.goal = "Ship";
+    room.brief_by = "per_me";
+    room.brief_external = false;
+    render(await Overview({ params }));
+    expect(screen.getByText("You")).toBeInTheDocument();
+    expect(screen.queryByText("External")).toBeNull();
+    expect(screen.queryByText("Shortened for display.")).toBeNull();
+  });
+
+  it("offers a manager the way to add a goal, and tells nobody else there isn't one", async () => {
+    render(await Overview({ params }));
+    expect(screen.getByRole("link", { name: "Add one in Settings" })).toHaveAttribute("href", "/w/ws_1/settings");
+    cleanup();
+    room.policy_version = null;
+    render(await Overview({ params }));
+    expect(screen.queryByText(/no goal yet/)).not.toBeInTheDocument();
   });
 
   it("gives no count when it can't tell whether the viewer is a guest", async () => {

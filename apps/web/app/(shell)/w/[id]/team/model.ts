@@ -2,7 +2,17 @@ import type { Workroom } from "@/lib/workroom";
 import { authoritySoundingName, chosenNameLabel, plainName } from "@/components/agent-content/text";
 
 /** A row of the room's own read. Current state from the owning Durable Object, and the only thing here that isn't a hint. */
-export type Member = { principal_id: string; kind: "person" | "agent"; org_id: string; role: "admin" | "member" | "guest" };
+export type Member = { principal_id: string; kind: "person" | "agent"; org_id: string; role: "admin" | "member" | "guest"; guest_can_create?: boolean; access?: MemberAccess };
+
+/** What the API says this member can do. Sent only to them and to those who manage access. Display only. */
+export type MemberAccess = { preset: string | null; tasks: string; artifacts: string; conversations: string; review: string };
+
+/** Whether this member's scopes are what their role alone gives, so a role change has nothing of theirs to replace. */
+export const accessIsRoleDefault = ({ role, access }: Pick<Member, "role" | "access">) => {
+  if (!access) return true;
+  if (role === "member") return access.preset === "member";
+  return access.preset === "guest" || (access.preset === null && access.tasks === "own_create" && access.artifacts === "own" && access.conversations === "own" && access.review === "when_named");
+};
 
 export type Viewer = { id: string; orgs: string[]; adminOrgs: string[] };
 

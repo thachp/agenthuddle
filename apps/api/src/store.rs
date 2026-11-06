@@ -1,6 +1,7 @@
 //! SQLite access for a workspace: schema, row mapping and writes shared by commands.
 use crate::error::ApiError;
 use podster_core::{Decision, EventKind, Task, TaskStatus};
+use podster_policy::{ArtifactScope, ConversationScope, ReviewScope, Scopes, TaskScope};
 use serde_json::Value;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{closure::Closure, JsCast, JsValue};
@@ -54,6 +55,21 @@ CREATE INDEX denial_last_at ON denial (last_at);
 ", "
 UPDATE workspace SET owner_since = created_at WHERE owner_since IS NULL;
 INSERT INTO index_outbox (principal_id, org_id, role, removed) SELECT owner_person_id, owner_org_id, 'owner', 0 FROM workspace WHERE owner_left_at IS NOT NULL;
+", "
+ALTER TABLE workspace ADD COLUMN goal TEXT;
+ALTER TABLE workspace ADD COLUMN context TEXT;
+ALTER TABLE workspace ADD COLUMN brief_by TEXT;
+UPDATE member SET guest_can_create = 0 WHERE role <> 'guest';
+UPDATE invitation SET guest_can_create = 0 WHERE role <> 'guest';
+CREATE TABLE access_grant (principal_id TEXT PRIMARY KEY, tasks TEXT NOT NULL, artifacts TEXT NOT NULL, conversations TEXT NOT NULL, review TEXT NOT NULL,
+  granted_by TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL);
+INSERT INTO access_grant (principal_id, tasks, artifacts, conversations, review, granted_by, updated_at)
+  SELECT principal_id,
+    CASE WHEN role = 'guest' AND guest_can_create <> 0 THEN 'own_create' WHEN role = 'guest' THEN 'own' ELSE 'all_create' END,
+    CASE WHEN role = 'guest' THEN 'own' ELSE 'all' END,
+    CASE WHEN role = 'guest' THEN 'own' ELSE 'all' END,
+    'when_named', added_by, added_at
+  FROM member;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -159,6 +175,52 @@ pub fn participant(sql: &SqlStorage, id: &str) -> R<Option<(String, String)>> {
             text(&m["role"]).unwrap_or_default(),
         )
     }))
+}
+
+/// Someone's stored access in this room. With no grant they get the narrowest, so a missing row can't widen anything.
+pub fn granted_scopes(sql: &SqlStorage, id: &str) -> R<Scopes> {
+    let found = rows(
+        sql,
+        "SELECT tasks, artifacts, conversations, review FROM access_grant WHERE principal_id = ?",
+        vec![id.into()],
+    )?;
+    let Some(row) = found.first() else {
+        return Ok(Scopes::PUBLIC_PARTICIPANT);
+    };
+    let bad = || ApiError::internal("bad access grant");
+    Ok(Scopes {
+        tasks: row["tasks"]
+            .as_str()
+            .and_then(TaskScope::from_name)
+            .ok_or_else(bad)?,
+        artifacts: row["artifacts"]
+            .as_str()
+            .and_then(ArtifactScope::from_name)
+            .ok_or_else(bad)?,
+        conversations: row["conversations"]
+            .as_str()
+            .and_then(ConversationScope::from_name)
+            .ok_or_else(bad)?,
+        review: row["review"]
+            .as_str()
+            .and_then(ReviewScope::from_name)
+            .ok_or_else(bad)?,
+    })
+}
+
+/// Sets someone's access in the caller's transaction, moving the grant's own version.
+pub fn write_grant(
+    sql: &SqlStorage,
+    principal: &str,
+    scopes: Scopes,
+    granted_by: &str,
+    now: i64,
+) -> R<()> {
+    exec(sql, "INSERT INTO access_grant (principal_id, tasks, artifacts, conversations, review, granted_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (principal_id) DO UPDATE SET tasks = excluded.tasks, artifacts = excluded.artifacts, conversations = excluded.conversations, review = excluded.review,
+        granted_by = excluded.granted_by, version = version + 1, updated_at = excluded.updated_at", vec![
+        principal.into(), scopes.tasks.name().into(), scopes.artifacts.name().into(), scopes.conversations.name().into(), scopes.review.name().into(), granted_by.into(), now.into(),
+    ])
 }
 
 pub fn task_from_row(row: &Value) -> R<Task> {

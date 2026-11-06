@@ -2,7 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { cache } from "react";
 import { gatewayQuery, signInPath } from "./gateway/server";
 
-export type Workroom = { id: string; name: string; owner: string; status: string; owner_org?: string | null; owner_left_at?: number | null; members?: unknown[]; policy_version: number | null };
+export type Workroom = { id: string; name: string; owner: string; status: string; owner_org?: string | null; owner_left_at?: number | null; goal?: string | null; context?: string | null; brief_by?: string | null; brief_external?: boolean; members?: unknown[]; policy_version: number | null };
 
 const VALID_ID = /^[\w-]{1,128}$/;
 

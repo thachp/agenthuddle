@@ -148,7 +148,7 @@ function OverseenTask({ api, scope }: { api: SheetApi<Overseen>; scope: Scope })
           ))}
         </Tabs.List>
         <Tabs.Content value="details" className="mt-4 space-y-4 outline-none">
-          <Details data={data} me={me} names={names} orgNames={orgNames} />
+          <Details data={data} me={me} names={names} orgNames={orgNames} overseen />
         </Tabs.Content>
         {/* Stays mounted, so messages already paged in are still there on coming back. */}
         <Tabs.Content value="thread" forceMount className="mt-4 outline-none data-[state=inactive]:hidden">

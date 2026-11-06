@@ -10,7 +10,7 @@ import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import type { Workroom } from "@/lib/workroom";
 import { ConfirmAction } from "./confirm-action";
 import { FIELD, MOBILE_TARGET } from "./field";
-import { isExternal, membersOf, roleLabel, type Member, type Viewer } from "./model";
+import { accessIsRoleDefault, isExternal, membersOf, roleLabel, type Member, type Viewer } from "./model";
 
 type Connection = { id: string; status: string; generation: number };
 type Ended = "revoked" | "withdrawn" | "disconnected";
@@ -170,6 +170,11 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
                     <option value="deny">Don't allow it</option>
                   </select>
                 </label>
+              ) : null}
+              {(role !== member.role || (guestCreate !== "keep" && (guestCreate === "allow") !== (member.guest_can_create ?? false))) && !accessIsRoleDefault(member) ? (
+                <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm">
+                  This agent's access has been set separately from its role. Saving replaces it with what the role gives, which can widen as well as narrow what the agent can do.
+                </p>
               ) : null}
             </fieldset>
           ) : (
