@@ -37,6 +37,7 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
   const [notice, setNotice] = useState<string | null>(null);
   // Add and Remove take away the button that was pressed, so this says what happened, and focus goes somewhere that's still there.
   const [listNotice, setListNotice] = useState("");
+  const [formClosed, setFormClosed] = useState(false);
   const reader = useRef<AbortController | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const editButton = useRef<HTMLButtonElement>(null);
@@ -53,8 +54,8 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
   const row = plan?.tasks.find((other) => other.id === task.id);
   const stored = plan ? predecessorsOf(plan, task.id) : [];
   const storedDays = row?.duration_days ?? null;
-  // The Sheet's own read of the task is the fresher one.
-  const finished = isFinished(task.status);
+  // Either read can be the newer one. Finished in either only restricts the form, and the server still decides.
+  const finished = isFinished(task.status) || (row ? isFinished(row.status) : false);
   const parsed = parseDuration(duration);
   const changed = editing && (parsed !== storedDays || chosen.length !== stored.length || chosen.some((id) => !stored.includes(id)));
   const titleOf = (id: string) => {
@@ -105,6 +106,7 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
     setProblem(null);
     setNotice(null);
     setListNotice("");
+    setFormClosed(false);
     setEditing(true);
     focusNext.current = "duration";
   };
@@ -143,6 +145,7 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
         edges: [...plan.edges.filter((edge) => edge.successor !== task.id), ...saved.predecessors.map((predecessor) => ({ predecessor, successor: task.id }))],
       });
       setEditing(false);
+      setLoadFailed(false);
       setNotice("Plan saved. Nobody is told, and the task's status doesn't change.");
       focusNext.current = "edit";
       refresh();
@@ -190,14 +193,20 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
     );
   }
 
-  const incomplete = missesLinks(plan, task.status);
+  const incomplete = missesLinks(plan, finished);
   const offered = offersEdit(plan, task.requester, me, role, isArchivedRoom(room)) && !incomplete;
+  const nothingToChange = finished && stored.length === 0;
   const repeated = repeatedTitles(plan);
   const tellApart = (title: string, id: string) => (repeated.has(title) ? `${title} (${id})` : title);
   const full = chosen.length >= MAX_PREDECESSORS;
   const found = candidates(plan, task.id, chosen, filter);
   // A newer read can show this person no longer gets to edit, or that the task isn't in it.
-  if (editing && (!offered || !row)) setEditing(false);
+  if (editing && (!offered || !row)) {
+    setEditing(false);
+    setProblem(null);
+    setFormClosed(true);
+    focusNext.current = "heading";
+  }
   const unsure = problem ? needsLatest(problem.code, problem.status) : false;
   return (
     <section aria-labelledby="task-plan" className="space-y-2">
@@ -229,7 +238,7 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
         <p className="text-sm text-muted-foreground">This task is too old to be in the room's plan read.</p>
       )}
       <p role="status" className="text-sm empty:hidden">
-        {notice}
+        {formClosed ? "You can no longer edit this plan here, so the form has closed and your edits weren't saved." : notice}
       </p>
       {incomplete && row ? <p className="text-sm text-muted-foreground">This task has finished, and it may have links this read leaves out, so its plan can't be edited here.</p> : null}
       {loadFailed ? (
@@ -237,7 +246,8 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
           We couldn't load the latest plan, so what's shown may be out of date. Try again.
         </p>
       ) : null}
-      {offered && row && !editing ? (
+      {offered && row && !editing && nothingToChange ? <p className="text-sm text-muted-foreground">This task has finished and has no predecessors to remove, so there's nothing left to change.</p> : null}
+      {offered && row && !editing && !nothingToChange ? (
         <Button ref={editButton} type="button" variant="outline" size="sm" className={TARGET} onClick={startEdit}>
           Edit plan
         </Button>

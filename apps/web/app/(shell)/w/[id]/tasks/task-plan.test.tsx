@@ -226,9 +226,30 @@ describe("editing a plan", () => {
     expect(screen.getByLabelText("Estimate in working days")).toBeInTheDocument();
   });
 
-  it("goes by the Sheet's status, which is fresher than the plan read", async () => {
+  it("treats a task as finished if the Sheet's newer read says so", async () => {
     await openEditor(apiFor({ status: "completed" }));
     expect(screen.queryByLabelText("Estimate in working days")).toBeNull();
+  });
+
+  it("restricts the form when only the plan read says finished", async () => {
+    answers.GET = () => json(200, { ...whole, tasks: [row("tsk_1", "This task", "completed", 3), row("tsk_2", "First step")] });
+    await openEditor(apiFor({ status: "open" }));
+    expect(screen.queryByLabelText("Estimate in working days")).toBeNull();
+    expect(screen.queryByLabelText("Add a task that comes first")).toBeNull();
+  });
+
+  it("offers no form on a partial read when only the plan read says finished", async () => {
+    answers.GET = () => json(200, { ...whole, complete: false, tasks: [row("tsk_1", "This task", "canceled", 3)], edges: [] });
+    await open(apiFor({ status: "open" }));
+    expect(await screen.findByText(/may have links this read leaves out/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit plan" })).toBeNull();
+  });
+
+  it("offers no Edit on a finished task with nothing to remove, and says so", async () => {
+    answers.GET = () => json(200, { ...whole, tasks: [row("tsk_1", "This task", "completed", 3)], edges: [] });
+    await open(apiFor({ status: "completed" }));
+    expect(await screen.findByText(/nothing left to change/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit plan" })).toBeNull();
   });
 
   it("moves focus somewhere that's still there after Add and Remove, and says what happened", async () => {
@@ -280,6 +301,10 @@ describe("editing a plan", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Load the latest plan" }));
     await waitFor(() => expect(screen.queryByRole("form", { name: "Edit plan" })).toBeNull());
     expect(screen.getByText(/shows only tasks you can see/)).toBeInTheDocument();
+    // It says the draft went and why, whatever the reload then says, and focus doesn't fall away with the form.
+    expect(await screen.findByText(/form has closed and your edits weren't saved/)).toHaveAttribute("role", "status");
+    expect(screen.queryByText(/Your edits are still here/)).toBeNull();
+    expect(screen.getByRole("heading", { name: "Plan" })).toHaveFocus();
   });
 
   it("narrows what can be added, and never offers the task itself or what's chosen", () => {
@@ -343,6 +368,17 @@ describe("a refusal", () => {
     answers.GET = () => json(200, whole);
     await userEvent.click(screen.getByRole("button", { name: "Load the latest plan" }));
     expect(await screen.findByText(/This is the latest plan/)).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load the latest plan/)).toBeNull();
+  });
+
+  it("clears a failed reload's alert when a save then works", async () => {
+    await refusedWith(500, "internal");
+    answers.GET = () => refused(500, "internal");
+    await userEvent.click(screen.getByRole("button", { name: "Load the latest plan" }));
+    expect(await screen.findByText(/couldn't load the latest plan/)).toBeInTheDocument();
+    answers.PUT = () => json(200, { task_id: "tsk_1", duration_days: 3, predecessors: ["tsk_2", "tsk_3"], plan_revision: 8, plan_changed_at: 2 });
+    await userEvent.click(screen.getByRole("button", { name: "Save plan" }));
+    expect(await screen.findByText(/Plan saved/)).toBeInTheDocument();
     expect(screen.queryByText(/couldn't load the latest plan/)).toBeNull();
   });
 

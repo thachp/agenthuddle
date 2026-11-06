@@ -35,7 +35,7 @@ export const isFinished = (status: string) => status === "completed" || status =
  * An incomplete read can leave out a finished task's edges, and saving replaces them all, so links nobody saw would go. An
  * unfinished task always comes with its whole list.
  */
-export const missesLinks = (plan: PlanRead, status: string) => !plan.complete && isFinished(status);
+export const missesLinks = (plan: PlanRead, finished: boolean) => !plan.complete && finished;
 
 /** What a person can tell an "Add" or "Remove" button by, when titles repeat. */
 export function repeatedTitles(plan: PlanRead) {
