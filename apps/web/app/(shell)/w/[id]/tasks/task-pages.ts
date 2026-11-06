@@ -142,7 +142,7 @@ const MOVED_PX = 4;
  * measured is the bottom's distance from the top of the window: new rows above and that correction leave it alone, and so
  * does a browser's own anchoring, whose scroll event would otherwise look like the reader's.
  */
-export function useLoadOnScroll(pages: Pick<TaskPages, "cursor" | "status" | "load" | "tasks">, paused: boolean) {
+export function useLoadOnScroll(pages: { cursor: unknown; status: string; load: () => void; tasks: unknown }, paused: boolean) {
   const bottom = useRef<HTMLDivElement>(null);
   const latest = useRef({ ...pages, paused });
   useEffect(() => {
