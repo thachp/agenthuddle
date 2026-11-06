@@ -4237,6 +4237,53 @@ describe("access presets and scopes", () => {
     expect(JSON.parse(same.new_json).access).toBeUndefined();
   });
 
+  it("records what coming back did to scopes, when a room's owner or admin adds an agent again", async () => {
+    const { id } = await room();
+    const agent: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    const add = () => api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: agent.id, kind: "agent", org_id: "org_a", role: "guest" });
+    const lastAdded = async () => (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((a: any) => a.action === "member.added" && a.target_id === agent.id).at(-1);
+    expect((await add()).status).toBe(200);
+    expect(JSON.parse((await lastAdded()).new_json).access).toBeUndefined();
+    expect((await setAccess(OWNER, id, agent, { preset: "public_participant" })).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${agent.id}`, {})).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${agent.id}/clear-removal`, {})).status).toBe(200);
+    expect((await add()).status).toBe(200);
+    const entry = await lastAdded();
+    expect(JSON.parse(entry.prior_json).access.preset).toBe("public_participant");
+    expect(JSON.parse(entry.new_json).access).toEqual(GUEST_ACCESS);
+    // With nothing moved, it says nothing about access.
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${agent.id}`, {})).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${agent.id}/clear-removal`, {})).status).toBe(200);
+    expect((await add()).status).toBe(200);
+    expect(JSON.parse((await lastAdded()).prior_json).access).toBeUndefined();
+  });
+
+  it("keeps the guest switch false for anyone who isn't a guest, and it can't reset a member's scopes", async () => {
+    const { id } = await room();
+    const flagOf = async (who: Who) => (await readRoom(id)).members.find((m: any) => m.principal_id === who.id).guest_can_create;
+    const role = (who: Who, body: object) => api(OWNER, "POST", `/v1/workspaces/${id}/members/${who.id}/role`, body);
+    const fresh: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: fresh.id, kind: "agent", org_id: "org_a", role: "member", guest_can_create: true })).status).toBe(200);
+    expect(await flagOf(fresh)).toBe(false);
+    expect((await setAccess(OWNER, id, LEAD, { scopes: { conversations: "own" } })).status).toBe(200);
+    expect((await role(LEAD, { role: "member", guest_can_create: true })).status).toBe(200);
+    expect((await accessOf(id, LEAD)).conversations).toBe("own");
+    expect(await flagOf(LEAD)).toBe(false);
+    expect((await role(BOB, { role: "guest", guest_can_create: true })).status).toBe(200);
+    expect(await flagOf(BOB)).toBe(true);
+    expect((await role(BOB, { role: "member" })).status).toBe(200);
+    expect(await flagOf(BOB)).toBe(false);
+    const link = await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "member", guest_can_create: true });
+    const shown = (await api(OWNER, "GET", `/v1/workspaces/${id}/invitations`)).body.invitations.find((i: any) => i.id === link.body.id);
+    expect(shown.guest_can_create).toBe(false);
+    // Rooms from before this are cleaned up by the migration.
+    await runInDurableObject(stub(id), (_: any, state: any) => {
+      undoBriefMigration(state);
+      state.storage.sql.exec("UPDATE member SET guest_can_create = 1 WHERE principal_id = ?", REVIEWER.id);
+    });
+    expect(await flagOf(REVIEWER)).toBe(false);
+  });
+
   it("refuses review without being able to read the work, and moves tasks when reading is taken away", async () => {
     const { id, tasks } = await room();
     for (const bad of [{ scopes: { artifacts: "shared" } }, { preset: "member", scopes: { artifacts: "shared" } }, { preset: "public_participant", scopes: { review: "when_named" } }]) {

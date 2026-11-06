@@ -171,7 +171,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
                   </select>
                 </label>
               ) : null}
-              {(role !== member.role || (role === "guest" && guestCreate !== "keep")) && !accessIsRoleDefault(member) ? (
+              {(role !== member.role || (guestCreate !== "keep" && (guestCreate === "allow") !== (member.guest_can_create ?? false))) && !accessIsRoleDefault(member) ? (
                 <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm">
                   This agent's access has been set separately from its role. Saving replaces it with what the role gives, which can widen as well as narrow what the agent can do.
                 </p>

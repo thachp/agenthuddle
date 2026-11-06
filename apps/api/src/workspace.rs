@@ -792,9 +792,8 @@ fn handle_add_member(
     if active_count(sql)? + 1 >= MAX_MEMBERS {
         return Err(ApiError::limit_exceeded());
     }
-    let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
-        v.as_bool().ok_or_else(ApiError::invalid_argument)
-    })?;
+    let guest_can_create = guest_switch(&role, body, false)?;
+    let prior_scopes = store::granted_scopes(sql, &principal)?;
     write_member(
         sql,
         &caller.id,
@@ -807,11 +806,29 @@ fn handle_add_member(
         // The gateway's clock may be ahead, and this must not look older than the membership it belongs to.
         joined.map_or(now, |since| now.max(since)),
     )?;
+    let scopes = Scopes::for_role(parse_role(&role), guest_can_create);
+    let mut new_json =
+        json!({ "role": role, "kind": kind, "org_id": org, "guest_can_create": guest_can_create });
     let prior_json = prior.map(|p| {
-        json!({ "role": p["role"], "kind": p["kind"], "org_id": p["org_id"], "revoked": !p["revoked_at"].is_null() })
-            .to_string()
+        let mut before = json!({ "role": p["role"], "kind": p["kind"], "org_id": p["org_id"], "revoked": !p["revoked_at"].is_null() });
+        // Coming back starts from the role's preset, which can widen what they held, so the audit says what moved.
+        if prior_scopes != scopes {
+            let prior_kind = p["kind"].as_str().map_or(PrincipalKind::Agent, parse_kind);
+            let prior_role = p["role"].as_str().map_or(Role::None, parse_role);
+            before["access"] = access_json(prior_kind, prior_role, prior_scopes);
+            new_json["access"] = access_json(parse_kind(&kind), parse_role(&role), scopes);
+        }
+        before.to_string()
     });
-    audit(sql, caller, "member.added", &principal, prior_json, Some(json!({ "role": role, "kind": kind, "org_id": org, "guest_can_create": guest_can_create }).to_string()), now)?;
+    audit(
+        sql,
+        caller,
+        "member.added",
+        &principal,
+        prior_json,
+        Some(new_json.to_string()),
+        now,
+    )?;
     record_event(
         sql,
         "member.added",
@@ -860,9 +877,7 @@ fn handle_create_invitation(
     if let Some(org) = &invited_org {
         require_id(org)?;
     }
-    let guest_can_create = body.get("guest_can_create").map_or(Ok(false), |v| {
-        v.as_bool().ok_or_else(ApiError::invalid_argument)
-    })?;
+    let guest_can_create = guest_switch(&role, body, false)?;
     let id = format!("ivt_{}", uuid::Uuid::new_v4().simple());
     let secret = format!(
         "{}{}",
@@ -973,10 +988,8 @@ fn handle_change_role(
             return Err(ApiError::not_in_organization());
         }
     }
-    let guest_can_create = match body.get("guest_can_create") {
-        None => int(&member["guest_can_create"]) != 0,
-        Some(v) => v.as_bool().ok_or_else(ApiError::invalid_argument)?,
-    };
+    let stored_switch = int(&member["guest_can_create"]) != 0;
+    let guest_can_create = guest_switch(&role, body, stored_switch)?;
     if role != "admin" && member["role"].as_str() == Some("admin") {
         end_invitations_of(
             sql,
@@ -992,7 +1005,7 @@ fn handle_change_role(
     let prior_scopes = store::granted_scopes(sql, principal)?;
     let mut scopes = prior_scopes;
     if member["role"].as_str() != Some(role.as_str())
-        || (int(&member["guest_can_create"]) != 0) != guest_can_create
+        || (role == "guest" && stored_switch != guest_can_create)
     {
         scopes = Scopes::for_role(parse_role(&role), guest_can_create);
         store::write_grant(sql, principal, scopes, &caller.id, now)?;
@@ -1065,6 +1078,16 @@ fn access_json(kind: PrincipalKind, role: Role, stored: Scopes) -> Value {
         "tasks": scopes.tasks.name(), "artifacts": scopes.artifacts.name(),
         "conversations": scopes.conversations.name(), "review": scopes.review.name(),
     })
+}
+
+/// A guest's task-creating switch from a request. It means nothing for any other role, so it's always false for them,
+/// whatever was sent.
+fn guest_switch(role: &str, body: &Value, otherwise: bool) -> R<bool> {
+    let given = match body.get("guest_can_create") {
+        None => otherwise,
+        Some(value) => value.as_bool().ok_or_else(ApiError::invalid_argument)?,
+    };
+    Ok(role == "guest" && given)
 }
 
 /// Applies a named scope from a request. Only these four exist, so anything else, such as managing access, is refused.
@@ -2491,7 +2514,7 @@ impl Workspace {
                 return Err(ApiError::invitation_not_found());
             }
             let role = text(&found["role"]).unwrap_or_else(|| "guest".to_string());
-            let guest_can_create = int(&found["guest_can_create"]) != 0;
+            let guest_can_create = role == "guest" && int(&found["guest_can_create"]) != 0;
             let actor = Caller {
                 id: person.clone(),
                 kind: PrincipalKind::Person,

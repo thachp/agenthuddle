@@ -59,6 +59,8 @@ INSERT INTO index_outbox (principal_id, org_id, role, removed) SELECT owner_pers
 ALTER TABLE workspace ADD COLUMN goal TEXT;
 ALTER TABLE workspace ADD COLUMN context TEXT;
 ALTER TABLE workspace ADD COLUMN brief_by TEXT;
+UPDATE member SET guest_can_create = 0 WHERE role <> 'guest';
+UPDATE invitation SET guest_can_create = 0 WHERE role <> 'guest';
 CREATE TABLE access_grant (principal_id TEXT PRIMARY KEY, tasks TEXT NOT NULL, artifacts TEXT NOT NULL, conversations TEXT NOT NULL, review TEXT NOT NULL,
   granted_by TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL);
 INSERT INTO access_grant (principal_id, tasks, artifacts, conversations, review, granted_by, updated_at)
