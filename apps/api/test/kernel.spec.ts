@@ -83,7 +83,13 @@ const offer = async (tasks: string, extra: object = {}) => {
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 /** Puts a room back to what the last deployment left, with only the newest migration undone. */
+const undoPlannedMigration = (state: any) => {
+  state.storage.sql.exec("DROP TABLE relationship");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before handoffs were recorded. */
 const undoHandoffMigration = (state: any) => {
+  undoPlannedMigration(state);
   state.storage.sql.exec("DROP TABLE handoff");
   state.storage.sql.exec("DROP INDEX event_actor");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
@@ -4428,7 +4434,7 @@ describe("rooms from before access grants", () => {
     const version = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number);
     const read = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body;
     expect([read.goal, read.context]).toEqual([null, null]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 4);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 5);
     const accessOf = (who: Who) => read.members.find((m: any) => m.principal_id === who.id).access;
     expect(accessOf(LEAD).preset).toBe("member");
     expect(accessOf(BOB).preset).toBe("guest");
@@ -4618,7 +4624,7 @@ describe("work roles and claims", () => {
     expect(read.status).toBe(200);
     expect(read.body.members.find((m: any) => m.principal_id === BOB.id).access.preset).toBe("public_participant");
     expect(await count(id, "access_grant")).toBe(before);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 3);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 4);
     const role = await opening(id);
     expect((await invite(id, role, BOB)).status).toBe(200);
     expect((await claim(id, role, BOB)).body.access.preset).toBe("member");
@@ -5106,7 +5112,7 @@ describe("requiring a person to review (decision 5)", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 2);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 3);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     expect((await setting(id, true)).code).toBe("workspace_archived");
   });
@@ -5351,6 +5357,270 @@ describe("the activity list and the workroom brief", () => {
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/brief`)).body.brief_external).toBe(false);
     expect((await api(OUTSIDER, "GET", `/v1/workspaces/${id}/brief`)).code).toBe("workspace_not_found");
     expect((await api(BOB, "GET", `/v1/workspaces/${id}/audit`)).code).toBe("not_allowed");
+  });
+});
+
+describe("planned relationships", () => {
+  const map = (id: string) => `/v1/workspaces/${id}/collaboration`;
+  const planned = (id: string) => `${map(id)}/planned`;
+  const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
+  const managed = async (who: Who, method: string, path: string, id: string, body: object = {}, opts: object = {}) => api(who, method, path, { policy_version: await version(id), ...body }, opts);
+  const opening = async (id: string, title: string) => {
+    const made = await managed(OWNER, "POST", `/v1/workspaces/${id}/roles`, id, { title, responsibilities: "Works", capacity: 1, preset: "member" });
+    expect(made.status).toBe(200);
+    return made.body.id as string;
+  };
+  const twoRoles = async () => {
+    const { id, tasks } = await room();
+    return { id, tasks, a: await opening(id, "Architect"), b: await opening(id, "Engineer") };
+  };
+  const line = (from: string, to: string, label = "Hands designs to") => ({ from_role_id: from, to_role_id: to, label });
+  const read = async (who: Who, id: string) => (await api(who, "GET", map(id))).body;
+  const sql = (id: string, query: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec(query).toArray() as any[]);
+
+  it("lets the owner and admins add and remove a line, and shows it to whoever sees the whole room", async () => {
+    const { id, a, b } = await twoRoles();
+    const made = await managed(OWNER, "POST", planned(id), id, line(a, b, "  Hands designs to  "));
+    expect(made.status).toBe(200);
+    expect(made.body).toMatchObject({ from_role: a, to_role: b, label: "Hands designs to", created_by: OWNER.id });
+    // The reverse is a different flow.
+    const back = await managed(ADMIN, "POST", planned(id), id, line(b, a, "Asks questions of"));
+    expect(back.status).toBe(200);
+    for (const who of [OWNER, ADMIN, LEAD]) {
+      const lines = (await read(who, id)).planned;
+      expect(lines.map((l: any) => l.id)).toEqual([made.body.id, back.body.id]);
+      expect(lines[0]).toMatchObject({ from_role: a, from_title: "Architect", to_role: b, to_title: "Engineer", label: "Hands designs to", created_by: OWNER.id });
+    }
+    // Renaming a role shows on its lines, because a line holds only the role's ID.
+    expect((await managed(OWNER, "PUT", `/v1/workspaces/${id}/roles/${a}`, id, { title: "Designer" })).status).toBe(200);
+    expect((await read(OWNER, id)).planned[0].from_title).toBe("Designer");
+    expect((await managed(ADMIN, "DELETE", `${planned(id)}/${made.body.id}`, id)).status).toBe(200);
+    expect((await read(OWNER, id)).planned.map((l: any) => l.id)).toEqual([back.body.id]);
+    expect((await managed(OWNER, "DELETE", `${planned(id)}/${made.body.id}`, id)).code).toBe("relationship_not_found");
+    // Removed is ended, with who did it, and the same line can be planned again.
+    expect(await sql(id, `SELECT ended_by, end_reason FROM relationship WHERE id = '${made.body.id}'`)).toEqual([{ ended_by: ADMIN.id, end_reason: "removed" }]);
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, b, "Again"))).status).toBe(200);
+  });
+
+  it("leaves the policy version and access log alone, so a plan never gets in the way of an access change", async () => {
+    const { id, a, b } = await twoRoles();
+    const held = await version(id);
+    const logged = await count(id, "audit_event");
+    const made = await api(OWNER, "POST", planned(id), { policy_version: held, ...line(a, b) });
+    expect(made.status).toBe(200);
+    expect((await api(OWNER, "DELETE", `${planned(id)}/${made.body.id}`, { policy_version: held })).status).toBe(200);
+    expect(await version(id)).toBe(held);
+    expect(await count(id, "audit_event")).toBe(logged);
+    // An admin's form from before the plan still applies.
+    expect((await api(ADMIN, "PUT", `/v1/workspaces/${id}/members/${LEAD.id}/access`, { policy_version: held, scopes: { tasks: "own" } })).status).toBe(200);
+    // A change to access or roles does move it, so a plan drawn from an old view of the roles is refused.
+    expect((await api(OWNER, "POST", planned(id), { policy_version: held, ...line(b, a) })).code).toBe("version_conflict");
+  });
+
+  it("stops an admin who's demoted, with a replay answering only what already happened", async () => {
+    const { id, a, b } = await twoRoles();
+    const body = { policy_version: await version(id), ...line(a, b) };
+    const first = await api(ADMIN, "POST", planned(id), body, { key: "before-demotion" });
+    expect(first.status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${ADMIN.id}/role`, { role: "member" })).status).toBe(200);
+    // A replay gets its stored answer and does nothing more.
+    expect((await api(ADMIN, "POST", planned(id), body, { key: "before-demotion" })).body).toEqual(first.body);
+    expect(await sql(id, "SELECT count(*) AS n FROM relationship")).toEqual([{ n: 1 }]);
+    // Anything new is refused, whatever version it brings.
+    const now = await version(id);
+    expect((await api(ADMIN, "POST", planned(id), { policy_version: now, ...line(b, a) }, { key: "after-demotion" })).code).toBe("not_allowed");
+    expect((await api(ADMIN, "DELETE", `${planned(id)}/${first.body.id}`, { policy_version: now }, { key: "remove-after" })).code).toBe("not_allowed");
+    expect((await read(OWNER, id)).planned.map((l: any) => l.id)).toEqual([first.body.id]);
+  });
+
+  it("refuses Coordinator scopes, on a person or an agent, because they don't make someone an admin", async () => {
+    const { id, a, b } = await twoRoles();
+    expect((await managed(OWNER, "PUT", `/v1/workspaces/${id}/members/${LEAD.id}/access`, id, { preset: "coordinator" })).status).toBe(200);
+    const person: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: person.id, kind: "person", org_id: person.org, role: "member" })).status).toBe(200);
+    await sql(id, `UPDATE access_grant SET tasks = 'coordinate' WHERE principal_id = '${person.id}'`);
+    for (const who of [LEAD, person]) {
+      expect((await managed(who, "POST", planned(id), id, line(a, b))).code).toBe("not_allowed");
+      expect((await read(who, id)).planned).toEqual([]);
+    }
+    expect(await count(id, "relationship")).toBe(0);
+  });
+
+  it("refuses every agent, including the lead and an agent admin, and changes nothing", async () => {
+    const { id, a, b } = await twoRoles();
+    const made = await managed(OWNER, "POST", planned(id), id, line(a, b));
+    // A lead role held by LEAD.
+    const lead = await managed(OWNER, "POST", `/v1/workspaces/${id}/roles`, id, { title: "Lead", responsibilities: "Leads", is_lead: true });
+    expect((await managed(OWNER, "POST", `/v1/workspaces/${id}/roles/${lead.body.id}/invites`, id, { principal_id: LEAD.id })).status).toBe(200);
+    expect((await api(LEAD, "POST", `/v1/workspaces/${id}/roles/${lead.body.id}/claim`, {})).status).toBe(200);
+    await sql(id, `UPDATE member SET role = 'admin' WHERE principal_id = '${REVIEWER.id}'`);
+    for (const who of [LEAD, REVIEWER, BOB]) {
+      expect((await managed(who, "POST", planned(id), id, line(b, a))).code).toBe("not_allowed");
+      expect((await managed(who, "DELETE", `${planned(id)}/${made.body.id}`, id)).code).toBe("not_allowed");
+    }
+    expect((await managed(OUTSIDER, "POST", planned(id), id, line(b, a))).code).toBe("workspace_not_found");
+    expect(await count(id, "relationship")).toBe(1);
+  });
+
+  it("shows a guest the lines, whose roles it can already read, and not who set them", async () => {
+    const { id, a, b } = await twoRoles();
+    expect((await managed(ADMIN, "POST", planned(id), id, line(a, b, "Flow"))).status).toBe(200);
+    const body = await read(BOB, id);
+    expect(body.planned).toHaveLength(1);
+    expect(body.planned[0]).toMatchObject({ from_title: "Architect", to_title: "Engineer", label: "Flow" });
+    // A line's admin isn't someone a guest has any other way to learn of.
+    expect(body.planned[0].created_by).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain(ADMIN.id);
+    expect(body.external).toBe(true);
+    expect((await read(OWNER, id)).external).toBe(false);
+    // Every title on a line is one its role list already gives them.
+    const titles = (await api(BOB, "GET", `/v1/workspaces/${id}/roles`)).body.roles.map((role: any) => role.title);
+    for (const seen of body.planned) expect(titles).toEqual(expect.arrayContaining([seen.from_title, seen.to_title]));
+    // Nor does a line add anyone to their nodes, or change their recorded lines.
+    expect(body.nodes.map((n: any) => n.id)).toEqual([BOB.id]);
+    expect(body.edges).toEqual([]);
+    // The same for an agent with a stored admin role, and someone narrowed to their own tasks.
+    await sql(id, `UPDATE member SET role = 'admin' WHERE principal_id = '${REVIEWER.id}'`);
+    expect((await read(REVIEWER, id)).planned[0].created_by).toBeUndefined();
+    const v = await version(id);
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${LEAD.id}/access`, { policy_version: v, scopes: { tasks: "own" } })).status).toBe(200);
+    expect((await read(LEAD, id)).planned[0].created_by).toBeUndefined();
+    // Whoever sees the whole room sees who set it.
+    expect((await read(OWNER, id)).planned[0].created_by).toBe(ADMIN.id);
+    // Its event isn't in a guest's activity, since it names who acted, though it is in the owner's.
+    const seenBy = async (who: Who) => (await api(who, "GET", `/v1/workspaces/${id}/activity`)).body.events.map((e: any) => e.type);
+    const removedLine = await managed(OWNER, "POST", planned(id), id, line(a, await opening(id, "Removed end"), "Goes"));
+    expect((await managed(OWNER, "DELETE", `${planned(id)}/${removedLine.body.id}`, id)).status).toBe(200);
+    const closing = await opening(id, "Closes");
+    expect((await managed(OWNER, "POST", planned(id), id, line(closing, a, "Hides"))).status).toBe(200);
+    expect((await managed(OWNER, "DELETE", `/v1/workspaces/${id}/roles/${closing}`, id)).status).toBe(200);
+    for (const kind of ["relationship.planned", "relationship.removed", "relationship.hidden"]) {
+      expect(await seenBy(OWNER)).toContain(kind);
+      expect(await seenBy(BOB)).not.toContain(kind);
+    }
+    // It's addressed to the people who can change it, and to no agent.
+    await holdOutbox(id);
+    expect((await managed(ADMIN, "POST", planned(id), id, line(b, a, "Told"))).status).toBe(200);
+    const told = await sql(id, "SELECT DISTINCT o.recipient_principal_id AS who FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.type = 'relationship.planned'");
+    expect(told.map((row) => row.who)).toEqual([OWNER.id]);
+    await releaseOutbox(id);
+    expect((await api(OUTSIDER, "GET", map(id))).code).toBe("workspace_not_found");
+  });
+
+  it("refuses a self-link, a duplicate, a closed or unknown role, and a label that's empty or too long", async () => {
+    const { id, a, b } = await twoRoles();
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, a))).code).toBe("invalid_argument");
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, b, "   "))).code).toBe("invalid_argument");
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, b, "x".repeat(201)))).code).toBe("invalid_argument");
+    expect((await managed(OWNER, "POST", planned(id), id, { from_role_id: a, to_role_id: b })).code).toBe("invalid_argument");
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, "rol_missing"))).code).toBe("role_not_found");
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, "../x"))).code).toBe("invalid_argument");
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, b, "x".repeat(200)))).status).toBe(200);
+    expect((await managed(ADMIN, "POST", planned(id), id, line(a, b, "Other words"))).code).toBe("relationship_exists");
+    const closed = await opening(id, "Closed");
+    expect((await managed(OWNER, "DELETE", `/v1/workspaces/${id}/roles/${closed}`, id)).status).toBe(200);
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, closed))).code).toBe("role_not_found");
+    expect((await managed(OWNER, "POST", planned(id), id, line(closed, a))).code).toBe("role_not_found");
+    expect(await count(id, "relationship")).toBe(1);
+    expect((await api(OWNER, "POST", planned(id), { ...line(b, a), policy_version: 0 })).code).toBe("version_conflict");
+  });
+
+  it("hides a role's lines when it closes, keeps them with their history, and rolls that back with the close", async () => {
+    const { id, a, b } = await twoRoles();
+    const c = await opening(id, "Reviewer");
+    const made: Record<string, string> = {};
+    for (const [from, to] of [[a, b], [b, a], [c, a], [b, c]]) {
+      const added = await managed(OWNER, "POST", planned(id), id, line(from, to));
+      expect(added.status).toBe(200);
+      made[`${from}>${to}`] = added.body.id;
+    }
+    const close = `/v1/workspaces/${id}/roles/${a}`;
+    const before = await count(id, "event");
+    const versionBefore = await version(id);
+    const failed = await managed(OWNER, "DELETE", close, id, {}, { key: "closes", fail: true });
+    expect(failed.status).toBe(500);
+    expect((await read(OWNER, id)).planned).toHaveLength(4);
+    expect(await count(id, "event")).toBe(before);
+    expect((await managed(OWNER, "DELETE", close, id, {}, { key: "closes" })).status).toBe(200);
+    for (const who of [OWNER, BOB]) expect((await read(who, id)).planned.map((l: any) => [l.from_role, l.to_role])).toEqual([[b, c]]);
+    expect(await count(id, "relationship")).toBe(4);
+    const ended = await sql(id, "SELECT ended_by, end_reason, count(*) AS n FROM relationship WHERE ended_at IS NOT NULL GROUP BY 1, 2");
+    expect(ended).toEqual([{ ended_by: OWNER.id, end_reason: "role_closed", n: 3 }]);
+    expect(await sql(id, "SELECT count(*) AS n FROM event WHERE type = 'relationship.hidden'")).toEqual([{ n: 3 }]);
+    // The close moves the policy version once, however many lines it had, and only its own record goes in the access log.
+    expect(await version(id)).toBe(versionBefore + 1);
+    expect(await sql(id, "SELECT count(*) AS n FROM audit_event WHERE action LIKE 'relationship.%'")).toEqual([{ n: 0 }]);
+    // A hidden line can't be removed.
+    expect((await managed(OWNER, "DELETE", `${planned(id)}/${made[`${a}>${b}`]}`, id)).code).toBe("relationship_not_found");
+    expect(await count(id, "relationship")).toBe(4);
+  });
+
+  it("is refused in an archived room, for adding and removing, and stays readable", async () => {
+    const { id, a, b } = await twoRoles();
+    const made = await managed(OWNER, "POST", planned(id), id, line(a, b));
+    expect((await managed(OWNER, "POST", `/v1/workspaces/${id}/archive`, id)).status).toBe(200);
+    expect((await managed(OWNER, "POST", planned(id), id, line(b, a))).code).toBe("workspace_archived");
+    expect((await managed(ADMIN, "DELETE", `${planned(id)}/${made.body.id}`, id)).code).toBe("workspace_archived");
+    expect((await read(OWNER, id)).planned).toHaveLength(1);
+  });
+
+  it("answers a replay from the record, refuses a changed body under its key, and rolls a failure back", async () => {
+    const { id, a, b } = await twoRoles();
+    const body = { policy_version: await version(id), ...line(a, b) };
+    const events = await count(id, "event");
+    const failed = await api(OWNER, "POST", planned(id), body, { key: "adds", fail: true });
+    expect(failed.status).toBe(500);
+    expect(await count(id, "relationship")).toBe(0);
+    expect(await count(id, "event")).toBe(events);
+    const first = await api(OWNER, "POST", planned(id), body, { key: "adds" });
+    expect(first.status).toBe(200);
+    const replay = await api(OWNER, "POST", planned(id), body, { key: "adds" });
+    expect(replay.body).toEqual(first.body);
+    expect(await count(id, "relationship")).toBe(1);
+    expect(await count(id, "event")).toBe(events + 1);
+    expect((await api(OWNER, "POST", planned(id), { ...body, label: "Changed" }, { key: "adds" })).code).toBe("idempotency_mismatch");
+    expect((await api(OWNER, "POST", planned(id), body, { key: null })).code).toBe("idempotency_key_required");
+    // Removing too.
+    const remove = { policy_version: await version(id) };
+    const path = `${planned(id)}/${first.body.id}`;
+    expect((await api(OWNER, "DELETE", path, remove, { key: "drops", fail: true })).status).toBe(500);
+    expect((await read(OWNER, id)).planned).toHaveLength(1);
+    const dropped = await api(OWNER, "DELETE", path, remove, { key: "drops" });
+    expect(dropped.status).toBe(200);
+    expect((await api(OWNER, "DELETE", path, remove, { key: "drops" })).body).toEqual(dropped.body);
+    expect(await count(id, "event")).toBe(events + 2);
+  });
+
+  it("upgrades a room that ran the last migration, with no plans in it", async () => {
+    const { id, a, b } = await twoRoles();
+    const seen = await runInDurableObject(stub(id), (_: any, state: any) => {
+      undoPlannedMigration(state);
+      return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
+    });
+    expect((await read(OWNER, id)).planned).toEqual([]);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 1);
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).status).toBe(200);
+  });
+
+  it("holds a room to 100 lines, and a read of them stays bounded", async () => {
+    const { id, a, b } = await twoRoles();
+    await sql(id, `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100) INSERT INTO relationship (id, from_role_id, to_role_id, label, created_by, created_at)
+      SELECT 'rel_' || i, CASE WHEN i % 2 = 0 THEN '${a}' ELSE '${b}' END, 'rol_' || i, 'x', '${OWNER.id}', i FROM n`);
+    // Lines hidden with long-closed roles count for nothing, in the limit or in what a read costs.
+    await sql(id, `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2000) INSERT INTO relationship (id, from_role_id, to_role_id, label, created_by, created_at, ended_at)
+      SELECT 'old_' || i, 'gone_' || i, 'gone', 'x', '${OWNER.id}', i, i FROM n`);
+    await sql(id, `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100) INSERT INTO work_role (id, title, responsibilities, capacity, preset, created_by, created_at)
+      SELECT 'rol_' || i, 'Role', 'x', 1, 'member', '${OWNER.id}', 1 FROM n`);
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).code).toBe("limit_exceeded");
+    expect((await read(OWNER, id)).planned).toHaveLength(100);
+    const cost = (await api(OWNER, "GET", `${map(id)}/costs?from=${LEAD.id}&to=${BOB.id}`)).body.planned;
+    expect(cost.plan).toContain("relationship_shown");
+    expect(cost.plan).not.toContain("SCAN f");
+    expect(cost.plan).not.toContain("SCAN t");
+    expect(cost.rows_read).toBeLessThan(500);
+    // Removing one makes room.
+    expect((await managed(OWNER, "DELETE", `${planned(id)}/rel_1`, id)).status).toBe(200);
+    expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).status).toBe(200);
   });
 });
 
@@ -5714,6 +5984,6 @@ describe("the collaboration list and map", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).edges).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 1);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 2);
   });
 });

@@ -39,6 +39,8 @@ person_only:
   - getWorkspaceCard
   - getCollaboration
   - listHandoffs
+  - addPlannedRelationship
+  - removePlannedRelationship
   - setReviewPolicy
   - createRole
   - updateRole

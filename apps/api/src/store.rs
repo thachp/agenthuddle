@@ -89,6 +89,11 @@ CREATE INDEX handoff_edge ON handoff (from_id, to_id, kind, created_at);
 CREATE INDEX handoff_line ON handoff (from_id, to_id, seq);
 CREATE INDEX handoff_task ON handoff (task_id);
 CREATE INDEX event_actor ON event (actor_id, created_at);
+", "
+CREATE TABLE relationship (id TEXT PRIMARY KEY, from_role_id TEXT NOT NULL, to_role_id TEXT NOT NULL, label TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, ended_at INTEGER, ended_by TEXT, end_reason TEXT);
+CREATE UNIQUE INDEX relationship_line ON relationship (from_role_id, to_role_id) WHERE ended_at IS NULL;
+CREATE INDEX relationship_to ON relationship (to_role_id) WHERE ended_at IS NULL;
+CREATE INDEX relationship_shown ON relationship (created_at, id) WHERE ended_at IS NULL;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -399,7 +404,7 @@ pub fn record_event(
 }
 
 /// Human owners and admins, who handle tasks a departure left needing attention.
-fn room_admins(sql: &SqlStorage) -> R<Vec<String>> {
+pub fn room_admins(sql: &SqlStorage) -> R<Vec<String>> {
     let mut admins: Vec<String> = rows(
         sql,
         "SELECT owner_person_id FROM workspace WHERE owner_left_at IS NULL",
