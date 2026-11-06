@@ -2133,7 +2133,11 @@ mod queries {
             .ok_or_else(ApiError::invalid_argument)
         };
         let (after, before) = (query_str(url, "after"), query_str(url, "before"));
-        let newest = before.is_some() || query_str(url, "order").as_deref() == Some("newest");
+        let order = query_str(url, "order");
+        if order.as_deref().is_some_and(|value| value != "newest") {
+            return Err(ApiError::invalid_argument());
+        }
+        let newest = before.is_some() || order.is_some();
         if newest && after.is_some() {
             return Err(ApiError::invalid_argument());
         }
@@ -2176,10 +2180,11 @@ mod queries {
                 Some(task_id) => load_task(sql, task_id)?,
                 None => None,
             };
-            last = row["id"].as_str().map(str::to_string);
             if !can_see_event(caller, kind, actor, task.as_ref()) {
                 continue;
             }
+            // Only something the viewer may see becomes the cursor, even if the query and policy ever disagree.
+            last = row["id"].as_str().map(str::to_string);
             // A reason is something someone wrote, so it follows the thread's scope, as in a task read.
             let reason = match &task {
                 Some(task) if !task_view(caller, task).conversation => Value::Null,

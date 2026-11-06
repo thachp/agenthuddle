@@ -5243,6 +5243,71 @@ describe("the activity list and the workroom brief", () => {
     expect((await api(BOB, "GET", `${activity(id)}?order=newest`)).body.events[0].id).toBe(newest[0].id);
   });
 
+  const newest = async (who: Who, id: string, query = "", limit = 2) => {
+    const events: any[] = [];
+    let before: string | null = null;
+    for (let page = 0; page < 40; page++) {
+      const r: any = await api(who, "GET", `${activity(id)}?order=newest&limit=${limit}${query}${before ? `&before=${before}` : ""}`);
+      expect(r.status).toBe(200);
+      events.push(...r.body.events);
+      before = r.body.next_before;
+      if (!before) break;
+    }
+    return events;
+  };
+
+  it("pages newest first across the whole room too, and each page's cursor is the last event on it", async () => {
+    const { id, tasks } = await room();
+    await offer(tasks);
+    await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id });
+    const forward = await all(OWNER, id);
+    expect(await newest(OWNER, id)).toEqual([...forward].reverse());
+    expect(forward.map((e) => e.type)).toEqual(expect.arrayContaining(["member.added", "task.offered"]));
+    const page = await api(OWNER, "GET", `${activity(id)}?order=newest&limit=2`);
+    expect(page.body.next_before).toBe(page.body.events[1].id);
+    expect(page.body.next_after).toBeUndefined();
+    expect((await api(LEAD, "GET", `${activity(id)}?order=newest`)).body.events.length).toBeGreaterThan(0);
+  });
+
+  it("applies task and participant filters to pages going back", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    await api(LEAD, "POST", `${tasks}/${t.id}/messages`, { body: "one" });
+    await api(BOB, "POST", `${tasks}/${t.id}/messages`, { body: "two" });
+    await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id });
+    const onTask = await newest(LEAD, id, `&task=${t.id}`, 1);
+    expect(onTask.length).toBeGreaterThan(1);
+    expect(onTask.every((e) => e.task_id === t.id)).toBe(true);
+    const byBob = await newest(LEAD, id, `&actor=${BOB.id}`, 1);
+    expect(byBob.every((e) => e.from.id === BOB.id)).toBe(true);
+    expect(byBob.some((e) => e.type === "task.message")).toBe(true);
+    const both = await newest(LEAD, id, `&task=${t.id}&actor=${BOB.id}`, 1);
+    expect(both.map((e) => e.type)).toEqual(["task.message"]);
+  });
+
+  it("refuses an order it doesn't know, rather than paging the wrong way", async () => {
+    const { id } = await room();
+    for (const order of ["Newest", "oldest", ""]) expect((await api(BOB, "GET", `${activity(id)}?order=${order}`)).code, order).toBe("invalid_argument");
+  });
+
+  it("a hidden event's ID as a cursor shows only where the viewer's own events fall", async () => {
+    const { id, tasks } = await room();
+    const own = await offer(tasks, { title: "Bob's" });
+    const hidden = await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id, title: "Secret" });
+    const later = await offer(tasks, { title: "Bob's later" });
+    const secretEvent = (await all(OWNER, id)).find((e) => e.task_id === hidden.id);
+    const seen = await api(BOB, "GET", `${activity(id)}?before=${secretEvent.id}`);
+    // 200, and only events it may see from before that point. It needs the random ID already, and it learns nothing else.
+    expect(seen.status).toBe(200);
+    expect(JSON.stringify(seen.body)).not.toContain("Secret");
+    expect(JSON.stringify(seen.body)).not.toContain(hidden.id);
+    expect(JSON.stringify(seen.body)).not.toContain(later.id);
+    expect(seen.body.events.some((e: any) => e.task_id === own.id)).toBe(true);
+    const after = await api(BOB, "GET", `${activity(id)}?after=${secretEvent.id}`);
+    expect(after.body.events.map((e: any) => e.task_id)).toContain(later.id);
+    expect(JSON.stringify(after.body)).not.toContain(hidden.id);
+  });
+
   it("filters to nothing, the same way, for a hidden task and an unknown one", async () => {
     const { id, tasks } = await room();
     const hidden = await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id });

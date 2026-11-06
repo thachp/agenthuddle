@@ -2247,6 +2247,19 @@ describe("kernel journey across two organizations", () => {
     return { personA, personB, lead, architect, room, version };
   }
 
+  it("passes list_activity's order and cursor through to the API, over both connection methods", async () => {
+    const { personA, lead, architect, room, version } = await setup();
+    await dash(personA, "PUT", `/v1/workspaces/${room}/brief`, { goal: "Ship", policy_version: await version() });
+    const first = (await lead.tool("list_activity", { workspace_id: room, order: "newest", limit: 1 })).data;
+    expect(first.events[0].type).toBe("workspace.brief_changed");
+    expect(first.next_before).toBe(first.events[0].id);
+    const second = (await lead.tool("list_activity", { workspace_id: room, order: "newest", limit: 1, before: first.next_before })).data;
+    expect(second.events[0].id).not.toBe(first.events[0].id);
+    const agentAuth = (await execute(architect, "list_activity", { workspace_id: room, order: "newest", limit: 1 })).data;
+    expect(agentAuth.events[0].type).toBe("workspace.brief_changed");
+    expect(agentAuth.events[0].from).not.toHaveProperty("org");
+  });
+
   it("runs offer, accept, message, submit, changes, resubmit and verify, with different credentials on each side", async () => {
     const { lead, architect, room } = await setup();
     const created = await lead.tool("create_task", { workspace_id: room, title: "Design billing API", instructions: "Write the design", assignee: architect.id, idempotency_key: unique("k") });

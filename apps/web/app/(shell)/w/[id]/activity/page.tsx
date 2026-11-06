@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { loadWorkroom } from "@/lib/workroom";
 import { loadNames, loadTasks, orgNamesOf, orgRows } from "../tasks/load-tasks";
-import { kindOf, nameOf } from "../tasks/task-model";
+import { kindOf, nameOf, textNameOf } from "../tasks/task-model";
 import { FIELD, MOBILE_TARGET } from "../team/field";
 import { membersOf } from "../team/model";
 import { eventVerb, safeId } from "./model";
@@ -33,7 +33,7 @@ export default async function Activity({ params, searchParams }: { params: Promi
   const rows = events.ok ? events.data.events : [];
   const participants = [room.owner, ...membersOf(room).map((member) => member.principal_id)];
   // Names only make rows readable, so a failure leaves IDs, and a failed task list just leaves out that filter.
-  const [names, tasks] = await Promise.all([rows.length > 0 || participants.length > 0 ? loadNames(gatewayQuery, orgs) : {}, loadTasks(gatewayQuery, id, "", 1)]);
+  const [names, tasks] = await Promise.all([loadNames(gatewayQuery, orgs), loadTasks(gatewayQuery, id, "", 1)]);
   const taskOptions = tasks.ok ? tasks.data.tasks : [];
   const base = `/w/${id}/activity`;
   const pageLink = (cursor: string) => `${base}?${new URLSearchParams({ before: cursor, ...Object.fromEntries(filters) })}`;
@@ -41,14 +41,15 @@ export default async function Activity({ params, searchParams }: { params: Promi
     <section className="max-w-3xl space-y-3">
       <h1 className="text-2xl font-semibold">Activity</h1>
       <p className="text-sm text-muted-foreground">What happened here, newest first, as far as you may see it. Reading this changes nothing in anyone's inbox.</p>
-      <form method="get" action={base} className="flex flex-wrap items-end gap-3 rounded-lg border p-3">
+      {/* Keyed on the filters, because a default value only applies on mount, and Clear, Back and Forward don't remount otherwise. */}
+      <form key={filters.toString()} method="get" action={base} className="flex flex-wrap items-end gap-3 rounded-lg border p-3">
         <label className="min-w-0 flex-1 basis-44 space-y-1 text-sm">
           <span>Participant</span>
           <select name="actor" defaultValue={actor ?? ""} className={FIELD}>
             <option value="">Everyone</option>
             {[...new Set([...participants, ...(actor ? [actor] : [])])].map((participant) => (
               <option key={participant} value={participant}>
-                {nameOf(participant, me, names)}
+                {textNameOf(participant, me, names)}
               </option>
             ))}
           </select>
@@ -121,7 +122,7 @@ export default async function Activity({ params, searchParams }: { params: Promi
       ) : events.status === 400 ? (
         <p className="text-muted-foreground">
           That page isn't available.{" "}
-          <Link href={base} prefetch={false} className="text-primary underline">
+          <Link href={filtered ? `${base}?${filters}` : base} prefetch={false} className="text-primary underline">
             Back to the newest
           </Link>
         </p>

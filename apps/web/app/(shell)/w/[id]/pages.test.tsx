@@ -170,6 +170,22 @@ describe("Activity", () => {
     expect(screen.getByRole("button", { name: "Filter" })).toBeInTheDocument();
   });
 
+  it("labels an agent's chosen name in the Participant filter", async () => {
+    room.members = [{ principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member" }];
+    replies.set(path, page([]));
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_1", name: "Podster Admin" }] } });
+    render(await Activity({ params, searchParams }));
+    expect(within(screen.getByLabelText("Participant")).getByRole("option", { name: /Podster Admin \(name chosen by this agent\)/ })).toBeInTheDocument();
+  });
+
+  it("resets the filter controls when the filters change without a remount", async () => {
+    replies.set(path, page([]));
+    const { rerender } = render(await Activity({ params, searchParams: Promise.resolve({ actor: "per_owner" }) }));
+    expect(screen.getByLabelText("Participant")).toHaveValue("per_owner");
+    rerender(await Activity({ params, searchParams: Promise.resolve({}) }));
+    expect(screen.getByLabelText("Participant")).toHaveValue("");
+  });
+
   it("never sends a URL's odd values to the API", async () => {
     replies.set(path, page([]));
     render(await Activity({ params, searchParams: Promise.resolve({ task: "x y&admin=1", before: ["a", "b"] }) }));
@@ -196,8 +212,9 @@ describe("Activity", () => {
 
   it("says a stale cursor isn't available, and offers the newest", async () => {
     replies.set(path, failed(400, "invalid_argument"));
-    render(await Activity({ params, searchParams: Promise.resolve({ before: "evt_gone" }) }));
+    render(await Activity({ params, searchParams: Promise.resolve({ before: "evt_gone", task: "tsk_1" }) }));
     expect(screen.getByText(/That page isn't available/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Back to the newest" })).toHaveAttribute("href", "/w/ws_1/activity?task=tsk_1");
   });
 
   it.each([401, 429, 503])("shows a %i as a failed read", async (status) => {
