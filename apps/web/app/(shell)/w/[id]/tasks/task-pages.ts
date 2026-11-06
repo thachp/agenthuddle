@@ -19,13 +19,13 @@ export type TaskPages = {
   announce: { count: number } | null;
   /** Reads the next page, unless one is already on its way. */
   load: () => void;
-  /** Reads from the start again and replaces what's held, keeping it on screen until the answer comes. */
+  /** Reads the first page again, keeping what's held on screen until the answer comes, and later pages after it. */
   restart: () => void;
 };
 
 /** A read that doesn't reach the screen is at most this far from the reader's place. */
-type Held = { generation: number; tasks: TaskSummary[]; cursor: number | null | undefined; pages: number; announce: { count: number } | null; lost: boolean };
-const nothingHeld = (generation: number): Held => ({ generation, tasks: [], cursor: undefined, pages: 0, announce: null, lost: false });
+type Held = { generation: number; tasks: TaskSummary[]; firstPageRows: number; cursor: number | null | undefined; pages: number; announce: { count: number } | null; lost: boolean };
+const nothingHeld = (generation: number): Held => ({ generation, tasks: [], firstPageRows: 0, cursor: undefined, pages: 0, announce: null, lost: false });
 
 /**
  * Keeps what the reader is looking at where it is when rows arrive above it, because a page adds to every group. Chrome and
@@ -91,14 +91,15 @@ export function useTaskPages(workspace: string, filter: string, start: number | 
           if (result.ok) {
             const rows = result.data.tasks.map(summaryOf);
             restore.current = rememberPlace();
-            setStored((now) => ({
-              generation,
-              tasks: replace ? rows : [...(now.generation === generation ? now.tasks : []), ...rows],
-              cursor: result.data.next_cursor,
-              pages: replace ? 1 : (now.generation === generation ? now.pages : 0) + 1,
-              announce: replace ? null : { count: rows.length },
-              lost: false,
-            }));
+            const next = result.data.next_cursor;
+            setStored((before) => {
+              const now = before.generation === generation ? before : nothingHeld(generation);
+              if (!replace) return { ...now, tasks: [...now.tasks, ...rows], firstPageRows: now.pages === 0 ? rows.length : now.firstPageRows, cursor: next, pages: now.pages + 1, announce: { count: rows.length }, lost: false };
+              // A first page that ends the list says later pages are empty now. Otherwise they're still the reader's place, and
+              // cursors only go forward, so this leaves no gap between them.
+              const keepLater = next !== null && now.pages > 1;
+              return { ...now, tasks: keepLater ? [...rows, ...now.tasks.slice(now.firstPageRows)] : rows, firstPageRows: rows.length, cursor: keepLater ? now.cursor : next, pages: keepLater ? now.pages : 1, announce: null, lost: false };
+            });
             setStatus("idle");
           } else if (result.status === 401) {
             goToSignIn();

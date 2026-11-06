@@ -217,6 +217,18 @@ describe("focus when the list ends", () => {
     expect(row("Title a")).toHaveFocus();
   });
 
+  it("goes to the page when a read removes the focused button and nothing replaces it", () => {
+    const main = document.createElement("main");
+    main.id = "main-content";
+    main.tabIndex = -1;
+    document.body.appendChild(main);
+    const { rerender } = show([task("a")], 50);
+    button().focus();
+    rerender(screenWith([task("a")], null));
+    expect(main).toHaveFocus();
+    main.remove();
+  });
+
   it("follows a task to its new group, instead of falling to the page", () => {
     const { rerender } = show([task("a"), task("b")], null);
     row("Title b").focus();
@@ -352,6 +364,40 @@ describe("Needs my review in a room past one page", () => {
     rerender(screenWith([task("a")], 50));
     expect(await screen.findByRole("link", { name: "Title mine" })).toBeInTheDocument();
     expect(reads).toEqual([QUERY, QUERY]);
+  });
+
+  it("keeps a later page through a re-read, so a row someone opened from it isn't lost", async () => {
+    const user = userEvent.setup();
+    setUrl("/w/ws_1/tasks?review=mine");
+    const second = task("second", { status: "submitted", reviewer: "per_me" });
+    replies[QUERY] = { tasks: [mine], next_cursor: 7 };
+    replies["cursor=7&status=submitted&mine=true"] = { tasks: [second], next_cursor: null };
+    const { rerender } = show();
+    await screen.findByRole("link", { name: "Title mine" });
+    await user.click(button());
+    const row2 = await screen.findByRole("link", { name: "Title second" });
+    row2.focus();
+    rerender(screenWith([task("a")], 50));
+    await waitFor(() => expect(reads.filter((query) => query === QUERY)).toHaveLength(2));
+    await settled();
+    expect(row("Title second")).toHaveFocus();
+    // It had reached the end, and still has, so nothing offers to read that page again.
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+  });
+
+  it("drops later pages when the first page now ends the list", async () => {
+    const user = userEvent.setup();
+    setUrl("/w/ws_1/tasks?review=mine");
+    const second = task("second", { status: "submitted", reviewer: "per_me" });
+    replies[QUERY] = { tasks: [mine], next_cursor: 7 };
+    replies["cursor=7&status=submitted&mine=true"] = { tasks: [second], next_cursor: 9 };
+    const { rerender } = show();
+    await screen.findByRole("link", { name: "Title mine" });
+    await user.click(button());
+    await screen.findByRole("link", { name: "Title second" });
+    replies[QUERY] = { tasks: [mine], next_cursor: null };
+    rerender(screenWith([task("a")], 50));
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Title second" })).not.toBeInTheDocument());
   });
 
   it("asks again each time the filter is turned on, and the room's own pages carry on between", async () => {
