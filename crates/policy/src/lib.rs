@@ -176,6 +176,51 @@ impl Scopes {
         Preset::ALL.into_iter().find(|p| p.scopes() == self)
     }
 
+    /// The most these two together allow, scope by scope. Used where someone without room authority brings a participant
+    /// back, so they can't undo what the room narrowed.
+    pub fn narrower(self, other: Scopes) -> Scopes {
+        let sees_all = self.tasks.sees_all() && other.tasks.sees_all();
+        let creates = self.tasks.can_create() && other.tasks.can_create();
+        Scopes {
+            tasks: match (sees_all, creates) {
+                (true, true) if self.tasks == other.tasks => self.tasks,
+                (true, true) => TaskScope::AllCreate,
+                (true, false) => TaskScope::All,
+                (false, true) => TaskScope::OwnCreate,
+                (false, false) => TaskScope::Own,
+            },
+            artifacts: match (self.artifacts, other.artifacts) {
+                (ArtifactScope::All, ArtifactScope::All) => ArtifactScope::All,
+                (ArtifactScope::Shared, _) | (_, ArtifactScope::Shared) => ArtifactScope::Shared,
+                _ => ArtifactScope::Own,
+            },
+            conversations: if self.conversations == ConversationScope::All
+                && other.conversations == ConversationScope::All
+            {
+                ConversationScope::All
+            } else {
+                ConversationScope::Own
+            },
+            review: if self.review == ReviewScope::WhenNamed
+                && other.review == ReviewScope::WhenNamed
+            {
+                ReviewScope::WhenNamed
+            } else {
+                ReviewScope::None
+            },
+        }
+    }
+
+    /// Whether these scopes let someone review: they must be able to read the work on tasks they're named on.
+    pub fn reviews(self) -> bool {
+        self.review == ReviewScope::WhenNamed && self.artifacts != ArtifactScope::Shared
+    }
+
+    /// Whether these scopes can be granted. Reviewing work you can't read isn't a review, so that pair is refused.
+    pub fn is_grantable(self) -> bool {
+        self.review == ReviewScope::None || self.reviews()
+    }
+
     /// What an organization's admin sees when overseeing its agent: never more than the agent sees, and only its own tasks.
     pub fn for_oversight(self) -> Scopes {
         Scopes {
@@ -521,9 +566,7 @@ pub fn authorize_task(caller: &Caller, task: &Task, action: TaskAction) -> Verdi
             is_assignee
         }
         TaskAction::RequestChanges | TaskAction::Verify => {
-            is_reviewer
-                && !is_assignee
-                && caller.effective_scopes().review == ReviewScope::WhenNamed
+            is_reviewer && !is_assignee && caller.effective_scopes().reviews()
         }
     };
     if allowed {
@@ -554,6 +597,6 @@ pub fn can_review(
     room_requires_person: bool,
 ) -> bool {
     role != Role::None
-        && effective_scopes(kind, role, stored).review == ReviewScope::WhenNamed
+        && effective_scopes(kind, role, stored).reviews()
         && (!room_requires_person || kind == PrincipalKind::Person)
 }

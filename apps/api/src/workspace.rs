@@ -987,18 +987,29 @@ fn handle_change_role(
             now,
         )?;
     }
-    // A changed role starts again from its preset. Saving the same role keeps any scopes adjusted since.
+    // A changed role starts again from its preset, which can widen as well as narrow, so the audit says what moved.
+    // Saving the same role keeps any scopes adjusted since.
+    let prior_scopes = store::granted_scopes(sql, principal)?;
+    let mut scopes = prior_scopes;
     if member["role"].as_str() != Some(role.as_str())
         || (int(&member["guest_can_create"]) != 0) != guest_can_create
     {
-        store::write_grant(
-            sql,
-            principal,
-            Scopes::for_role(parse_role(&role), guest_can_create),
-            &caller.id,
-            now,
-        )?;
+        scopes = Scopes::for_role(parse_role(&role), guest_can_create);
+        store::write_grant(sql, principal, scopes, &caller.id, now)?;
     }
+    let target_kind = member["kind"]
+        .as_str()
+        .map_or(PrincipalKind::Agent, parse_kind);
+    let moved = (scopes != prior_scopes).then(|| {
+        (
+            access_json(
+                target_kind,
+                member["role"].as_str().map_or(Role::None, parse_role),
+                prior_scopes,
+            ),
+            access_json(target_kind, parse_role(&role), scopes),
+        )
+    });
     exec(
         sql,
         "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
@@ -1017,14 +1028,19 @@ fn handle_change_role(
     .and_then(|m| text(&m["org_id"]))
     .unwrap_or_default();
     queue_index(sql, principal, &org, Some(&role), now)?;
-    let prior = json!({ "role": member["role"], "guest_can_create": int(&member["guest_can_create"]) != 0 }).to_string();
+    let mut prior = json!({ "role": member["role"], "guest_can_create": int(&member["guest_can_create"]) != 0 });
+    let mut new = json!({ "role": role, "guest_can_create": guest_can_create });
+    if let Some((before, after)) = moved {
+        prior["access"] = before;
+        new["access"] = after;
+    }
     audit(
         sql,
         caller,
         "member.role_changed",
         principal,
-        Some(prior),
-        Some(json!({ "role": role, "guest_can_create": guest_can_create }).to_string()),
+        Some(prior.to_string()),
+        Some(new.to_string()),
         now,
     )?;
     record_event(
@@ -1103,6 +1119,9 @@ fn handle_change_access(
     for (name, value) in adjustments.into_iter().flatten() {
         adjust_scope(&mut next, name, value)?;
     }
+    if !next.is_grantable() {
+        return Err(ApiError::invalid_argument());
+    }
     let prior_role = text(&member["role"]).unwrap_or_default();
     let role = preset.map_or(prior_role.clone(), |p| p.role_name().to_string());
     let answer = |scopes| json!({ "principal_id": principal, "role": role, "access": access_json(PrincipalKind::Agent, parse_role(&role), scopes) });
@@ -1116,7 +1135,7 @@ fn handle_change_access(
         "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
         vec![
             role.as_str().into(),
-            flag(next.tasks == TaskScope::OwnCreate),
+            flag(role == "guest" && next.tasks.can_create()),
             principal.into(),
         ],
     )?;
@@ -1142,7 +1161,7 @@ fn handle_change_access(
         now,
     )?;
     // Someone who can't review any more can't stay named on open tasks, or they'd wait forever.
-    if next.review == ReviewScope::None && prior.review != ReviewScope::None {
+    if prior.reviews() && !next.reviews() {
         let named = rows(
             sql,
             "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled') AND reviewer_id = ?",
@@ -2487,6 +2506,7 @@ impl Workspace {
                 require_past_fence(&sql, agent, *generation)?;
                 let existing = rows(&sql, "SELECT kind, org_id, revoked_at, revocation_reason FROM member WHERE principal_id = ?", vec![agent.as_str().into()])?;
                 let mut returning = false;
+                let prior_scopes = store::granted_scopes(&sql, agent)?;
                 if let Some(row) = existing.first() {
                     if row["revoked_at"].is_null() {
                         continue;
@@ -2514,14 +2534,31 @@ impl Workspace {
                     Some(*generation),
                     now,
                 )?;
+                // The agent's own organization is bringing it back, and that organization has no authority in this
+                // room, so it can't undo what the room narrowed. A room's owner or admin can widen it again.
+                let parsed_role = parse_role(&role);
+                let mut scopes = Scopes::for_role(parsed_role, guest_can_create);
+                if returning {
+                    scopes = prior_scopes.narrower(scopes);
+                    store::write_grant(&sql, agent, scopes, &person, now)?;
+                    exec(
+                        &sql,
+                        "UPDATE member SET guest_can_create = ? WHERE principal_id = ?",
+                        vec![
+                            flag(guest_can_create && scopes.tasks.can_create()),
+                            agent.as_str().into(),
+                        ],
+                    )?;
+                }
+                let access = access_json(PrincipalKind::Agent, parsed_role, scopes);
                 audit(
                     &sql,
                     &actor,
                     "member.added",
                     agent,
-                    returning.then(|| json!({ "revoked": true }).to_string()),
+                    returning.then(|| json!({ "revoked": true, "access": access_json(PrincipalKind::Agent, parsed_role, prior_scopes) }).to_string()),
                     Some(
-                        json!({ "role": role, "kind": "agent", "org_id": org, "invitation": id })
+                        json!({ "role": role, "kind": "agent", "org_id": org, "invitation": id, "access": access })
                             .to_string(),
                     ),
                     now,

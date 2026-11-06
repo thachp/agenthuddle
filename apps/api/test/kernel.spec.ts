@@ -4202,6 +4202,71 @@ describe("access presets and scopes", () => {
     expect(await accessOf(id, BOB)).toEqual(GUEST_ACCESS);
   });
 
+  it("doesn't let an agent's own organization undo what the room narrowed, by withdrawing and returning it", async () => {
+    const { id } = await room();
+    const agent: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_b" };
+    await register(agent);
+    expect((await admit(id, agent, { role: "member" })).status).toBe(200);
+    expect(await accessOf(id, agent)).toEqual(MEMBER_ACCESS);
+    const link = await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "member", invited_org_id: "org_b" });
+    expect(link.status).toBe(200);
+    expect((await setAccess(OWNER, id, agent, { preset: "public_participant" })).status).toBe(200);
+    expect((await api(orgAdmin("org_b"), "POST", `/v1/workspaces/${id}/members/${agent.id}/withdraw`, {})).status).toBe(200);
+    expect((await api(orgAdmin("org_b"), "POST", "/v1/invitations/accept", { token: link.body.token, org_id: "org_b", agents: [agent.id] })).status).toBe(200);
+    const back = (await readRoom(id)).members.find((m: any) => m.principal_id === agent.id);
+    expect(back.access).toEqual({ preset: "public_participant", tasks: "own", artifacts: "shared", conversations: "own", review: "none" });
+    expect(back.guest_can_create).toBe(false);
+    const audit = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((a: any) => a.action === "member.added" && a.target_id === agent.id).at(-1);
+    expect(JSON.parse(audit.prior_json).access.preset).toBe("public_participant");
+    expect(JSON.parse(audit.new_json).access.preset).toBe("public_participant");
+    // The room can still widen it, because that's the room's call.
+    expect((await setAccess(OWNER, id, agent, { preset: "member" })).body.access).toEqual(MEMBER_ACCESS);
+  });
+
+  it("records what a role or guest-switch change did to scopes, which can widen them", async () => {
+    const { id } = await room();
+    expect((await setAccess(OWNER, id, BOB, { preset: "public_participant" })).status).toBe(200);
+    const changed = await api(OWNER, "POST", `/v1/workspaces/${id}/members/${BOB.id}/role`, { role: "guest", guest_can_create: true });
+    expect(changed.status).toBe(200);
+    const entry = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((a: any) => a.action === "member.role_changed" && a.target_id === BOB.id).at(-1);
+    expect(JSON.parse(entry.prior_json).access.preset).toBe("public_participant");
+    expect(JSON.parse(entry.new_json).access).toEqual({ ...GUEST_ACCESS, preset: null, tasks: "own_create" });
+    // Saving the same thing moves nothing, so it says nothing about access.
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${BOB.id}/role`, { role: "guest" })).status).toBe(200);
+    const same = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((a: any) => a.action === "member.role_changed" && a.target_id === BOB.id).at(-1);
+    expect(JSON.parse(same.new_json).access).toBeUndefined();
+  });
+
+  it("refuses review without being able to read the work, and moves tasks when reading is taken away", async () => {
+    const { id, tasks } = await room();
+    for (const bad of [{ scopes: { artifacts: "shared" } }, { preset: "member", scopes: { artifacts: "shared" } }, { preset: "public_participant", scopes: { review: "when_named" } }]) {
+      expect((await setAccess(OWNER, id, REVIEWER, bad)).code).toBe("invalid_argument");
+    }
+    expect(await accessOf(id, REVIEWER)).toEqual(MEMBER_ACCESS);
+    const t = await offer(tasks);
+    await api(BOB, "POST", `${tasks}/${t.id}/accept`, { version: 1 });
+    await api(BOB, "POST", `${tasks}/${t.id}/submit`, { version: 2, artifacts: [{ uri: "https://example.com/a", label: "A" }] });
+    expect((await setAccess(OWNER, id, REVIEWER, { scopes: { artifacts: "shared", review: "none" } })).status).toBe(200);
+    const moved = (await api(LEAD, "GET", `${tasks}/${t.id}`)).body.task;
+    expect([moved.reviewer, moved.status]).toEqual([LEAD.id, "submitted"]);
+    expect((await api(REVIEWER, "POST", `${tasks}/${t.id}/verify`, { submission_no: 1 })).code).toBe("not_allowed");
+    // A row that somehow holds the pair still can't be named or decide.
+    const again = await offer(tasks, { reviewer: LEAD.id });
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE access_grant SET artifacts = 'shared', review = 'when_named' WHERE principal_id = ?", CAROL.id));
+    expect((await api(LEAD, "POST", `${tasks}/${again.id}/set-reviewer`, { version: 1, reviewer: CAROL.id })).code).toBe("invalid_argument");
+  });
+
+  it("keeps guest_can_create true to the scope after an adjustment", async () => {
+    const { id } = await room();
+    const flag = async () => (await readRoom(id)).members.find((m: any) => m.principal_id === BOB.id).guest_can_create;
+    expect((await setAccess(OWNER, id, BOB, { scopes: { tasks: "all_create" } })).body.role).toBe("guest");
+    expect(await flag()).toBe(true);
+    expect((await setAccess(OWNER, id, BOB, { scopes: { tasks: "all" } })).status).toBe(200);
+    expect(await flag()).toBe(false);
+    expect((await setAccess(OWNER, id, BOB, { preset: "member" })).status).toBe(200);
+    expect(await flag()).toBe(false);
+  });
+
   it("keeps scopes out of a former owner's admin authority after a transfer", async () => {
     const founder: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
     const heir: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"] };

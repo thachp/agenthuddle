@@ -5,7 +5,7 @@ import { SheetLink } from "@/components/sheet/target-sheet";
 import { currentUrl, navigate, routerCalls, setUrl } from "@/test/next-navigation";
 import type { Room, Task, TaskDetail } from "./task-model";
 import { goToSignIn } from "./go-to-sign-in";
-import { TaskSheet } from "./task-sheet";
+import { Details, TaskSheet } from "./task-sheet";
 
 vi.mock("./go-to-sign-in", () => ({ goToSignIn: vi.fn() }));
 
@@ -774,11 +774,25 @@ describe("what the viewer's access leaves out", () => {
     expect(screen.queryByLabelText("Post a message")).toBeNull();
   });
 
-  it("says other submissions may exist, and doesn't claim nothing was submitted", async () => {
-    answer = () => json(200, narrowed());
+  it("says other submissions exist, and doesn't claim nothing was submitted", async () => {
+    answer = () => json(200, detail({ submission_no: 2 }, { submissions: [], artifacts: [], messages: [], visible: { submissions: "own", conversation: false } }));
     await open();
-    expect(screen.getByText(/shows only what you submitted/)).toBeInTheDocument();
+    expect(screen.getByText(/has submissions your access doesn't show/)).toBeInTheDocument();
     expect(screen.queryByText("Nothing submitted yet.")).toBeNull();
+  });
+
+  it("says nothing was submitted when the numbering shows that's true, even with limited access", async () => {
+    answer = () => json(200, detail({ submission_no: 0 }, { submissions: [], artifacts: [], messages: [], visible: { submissions: "own", conversation: false } }));
+    await open();
+    expect(screen.getByText("Nothing submitted yet.")).toBeInTheDocument();
+    expect(screen.queryByText(/your access doesn't show/)).toBeNull();
+  });
+
+  it("speaks of the agent, not the viewer, to an admin overseeing it", () => {
+    const data = detail({ submission_no: 2 }, { submissions: [], artifacts: [], messages: [], visible: { submissions: "own", conversation: true } });
+    render(<Details data={data} me="agt_a" names={{}} orgNames={{}} overseen />);
+    expect(screen.getByText(/this agent's access doesn't show/)).toBeInTheDocument();
+    expect(screen.queryByText(/your access/i)).toBeNull();
   });
 
   it("says reasons are left out of the history", async () => {
@@ -794,7 +808,7 @@ describe("what the viewer's access leaves out", () => {
     answer = () => json(200, detail({}, { submissions: [], artifacts: [], messages: [], visible: { submissions: "all", conversation: true } }));
     await open();
     expect(screen.getByText("Nothing submitted yet.")).toBeInTheDocument();
-    expect(screen.queryByText(/shows only what you submitted/)).toBeNull();
+    expect(screen.queryByText(/access doesn't show/)).toBeNull();
     await user.click(screen.getByRole("tab", { name: "Discussion (0)" }));
     expect(screen.getByText(/No messages yet/)).toBeInTheDocument();
     expect(screen.getByLabelText("Post a message")).toBeInTheDocument();

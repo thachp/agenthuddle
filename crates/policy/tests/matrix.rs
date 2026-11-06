@@ -683,3 +683,74 @@ fn access_and_brief_changes_are_named_in_the_denial_record() {
         Some("room.change_brief")
     );
 }
+
+#[test]
+fn nobody_reviews_work_they_cant_read() {
+    let unread = Scopes {
+        artifacts: ArtifactScope::Shared,
+        ..Scopes::GUEST
+    };
+    assert!(!unread.is_grantable());
+    assert!(!unread.reviews());
+    for preset in Preset::ALL {
+        assert!(preset.scopes().is_grantable(), "{preset:?}");
+    }
+    assert!(!can_review(Agent, Role::Guest, unread, false));
+    let reviewer = Caller {
+        scopes: unread,
+        ..caller("rev", Agent, Role::Guest)
+    };
+    assert_eq!(
+        authorize_task(&reviewer, &task(), A::Verify),
+        Verdict::Forbidden
+    );
+    assert_eq!(
+        authorize_task(&reviewer, &task(), A::RequestChanges),
+        Verdict::Forbidden
+    );
+    let own = Caller {
+        scopes: Scopes::GUEST,
+        ..caller("rev", Agent, Role::Guest)
+    };
+    assert_eq!(authorize_task(&own, &task(), A::Verify), Verdict::Allow);
+}
+
+#[test]
+fn the_narrower_of_two_grants_never_exceeds_either() {
+    let rank = |s: Scopes| {
+        (
+            u8::from(s.tasks.sees_all()),
+            u8::from(s.tasks.can_create()),
+            match s.artifacts {
+                ArtifactScope::Shared => 0,
+                ArtifactScope::Own => 1,
+                ArtifactScope::All => 2,
+            },
+            u8::from(s.conversations == ConversationScope::All),
+            u8::from(s.review == ReviewScope::WhenNamed),
+        )
+    };
+    let all = every_scopes();
+    for a in &all {
+        for b in &all {
+            let least = a.narrower(*b);
+            assert_eq!(least, b.narrower(*a), "{a:?} {b:?}");
+            let (l, x, y) = (rank(least), rank(*a), rank(*b));
+            assert!(
+                l.0 <= x.0.min(y.0)
+                    && l.1 <= x.1.min(y.1)
+                    && l.2 <= x.2.min(y.2)
+                    && l.3 <= x.3.min(y.3)
+                    && l.4 <= x.4.min(y.4),
+                "{a:?} {b:?}"
+            );
+            assert_eq!(a.narrower(*a), *a);
+        }
+    }
+    assert_eq!(
+        Scopes::PUBLIC_PARTICIPANT.narrower(Scopes::MEMBER),
+        Scopes::PUBLIC_PARTICIPANT
+    );
+    assert_eq!(Scopes::COORDINATOR.narrower(Scopes::GUEST), Scopes::GUEST);
+    assert_eq!(Scopes::COORDINATOR.narrower(Scopes::MEMBER), Scopes::MEMBER);
+}
