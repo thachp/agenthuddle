@@ -427,8 +427,10 @@ async function keyboardPaths(s) {
     await mapLine.waitFor({ timeout: 15_000 });
     ok((await mapLine.getAttribute("aria-label"))?.includes(" to "), "a map line has no words");
     await tabTo(page, mapLine, "a map line");
+    await page.evaluate(() => { window.__samePage = true; });
     await page.keyboard.press("Enter");
     await page.getByRole("dialog").getByRole("link").first().waitFor({ timeout: 15_000 });
+    ok(await page.evaluate(() => window.__samePage === true), "a map line reloaded the page");
     await page.keyboard.press("Escape");
     await page.getByRole("dialog").waitFor({ state: "detached", timeout: 15_000 });
     await page.waitForFunction(() => document.activeElement?.closest("svg") !== null, null, { timeout: 15_000 });
