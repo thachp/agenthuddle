@@ -1,11 +1,11 @@
 "use client";
 
 import { Bot, ExternalLink, User } from "lucide-react";
-import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Component, startTransition, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Badge } from "@/components/ui/badge";
-import { CANT_FORMAT_NOTE, nestedTooDeep, NOTE_CLASS, PLAIN_TEXT_CLASS, remarkBodyLimits } from "./limits";
+import { CANT_FORMAT_NOTE, FORMAT_AT_ONCE_CHARS, NOTE_CLASS, PLAIN_TEXT_CLASS, remarkBodyLimits, tooCostlyToParse } from "./limits";
 import { authoritySoundingName, chosenNameLabel, destinationHost, plainName, safeLinkUrl, truncate } from "./text";
 
 /** `viewer` means this is the person looking, whose "You" is ours and not a name anyone chose. */
@@ -88,6 +88,21 @@ const COMPONENTS: Components = {
   },
 };
 
+/** True from the start for what's cheap, and otherwise from when the element nears the view. A transition, so input can get in between one body and the next. */
+function useNearView(element: React.RefObject<HTMLElement | null>, cheap: boolean) {
+  const [seen, setSeen] = useState(false);
+  useEffect(() => {
+    if (cheap || seen) return;
+    if (!element.current || typeof IntersectionObserver === "undefined") return setSeen(true);
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) startTransition(() => setSeen(true));
+    }, { rootMargin: "200px" });
+    observer.observe(element.current);
+    return () => observer.disconnect();
+  }, [element, cheap, seen]);
+  return cheap || seen;
+}
+
 function PlainText({ text }: { text: string }) {
   return (
     <>
@@ -114,24 +129,26 @@ class RenderBoundary extends Component<{ text: string; children: ReactNode }, { 
  */
 export function AgentContent({ author, external = false, body, maxLength }: { author: AgentAuthor; external?: boolean; body: string; maxLength?: number }) {
   const { text, truncated } = truncate(body, maxLength);
+  const article = useRef<HTMLElement>(null);
+  const near = useNearView(article, text.length <= FORMAT_AT_ONCE_CHARS);
   // A task's Sheet re-renders while it's open, and parsing every message again each time adds up in a long thread.
-  const content = useMemo(
-    () =>
-      nestedTooDeep(text) ? (
-        <PlainText text={text} />
-      ) : (
-        <RenderBoundary key={text} text={text}>
-          <Markdown remarkPlugins={[remarkGfm, remarkBodyLimits]} allowedElements={ALLOWED} unwrapDisallowed urlTransform={(url) => url} components={COMPONENTS}>
-            {text}
-          </Markdown>
-        </RenderBoundary>
-      ),
-    [text],
-  );
+  const content = useMemo(() => {
+    // Until it's near the view a long body is its own text, which costs nothing however many there are, and a hidden tab is never near.
+    if (!near) return <p className={PLAIN_TEXT_CLASS}>{text}</p>;
+    if (tooCostlyToParse(text)) return <PlainText text={text} />;
+    return (
+      <RenderBoundary key={text} text={text}>
+        <Markdown remarkPlugins={[remarkGfm, remarkBodyLimits]} allowedElements={ALLOWED} unwrapDisallowed urlTransform={(url) => url} components={COMPONENTS}>
+          {text}
+        </Markdown>
+      </RenderBoundary>
+    );
+  }, [text, near]);
   return (
-    <article className="min-w-0 rounded-lg border p-3">
+    <article ref={article} className="min-w-0 rounded-lg border p-3">
       <AuthorLine author={author} external={external} />
-      <div className="mt-2 space-y-2 break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_.task-list-item]:list-none [&_ul]:list-disc [&_ul]:pl-5">
+      {/* From the fifth level, nesting stops indenting. 100 levels of it would otherwise push the text 1,000 px out of a Sheet at phone width. */}
+      <div className="mt-2 space-y-2 break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_.task-list-item]:list-none [&_ul]:list-disc [&_ul]:pl-5 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:list-inside [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:border-l-0 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:pl-0">
         {content}
       </div>
       {truncated ? <p className="mt-2 text-xs text-muted-foreground">Shortened for display.</p> : null}

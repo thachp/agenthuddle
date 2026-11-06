@@ -59,13 +59,25 @@ async function seed() {
     const columns = Math.floor(size / 8);
     return `${"|a".repeat(columns)}\n${"|-".repeat(columns)}\n${"a\n".repeat(Math.floor((size - 4 * columns) / 2) - 2)}`;
   };
+  const K16 = 16 * 1024;
   const oversized = await make("Task with oversized tables", { assignee: guest.id, instructions: paddedTable(20_000).padEnd(64 * 1024, "a\n") });
   await guest.must("accept_task", { ...at(oversized), version: oversized.version });
   await guest.must("send_message", { ...at(oversized), body: paddedTable(16 * 1024) });
+  // What a whole screen can cost: the shapes that took longest to parse, on one task. About 34 s to open before bodies were deferred.
+  const fill = (unit) => unit.repeat(Math.ceil(K16 / unit.length)).slice(0, K16);
+  const heavy = [`${"*a _b ".repeat(1300)}x${" b_ a*".repeat(1300)}`, fill("]"), fill("a\n=\n"), fill(`${"- ".repeat(100)}x\n`)];
+  const heavyThread = await make("Task with a heavy thread", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(heavyThread), version: heavyThread.version });
+  for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(heavyThread), body: heavy[i % heavy.length] });
+  // And what's formatted at once, without waiting for the view: the same shapes, just under that length.
+  const atOnce = 2_000;
+  const heavyShort = ["*a _b ".repeat(Math.floor(atOnce / 6)), "]".repeat(1_000).padEnd(atOnce, "x"), "a\n=\n".repeat(atOnce / 4), `${"- ".repeat(100)}x\n`.repeat(Math.floor(atOnce / 202))];
+  const shortThread = await make("Task with a heavy short thread", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(shortThread), version: shortThread.version });
+  for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(shortThread), body: heavyShort[i % heavyShort.length] });
   // Text that has crashed the tab. Each gets its own task, in its own room, so one failure can't hide another.
   const hostileRoom = await owner.createRoom("Hostile text");
   await owner.addAgent(hostileRoom, lead);
-  const K16 = 16 * 1024;
   const deepest = `${"- ".repeat(100)}x\n`;
   const hostile = [];
   for (const [label, instructions, note] of [
@@ -84,6 +96,7 @@ async function seed() {
     ["tabs behind a quote at the message limit", Array.from({ length: 70 }, (_, i) => `> ${"\t".repeat(i)}${"- ".repeat(98)}x`).join("\n").slice(0, K16), CANT_FORMAT],
     ["footnotes", "[^a]: ".repeat(Math.floor(K16 / 6)), CANT_FORMAT],
     ["inline nesting", `${"*a _b ".repeat(1300)}x${" b_ a*".repeat(1300)}`, CANT_FORMAT],
+    ["a mix at the limit", `${"> - ".repeat(50)}deep`, null],
     ["the deepest allowed, repeated", deepest.repeat(Math.floor(K16 / deepest.length)), null],
     ["wide tables repeated", `| ${"w".repeat(300)} |\n| - |\n\n`.repeat(Math.floor(K16 / 312)), "too large to show as a table"],
   ]) hostile.push({ label, note, id: (await lead.must("create_task", { workspace_id: hostileRoom, title: `Hostile: ${label}`, instructions })).id });
@@ -126,7 +139,7 @@ async function seed() {
   await until(async () => (await owner.must("GET", "/v1/oversight/ownerless")).rooms.some((r) => r.workspace_id === ownerlessRoom), "the workroom reaching the ownerless list");
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
-  return { owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -544,6 +557,59 @@ async function keyboardPaths(s) {
     ok((await page.locator("table td").count()) < 2_500, "an oversized table still rendered as a table");
     const responded = await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done(true))));
     ok(responded && Date.now() - started < 15_000, `the Sheet took ${Date.now() - started}ms`);
+  });
+
+  // A bound that would catch the 34 s and 86 s these took, measured to a frame after the screen shows. The input check is that a tab can still be switched.
+  const openHeavy = async (label, context, path, tab) => {
+    const own = await context.newPage();
+    try {
+      const started = Date.now();
+      await own.goto(`${app}${path}`);
+      await own.getByRole("dialog").getByRole("tab", { name: tab }).waitFor({ timeout: 30_000 });
+      await hydrated(own);
+      await own.evaluate(() => new Promise((done) => requestAnimationFrame(done)));
+      const opened = Date.now() - started;
+      ok(opened < 10_000, `${label} took ${opened}ms to open`);
+      const switched = Date.now();
+      await own.getByRole("dialog").getByRole("tab", { name: tab }).click();
+      await own.getByRole("dialog").locator("article").first().waitFor({ timeout: 30_000 });
+      await own.evaluate(() => new Promise((done) => requestAnimationFrame(done)));
+      const shown = Date.now() - switched;
+      ok(shown < 10_000, `${label}'s ${tab} tab took ${shown}ms to show`);
+      // Reading to the end pays for each body once, a body at a time, and input can get in between them.
+      const read = await own.getByRole("dialog").evaluate(async (sheet) => {
+        const [started, step] = [performance.now(), []];
+        for (const article of sheet.querySelectorAll("article")) {
+          article.scrollIntoView();
+          const at = performance.now();
+          await new Promise((done) => setTimeout(() => requestAnimationFrame(done), 50));
+          step.push(performance.now() - at);
+        }
+        return { total: Math.round(performance.now() - started), worst: Math.round(Math.max(...step)) };
+      });
+      ok(read.worst < 5_000, `${label} froze for ${read.worst}ms while scrolling`);
+      console.log(`     ${label}: opened in ${opened}ms, ${tab} tab showed in ${shown}ms, read to the end in ${read.total}ms, worst step ${read.worst}ms`);
+    } finally {
+      await own.close().catch(() => {});
+    }
+  };
+  await keyboardPath("a heavy thread on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.heavyThread.id}`, /^Discussion/));
+  await keyboardPath("a heavy thread on oversight (50 messages)", () => openHeavy("oversight", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.heavyThread.id}`, "Thread"));
+  await keyboardPath("a heavy short thread on oversight (50 messages)", () => openHeavy("oversight, short messages", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.shortThread.id}`, "Thread"));
+
+  await keyboardPath("nesting inside the limit at phone width", async () => {
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    for (const { label, id } of s.hostile.filter((shape) => shape.note === null)) {
+      await small.goto(`${app}/w/${s.hostileRoom}/tasks?task=${id}`);
+      await small.getByRole("dialog").getByText(`Hostile: ${label}`).first().waitFor({ timeout: 15_000 });
+      await hydrated(small);
+      const sizes = await small.getByRole("dialog").evaluate((sheet) => ({ page: document.documentElement.scrollWidth - window.innerWidth, sheet: sheet.scrollWidth - sheet.clientWidth, article: (sheet.querySelector("article")?.scrollWidth ?? 0) - (sheet.querySelector("article")?.clientWidth ?? 0) }));
+      console.log(`     ${label} at 375px overflows by ${JSON.stringify(sizes)}`);
+      ok(sizes.page <= 0, `${label} scrolls the page sideways by ${sizes.page}px at 375px`);
+      ok(sizes.sheet <= 0, `${label} scrolls the Sheet sideways by ${sizes.sheet}px at 375px`);
+    }
+    await phone.close();
   });
 
   for (const { label, note, id } of s.hostile) {

@@ -1,5 +1,6 @@
 /**
- * What one piece of agent text may cost the person reading it. These limits are per body, and they don't bound a whole screen.
+ * What one piece of agent text may cost the person reading it. A whole screen's cost is bounded by these limits together with
+ * AgentContent parsing long bodies only when they near the view.
  *
  * - Quote and list nesting is checked before parsing, because the parser itself overflows the stack or takes seconds, and because
  *   a tree that deep can crash the renderer, which no error boundary can catch.
@@ -9,6 +10,10 @@
 export const MAX_NESTING = 100;
 /** Inline nesting like `*_*_` is cheap to parse and only shows in the tree. A list level is two nodes, so MAX_NESTING fits inside this. */
 export const MAX_TREE_DEPTH = 256;
+/** The parser's emphasis and link matching is quadratic in these. 16 KB of them took about 2 s, and 1,000 takes about 50 ms. */
+export const MAX_INLINE_MARKS = 1_000;
+/** Bodies longer than this are parsed only when they near the view, so a screen's cost follows what's on it. Parsing this much takes about 20 ms at worst. */
+export const FORMAT_AT_ONCE_CHARS = 2_000;
 export const MAX_TABLES_PER_BODY = 10;
 export const MAX_TABLE_CELLS_PER_BODY = 2_000;
 
@@ -41,6 +46,18 @@ export function nestedTooDeep(text: string) {
   }
   return false;
 }
+
+// An underscore inside a word can't open or close emphasis, so snake_case costs nothing and doesn't count.
+const INLINE_MARK = /[*~]+|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])|\]/g;
+
+export function tooManyInlineMarks(text: string) {
+  let count = 0;
+  for (const _ of text.matchAll(INLINE_MARK)) if (++count > MAX_INLINE_MARKS) return true;
+  return false;
+}
+
+/** Whether parsing this could cost the viewer more than a formatted body is worth. Runs in a few milliseconds on anything we'd display. */
+export const tooCostlyToParse = (text: string) => nestedTooDeep(text) || tooManyInlineMarks(text);
 
 type MdNode = {
   type: string;
