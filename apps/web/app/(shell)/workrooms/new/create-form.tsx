@@ -153,7 +153,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
                 <input type="checkbox" className="mt-1 size-4" checked={role.isLead} disabled={hasLead && !role.isLead} onChange={(event) => editRole(role.key, { isLead: event.target.checked })} />
                 <span>
                   Lead coordinator
-                  <span className="block text-muted-foreground">One opening, with the Coordinator preset. Being lead adds no admin, review or deploy rights.</span>
+                  <span className="block text-muted-foreground">One opening, with the Coordinator preset. Being lead adds nothing beyond that preset, which can review only when named.</span>
                 </span>
               </label>
               {role.isLead ? null : (
