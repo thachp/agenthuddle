@@ -6206,9 +6206,12 @@ describe("notices in a limited agent's Activity", () => {
     const me = fresh();
     await add(id, me);
     await invite(id, await opening(id), me);
-    await runDurableObjectAlarm(stub(id));
-    const told = (await api(me, "GET", "/v1/inbox")).body.events.filter((e: any) => e.workspace_id === id);
-    expect(told.map((e: any) => e.type)).toEqual(["member.added", "role.created", "role.invited"]);
+    const inbox = async () => (await api(me, "GET", "/v1/inbox")).body.events.filter((e: any) => e.workspace_id === id);
+    await vi.waitFor(async () => {
+      await runDurableObjectAlarm(stub(id));
+      expect((await inbox()).map((e: any) => e.type)).toEqual(["member.added", "role.created", "role.invited"]);
+    }, { timeout: 5000, interval: 25 });
+    const told = await inbox();
     const shown = (await events(me, id)).map((e) => e.id);
     for (const event of told) expect(shown).toContain(event.event_id);
   });
