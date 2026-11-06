@@ -1,6 +1,6 @@
 # Podster workroom access control
 
-Status: **approved product model; proposed implementation and acceptance criteria** · Updated: 2026-11-04
+Status: **approved product model; proposed implementation and acceptance criteria** · Updated: 2026-11-05
 
 Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design](DESIGN.md)
 
@@ -20,7 +20,7 @@ These rules apply to every entry path: dashboard, hosted MCP, Agent Auth and A2A
 
 ## Proposed permission matrix
 
-This matrix makes the approved model testable. [Access presets](PRODUCT.md#access-presets-proposed) propose the fine-grained scopes, and [decision 8](PRODUCT.md#decisions-needed) sets the rule for ownership transfer and recovery. [ADR 0005](../adr/0005-ownership-transfer-and-recovery.md) has the design. Unsupported grants are denied.
+This matrix makes the approved model testable. [Access presets](PRODUCT.md#access-presets) set the fine-grained scopes under [decision 20](PRODUCT.md#decisions-needed), and [decision 8](PRODUCT.md#decisions-needed) sets the rule for ownership transfer and recovery. [ADR 0005](../adr/0005-ownership-transfer-and-recovery.md) has the design. Unsupported grants are denied.
 
 | Action | Required authority | Boundary |
 | --- | --- | --- |
@@ -33,7 +33,7 @@ This matrix makes the approved model testable. [Access presets](PRODUCT.md#acces
 | Claim an available public work role | Connected, authenticated agent whose owner's participation policy allows public claims (proposed default: invitations only) | Uses the workroom owner/admin-configured policy and available capacity. Does not edit policy or require the workroom owner's manual approval for each public claim. |
 | Change permissions of self/other participants | Workroom owner or appointed administrator | Agents, ordinary members and guests are denied, including a lead or DevOps agent. No admin self-elevation or owner removal. |
 | Connect/claim an agent identity | Authenticated person authorized by the agent-owning organization | Verify ownership; workroom authority alone is insufficient. |
-| Oversee own agent in a workroom (read-only) | Admin of the agent's organization, where that is an invited organization and the agent is in the room now | Only what the agent sees of the tasks it's party to. No room role and no other room data. Not for the room's own organization, or anyone in the room or revoked from it. M0's form of [decision 7](PRODUCT.md#decisions-needed). |
+| Oversee own agent in a workroom (read-only) | Admin of the agent's organization, where that is an invited organization and the agent is in the room now | Only what the agent sees of the tasks it's party to. No room role and no other room data. Not for the room's own organization, or anyone in the room or revoked from it. Admins of the room's own organization outside the room stay refused in M0, with the owner's answer pending. People otherwise see a room only through their own explicit role in it ([decision 7](PRODUCT.md#decisions-needed)). |
 | Withdraw own agent from a workroom | Agent owner or authorized human representative of its owning organization | Does not require the workroom owner's permission. Does not grant authority over other agents. |
 | Disconnect own agent globally | Agent owner or authorized human representative of its owning organization | Revoke its connection across all rooms; room admins cannot reverse this. Reconnection does not restore room access. |
 | Grant repository/deployment access | Authorized external-resource delegator AND permitted workroom configuration actor | Provider, account, installation, repository/project, environment, action and scope must match. Neither side alone suffices. Proposed: for a Podster-managed repository, Podster's platform is the resource owner and delegates to the room owner for that repository only; see [ARCHITECTURE.md](ARCHITECTURE.md#managed-repositories-and-merge-m5). |

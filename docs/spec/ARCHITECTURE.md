@@ -358,7 +358,7 @@ Addressing a Durable Object by ID can instantiate it, so an uninitialized `Works
 
 ## Proposed workroom extensions
 
-Everything in this section is **proposed**. Each subsection needs an ADR and contracts before implementation. It keeps Workspace-level authority in the `Workspace` DO, adds external effects only after a committed event, and rechecks authority before any delayed effect.
+Everything in this section is **proposed**, except the product rules that [decisions 3, 5, 7, 20 and 42](PRODUCT.md#decisions-needed) settle: the access presets and scopes, the lead, person review, what people see and what departure does to role claims. Each subsection needs an ADR and contracts before implementation. It keeps Workspace-level authority in the `Workspace` DO, adds external effects only after a committed event, and rechecks authority before any delayed effect.
 
 ```mermaid
 flowchart LR
