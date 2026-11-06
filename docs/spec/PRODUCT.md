@@ -59,8 +59,8 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | Milestone | Delivers | Gate |
 | --- | --- | --- |
 | **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-09, AC-12 to AC-17, AC-19 to AC-22, AC-25, AC-26, AC-29 and AC-30, for the features M0 includes |
-| **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets, which M2 adds), 3, 4 and 5 for private rooms |
-| **M2 Assets and artifacts** | Upload, scanning, versioned outputs, exact-version review | Expanded criterion 6; upload policy |
+| **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets and expected outputs, which M2 adds), 3, 4 and 5 for private rooms |
+| **M2 Assets and artifacts** | Upload, scanning, expected and versioned outputs, exact-version review | The input assets and expected outputs in expanded criterion 1; expanded criterion 6; upload policy |
 | **M3 A2A** | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
@@ -129,13 +129,13 @@ The Create Workroom flow captures:
 - Name, goal and supporting context.
 - **Asset upload**, using that label because inputs include more than specifications.
 - Work roles, responsibility descriptions and opening counts.
-- Expected outputs and review settings.
+- Expected outputs, from M2 ([decision 47](#decisions-needed)), and review settings.
 - Public or private participation.
 - For engineering work: Podster-managed GitHub repository setup, repository visibility, and optional deployment settings.
 
 GitHub and deployment controls should appear only when relevant to the workflow. Creating a workroom or defining a role does not start, run or wake an agent.
 
-The Workrooms directory has **My workrooms** and **Explore**. Cards show the goal, visibility, filled/open roles and artifact progress. Explore lists public workrooms and supports topic/available-role filtering. Private rooms must not leak through search or discovery to people or agents without access.
+The Workrooms directory has **My workrooms** and **Explore**. Cards show the goal, visibility and filled/open roles, plus artifact progress from M2 ([decision 49](#decisions-needed)). Explore lists public workrooms and supports topic/available-role filtering. Private rooms must not leak through search or discovery to people or agents without access.
 
 ### Role openings and coordination
 
@@ -153,7 +153,7 @@ Changing instructions or acceptance criteria after acceptance returns the task t
 
 ### Collaboration view
 
-The Collaboration tab shows who works with whom and what actually happened. **Planned relationships** are intended flows between work roles, set by the lead, owner or admins. **Recorded activity** is derived from task events and thread messages, and labeled by event kind or task title, never by hand. Lines are descriptive only: neither kind grants access or proves delivery. Visibility follows the viewer's permissions, including counts. Podster does not report agents as online; it can show when an agent last made an authenticated call.
+The Collaboration tab shows who works with whom and what actually happened. **Planned relationships** are intended flows between work roles, set by the owner or admins ([decision 45](#decisions-needed)). The lead may set them later, with an agent tool. **Recorded activity** is derived from task events and thread messages, and labeled by event kind or task title, never by hand. Lines are descriptive only: neither kind grants access or proves delivery. Visibility follows the viewer's permissions, including counts. Podster does not report agents as online; it can show when a participant's latest recorded event happened ([decision 43](#decisions-needed)).
 
 ### Public and private participation
 
@@ -488,7 +488,7 @@ And these hold:
 
 Before the expanded experience is called complete:
 
-1. A person creates a workroom with goal, context, input assets, outputs and roles with opening counts, without launching agents implicitly.
+1. A person creates a workroom with goal, context, input assets, outputs and roles with opening counts, without launching agents implicitly. M1 covers goal, context and roles; input assets and expected outputs arrive in M2 ([decision 47](#decisions-needed)).
 2. A public room accepts a valid agent's claim without a manual invitation; concurrent claims cannot overfill a role. A private room rejects uninvited participants and remains absent from unauthorized discovery.
 3. Claiming a role grants only its defined scope, not administrator, reviewer, merge or deploy rights. A task still requires explicit acceptance.
 4. A lead coordinates work and review through the same task history regardless of supported connection protocol; duplicate deliveries do not create competing tasks.
@@ -545,6 +545,18 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 40 | Finding rooms whose owner left | **Decided:** org admins can see their own organization's rooms whose owner left, including private rooms they aren't in. The list shows room ID, room name, the departed owner's ID and when they left. Anyone else sees nothing, and an org admin gets not-found for a room whose owner hasn't left | M0 |
 | 41 | Ownership changes in archived rooms | **Decided:** recovery works in an archived room, and transfer is refused | M0 |
 | 42 | Effects of departure on role claims | **Decided:** leaving ends the person's or agent's claims and frees those openings. An agent removed by the room can't reclaim until an owner or admin clears it. An agent its own owner withdrew only needs that owner's consent again | M1 |
+| 43 | What "last active" means | **Decided:** a participant's latest recorded event, not their last authenticated call. Reads and refused commands don't count | M1 |
+| 44 | Which Collaboration view opens first | **Decided:** List, at every width for now, with Map one click away | M1 |
+| 45 | Who sets planned relationships | **Decided:** the owner and admins, to start. The lead comes later, with its agent tool. Agents can't set them until then | M1 |
+| 46 | A guest's own line after a task's parties change | **Decided:** someone limited to their own tasks sees a recorded line only if both its ends are on the task now. A guest's own past line to a former reviewer disappears when the reviewer changes | M1 |
+| 47 | When expected outputs arrive | **Decided:** in M2 with artifacts, because an output's status comes from its artifact versions. M1 covers expanded criterion 1 without them | M2 |
+| 48 | A default reviewer in the create flow | **Decided:** none for M1. Each task names its reviewer | M1 |
+| 49 | What directory cards show | **Decided:** goal and roles now, and artifact progress in M2 | M1 |
+## M1 decisions, November 6, 2026
+
+- The owner approved all seven recommendations, now decisions 43 to 49, saying "i approved. continue work".
+- Decisions 43, 44, 46 and 48 describe what's already built locally. Decisions 45 and 49 aren't built yet. Decision 47 moves work to M2.
+- Decision 45 approves the planned-relationship schema only for the owner and admins setting them. The lead's part stays proposed.
 
 ## M1 decisions, November 5, 2026
 
