@@ -315,6 +315,8 @@ The consumer in `apps/api` rechecks everything before sending: the connection is
 ```
 GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
+GET    /v1/workspaces/cards?offset=                 20 rooms at most: membership_index says which to ask, and each room answers what this viewer sees
+GET    /v1/workspaces/{ws}/card                     goal and role summary, narrowed per viewer as the room and role reads are
 POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33); at most 20 per organization
 GET    /v1/workspaces/{ws}
 PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
