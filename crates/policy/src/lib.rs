@@ -524,6 +524,11 @@ pub fn sees_whole_room(caller: &Caller) -> bool {
     caller.role != Role::None && caller.effective_scopes().tasks.sees_all()
 }
 
+/// Whether the caller reads every thread, so a message count on someone else's task tells them nothing new.
+pub fn reads_every_thread(caller: &Caller) -> bool {
+    caller.role != Role::None && caller.effective_scopes().conversations == ConversationScope::All
+}
+
 /// How much of a submission's work the caller can read on a task they can see.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArtifactView {

@@ -83,7 +83,14 @@ const offer = async (tasks: string, extra: object = {}) => {
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 /** Puts a room back to what the last deployment left, with only the newest migration undone. */
+const undoHandoffMigration = (state: any) => {
+  state.storage.sql.exec("DROP TABLE handoff");
+  state.storage.sql.exec("DROP INDEX event_actor");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before person review. */
 const undoReviewMigration = (state: any) => {
+  undoHandoffMigration(state);
   state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN require_person_review");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
 };
@@ -4421,7 +4428,7 @@ describe("rooms from before access grants", () => {
     const version = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number);
     const read = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body;
     expect([read.goal, read.context]).toEqual([null, null]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 3);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 4);
     const accessOf = (who: Who) => read.members.find((m: any) => m.principal_id === who.id).access;
     expect(accessOf(LEAD).preset).toBe("member");
     expect(accessOf(BOB).preset).toBe("guest");
@@ -4611,7 +4618,7 @@ describe("work roles and claims", () => {
     expect(read.status).toBe(200);
     expect(read.body.members.find((m: any) => m.principal_id === BOB.id).access.preset).toBe("public_participant");
     expect(await count(id, "access_grant")).toBe(before);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 2);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 3);
     const role = await opening(id);
     expect((await invite(id, role, BOB)).status).toBe(200);
     expect((await claim(id, role, BOB)).body.access.preset).toBe("member");
@@ -5099,7 +5106,7 @@ describe("requiring a person to review (decision 5)", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 1);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 2);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     expect((await setting(id, true)).code).toBe("workspace_archived");
   });
@@ -5344,5 +5351,270 @@ describe("the activity list and the workroom brief", () => {
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/brief`)).body.brief_external).toBe(false);
     expect((await api(OUTSIDER, "GET", `/v1/workspaces/${id}/brief`)).code).toBe("workspace_not_found");
     expect((await api(BOB, "GET", `/v1/workspaces/${id}/audit`)).code).toBe("not_allowed");
+  });
+});
+
+describe("the collaboration list and map", () => {
+  const map = (id: string) => `/v1/workspaces/${id}/collaboration`;
+  const read = async (who: Who, id: string) => {
+    const r = await api(who, "GET", map(id));
+    expect(r.status).toBe(200);
+    return r.body as { edges: any[]; nodes: any[] };
+  };
+  const edge = (body: { edges: any[] }, from: Who, to: Who, kind: string) => body.edges.find((e) => e.from === from.id && e.to === to.id && e.kind === kind);
+  const submit = async (tasks: string, t: any, who: Who = BOB) => {
+    await api(who, "POST", `${tasks}/${t.id}/accept`, { version: t.version });
+    await api(who, "POST", `${tasks}/${t.id}/submit`, { version: t.version + 1, artifacts: [{ uri: "https://example.com/a", label: "A" }] });
+  };
+
+  it("counts offers, submissions, change requests and messages, each from what really happened", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    await submit(tasks, t);
+    await api(REVIEWER, "POST", `${tasks}/${t.id}/request-changes`, { submission_no: 1, reason: "more" });
+    await api(LEAD, "POST", `${tasks}/${t.id}/messages`, { body: "hello" });
+    const body = await read(OWNER, id);
+    expect(edge(body, LEAD, BOB, "offer").count).toBe(1);
+    expect(edge(body, BOB, REVIEWER, "submission").count).toBe(1);
+    expect(edge(body, REVIEWER, BOB, "change_request").count).toBe(1);
+    expect(edge(body, LEAD, BOB, "message").count).toBe(1);
+    expect(edge(body, LEAD, REVIEWER, "message").count).toBe(1);
+    expect(edge(body, LEAD, BOB, "offer").last_at).toBeGreaterThan(0);
+    // A line stays what it was when the task moves on.
+    const moved = await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id, title: "Moves on" });
+    expect((await api(OWNER, "POST", `${tasks}/${moved.id}/assign`, { version: moved.version, assignee: CAROL.id })).status).toBe(200);
+    const later = await read(OWNER, id);
+    expect(edge(later, LEAD, REVIEWER, "offer").count).toBe(1);
+    expect(edge(later, OWNER, CAROL, "offer").count).toBe(1);
+  });
+
+  it("draws nothing for handing work to yourself", async () => {
+    const { id, tasks } = await room();
+    await api(LEAD, "POST", tasks, { title: "Mine", instructions: "x", assignee: LEAD.id, reviewer: REVIEWER.id });
+    expect((await read(OWNER, id)).edges.filter((e) => e.from === LEAD.id && e.to === LEAD.id)).toEqual([]);
+  });
+
+  it("shows a guest only lines from its own tasks, and counts nothing it can't see", async () => {
+    const { id, tasks } = await room();
+    await offer(tasks, { assignee: BOB.id });
+    const before = await read(BOB, id);
+    await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id });
+    await offer(tasks, { assignee: CAROL.id });
+    const after = await read(BOB, id);
+    expect(after).toEqual(before);
+    expect(edge(after, LEAD, BOB, "offer").count).toBe(1);
+    expect(after.edges.every((e) => e.from === BOB.id || e.to === BOB.id)).toBe(true);
+    expect(edge(after, LEAD, CAROL, "offer")).toBeUndefined();
+    expect(edge(after, LEAD, REVIEWER, "offer")).toBeUndefined();
+    expect((await read(CAROL, id)).edges.some((e) => e.to === BOB.id)).toBe(false);
+    // Nodes are only who its lines touch, plus itself, and last active goes only with its own.
+    expect(after.nodes.map((n) => n.id).sort()).toEqual([BOB.id, LEAD.id].sort());
+    expect(after.nodes.find((n) => n.id === LEAD.id).last_active).toBeUndefined();
+    expect((await read(OUTSIDER, id).catch(() => null))).toBeNull();
+  });
+
+  it("counts messages only where the viewer's conversation scope reaches", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    await api(LEAD, "POST", `${tasks}/${t.id}/messages`, { body: "hello" });
+    const v = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${CAROL.id}/access`, { policy_version: v, scopes: { tasks: "all" } })).status).toBe(200);
+    const narrow = await read(CAROL, id);
+    expect(edge(narrow, LEAD, BOB, "offer").count).toBe(1);
+    expect(edge(narrow, LEAD, BOB, "message")).toBeUndefined();
+    const wide = await read(REVIEWER, id);
+    expect(edge(wide, LEAD, BOB, "message").count).toBe(1);
+  });
+
+  it("shows a guest no line naming someone no longer on its task", async () => {
+    const { id, tasks } = await room();
+    // An old assignee.
+    const t = await offer(tasks, { assignee: CAROL.id, title: "Moved" });
+    expect((await api(LEAD, "POST", `${tasks}/${t.id}/assign`, { version: t.version, assignee: BOB.id })).status).toBe(200);
+    let bob = await read(BOB, id);
+    expect(edge(bob, LEAD, BOB, "offer").count).toBe(1);
+    expect(edge(bob, LEAD, CAROL, "offer")).toBeUndefined();
+    expect(bob.nodes.map((n) => n.id)).not.toContain(CAROL.id);
+    expect((await api(BOB, "GET", `${map(id)}/handoffs?from=${LEAD.id}&to=${CAROL.id}`)).body.handoffs).toEqual([]);
+    // An old reviewer, whose submission line went with them.
+    const s = await offer(tasks, { title: "Reviewed" });
+    await submit(tasks, s);
+    const now = (await api(OWNER, "GET", `${tasks}/${s.id}`)).body.task;
+    expect((await api(OWNER, "POST", `${tasks}/${s.id}/set-reviewer`, { version: now.version, reviewer: LEAD.id })).status).toBe(200);
+    bob = await read(BOB, id);
+    expect(edge(bob, BOB, REVIEWER, "submission")).toBeUndefined();
+    expect(bob.nodes.map((n) => n.id)).not.toContain(REVIEWER.id);
+    // Someone who has seen the whole room still does.
+    expect(edge(await read(OWNER, id), LEAD, CAROL, "offer").count).toBe(1);
+    expect(edge(await read(LEAD, id), BOB, REVIEWER, "submission").count).toBe(1);
+  });
+
+  it("drops a guest's lines when the task is no longer theirs", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks, { assignee: BOB.id });
+    expect((await read(BOB, id)).edges.length).toBeGreaterThan(0);
+    expect((await api(LEAD, "POST", `${tasks}/${t.id}/assign`, { version: t.version, assignee: CAROL.id })).status).toBe(200);
+    expect((await read(BOB, id)).edges).toEqual([]);
+    expect((await read(BOB, id)).nodes.map((n) => n.id)).toEqual([BOB.id]);
+  });
+
+  it("records to nobody who has left, and marks who has gone only for those who see the member list", async () => {
+    const { id, tasks } = await room();
+    const leaving: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: leaving.id, kind: "agent", org_id: "org_a", role: "member" })).status).toBe(200);
+    // A reviewer named, then removed, before the submission that would have gone to them.
+    const task = await offer(tasks, { reviewer: leaving.id, assignee: LEAD.id, title: "Self" });
+    expect(task.id).toBeTruthy();
+    await api(LEAD, "POST", `${tasks}/${task.id}/accept`, { version: task.version });
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${leaving.id}`, {})).status).toBe(200);
+    expect((await api(LEAD, "POST", `${tasks}/${task.id}/submit`, { version: task.version + 1 + 1, artifacts: [{ uri: "https://example.com/a", label: "A" }] })).status).toBe(200);
+    const body = await read(OWNER, id);
+    expect(edge(body, LEAD, leaving, "submission")).toBeUndefined();
+    // Someone with a line who has since left is marked, and someone here isn't.
+    await offer(tasks, { assignee: CAROL.id });
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${CAROL.id}`, {})).status).toBe(200);
+    const after = await read(OWNER, id);
+    expect(after.nodes.find((n) => n.id === CAROL.id).gone).toBe(true);
+    expect(after.nodes.find((n) => n.id === LEAD.id).gone).toBeUndefined();
+    expect((await read(BOB, id)).nodes.every((n) => n.gone === undefined)).toBe(true);
+  });
+
+  it("treats an owner who left as the room read does", async () => {
+    const owner: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
+    const id = (await api(owner, "POST", "/v1/workspaces", { name: "Owner leaves" })).body.id as string;
+    const version = async () => (await api(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const helper: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
+    expect((await api(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: helper.id, kind: "person", org_id: "org_a", role: "admin", policy_version: await version() })).status).toBe(200);
+    const plain: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    await register(plain);
+    expect((await api(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: plain.id, kind: "agent", org_id: "org_a", role: "member", policy_version: await version() })).status).toBe(200);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE workspace SET owner_left_at = 1"));
+    const asMember = await read(plain, id);
+    expect(asMember.nodes.find((n) => n.id === owner.id)?.gone).toBeUndefined();
+    expect(asMember.nodes.map((n) => n.id)).toContain(owner.id);
+    expect((await read(helper, id)).nodes.find((n) => n.id === owner.id).gone).toBe(true);
+  });
+
+  it("counts a message from someone not named on the task, to all three who are", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    const other: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: other.id, kind: "agent", org_id: "org_a", role: "member" })).status).toBe(200);
+    expect((await api(other, "POST", `${tasks}/${t.id}/messages`, { body: "hi" })).status).toBe(200);
+    const body = await read(OWNER, id);
+    for (const to of [LEAD, BOB, REVIEWER]) expect(edge(body, other, to, "message").count).toBe(1);
+    // A guest named on the task doesn't learn of the line from someone it can't otherwise see.
+    expect(edge(await read(BOB, id), other, BOB, "message")).toBeUndefined();
+  });
+
+  it("records one handoff for a retry, and none for a command or message that fails", async () => {
+    const { id, tasks } = await room();
+    const key = nextKey();
+    const body = { title: "Once", instructions: "x", assignee: BOB.id, reviewer: REVIEWER.id };
+    const first = await api(LEAD, "POST", tasks, body, { key });
+    expect((await api(LEAD, "POST", tasks, body, { key })).body.id).toBe(first.body.id);
+    expect(edge(await read(OWNER, id), LEAD, BOB, "offer").count).toBe(1);
+    const messageKey = nextKey();
+    await api(LEAD, "POST", `${tasks}/${first.body.id}/messages`, { body: "once" }, { key: messageKey });
+    await api(LEAD, "POST", `${tasks}/${first.body.id}/messages`, { body: "once" }, { key: messageKey });
+    expect(edge(await read(OWNER, id), LEAD, BOB, "message").count).toBe(1);
+    const handoffs = await count(id, "handoff");
+    expect((await api(LEAD, "POST", `${tasks}/${first.body.id}/messages`, { body: "lost" }, { fail: true })).status).toBe(500);
+    await api(BOB, "POST", `${tasks}/${first.body.id}/accept`, { version: first.body.version });
+    expect((await api(BOB, "POST", `${tasks}/${first.body.id}/submit`, { version: first.body.version + 1, artifacts: [{ uri: "https://example.com/a", label: "A" }] }, { fail: true })).status).toBe(500);
+    expect(await count(id, "handoff")).toBe(handoffs);
+  });
+
+  it("reads through its indexes, so a view's cost doesn't follow the room's whole history", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    const hidden = await offer(tasks, { assignee: CAROL.id, title: "Hidden" });
+    // A long line and a long history, none of it on a task Bob is on, and a few rows on the one he is.
+    await runInDurableObject(stub(id), (_: any, state: any) => {
+      const rows = (values: string, count: number) => state.storage.sql.exec(`WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM g WHERE n < ${count}) ${values}`);
+      rows(`INSERT INTO handoff (from_id, to_id, kind, task_id, created_at) SELECT '${LEAD.id}', '${BOB.id}', 'offer', '${hidden.id}', n FROM g`, 5000);
+      rows(`INSERT INTO handoff (from_id, to_id, kind, task_id, created_at) SELECT '${LEAD.id}', '${BOB.id}', 'offer', '${t.id}', n FROM g`, 3);
+      rows(`INSERT INTO event (id, type, actor_id, created_at) SELECT 'evt_seed' || n, 'task.updated', '${LEAD.id}', n FROM g`, 5000);
+    });
+    const costs = async (who: Who) => {
+      const r = await api(who, "GET", `${map(id)}/costs?from=${LEAD.id}&to=${BOB.id}`);
+      expect(r.status).toBe(200);
+      return r.body;
+    };
+    const whole = await costs(OWNER);
+    expect(whole.line.plan).toContain("handoff_line");
+    expect(whole.line.plan).not.toContain("TEMP B-TREE");
+    // Each row read twice at most over the 51 it needs, and not the 5,003 on the line.
+    expect(whole.line.rows_read).toBeLessThan(200);
+    expect(whole.last_active.plan).toContain("COVERING INDEX event_actor");
+    expect(whole.last_active.rows_read).toBeLessThan(10);
+    expect(whole.map.plan).toContain("handoff_edge");
+    const guest = await costs(BOB);
+    expect(guest.map.plan).toContain("handoff_task");
+    expect(guest.map.rows_read).toBeLessThan(100);
+    expect(guest.line.plan).toContain("handoff_line");
+    // Known: a guest with few visible rows on a long line walks the pair, so this follows the rows hidden from them.
+    expect(guest.line.rows_read).toBeLessThan(5100);
+  });
+
+  it("shows whole-room viewers everyone, with role and last active", async () => {
+    const { id, tasks } = await room();
+    await offer(tasks);
+    const v = async () => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const role = await api(OWNER, "POST", `/v1/workspaces/${id}/roles`, { title: "Engineer", responsibilities: "x", preset: "member", policy_version: await v() });
+    await api(OWNER, "POST", `/v1/workspaces/${id}/roles/${role.body.id}/invites`, { principal_id: BOB.id, policy_version: await v() });
+    await api(BOB, "POST", `/v1/workspaces/${id}/roles/${role.body.id}/claim`, {});
+    const body = await read(LEAD, id);
+    expect(body.nodes.map((n) => n.id)).toEqual(expect.arrayContaining([OWNER.id, ADMIN.id, LEAD.id, REVIEWER.id, BOB.id, CAROL.id]));
+    expect(body.nodes.find((n) => n.id === BOB.id).role_title).toBe("Engineer");
+    expect(body.nodes.find((n) => n.id === LEAD.id).last_active).toBeGreaterThan(0);
+    // Only what the view is for: no talk of presence, and no one's organization.
+    expect(JSON.stringify(body)).not.toContain("online");
+    expect(JSON.stringify(body)).not.toContain("org_");
+    // A guest sees its own place, and not who else holds what.
+    const guest = await read(CAROL, id);
+    expect(guest.nodes.find((n) => n.id === BOB.id)).toBeUndefined();
+  });
+
+  it("opens an edge into its handoffs, each naming its task, under the same limits", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks, { title: "First" });
+    const hidden = await offer(tasks, { title: "Secret", assignee: CAROL.id });
+    const handoffs = (who: Who, query: string) => api(who, "GET", `${map(id)}/handoffs?${query}`);
+    const whole = await handoffs(OWNER, `from=${LEAD.id}&to=${BOB.id}`);
+    expect(whole.body.handoffs).toEqual([expect.objectContaining({ kind: "offer", task_id: t.id, task_title: "First" })]);
+    expect(whole.body.truncated).toBe(false);
+    expect((await handoffs(BOB, `from=${LEAD.id}&to=${CAROL.id}`)).body.handoffs).toEqual([]);
+    expect(JSON.stringify((await handoffs(BOB, `from=${LEAD.id}&to=${CAROL.id}`)).body)).not.toContain(hidden.id);
+    expect((await handoffs(OWNER, "from=x")).code).toBe("invalid_argument");
+    expect((await handoffs(OWNER, "to=x")).code).toBe("invalid_argument");
+    expect((await handoffs(OUTSIDER, `from=${LEAD.id}&to=${BOB.id}`)).code).toBe("workspace_not_found");
+  });
+
+  it("keeps a person from seeing it through their organization's agents, and writes nothing", async () => {
+    const { id, tasks } = await room();
+    await offer(tasks);
+    const orgPerson: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_b", adminOrgs: ["org_b"] };
+    expect((await api(orgPerson, "GET", map(id))).code).toBe("workspace_not_found");
+    const events = await count(id, "event");
+    const handoffs = await count(id, "handoff");
+    await read(OWNER, id);
+    expect(await count(id, "event")).toBe(events);
+    expect(await count(id, "handoff")).toBe(handoffs);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${CAROL.id}`, {})).status).toBe(200);
+    expect((await api(CAROL, "GET", map(id))).code).toBe("access_revoked");
+  });
+
+  it("rolls back a handoff with its command, and upgrades a room that ran the last migration", async () => {
+    const { id, tasks } = await room();
+    const before = await count(id, "handoff");
+    expect((await api(LEAD, "POST", tasks, { title: "x", instructions: "y", assignee: BOB.id, reviewer: REVIEWER.id }, { fail: true })).status).toBe(500);
+    expect(await count(id, "handoff")).toBe(before);
+    const seen = await runInDurableObject(stub(id), (_: any, state: any) => {
+      undoHandoffMigration(state);
+      return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
+    });
+    expect((await read(OWNER, id)).edges).toEqual([]);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 1);
   });
 });

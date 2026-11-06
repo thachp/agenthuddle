@@ -1,4 +1,4 @@
-import { authoritySoundingName, chosenNameLabel, plainName } from "@/components/agent-content/text";
+import { authoritySoundingName, chosenNameLabel, plainName, truncate } from "@/components/agent-content/text";
 
 /** What the API returns for tasks, and the wording the design spec gives it. Nothing here decides anything: Rust does. */
 
@@ -66,6 +66,13 @@ export const isChosenName = (id: string, name: string, me: string) => id !== me 
 export function textNameOf(id: string, me: string, names: Names) {
   const name = nameOf(id, me, names);
   return isChosenName(id, name, me) ? `${name} (${chosenNameLabel(kindOf(id)).toLowerCase()})` : name;
+}
+
+/** For a tight space such as a map: the name is cut, never its label, which is short and goes on separately. */
+export function shortNameOf(id: string, me: string, names: Names, max: number) {
+  const name = nameOf(id, me, names);
+  const cut = truncate(name, max);
+  return { name: cut.truncated ? `${cut.text}…` : cut.text, label: isChosenName(id, name, me) ? "(chosen name)" : null };
 }
 
 const VERBS: Record<string, string> = {

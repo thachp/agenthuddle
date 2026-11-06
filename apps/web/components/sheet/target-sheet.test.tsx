@@ -175,6 +175,21 @@ describe("TargetSheet", () => {
       }
     });
 
+    it("returns to the one pressed when two controls open the same target", async () => {
+      const Twice = () => (
+        <>
+          <SheetLink param="agent" target="b">First way</SheetLink>
+          <SheetLink param="agent" target="b">Second way</SheetLink>
+          <Screen />
+        </>
+      );
+      render(<Twice />);
+      await userEvent.click(screen.getByRole("link", { name: "Second way" }));
+      await title("Agent B");
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() => expect(screen.getByRole("link", { name: "Second way" })).toHaveFocus());
+    });
+
     it("returns to the launching control on Escape", async () => {
       render(<Screen />);
       await userEvent.click(screen.getByRole("link", { name: "Open B" }));

@@ -381,6 +381,43 @@ pub fn decide_claim(state: &ClaimState) -> Result<ClaimOutcome, ClaimRefusal> {
     Ok(ClaimOutcome::Claim)
 }
 
+/// A recorded offer, submission or change request between two participants, or a message in a thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoffKind {
+    Offer,
+    Submission,
+    ChangeRequest,
+    Message,
+}
+
+impl HandoffKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            HandoffKind::Offer => "offer",
+            HandoffKind::Submission => "submission",
+            HandoffKind::ChangeRequest => "change_request",
+            HandoffKind::Message => "message",
+        }
+    }
+}
+
+/// Who an event hands work to, if it's a handoff at all, read from the task as it stands right after the event. A
+/// reassignment comes with an offer to the new assignee, and only tells the old one, so it isn't one by itself. Handing
+/// something to yourself isn't a handoff, so a requester offering a task to itself draws no line.
+pub fn handoff_of<'a>(
+    kind: EventKind,
+    actor: &str,
+    task: &'a Task,
+) -> Option<(HandoffKind, &'a str)> {
+    let (handoff, to) = match kind {
+        EventKind::TaskOffered => (HandoffKind::Offer, task.assignee.as_deref()?),
+        EventKind::TaskSubmitted => (HandoffKind::Submission, task.reviewer.as_str()),
+        EventKind::TaskChangesRequested => (HandoffKind::ChangeRequest, task.assignee.as_deref()?),
+        _ => return None,
+    };
+    (to != actor).then_some((handoff, to))
+}
+
 /// Short references such as commit hashes and task IDs.
 fn require_reference(value: &Option<String>, field: &'static str) -> Result<(), CoreError> {
     if value
