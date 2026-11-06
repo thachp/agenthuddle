@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 function setSilently(control: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const prototype = control instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -9,7 +9,7 @@ function setSilently(control: HTMLInputElement | HTMLTextAreaElement, value: str
 
 /**
  * What a control holds that React hasn't heard of, as a step that hands it over, or null. A field filled in before the page hydrates, or
- * restored by the browser, shows its value without React hearing of it, so the form looks filled in while its state is empty. React only
+ * restored by the browser by then, shows its value without React hearing of it, so the form looks filled in while its state is empty. React only
  * sees a change from what it last recorded, so a step records the server's value, puts back what's really there without recording it,
  * and sends the event the form already handles. Values are read first, because each step re-renders the form, and that resets the rest.
  */
@@ -43,14 +43,20 @@ function handOver(control: Element): (() => void) | null {
   return null;
 }
 
+const noSubscription = () => () => {};
+
 /**
- * For a form that's on the page when it first loads. Put the ref on the form, or on what holds its controls. A form that only appears
- * after loading, like one in a Sheet, can't have been filled in early and doesn't need this.
+ * For a form that's on the page when it first loads. Put the ref on the form, or on what holds its controls. It looks once, just after
+ * hydrating, and never again: after that a control can differ from the server's value because someone chose it or because new data
+ * arrived, and sending that again would act twice or make a choice nobody made. A form mounted later can't have been filled in early.
  */
 export function useEarlyInput<T extends HTMLElement = HTMLFormElement>() {
   const ref = useRef<T>(null);
+  const hydrating = useRef(useSyncExternalStore(noSubscription, () => false, () => true));
   useEffect(() => {
-    const run = () => {
+    if (!hydrating.current) return;
+    // Not during this effect, where React would batch the events.
+    const first = setTimeout(() => {
       const controls = [...(ref.current?.querySelectorAll<HTMLInputElement>("input, textarea, select") ?? [])];
       const steps = controls.flatMap((control) => (control.disabled ? [] : (handOver(control) ?? [])));
       // One at a time, so a form whose state is one object sees the last step's result before the next.
@@ -59,17 +65,8 @@ export function useEarlyInput<T extends HTMLElement = HTMLFormElement>() {
         if (steps.length > 0) setTimeout(next);
       };
       next();
-    };
-    // Not during this effect, where React would batch the events.
-    const first = setTimeout(run);
-    // The browser can restore fields after this first look, and when coming back to a page.
-    window.addEventListener("load", run);
-    window.addEventListener("pageshow", run);
-    return () => {
-      clearTimeout(first);
-      window.removeEventListener("load", run);
-      window.removeEventListener("pageshow", run);
-    };
+    });
+    return () => clearTimeout(first);
   }, []);
   return ref;
 }

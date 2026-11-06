@@ -419,8 +419,8 @@ async function keyboardPaths(s) {
       await route.continue();
     });
     await own.goto(`${app}${path}`, { waitUntil: "commit" });
-    await own.waitForFunction(() => document.readyState !== "loading");
-    await own.waitForTimeout(300);
+    // React reveals streamed parts in batches, and a part still hidden can't be filled in.
+    await own.waitForFunction(() => document.readyState !== "loading" && !window.$RB?.length);
     const fields = own.locator("main input:not([type=hidden]), main textarea, main select, form input:not([type=hidden]), form textarea, form select");
     for (let i = 0; i < (await fields.count()); i++) {
       const field = fields.nth(i);
@@ -464,7 +464,10 @@ async function keyboardPaths(s) {
       await own.close();
       ok(lost.length === 0, `${path.split("?")[0]} shows what React doesn't hold: ${lost.join(", ")}`);
     }
-    // And it counts: the Save button works, and sends what's shown.
+    // And it counts: the buttons that were stuck disabled work.
+    const team = await fillEarly(`/w/${s.room}/team`, s.owner);
+    for (const name of ["Add opening", "Add agent", "Add person"]) ok(await team.own.getByRole("button", { name, exact: true }).isEnabled(), `${name} stayed disabled for a form filled in early`);
+    await team.own.close();
     const { own } = await fillEarly(`/w/${s.room}/settings`, s.owner);
     const save = own.getByRole("button", { name: "Save goal and context" });
     ok(await save.isEnabled(), "Save stayed disabled for a goal typed early");
@@ -477,6 +480,26 @@ async function keyboardPaths(s) {
     console.log(`     coming back, the browser ${goal ? "restored" : "didn't restore"} the goal`);
     ok(!goal || (await save.isEnabled()), "a restored goal left Save disabled");
     await own.close();
+  });
+
+  await keyboardPath("a filter ticked after the page is ready isn't sent again on load or coming back", async () => {
+    const own = await contextFor(s.owner).newPage();
+    try {
+      await own.goto(`${app}/w/${s.room}/tasks`);
+      await hydrated(own);
+      await own.getByRole("checkbox", { name: "Needs my review" }).click();
+      await own.waitForURL(/[?&]/, { timeout: 15_000 });
+      const [entries, url] = await own.evaluate(() => [history.length, location.href]);
+      await own.evaluate(() => {
+        window.dispatchEvent(new Event("load"));
+        window.dispatchEvent(new Event("pageshow"));
+      });
+      await own.waitForTimeout(500);
+      const after = await own.evaluate(() => [history.length, location.href]);
+      ok(after[0] === entries && after[1] === url, `a late load or pageshow moved the page: ${entries} entries to ${after[0]}, ${after[1]}`);
+    } finally {
+      await own.close();
+    }
   });
 
   await keyboardPath("a create form filled in before the page is ready still sends what it shows", async () => {

@@ -149,8 +149,8 @@ export function TeamScreen(props: TeamProps) {
 }
 
 function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames, memberIds, send }: { base: string; isOwner: boolean; orgs: OrgOption[] | null; agents: AgentOption[] | null; agentsPartial: boolean; orgNames: Record<string, string>; memberIds: Set<string>; send: Send }) {
-  const early2 = useEarlyInput();
-  const early = useEarlyInput();
+  const agentForm = useEarlyInput();
+  const personForm = useEarlyInput();
   const available = agents?.filter((agent) => !memberIds.has(agent.id)) ?? [];
   const [agent, setAgent] = useState("");
   const [agentRole, setAgentRole] = useState<"member" | "guest">("member");
@@ -183,7 +183,7 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
         </h2>
         <p className="text-sm text-muted-foreground">Only the workroom's own organization can be added directly. Invite anyone else below.</p>
       </div>
-      <form ref={early} onSubmit={addAgent} className="space-y-3 rounded-lg border p-3">
+      <form ref={agentForm} onSubmit={addAgent} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add an agent</h3>
         {agents === null ? <ReadFailure /> : null}
         {agentsPartial ? <p role="status" className="text-sm">Your organizations have more agents than we can list here, so some of this workroom's may be missing.</p> : null}
@@ -229,7 +229,7 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
           <ReadFailure />
         </div>
       ) : (
-      <form ref={early2} onSubmit={addPerson} className="space-y-3 rounded-lg border p-3">
+      <form ref={personForm} onSubmit={addPerson} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add a person</h3>
         <p className="text-sm text-muted-foreground">People are added by their person ID, because Podster has no directory of an organization's people yet.</p>
         <div className="grid gap-3 sm:grid-cols-3">

@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { hydrateRoot, type Root } from "react-dom/client";
+import { fireEvent } from "@testing-library/react";
+import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useEarlyInput } from "./use-early-input";
@@ -79,12 +80,76 @@ describe("useEarlyInput", () => {
     expect(seen).not.toHaveBeenCalled();
   });
 
-  it("catches a value the browser restores after the first look", async () => {
-    await hydrate(() => {});
-    const name = host.querySelector('[aria-label="name"]') as HTMLInputElement;
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "Restored");
-    window.dispatchEvent(new Event("pageshow"));
+  describe("after the page has hydrated", () => {
+    const control = (label: string) => host.querySelector(`[aria-label="${label}"]`) as HTMLInputElement;
+    const trigger = async () => {
+      window.dispatchEvent(new Event("load"));
+      window.dispatchEvent(new Event("pageshow"));
+      await settled();
+    };
+
+    it("doesn't send a change again when someone has typed, ticked and picked", async () => {
+      await hydrate(() => {});
+      fireEvent.change(control("name"), { target: { value: "Typed later" } });
+      fireEvent.click(control("tick"));
+      fireEvent.change(control("pick"), { target: { value: "b" } });
+      await settled();
+      seen.mockClear();
+      await trigger();
+      expect(seen).not.toHaveBeenCalled();
+    });
+
+    it("doesn't send what it already handed over a second time", async () => {
+      await hydrate((c) => {
+        c.tick.checked = true;
+        c.pick.value = "b";
+      });
+      seen.mockClear();
+      await trigger();
+      expect(seen).not.toHaveBeenCalled();
+    });
+
+    it("doesn't take a value the server later changed for someone's choice", async () => {
+      host = document.body.appendChild(document.createElement("div"));
+      function Driven({ tick, pick }: { tick: boolean; pick: string }) {
+        const early = useEarlyInput();
+        return (
+          <form ref={early}>
+            <input aria-label="tick" type="checkbox" checked={tick} onChange={(event) => seen({ tick: event.target.checked })} />
+            <select aria-label="pick" value={pick} onChange={(event) => seen({ pick: event.target.value })}>
+              <option value="a">A</option>
+              <option value="b">B</option>
+            </select>
+          </form>
+        );
+      }
+      host.innerHTML = renderToString(<Driven tick={false} pick="a" />);
+      root = hydrateRoot(host, <Driven tick={false} pick="a" />);
+      await settled();
+      root.render(<Driven tick pick="b" />);
+      await settled();
+      await trigger();
+      expect(seen).not.toHaveBeenCalled();
+    });
+  });
+
+  it("does nothing to a form mounted after the page has loaded, whatever its starting choice", async () => {
+    host = document.body.appendChild(document.createElement("div"));
+    root = createRoot(host);
+    function Picked() {
+      const early = useEarlyInput();
+      return (
+        <form ref={early}>
+          <select aria-label="pick" value="b" onChange={(event) => seen({ pick: event.target.value })}>
+            <option value="a">A</option>
+            <option value="b">B</option>
+          </select>
+          <input aria-label="tick" type="checkbox" checked onChange={(event) => seen({ tick: event.target.checked })} />
+        </form>
+      );
+    }
+    root.render(<Picked />);
     await settled();
-    expect(JSON.parse(host.querySelector("form")!.dataset.state!).name).toBe("Restored");
+    expect(seen).not.toHaveBeenCalled();
   });
 });
