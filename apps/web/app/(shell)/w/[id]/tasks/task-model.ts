@@ -31,7 +31,7 @@ export type TaskVisibility = { submissions: "all" | "own"; conversation: boolean
 export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Artifact[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
 
 export type Member = { principal_id: string; kind: string; org_id: string; role: string; access?: { review: string; artifacts: string } };
-export type Room = { id: string; name: string; owner: string; status?: string; require_person_review?: boolean; members?: Member[] };
+export type Room = { id: string; name: string; owner: string; status?: string; require_person_review?: boolean; owner_left_at?: number | null; members?: Member[] };
 
 /** Display only. In an archived room Rust refuses every new command with `workspace_archived`. */
 export const isArchivedRoom = (room: Pick<Room, "status">) => room.status === "archived";
@@ -132,8 +132,8 @@ export const canCreateTask = (role: string | undefined) => role === "owner" || r
 /** The API lists a room's owner apart from its members, so being absent from `members` doesn't mean having no role. */
 export const roleOf = (room: Pick<Room, "owner" | "members">, me: string) => (room.owner === me ? "owner" : room.members?.find((member) => member.principal_id === me)?.role);
 
-/** Everyone in the room, whether or not they could review. Being a requester, or having left, has nothing to do with reviewing. */
-const whoIsHere = (room: Pick<Room, "owner" | "members">) => [...new Set([room.owner, ...(room.members ?? []).map((member) => member.principal_id)])];
+/** Everyone in the room, whether or not they could review. An owner who left stays recorded as its owner, but isn't here, and only those who manage access are told. */
+const whoIsHere = (room: Pick<Room, "owner" | "members" | "owner_left_at">) => [...new Set([...(room.owner_left_at ? [] : [room.owner]), ...(room.members ?? []).map((member) => member.principal_id)])];
 
 /** Whether a member could review, as far as this read says. Access goes only to those who manage it, so anyone else can pick someone the server then refuses. */
 const canReview = (member: Member, room: Pick<Room, "require_person_review">) => {
@@ -142,7 +142,7 @@ const canReview = (member: Member, room: Pick<Room, "require_person_review">) =>
 };
 
 /** Who can be named reviewer: the owner and every member who could review, never the assignee. The server checks again. */
-export const reviewerChoices = (room: Pick<Room, "owner" | "members" | "require_person_review">, assignee: string) => [...new Set([room.owner, ...(room.members ?? []).filter((member) => canReview(member, room)).map((member) => member.principal_id)])].filter((id) => id !== assignee);
+export const reviewerChoices = (room: Pick<Room, "owner" | "members" | "require_person_review" | "owner_left_at">, assignee: string) => [...new Set([...(room.owner_left_at ? [] : [room.owner]), ...(room.members ?? []).filter((member) => canReview(member, room)).map((member) => member.principal_id)])].filter((id) => id !== assignee);
 
 /**
  * What a flagged task needs. The API only says that it needs something, so this looks at who has left. A guest sees only
@@ -164,16 +164,25 @@ function choicesFor(ids: string[], current: string, task: Pick<Task, "needs_atte
   return ids.filter((id) => keepCurrent || id !== current);
 }
 export const newReviewerChoices = (room: Pick<Room, "owner" | "members" | "require_person_review">, task: Pick<Task, "assignee" | "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(reviewerChoices(room, task.assignee ?? ""), task.reviewer, task, room, role);
-export const newRequesterChoices = (room: Pick<Room, "owner" | "members">, task: Pick<Task, "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(whoIsHere(room), task.requester, task, room, role);
+export const newRequesterChoices = (room: Pick<Room, "owner" | "members" | "owner_left_at">, task: Pick<Task, "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(whoIsHere(room), task.requester, task, room, role);
 
 /** The flag in words, including who can fix it, because that's often not the person reading. */
-export function flagText(task: Task, room: Pick<Room, "owner" | "members" | "status" | "require_person_review">, me: string, role: string | undefined) {
+export function flagText(task: Task, room: Pick<Room, "owner" | "members" | "status" | "require_person_review" | "owner_left_at">, me: string, role: string | undefined) {
   const can = viewerActions(task, me, role);
   const need = flagged(task, room, role);
   const whom = need.requester && need.reviewer ? "a new reviewer and a new requester" : need.requester ? "a new requester" : need.reviewer ? "a new reviewer" : "a new reviewer or requester";
-  // Nobody named on it has left, so the flag came from what someone can do here, not from a departure.
+  // A guest's read holds only itself, so it can't tell who left or why, and shouldn't be told a reason it can't know.
+  const canTell = role !== undefined && role !== "guest";
+  // Nobody named on it has left, so the flag came from what someone can do here, or from someone who left and came back.
   const stillHere = !need.requester && !need.reviewer;
-  const opening = stillHere ? (room.require_person_review ? "This workroom requires a person to review, so this task needs a new reviewer." : "Its reviewer can't review here any more, or someone named on it left and came back, so this task needs a new reviewer or requester.") : `Someone left this workroom, so this task needs ${whom}.`;
+  const reviewerIsAgent = task.reviewer.startsWith("agt_");
+  const opening = !canTell
+    ? "This task needs a new reviewer or requester."
+    : !stillHere
+      ? `Someone left this workroom, so this task needs ${whom}.`
+      : room.require_person_review && reviewerIsAgent
+        ? "This workroom requires a person to review, so this task needs a new reviewer."
+        : "This task needs a new reviewer or requester. Its reviewer may not be able to review here any more, or someone named on it left and came back.";
   if (isArchivedRoom(room)) return `${opening} It can be fixed once the workroom is back.`;
   const fixable = need.requester === need.reviewer ? can.setRequester || can.setReviewer : need.requester ? can.setRequester : can.setReviewer;
   return `${opening} ${fixable ? "You can choose below." : "An owner or admin of this workroom can fix it."}`;

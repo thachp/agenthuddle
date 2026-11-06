@@ -294,8 +294,31 @@ describe("who can be named reviewer", () => {
   it("says why when nobody named on a flagged task has left", () => {
     const flaggedTask = { needs_attention: true, requester: "per_m", reviewer: "agt_a", status: "open" } as never;
     expect(flagText(flaggedTask, { ...room, require_person_review: true }, "per_owner", "owner")).toMatch(/^This workroom requires a person to review, so this task needs a new reviewer\./);
-    expect(flagText(flaggedTask, room, "per_owner", "owner")).toMatch(/^Its reviewer can't review here any more/);
+    expect(flagText(flaggedTask, room, "per_owner", "owner")).toMatch(/left and came back/);
     expect(flagText(flaggedTask, room, "per_owner", "owner")).not.toMatch(/^Someone left/);
+  });
+
+  it("doesn't blame person review when the reviewer is a person, as with a requester who came back", () => {
+    const back = { needs_attention: true, requester: "agt_a", reviewer: "per_m", status: "open" } as never;
+    const text = flagText(back, { ...room, require_person_review: true }, "per_owner", "owner");
+    expect(text).not.toMatch(/requires a person to review/);
+    expect(text).toMatch(/left and came back/);
+  });
+
+  it("gives a guest neutral wording, because its read can't show why", () => {
+    const seen = { needs_attention: true, requester: "per_gone", reviewer: "agt_a", status: "open" } as never;
+    const onlyItself = { owner: "per_owner", require_person_review: true, members: [{ principal_id: "agt_me", kind: "agent", org_id: "o", role: "guest" }] };
+    const text = flagText(seen, onlyItself, "agt_me", "guest");
+    expect(text).toMatch(/^This task needs a new reviewer or requester\./);
+    expect(text).not.toMatch(/requires a person|Someone left/);
+  });
+
+  it("treats a departed owner as gone, and offers them for nothing", () => {
+    const left = { ...room, owner_left_at: 5 };
+    const task = { requester: "per_m", reviewer: "agt_a", needs_attention: false };
+    expect(newRequesterChoices(left, task, "admin")).not.toContain("per_owner");
+    expect(reviewerChoices(left, "")).not.toContain("per_owner");
+    expect(flagged({ needs_attention: true, requester: "per_owner", reviewer: "agt_a" }, left, "admin")).toEqual({ requester: true, reviewer: false });
   });
 
   it("still names who left, not who merely can't review", () => {

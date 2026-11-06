@@ -35,20 +35,22 @@ const emptyRole = (key: number): RoleDraft => ({ key, title: "", responsibilitie
 const MAX_OPENINGS = 20;
 
 type Added = "added" | "refused" | "unknown";
+/** What one attempt says, before what's known already. Too many requests means stop and wait. */
+type Attempt = Added | "limited";
 
 /**
  * Rooms are made first and openings one at a time after, because each needs the room. Each has its own key, so a retry can't
  * add it twice. A retry that lands on one already added is told the request differs, because the room's version has moved,
  * which says it went through.
  */
-async function addOpening(base: string, role: RoleDraft, key: string): Promise<Added> {
+async function addOpening(base: string, role: RoleDraft, key: string): Promise<Attempt> {
   try {
     const read = await clientQuery<{ policy_version: number | null }>(base);
-    if (!read.ok) return read.status === 429 || read.status >= 500 ? "unknown" : "refused";
+    if (!read.ok) return read.status === 429 ? "limited" : read.status >= 500 ? "unknown" : "refused";
     const shape = role.isLead ? { is_lead: true } : { capacity: Number(role.capacity), preset: role.preset };
     const result = await clientCommand(`${base}/roles`, { policy_version: read.data.policy_version, title: role.title.trim(), responsibilities: role.responsibilities.trim(), ...shape }, { idempotencyKey: key });
     if (result.ok || result.code === "idempotency_mismatch") return "added";
-    return result.status >= 500 || result.status === 429 ? "unknown" : "refused";
+    return result.status === 429 ? "limited" : result.status >= 500 ? "unknown" : "refused";
   } catch {
     return "unknown";
   }
@@ -65,6 +67,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
   const [madeRoom, setMadeRoom] = useState<string | null>(null);
   const [results, setResults] = useState<Record<number, Added>>({});
   const [progress, setProgress] = useState<string | null>(null);
+  const [limited, setLimited] = useState(false);
   const keys = useRef(new Map<number, string>());
   const noticeRef = useRef<HTMLDivElement>(null);
   const addRef = useRef<HTMLButtonElement>(null);
@@ -81,10 +84,13 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
   const unfinished = roles.filter((role) => results[role.key] !== "added");
   const notConfirmed = unfinished.filter((role) => results[role.key] === "unknown");
   const refused = unfinished.filter((role) => results[role.key] === "refused");
+  const notTried = unfinished.filter((role) => results[role.key] === undefined);
+  // Nothing changes while it's being sent, and what's sent can't change once the room exists.
+  const locked = pending || madeRoom !== null;
   const roleProblems = roles.map((role) => roleFitsLimits(role.title, role.responsibilities, role.isLead ? 1 : Number(role.capacity)));
   const hasLead = roles.some((role) => role.isLead);
   const blocked = !trimmed || tooLong || goalTooLong || contextTooLong || roleProblems.some((problem) => problem !== null);
-  const editRole = (key: number, change: Partial<RoleDraft>) => setRoles((all) => all.map((role) => (role.key === key ? { ...role, ...change } : role)));
+  const editRole = (key: number, change: Partial<RoleDraft>) => !locked && setRoles((all) => all.map((role) => (role.key === key ? { ...role, ...change } : role)));
 
   // The new screen replaces this form and takes the focused control with it, which would leave focus on the page body and a
   // screen reader saying nothing. The shell's main region outlives the form. If someone has already moved on, focus stays with them.
@@ -101,12 +107,20 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
     const known = { ...results };
     const waiting = roles.filter((role) => known[role.key] !== "added" && known[role.key] !== "refused");
     let done = 0;
+    setLimited(false);
     for (const role of waiting) {
       done += 1;
       setProgress(`Adding opening ${done} of ${waiting.length}…`);
       const key = keys.current.get(role.key) ?? crypto.randomUUID();
       keys.current.set(role.key, key);
-      known[role.key] = await addOpening(base, role, key);
+      const attempt = await addOpening(base, role, key);
+      if (attempt === "limited") {
+        // Sending more would only spend what's left. What's unknown stays so, and what wasn't tried says that.
+        setLimited(true);
+        break;
+      }
+      // Authority comes before a stored answer, so a refusal says nothing about an attempt that may already have gone through.
+      known[role.key] = known[role.key] === "unknown" && attempt === "refused" ? "unknown" : attempt;
       setResults({ ...known });
     }
     setProgress(null);
@@ -123,6 +137,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
   };
 
   const removeOpening = (key: number) => {
+    if (locked) return;
     setRoles((all) => all.filter((other) => other.key !== key));
     // The button that asked has gone, so focus goes to where another can be added.
     requestAnimationFrame(() => addRef.current?.focus());
@@ -160,21 +175,21 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
     <form onSubmit={create} className="space-y-4">
       <label className="block space-y-1">
         <span className="font-medium">Name</span>
-        <Input value={name} required autoFocus aria-invalid={tooLong} aria-describedby="workroom-name-help" onChange={(event) => setName(event.target.value)} />
+        <Input value={name} required autoFocus readOnly={locked} aria-invalid={tooLong} aria-describedby="workroom-name-help" onChange={(event) => setName(event.target.value)} />
       </label>
       <p id="workroom-name-help" className="text-sm text-muted-foreground">
         {tooLong ? "That's too long. Names can be up to 200 bytes." : "People and agents in this workroom will see it."}
       </p>
       <label className="block space-y-1">
         <span className="font-medium">Goal (optional)</span>
-        <textarea className={TEXTAREA} rows={2} value={goal} aria-invalid={goalTooLong} aria-describedby="workroom-goal-help" onChange={(event) => setGoal(event.target.value)} />
+        <textarea className={TEXTAREA} rows={2} value={goal} readOnly={locked} aria-invalid={goalTooLong} aria-describedby="workroom-goal-help" onChange={(event) => setGoal(event.target.value)} />
       </label>
       <p id="workroom-goal-help" className="text-sm text-muted-foreground">
         {goalTooLong ? "That's too long. A goal can be up to 2,048 bytes." : "What this workroom is for."}
       </p>
       <label className="block space-y-1">
         <span className="font-medium">Context (optional)</span>
-        <textarea className={TEXTAREA} rows={5} value={context} aria-invalid={contextTooLong} aria-describedby="workroom-context-help" onChange={(event) => setContext(event.target.value)} />
+        <textarea className={TEXTAREA} rows={5} value={context} readOnly={locked} aria-invalid={contextTooLong} aria-describedby="workroom-context-help" onChange={(event) => setContext(event.target.value)} />
       </label>
       <p id="workroom-context-help" className="text-sm text-muted-foreground">
         {contextTooLong ? "That's too long. Context can be up to 32,768 bytes." : "Anything participants should know. Everyone in this workroom can read it, and it gives no one any permission."}
@@ -188,11 +203,11 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
             <div key={role.key} role="group" aria-label={`Opening ${number}`} className="space-y-3 rounded-lg border p-3">
               <label className="block space-y-1 text-sm">
                 <span>Title</span>
-                <Input value={role.title} onChange={(event) => editRole(role.key, { title: event.target.value })} autoComplete="off" />
+                <Input value={role.title} readOnly={locked} onChange={(event) => editRole(role.key, { title: event.target.value })} autoComplete="off" />
               </label>
               <label className="block space-y-1 text-sm">
                 <span>Responsibilities</span>
-                <textarea className={TEXTAREA} rows={2} value={role.responsibilities} onChange={(event) => editRole(role.key, { responsibilities: event.target.value })} />
+                <textarea className={TEXTAREA} rows={2} value={role.responsibilities} readOnly={locked} onChange={(event) => editRole(role.key, { responsibilities: event.target.value })} />
               </label>
               <label className="flex items-start gap-2 text-sm">
                 <input type="checkbox" className="mt-1 size-4" checked={role.isLead} disabled={hasLead && !role.isLead} onChange={(event) => editRole(role.key, { isLead: event.target.checked })} />
@@ -205,7 +220,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="space-y-1 text-sm">
                     <span>Openings</span>
-                    <Input type="number" min={1} max={50} value={role.capacity} onChange={(event) => editRole(role.key, { capacity: event.target.value })} />
+                    <Input type="number" min={1} max={50} value={role.capacity} readOnly={locked} onChange={(event) => editRole(role.key, { capacity: event.target.value })} />
                   </label>
                   <label className="space-y-1 text-sm">
                     <span>Access preset a claim copies</span>
@@ -227,7 +242,10 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
           );
         })}
         {roles.length >= MAX_OPENINGS ? <p className="text-sm text-muted-foreground">You can add {MAX_OPENINGS} here, and more on Team once the workroom exists.</p> : null}
-        <Button ref={addRef} type="button" size="sm" variant="outline" className={MOBILE_TARGET} disabled={roles.length >= MAX_OPENINGS} onClick={() => setRoles((all) => [...all, emptyRole((nextRole.current += 1))])}>
+        <Button ref={addRef} type="button" size="sm" variant="outline" className={MOBILE_TARGET} aria-disabled={roles.length >= MAX_OPENINGS || pending || undefined} onClick={() => {
+            // Marked, not really disabled: that would drop focus when the last one it can add goes in.
+            if (roles.length < MAX_OPENINGS && !locked) setRoles((all) => [...all, emptyRole((nextRole.current += 1))]);
+          }}>
           Add an opening
         </Button>
       </fieldset>
@@ -240,9 +258,11 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
               Your workroom was created, and {roles.length - unfinished.length} of {roles.length} openings are confirmed. Don't create it again.
             </p>
             {notConfirmed.length > 0 ? <p>We can't tell whether these were added, so check Team before adding them yourself: {notConfirmed.map((role) => plainName(role.title)).join(", ")}.</p> : null}
+            {limited ? <p>There have been too many requests for now, so wait a minute before trying again.</p> : null}
+            {notTried.length > 0 ? <p>These haven't been tried yet: {notTried.map((role) => plainName(role.title)).join(", ")}.</p> : null}
             {refused.length > 0 ? <p>These weren't added: {refused.map((role) => plainName(role.title)).join(", ")}. You can add them on Team.</p> : null}
             <div className="flex flex-wrap items-center gap-3">
-              {notConfirmed.length > 0 ? (
+              {notConfirmed.length + notTried.length > 0 ? (
                 <Button type="button" size="sm" variant="outline" className={`text-foreground ${MOBILE_TARGET}`} aria-disabled={pending || undefined} onClick={() => void retry()}>
                   {pending ? "Trying…" : "Try those again"}
                 </Button>
@@ -262,9 +282,10 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
       ) : null}
       {/* While sending this is only marked disabled: really disabling it would drop focus to the body, and a refusal needs focus to still be here. `sending` stops a second request. */}
       <Button type="submit" className={`${MOBILE_TARGET} aria-disabled:pointer-events-none aria-disabled:opacity-50`} disabled={blocked || madeRoom !== null} aria-disabled={pending || undefined}>
-        {pending ? "Creating…" : "Create workroom"}
+        {pending && !madeRoom ? "Creating…" : "Create workroom"}
       </Button>
-      {roleProblems.some((rp) => rp !== null) ? <p className="text-sm text-muted-foreground">Finish or remove each opening above to create this workroom.</p> : null}
+      {!madeRoom && roleProblems.some((rp) => rp !== null) ? <p className="text-sm text-muted-foreground">Finish or remove each opening above to create this workroom.</p> : null}
+      {madeRoom ? <p className="text-sm text-muted-foreground">This workroom exists now. Change its name, goal and context in its Settings.</p> : null}
       <p className="text-sm text-muted-foreground">Agents connect later; this doesn't launch agents.</p>
     </form>
   );

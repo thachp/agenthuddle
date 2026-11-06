@@ -262,11 +262,68 @@ describe("role openings when creating a workroom", () => {
     expect(keys[1]).toBe(keys[0]);
   });
 
+  const scripted = (answers: (() => Response)[]) => {
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      const method = init.method ?? "GET";
+      if (method === "GET") return new Response(JSON.stringify({ policy_version: 3 }), { status: 200 });
+      if (url.endsWith("/roles")) return (answers.shift() ?? (() => new Response("{}", { status: 200 })))();
+      return new Response(JSON.stringify({ id: "ws_new" }), { status: 200 });
+    });
+  };
+  const refusal = (status: number, code: string) => () => new Response(JSON.stringify({ error: { code } }), { status });
+
+  it("keeps an opening unknown when a retry is refused, because the first attempt may have gone through", async () => {
+    setUrl("/workrooms/new");
+    scripted([refusal(502, "bad_gateway"), refusal(401, "unauthorized")]);
+    await setUp(["One"]);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("check Team before adding them yourself: One");
+    await userEvent.click(within(alert).getByRole("button", { name: "Try those again" }));
+    await vi.waitFor(() => expect(within(alert).getByRole("button", { name: "Try those again" })).toHaveTextContent("Try those again"));
+    expect(alert).toHaveTextContent("check Team before adding them yourself: One");
+    expect(alert).not.toHaveTextContent("weren't added");
+  });
+
+  it("says to wait after too many requests, stops sending, and offers what wasn't tried", async () => {
+    setUrl("/workrooms/new");
+    scripted([refusal(429, "rate_limited")]);
+    await setUp(["One", "Two"]);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("wait a minute");
+    expect(alert).toHaveTextContent("haven't been tried yet: One, Two");
+    expect(within(alert).getByRole("button", { name: "Try those again" })).toBeInTheDocument();
+  });
+
+  it("locks every field while sending, and says where to change them after", async () => {
+    setUrl("/workrooms/new");
+    let release: (value: Response) => void = () => {};
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      if ((init.method ?? "GET") === "GET") return new Response(JSON.stringify({ policy_version: 3 }), { status: 200 });
+      if (url.endsWith("/roles")) return new Promise<Response>((resolve) => (release = resolve));
+      return new Response(JSON.stringify({ id: "ws_new" }), { status: 200 });
+    });
+    await setUp(["One"]);
+    const title = within(screen.getByRole("group", { name: "Opening 1" })).getByLabelText("Title");
+    await vi.waitFor(() => expect(screen.getByText(/Adding opening 1 of 1/)).toBeInTheDocument());
+    expect(title).toHaveAttribute("readonly");
+    expect(screen.getByLabelText("Name")).toHaveAttribute("readonly");
+    await userEvent.type(title, "changed");
+    expect(title).toHaveValue("One");
+    release(new Response(JSON.stringify({ error: { code: "invalid_argument" } }), { status: 400 }));
+    await screen.findByRole("alert");
+    expect(screen.getByText(/Change its name, goal and context in its Settings/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create workroom" })).toBeDisabled();
+  });
+
   it("shows progress, and caps what it will send at once", async () => {
     render(<CreateWorkroomForm organization="Org A" />);
     const add = screen.getByRole("button", { name: "Add an opening" });
     for (let i = 0; i < 20; i++) await userEvent.click(add);
-    expect(add).toBeDisabled();
+    expect(add).toHaveAttribute("aria-disabled", "true");
+    // Marked rather than disabled, so focus stays, and pressing it adds nothing.
+    expect(add).toHaveFocus();
+    await userEvent.click(add);
+    expect(screen.queryByRole("group", { name: "Opening 21" })).toBeNull();
     expect(screen.getByText(/You can add 20 here/)).toBeInTheDocument();
   });
 
