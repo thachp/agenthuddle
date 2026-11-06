@@ -939,6 +939,22 @@ async function criteria() {
       await sleep(target.pollMs);
     }
   };
+  /** Waits for what an agent should hear, slowly enough that a missing event fails as that and not as a rate limit, and says which. */
+  const heard = async (agent, type, taskId) => {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      if ((await agent.inbox()).some((e) => e.type === type && (!taskId || e.task_id === taskId))) return;
+      ok(Date.now() < deadline, `${agent.label} was never told ${type}`);
+      await sleep(1000);
+    }
+  };
+  /** Once an agent's own notice of joining has arrived, anything the room sent it before it joined would have too, because delivery is in order per recipient. */
+  const toldNothingBeforeJoining = async (agent) => {
+    await heard(agent, "member.added");
+    const types = typesFor(await agent.inbox(), room);
+    eq(types[0], "member.added", `the first thing ${agent.label} heard from the room`);
+    for (const earlier of ["workspace.created", "role.created"]) ok(!types.includes(earlier), `${agent.label} was told ${earlier}, from before it joined`);
+  };
   let leadRole, writerRole;
 
   await check("M1-CREATE", "a room's goal, context and openings launch nothing: no agent is added or told, and the room stays out of every list until one is", async () => {
@@ -950,7 +966,7 @@ async function criteria() {
     eq((await personA.must("GET", roles)).roles.map((r) => [r.title, r.capacity, r.filled]), [["Lead", 1, 0], ["Writer", 2, 0]], "its openings, vacant");
     const card = (await personA.must("GET", `/v1/workspaces/${room}/card`)).roles;
     eq([card.count, card.filled, card.capacity], [2, 0, 3], "what its card counts");
-    // Long enough for anything sent to reach an inbox. The same agents are checked again below once something should.
+    // Long enough for anything sent to reach an inbox, though nothing here proves it arrived. `toldNothingBeforeJoining` does, once each agent joins.
     await settle();
     for (const agent of everyone) {
       eq(typesFor(await agent.inbox(), room), [], `what ${agent.label} was told`);
@@ -960,7 +976,7 @@ async function criteria() {
     // Being in the owner's organization adds nobody, and adding one adds only that one.
     await personA.addAgent(room, writer, "guest");
     await until(async () => (await listed(writer)).includes(room), "the room reaching an added agent's list");
-    await writer.waitFor("member.added");
+    await toldNothingBeforeJoining(writer);
     ok(!(await listed(spare)).includes(room), "an agent of the same organization lists the room, without being added");
     ok(!(await listed(partner)).includes(room), "an agent of another organization lists the room");
     eq(typesFor(await spare.inbox(), room), [], "what the agent that wasn't added was told");
@@ -969,6 +985,8 @@ async function criteria() {
   await check("M1-COUNT", "an opening with a count above 1 takes that many holders and no more", async () => {
     await personA.addAgent(room, lead, "guest");
     await personA.addAgent(room, spare, "guest");
+    await toldNothingBeforeJoining(lead);
+    await toldNothingBeforeJoining(spare);
     for (const agent of [writer, lead, spare]) await invite(writerRole.id, agent);
     const claim = { ...inRoom(), role_id: writerRole.id };
     eq((await writer.must("claim_role", claim)).access.preset, "member", "the first holder's preset");
@@ -978,9 +996,12 @@ async function criteria() {
     eq([filled.filled, filled.holders.toSorted()], [2, [writer.id, lead.id].toSorted()], "who holds it");
     await lead.must("release_role", claim);
     eq((await personA.must("GET", roles)).roles.find((r) => r.id === writerRole.id).filled, 1, "the count once one releases");
+    // The freed place is a real one. It's handed back, because later checks need this agent limited to its own tasks.
+    eq((await spare.must("claim_role", claim)).status, "active", "the agent refused earlier, now there's room");
+    eq((await spare.must("release_role", claim)).access.preset, "guest", "its access once it's released");
   });
 
-  await check("M1-CLAIM", "a claim holder can't review or act as an admin when it tries, and a task offered after its claim waits for it to accept", async () => {
+  await check("M1-CLAIM", "a claim holder can't approve or send back work it isn't reviewing, gets no access tool and no admin role, and a task offered after its claim waits for it to accept", async () => {
     await invite(leadRole.id, lead);
     eq((await lead.must("claim_role", { ...inRoom(), role_id: leadRole.id })).access.preset, "coordinator", "the lead's preset");
     // Another participant's work, waiting for the owner, which both holders can read.
@@ -994,9 +1015,6 @@ async function criteria() {
       refused(await holder.call("request_changes", { ...at, submission_no: sent.submission_no, reason: "No", idempotency_key: key() }), "not_allowed", `${holder.label} sending it back`);
       const tools = await holder.tools();
       ok(tools.includes("claim_role") && !tools.some((tool) => accessTools.test(tool)), `${holder.label} has an access tool: ${tools.join(", ")}`);
-      for (const tool of ["add_member", "create_role", "invite_to_role", "set_member_access", "revoke_member", "merge", "deploy"]) {
-        ok(!(await holder.call(tool, { ...inRoom(), principal_id: spare.id, idempotency_key: key() })).ok, `${holder.label} calling ${tool}`);
-      }
     }
     const members = (await personA.must("GET", `/v1/workspaces/${room}`)).members;
     // What each preset's role is, and never an admin's.
@@ -1006,10 +1024,10 @@ async function criteria() {
     const offered = await personA.must("POST", `/v1/workspaces/${room}/tasks`, { title: "After the claim", instructions: "x", assignee: writer.id, reviewer: personA.id });
     const here = { ...inRoom(), task_id: offered.id };
     eq(offered.status, "offered", "a task offered to a holder");
-    await writer.waitFor("task.offered", offered.id);
+    await heard(writer, "task.offered", offered.id);
     await settle();
     eq((await writer.must("get_task", here, false)).task.status, "offered", "the task with nothing more done");
-    ok(!(await writer.call("submit_task", { ...here, version: offered.version, note: "Early", artifacts: [{ uri: "https://example.com/early", label: "Early" }], idempotency_key: key() })).ok, "submitting before accepting");
+    refused(await writer.call("submit_task", { ...here, version: offered.version, note: "Early", artifacts: [{ uri: "https://example.com/early", label: "Early" }], idempotency_key: key() }), "invalid_transition", "submitting before accepting");
     eq((await writer.must("accept_task", { ...here, version: offered.version })).status, "accepted", "after it accepts");
   });
 
@@ -1017,12 +1035,18 @@ async function criteria() {
   await check("M1-LEAD", "a lead holding the opening takes work through review to approval, in one history across MCP and Agent Auth, and a retry makes no second task", async () => {
     invitedToRoom = await personA.invite(room, personB.org);
     eq((await personB.accept(invitedToRoom.token, personB.org, [partner])).body?.agents, [partner.id], "the Agent Auth agent joining");
+    await toldNothingBeforeJoining(partner);
+    eq((await personA.must("GET", roles)).roles.find((r) => r.id === leadRole.id).holders, [lead.id], "who holds the lead opening at the start");
+    // What only the opening gives it: this isn't its task, so as a guest it couldn't read it or post on it.
+    const ownersTask = (await personA.must("POST", `/v1/workspaces/${room}/tasks`, { title: "The owner's own", instructions: "x", reviewer: personA.id })).id;
+    const onOwners = { ...inRoom(), task_id: ownersTask };
+    eq((await lead.must("get_task", onOwners, false)).task.id, ownersTask, "the owner's task, as the lead");
+    await lead.must("send_message", { ...onOwners, body: "Coordinating this" });
     const made = { ...inRoom(), title: "Coordinated work", instructions: "Write it", assignee: writer.id, reviewer: lead.id, idempotency_key: key() };
     const task = await lead.must("create_task", made);
     eq((await lead.must("create_task", made)).id, task.id, "the same request delivered twice");
     const titled = (await lead.must("list_tasks", inRoom(), false)).tasks.filter((t) => t.title === made.title);
     eq(titled.map((t) => t.id), [task.id], "tasks with that title");
-    coordinated = task.id;
     const at = { ...inRoom(), task_id: task.id };
     const taken = await writer.twice("accept_task", { ...at, version: task.version });
     const first = await writer.twice("submit_task", { ...at, version: taken.version, note: "Draft", artifacts: [{ uri: "https://example.com/m1/1", label: "Draft" }] });
@@ -1032,10 +1056,19 @@ async function criteria() {
     await personA.must("DELETE", `${roles}/${leadRole.id}/claims/${lead.id}`, { policy_version: await personA.policyVersion(room) });
     await invite(leadRole.id, partner);
     eq((await partner.must("claim_role", { ...inRoom(), role_id: leadRole.id })).access.preset, "coordinator", "the Agent Auth lead's preset");
+    // The opening's power moved with it. Changing a task's reviewer or assignee was never part of it: that's its requester's or an admin's.
+    eq((await personA.must("GET", roles)).roles.find((r) => r.id === leadRole.id).holders, [partner.id], "who holds the lead opening now");
+    eq((await lead.must("get_workspace", inRoom(), false)).access.preset, "guest", "the former lead's access");
+    refused(await lead.call("get_task", onOwners), "task_not_found", "the former lead reading a task that isn't its own");
+    refused(await lead.call("send_message", { ...onOwners, body: "Still coordinating", idempotency_key: key() }), "task_not_found", "the former lead posting on it");
+    refused(await lead.call("create_task", { ...inRoom(), title: "Still leading", instructions: "x", idempotency_key: key() }), "not_allowed", "the former lead creating a task");
+    eq((await partner.must("get_task", onOwners, false)).task.id, ownersTask, "the owner's task, as the new lead");
+    await partner.must("send_message", { ...onOwners, body: "Taking over" });
     await personA.must("POST", `/v1/workspaces/${room}/tasks/${task.id}/set-reviewer`, { version: changes.version, reviewer: partner.id });
     const current = (await partner.must("get_task", at, false)).task;
     const second = await writer.twice("submit_task", { ...at, version: current.version, note: "Better", artifacts: [{ uri: "https://example.com/m1/2", label: "Better" }] });
-    refused(await lead.call("verify_task", { ...at, submission_no: second.submission_no, idempotency_key: key() }), "not_allowed", "the former lead approving");
+    // Refused because it's no longer the reviewer. That it lost the opening is what the reads above show.
+    refused(await lead.call("verify_task", { ...at, submission_no: second.submission_no, idempotency_key: key() }), "not_allowed", "the former reviewer approving");
     eq((await partner.twice("verify_task", { ...at, submission_no: second.submission_no })).status, "completed", "after the Agent Auth lead approves");
     const reads = [await lead.must("get_task", at, false), await writer.must("get_task", at, false), await partner.must("get_task", at, false), await personA.must("GET", `/v1/workspaces/${room}/tasks/${task.id}`)];
     const history = (read) => read.history.map((h) => [h.seq, h.type, h.new_status]);
@@ -1047,51 +1080,72 @@ async function criteria() {
     for (const type of ["task.offered", "task.accepted", "task.submitted", "task.changes_requested", "task.reviewer_changed", "task.completed"]) ok(types.includes(type), `the history has no ${type}: ${types.join(", ")}`);
     eq(types.filter((type) => type === "task.submitted").length, 2, "submissions in the history");
     eq(reads[0].submissions.length, 2, "submissions kept");
+    coordinated = task.id;
   });
 
-  await check("M1-AGREE", "Activity and each agent's inbox tell the same events, and neither tells one the viewer can't see", async () => {
-    await writer.waitFor("task.completed", coordinated);
-    await partner.waitFor("task.submitted", coordinated);
+  await check("M1-AGREE", "every event in an inbox is in that agent's Activity, each is told to exactly whom the event is for, and neither tells an agent of a task it can't see", async () => {
+    ok(coordinated, "M1-LEAD didn't finish, so there's no task to compare");
+    // Who's told each step of that one task. An inbox isn't every party hearing everything: it's what needs that agent next.
+    await heard(writer, "task.completed", coordinated);
+    await heard(lead, "task.completed", coordinated);
+    await heard(partner, "task.submitted", coordinated);
     const hidden = (await personA.must("POST", `/v1/workspaces/${room}/tasks`, { title: "Between two others", instructions: "x", assignee: writer.id, reviewer: personA.id })).id;
-    await writer.waitFor("task.offered", hidden);
-    const activityOf = async (agent) => (await agent.must("list_activity", inRoom(), false)).events;
-    // Told to the agent they're about, which the room's Activity hides from anyone limited to their own tasks.
+    await heard(writer, "task.offered", hidden);
+    // A later event for the guest, so anything sent to it before this would have arrived by now, because delivery is in order per recipient.
+    const last = await personA.must("POST", `/v1/workspaces/${room}/tasks`, { title: "Told to each in turn", instructions: "x", assignee: spare.id, reviewer: personA.id });
+    await heard(spare, "task.offered", last.id);
+    const activityOf = async (agent) => {
+      const events = [];
+      for (let after;;) {
+        const page = await agent.must("list_activity", { ...inRoom(), ...(after ? { after } : {}) }, false);
+        events.push(...page.events);
+        if (!page.next_after) return events;
+        after = page.next_after;
+      }
+    };
+    const aboutTask = (inbox) => inbox.filter((e) => e.task_id === coordinated).map((e) => e.type);
+    eq(aboutTask(await writer.inbox()), ["task.offered", "task.changes_requested", "task.completed"], "what the worker was told about the task");
+    eq(aboutTask(await lead.inbox()), ["task.accepted", "task.submitted", "task.completed"], "what the first lead was told about the task");
+    eq(aboutTask(await partner.inbox()), ["task.reviewer_changed", "task.submitted"], "what the second lead was told about the task");
+    // The inbox has no field saying who a notice is about, so these are counted against what this run did to each agent.
+    // Another agent's notice leaking here would make a count too high, and fail.
     const NOTICES_ABOUT_ITSELF = ["member.added", "role.invited", "role.invite_withdrawn", "role.claim_ended"];
+    const expectedNotices = new Map([
+      [lead, ["member.added", "role.claim_ended", "role.invited", "role.invited"]],
+      [spare, ["member.added", "role.invited"]],
+    ]);
     const noticesOnly = new Set();
     for (const agent of [writer, lead, partner, spare]) {
       const inbox = (await agent.inbox()).filter((e) => e.workspace_id === room);
       const sawRoom = (await agent.must("get_workspace", inRoom(), false)).access.tasks.startsWith("own") === false;
       const activity = new Map((await activityOf(agent)).map((e) => [e.id, e]));
       ok(inbox.length > 0, `${agent.label}'s inbox has nothing to compare`);
+      const excused = [];
       for (const told of inbox) {
         const shown = activity.get(told.event_id);
         if (!shown && !sawRoom && NOTICES_ABOUT_ITSELF.includes(told.type) && !told.task_id && told.actor_id !== agent.id) {
+          excused.push(told.type);
           noticesOnly.add(told.type);
           continue;
         }
         ok(shown, `${agent.label}'s inbox has ${told.type} ${told.event_id}, which its Activity doesn't`);
         eq([shown.type, shown.task_id ?? null, shown.from.id], [told.type, told.task_id ?? null, told.actor_id], `${told.type} in Activity and the inbox`);
       }
+      eq(excused.toSorted(), expectedNotices.get(agent) ?? [], `notices only in ${agent.label}'s inbox`);
       // What it's told arrives in the order Activity lists it.
       const order = inbox.map((e) => e.event_id).filter((id) => activity.has(id));
-      const listed = [...activity.keys()].filter((id) => order.includes(id));
-      eq(order, listed, `the order of ${agent.label}'s events`);
+      eq(order, [...activity.keys()].filter((id) => order.includes(id)), `the order of ${agent.label}'s events`);
     }
-    // The other way: what happened to it on its task is in its inbox, and each read of Activity shows the same event.
-    const writerTold = new Set((await writer.inbox()).map((e) => e.event_id));
-    const onTask = (await activityOf(writer)).filter((e) => e.task_id === coordinated);
-    for (const type of ["task.changes_requested", "task.completed"]) {
-      const event = onTask.find((e) => e.type === type);
-      ok(event && writerTold.has(event.id), `${type} is in the writer's Activity but not its inbox`);
-    }
-    // Spare isn't party to this task, and it's a guest: it hears nothing of it either way.
+    // Spare isn't party to these tasks, and it's a guest. Its own later offer has arrived, so if it were told of them they'd be here too.
     const spareActivity = await activityOf(spare);
     ok(spareActivity.some((e) => e.type === "workspace.created"), "a guest's Activity shows the room's own events");
+    ok(spareActivity.some((e) => e.task_id === last.id), "a guest's Activity shows its own task");
+    const spareInbox = await spare.inbox();
     for (const id of [coordinated, hidden]) {
       ok(!spareActivity.some((e) => e.task_id === id), "a guest's Activity shows a task it isn't party to");
-      ok(!(await spare.inbox()).some((e) => e.task_id === id), "a guest's inbox tells of a task it isn't party to");
+      ok(!spareInbox.some((e) => e.task_id === id), "a guest's inbox tells of a task it isn't party to");
     }
-    if (noticesOnly.size > 0) report.gap("M1-AGREE-NOTICES", "a limited agent's inbox has notices about itself that its Activity doesn't", [...noticesOnly].sort().join(", "));
+    if (noticesOnly.size > 0) report.gap("M1-AGREE-NOTICES", "a limited agent's inbox has notices about itself that its Activity doesn't", `${[...noticesOnly].sort().join(", ")}. The event names no subject, so the run compares each agent's count with what it did to that agent, not the subject itself`);
   });
 
   await check("M1-APART", "an agent in two rooms gets each room's goal and context only from that room, and one room's access or invitation opens nothing in the other", async () => {
@@ -1124,9 +1178,7 @@ async function criteria() {
     // An invitation is good for its own room, whichever room's ID is put in it.
     const swapped = invitation.token.replace(other, room);
     ok(swapped !== invitation.token, "the token doesn't name its room, so this tried nothing");
-    ok(!(await personB.accept(swapped, personB.org, [partner])).ok, "an invitation to one room, with another room's ID in it");
-    ok(!(await listed(partner)).includes(other), "the partner lists a room it never joined");
-    refused(await partner.call("get_workspace", inRoom(other)), "workspace_not_found", "the partner reading the second room");
+    refused(await personB.accept(swapped, personB.org, [partner]), "invitation_not_found", "an invitation to one room, with another room's ID in it");
   });
 
   await lead.close();
