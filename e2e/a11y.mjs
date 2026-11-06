@@ -380,27 +380,6 @@ async function keyboardPaths(s) {
     await phone.close();
   });
 
-  await keyboardPath("add an opening while creating a workroom, also at phone width", async () => {
-    await page.goto(`${app}/workrooms/new`);
-    await hydrated(page);
-    const add = page.getByRole("button", { name: "Add an opening" });
-    await tabTo(page, add, "Add an opening");
-    await page.keyboard.press("Enter");
-    const group = page.getByRole("group", { name: "Opening 1" });
-    await group.waitFor({ timeout: 15_000 });
-    await tabTo(page, group.getByLabel("Title"), "the opening's title");
-    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
-    const small = await phone.newPage();
-    await small.goto(`${app}/workrooms/new`);
-    await hydrated(small);
-    await small.getByRole("button", { name: "Add an opening" }).click();
-    await small.getByRole("group", { name: "Opening 1" }).waitFor({ timeout: 15_000 });
-    const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-    ok(overflow <= 0, `the create form scrolls sideways by ${overflow}px at 375px`);
-    await small.goto(`${app}/w/${s.room}/settings`);
-    await small.getByRole("button", { name: "Save review setting" }).waitFor({ timeout: 15_000 });
-    const settings = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-    ok(settings <= 0, `settings scrolls sideways by ${settings}px at 375px`);
   await keyboardPath("filter the room's activity, also at phone width", async () => {
     await page.goto(`${app}/w/${s.room}/activity`);
     await hydrated(page);
@@ -428,6 +407,30 @@ async function keyboardPaths(s) {
     await small.getByRole("button", { name: "Filter" }).waitFor({ timeout: 15_000 });
     const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     ok(overflow <= 0, `activity scrolls sideways by ${overflow}px at 375px`);
+    await phone.close();
+  });
+
+  await keyboardPath("add an opening while creating a workroom, also at phone width", async () => {
+    await page.goto(`${app}/workrooms/new`);
+    await hydrated(page);
+    const add = page.getByRole("button", { name: "Add an opening" });
+    await tabTo(page, add, "Add an opening");
+    await page.keyboard.press("Enter");
+    const group = page.getByRole("group", { name: "Opening 1" });
+    await group.waitFor({ timeout: 15_000 });
+    await tabTo(page, group.getByLabel("Title"), "the opening's title");
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    await small.goto(`${app}/workrooms/new`);
+    await hydrated(small);
+    await small.getByRole("button", { name: "Add an opening" }).click();
+    await small.getByRole("group", { name: "Opening 1" }).waitFor({ timeout: 15_000 });
+    const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    ok(overflow <= 0, `the create form scrolls sideways by ${overflow}px at 375px`);
+    await small.goto(`${app}/w/${s.room}/settings`);
+    await small.getByRole("button", { name: "Save review setting" }).waitFor({ timeout: 15_000 });
+    const settings = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    ok(settings <= 0, `settings scrolls sideways by ${settings}px at 375px`);
     await phone.close();
   });
 
