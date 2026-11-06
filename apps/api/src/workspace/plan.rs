@@ -6,7 +6,7 @@
 use super::*;
 use podster_core::{
     plan_change_allowed, plan_would_cycle, validate_task_plan, PlanChange, MAX_PLAN_EDGES,
-    MAX_PLAN_TASKS,
+    MAX_PLAN_TASKS, MAX_PLAN_WALK_EDGES,
 };
 use podster_policy::TASK_PLAN_CHANGED;
 use std::collections::{BTreeSet, HashSet};
@@ -134,14 +134,14 @@ pub(super) fn handle_set(
             EDGES_BEFORE,
             vec![
                 json!(predecessors).to_string().as_str().into(),
-                (MAX_PLAN_EDGES + 1).into(),
+                (MAX_PLAN_WALK_EDGES + 1).into(),
             ],
         )?
         .iter()
         .filter_map(|row| Some((text(&row["predecessor_id"])?, text(&row["successor_id"])?)))
         .collect();
         // A long history of finished work can't be walked for ever, and canceling frees the count that would have limited it.
-        if edges.len() as i64 > MAX_PLAN_EDGES {
+        if edges.len() as i64 > MAX_PLAN_WALK_EDGES {
             return Err(ApiError::limit_exceeded());
         }
         if plan_would_cycle(task_id, &predecessors, &edges) {
@@ -230,7 +230,7 @@ fn own_tasks() -> String {
     )
 }
 
-const EDGES_FROM: &str = "SELECT predecessor_id, successor_id FROM task_dependency WHERE successor_id IN (SELECT value FROM json_each(?1)) AND predecessor_id IN (SELECT value FROM json_each(?1)) LIMIT ?2";
+const EDGES_FROM: &str = "SELECT predecessor_id, successor_id FROM task_dependency WHERE successor_id IN (SELECT value FROM json_each(?1)) AND +predecessor_id IN (SELECT value FROM json_each(?1)) LIMIT ?2";
 
 fn pair(row: &Value) -> Option<(String, String)> {
     Some((text(&row["predecessor_id"])?, text(&row["successor_id"])?))
@@ -342,7 +342,7 @@ pub(super) fn read_costs(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Va
         "edges_unfinished": cost(&edges_of(UNFINISHED, "d.predecessor_id, d.successor_id"), vec![])?,
         "edges_finished": cost(FINISHED_EDGES, vec![(MAX_PLAN_EDGES + 1).into()])?,
         "edges_from": cost(EDGES_FROM, vec![ids.as_str().into(), (MAX_PLAN_EDGES + 1).into()])?,
-        "edges_before": cost(EDGES_BEFORE, vec![ids.as_str().into(), (MAX_PLAN_EDGES + 1).into()])?,
+        "edges_before": cost(EDGES_BEFORE, vec![ids.as_str().into(), (MAX_PLAN_WALK_EDGES + 1).into()])?,
         "edges_count": cost(&edges_of(UNFINISHED, "count(*) AS n"), vec![])?,
     }))
 }

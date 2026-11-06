@@ -26,6 +26,10 @@ pub const MAX_PLANNED_RELATIONSHIPS: i64 = 100;
 pub const MAX_TASK_DURATION_DAYS: i64 = 260;
 pub const MAX_PREDECESSORS_PER_TASK: usize = 50;
 pub const MAX_PLAN_EDGES: i64 = 5_000;
+/// How many edges the cycle check walks back through before refusing. Canceling and finishing free `MAX_PLAN_EDGES`, so a long
+/// chain of finished work can pass that, and a limit as low as that would leave it impossible to extend. It holds up the
+/// room while it runs, at about 4 ms per 1,000 edges measured locally, so this is about 100 ms.
+pub const MAX_PLAN_WALK_EDGES: i64 = 25_000;
 /// Over this many tasks, a plan read says it isn't complete, and there's no forecast from it.
 pub const MAX_PLAN_TASKS: i64 = 3_000;
 

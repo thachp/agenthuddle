@@ -5952,25 +5952,40 @@ describe("task plans", () => {
     expect((await set(LEAD, tasks, s.id, id, { predecessors: [f.id] })).code).toBe("dependency_cycle");
   });
 
-  it("refuses an edit that would walk more than 5,000 ancestor edges, and stops reading there", async () => {
+  it("walks back past 5,000 edges so a long chain can still grow, and refuses at 25,000, having stopped reading there", async () => {
     const { id, tasks } = await room();
     const s = await offer(tasks, { title: "S" });
-    await seedFinished(id, 5100);
-    // A chain of 5,050 finished tasks, whose edges no longer count toward the limit.
-    await seedEdges(id, (n) => `'tsk_old' || (${n} + 1)`, (n) => `'tsk_old' || ${n}`, 5050);
-    expect((await set(LEAD, tasks, s.id, id, { predecessors: ["tsk_old5050"] })).code).toBe("limit_exceeded");
+    await seedFinished(id, 1, 37_500);
+    await seedFinished(id, 1, 24_000);
+    await seedEdges(id, (n) => `'tsk_old' || (${n} + 1)`, (n) => `'tsk_old' || ${n}`, 37_500);
+    expect((await set(LEAD, tasks, s.id, id, { predecessors: ["tsk_old37500"] })).code).toBe("limit_exceeded");
     expect((await read(OWNER, id)).edges.filter((e) => e.successor === s.id)).toEqual([]);
-    const costs = (await api(OWNER, "GET", `${planOf(id)}/costs?ids=${encodeURIComponent(JSON.stringify(["tsk_old5050"]))}`)).body;
-    expect(costs.edges_before.rows).toBe(5001);
-    expect(costs.edges_before.rows_read).toBeLessThan(5001 * 6);
-    // A shorter one is fine.
-    expect((await set(LEAD, tasks, s.id, id, { predecessors: ["tsk_old10"] })).status).toBe(200);
+    const costs = (await api(OWNER, "GET", `${planOf(id)}/costs?ids=${encodeURIComponent(JSON.stringify(["tsk_old37500"]))}`)).body;
+    expect(costs.edges_before.rows).toBe(25_001);
+    // About 5 rows per edge. The whole chain would read about 187,500.
+    expect(costs.edges_before.rows_read).toBeLessThan(26_000 * 5);
+    // A chain well past 5,000 edges, which a room's history can reach, can still be extended.
+    expect((await set(LEAD, tasks, s.id, id, { predecessors: ["tsk_old24000"] })).status).toBe(200);
+  });
+
+  it("reads a narrowed viewer's edges in time that follows their edges, not the square of their tasks", async () => {
+    const { id } = await room();
+    await seedFinished(id, 3000);
+    await seedEdges(id, (n) => `'tsk_old' || (${n} + 1)`, (n) => `'tsk_old' || ${n}`, 2999);
+    const ids = Array.from({ length: 3000 }, (_, n) => `tsk_old${n}`);
+    const costs = (await api(BOB, "GET", `${planOf(id)}/costs?ids=${encodeURIComponent(JSON.stringify(ids))}`)).body;
+    expect(costs.edges_from.rows).toBe(2999);
+    expect(costs.edges_from.plan).toContain("PRIMARY KEY (successor_id=?)");
+    expect(costs.edges_from.plan).not.toContain("predecessor_id=?");
+    // Both columns seeking would read about 9,000,000.
+    expect(costs.edges_from.rows_read).toBeLessThan(20_000);
   });
 
   it("keeps a narrowed viewer's visible edges however many hidden predecessors there are", async () => {
     const { id, tasks } = await room();
     const [first, second] = [await offer(tasks, { assignee: BOB.id, title: "First" }), await offer(tasks, { assignee: BOB.id, title: "Second" })];
-    await seedEdges(id, () => `'${second.id}'`, (n) => `'tsk_a' || ${n}`, 5100);
+    // These sort before any `tsk_` ID, so without the filter in the query they'd fill the limit ahead of the visible edge.
+    await seedEdges(id, () => `'${second.id}'`, (n) => `'aaa_' || ${n}`, 5100);
     await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) VALUES ('${second.id}', '${first.id}', 'o', 1)`));
     expect((await read(BOB, id)).edges).toEqual([{ predecessor: first.id, successor: second.id }]);
   });
