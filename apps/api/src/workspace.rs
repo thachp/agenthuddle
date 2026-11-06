@@ -1036,6 +1036,17 @@ fn handle_change_role(
         scopes = Scopes::for_role(parse_role(&role), guest_can_create);
         store::write_grant(sql, principal, scopes, &caller.id, now)?;
         roles::withdraw_role_invites(sql, principal)?;
+    } else if !rows(
+        sql,
+        "SELECT id FROM role_claim WHERE principal_id = ? AND status = 'active'",
+        vec![principal.into()],
+    )?
+    .is_empty()
+    {
+        // On someone holding an opening, saving the same thing is the room choosing to keep them there, as on the access
+        // route, and releasing the opening mustn't undo that.
+        store::write_grant(sql, principal, scopes, &caller.id, now)?;
+        roles::withdraw_role_invites(sql, principal)?;
     }
     let target_kind = member["kind"]
         .as_str()
@@ -1362,6 +1373,12 @@ fn end_invitations_of(
     reason: &str,
     now: i64,
 ) -> R<()> {
+    // What they offered as a role's invites ends with their authority too, so being appointed again can't revive it.
+    exec(
+        sql,
+        "DELETE FROM role_invite WHERE invited_by = ?",
+        vec![creator.into()],
+    )?;
     let pending = rows(
         sql,
         "SELECT id FROM invitation WHERE created_by = ? AND status = 'pending'",

@@ -4636,6 +4636,16 @@ describe("work roles and claims", () => {
     await api(OWNER, "POST", `/v1/workspaces/${id}/members/${roleMoved.id}/role`, { role: "member" });
     await api(OWNER, "POST", `/v1/workspaces/${id}/members/${roleMoved.id}/role`, { role: "guest" });
     expect((await release(id, role, roleMoved)).body.access.preset).toBe("guest");
+    // Saving the same role counts too, and takes back other offers, as the access route does.
+    const sameRole = await join(id, "member");
+    await invite(id, role, sameRole);
+    await claim(id, role, sameRole);
+    const elsewhere = await opening(id, { title: "Elsewhere" });
+    await invite(id, elsewhere, sameRole);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${sameRole.id}/role`, { role: "guest" })).status).toBe(200);
+    expect((await listed(id, elsewhere, sameRole)).mine).toBeNull();
+    expect((await release(id, role, sameRole)).body.access.preset).toBe("guest");
+    expect((await accessOf(id, sameRole)).role).toBe("guest");
     // Ending the claim follows the same rule, and says what the agent is left with.
     const ended = await join(id, "member");
     await invite(id, role, ended);
@@ -4688,6 +4698,16 @@ describe("work roles and claims", () => {
     expect((await listed(id, second, agent)).mine).toBeNull();
     expect((await claim(id, second, agent)).code).toBe("not_allowed");
     expect((await listed(id, second)).invited).toEqual([]);
+    // Being appointed again doesn't bring back what they offered before.
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${admin.id}/role`, { role: "admin" })).status).toBe(200);
+    expect((await listed(id, second, agent)).mine).toBeNull();
+    expect((await claim(id, second, agent)).code).toBe("not_allowed");
+    await invite(id, second, agent, admin);
+    // Nor does coming back after being removed from the room.
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${admin.id}`, {})).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${admin.id}/clear-removal`, {})).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: admin.id, kind: "person", org_id: "org_a", role: "admin" })).status).toBe(200);
+    expect((await listed(id, second, agent)).mine).toBeNull();
     await invite(id, second, agent);
     expect((await claim(id, second, agent)).status).toBe(200);
   });
