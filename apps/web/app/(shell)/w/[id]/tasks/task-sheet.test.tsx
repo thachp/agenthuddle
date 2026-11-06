@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SheetLink } from "@/components/sheet/target-sheet";
@@ -387,6 +387,125 @@ describe("posting to the thread", () => {
     expect(screen.getByLabelText("Post a message")).toHaveValue("");
     expect(screen.getByLabelText("Post a message")).toHaveFocus();
     await waitFor(() => expect(calls.filter((call) => call.method === "GET").length).toBeGreaterThan(1));
+  });
+
+  describe("previewing", () => {
+    const WRITTEN = "_id ~/foo C:\\Users\\me **x** `a\\_b`\n\ndef __init__(self, *args):\n\nhttps://ex.com/~me/_x?a=*b";
+    const write = (text: string) => fireEvent.change(screen.getByLabelText("Post a message"), { target: { value: text } });
+    const toggle = () => screen.getByRole("button", { name: /^(Preview|Edit)$/ });
+    const preview = () => screen.getByRole("region", { name: "Preview of your message" });
+
+    it("shows how the text will look, and hides the box without losing it", async () => {
+      const user = userEvent.setup();
+      answer = () => json(200, detail());
+      await openDiscussion(user);
+      expect(toggle()).toHaveTextContent("Preview");
+      write("**bold** words");
+      await user.click(toggle());
+      expect(toggle()).toHaveTextContent("Edit");
+      expect(toggle()).toHaveFocus();
+      expect(within(preview()).getByText(/^Preview\. Not posted yet\. This shows how the text will look/)).toBeInTheDocument();
+      expect(within(preview()).getByText("Not posted yet.")).toBeInTheDocument();
+      expect(within(preview()).getByText("bold").tagName).toBe("STRONG");
+      expect(screen.getByLabelText("Post a message")).not.toBeVisible();
+      await user.click(toggle());
+      expect(screen.queryByRole("region", { name: "Preview of your message" })).toBeNull();
+      expect(screen.getByLabelText("Post a message")).toBeVisible();
+      expect(screen.getByLabelText("Post a message")).toHaveValue("**bold** words");
+    });
+
+    it("still asks before discarding a draft that's being previewed, and keeps it", async () => {
+      const user = userEvent.setup();
+      answer = () => json(200, detail());
+      await openDiscussion(user);
+      write("A draft");
+      await user.click(toggle());
+      expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+      await user.keyboard("{Escape}");
+      expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Keep editing" }));
+      expect(within(preview()).getByText("A draft")).toBeInTheDocument();
+      expect(screen.getByLabelText("Post a message")).toHaveValue("A draft");
+    });
+
+    it("formats a large result, and sends it unchanged", async () => {
+      const user = userEvent.setup();
+      answer = (_, method) => (method === "POST" ? json(200, { id: "msg_2" }) : json(200, detail()));
+      await openDiscussion(user);
+      const large = "- item\n".repeat(600).trim();
+      write(large);
+      await user.click(toggle());
+      expect(preview().querySelectorAll("li")).toHaveLength(600);
+      await user.click(screen.getByRole("button", { name: "Post message" }));
+      expect(await screen.findByText("Posted.")).toBeInTheDocument();
+      expect(commands()[0]).toMatchObject({ body: { body: large } });
+    });
+
+    it("says when there's nothing to preview", async () => {
+      const user = userEvent.setup();
+      answer = () => json(200, detail());
+      await openDiscussion(user);
+      write("   ");
+      await user.click(toggle());
+      expect(within(preview()).getByText("Nothing to preview yet.")).toBeInTheDocument();
+    });
+
+    it.each([
+      ["never previewed", 0],
+      ["previewed and closed", 2],
+      ["still previewing", 1],
+    ])("sends every byte as written when %s", async (_, presses) => {
+      const user = userEvent.setup();
+      answer = (__, method) => (method === "POST" ? json(200, { id: "msg_2" }) : json(200, detail()));
+      await openDiscussion(user);
+      write(`  ${WRITTEN}  `);
+      for (let press = 0; press < presses; press++) await user.click(toggle());
+      await user.click(screen.getByRole("button", { name: "Post message" }));
+      expect(await screen.findByText("Posted.")).toBeInTheDocument();
+      expect(commands()[0]).toMatchObject({ body: { body: WRITTEN } });
+    });
+
+    it("goes back to the empty box, with focus in it, after posting from the preview", async () => {
+      const user = userEvent.setup();
+      answer = (_, method) => (method === "POST" ? json(200, { id: "msg_2" }) : json(200, detail()));
+      await openDiscussion(user);
+      write("On it");
+      await user.click(toggle());
+      await user.click(screen.getByRole("button", { name: "Post message" }));
+      expect(await screen.findByText("Posted.")).toBeInTheDocument();
+      expect(screen.queryByRole("region", { name: "Preview of your message" })).toBeNull();
+      expect(screen.getByLabelText("Post a message")).toHaveValue("");
+      expect(screen.getByLabelText("Post a message")).toHaveFocus();
+    });
+
+    it("keeps the draft and the key through a failed send from the preview", async () => {
+      const user = userEvent.setup();
+      let tries = 0;
+      answer = (_, method) => (method !== "POST" ? json(200, detail()) : tries++ === 0 ? json(502, { error: { code: "bad_gateway" } }) : json(200, { id: "msg_2" }));
+      await openDiscussion(user);
+      write("A draft");
+      await user.click(toggle());
+      await user.click(screen.getByRole("button", { name: "Post message" }));
+      expect(await screen.findByRole("alert")).toBeInTheDocument();
+      expect(within(preview()).getByText("A draft")).toBeInTheDocument();
+      expect(screen.getByLabelText("Post a message")).toHaveValue("A draft");
+      await user.click(screen.getByRole("button", { name: "Post message" }));
+      expect(await screen.findByText("Posted.")).toBeInTheDocument();
+      const keys = commands().map((command) => command.key);
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toBe(keys[1]);
+    });
+
+    it("keeps hostile text inert", async () => {
+      const user = userEvent.setup();
+      answer = () => json(200, detail());
+      await openDiscussion(user);
+      write(`<img src=x onerror="window.pwned=1"><script>window.pwned=2</script><iframe src="https://evil.test"></iframe>\n\n[x](javascript:window.pwned=3) ![p](https://evil.test/p.png)`);
+      await user.click(toggle());
+      expect(preview().querySelector("img, script, iframe, a, [src], [onerror]")).toBeNull();
+      expect(preview()).toHaveTextContent("<img src=x");
+      expect((window as unknown as { pwned?: number }).pwned).toBeUndefined();
+    });
   });
 
   it("is offered to someone with no other controls, even after the task finished", async () => {
