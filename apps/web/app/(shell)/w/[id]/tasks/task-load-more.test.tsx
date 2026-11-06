@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { summaryOf, type Room, type Task } from "./task-model";
 import { rememberPlace } from "./task-pages";
-import { endOfListText, mergeTasks, soFarText } from "./task-views";
+import { advanceFirstPage, endOfListText, MAX_PUSHED_OFF, mergeTasks, soFarText, type FirstPageHistory } from "./task-views";
 import { TasksScreen } from "./tasks-screen";
 
 const signIn = vi.hoisted(() => vi.fn());
@@ -340,6 +340,28 @@ describe("when the viewer's view of the room narrows", () => {
     rerender(screenWith([task("d"), task("c")], 50));
     const links = screen.getAllByRole("link", { name: /^Title / }).map((link) => link.textContent);
     expect(links).toEqual(["Title d", "Title c", "Title a", "Title b", "Title later"]);
+  });
+
+  it("starts over rather than holding pushed-off rows without limit, and until then loses none", () => {
+    const page = (newest: number) => [task(`t${newest}`), task(`t${newest - 1}`)];
+    let seen: FirstPageHistory = { rows: page(1), role: "member", generation: 0, pushedOff: [] };
+    for (let newest = 2; seen.generation === 0; newest += 1) {
+      const next = advanceFirstPage(seen, page(newest), "member");
+      if (next.generation === 0) {
+        // Everything ever shown is on the page or held: t0 up to the newest.
+        expect(next.pushedOff).toHaveLength(newest - 1);
+        expect(next.pushedOff.at(-1)?.id).toBe("t0");
+      }
+      seen = next;
+    }
+    expect(seen.generation).toBe(1);
+    expect(seen.pushedOff).toEqual([]);
+    expect(seen.rows.map((row) => row.id)).toEqual(page(MAX_PUSHED_OFF + 2).map((row) => row.id));
+  });
+
+  it("starts over when more tasks arrive between reads than a first page holds, which is safe if abrupt", () => {
+    const seen: FirstPageHistory = { rows: [task("a"), task("b")], role: "member", generation: 0, pushedOff: [] };
+    expect(advanceFirstPage(seen, [task("x"), task("y")], "member")).toMatchObject({ generation: 1, pushedOff: [] });
   });
 
   it("drops later pages when a first page of the same size has different rows", async () => {

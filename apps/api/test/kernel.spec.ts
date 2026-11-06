@@ -668,6 +668,9 @@ describe("review findings", () => {
     expect(ids((await api(LEAD, "GET", tasks)).body)).toEqual(made.slice(0, 50));
     expect(ids((await api(LEAD, "GET", `${tasks}?order=oldest`)).body)).toEqual(made.slice(0, 50));
     expect((await api(LEAD, "GET", `${tasks}?order=sideways`)).code).toBe("invalid_argument");
+    // A bad cursor is refused rather than looking like the end of the list. Oldest first keeps treating it as the start.
+    expect((await api(LEAD, "GET", `${tasks}?order=newest&cursor=-1`)).code).toBe("invalid_argument");
+    expect(ids((await api(LEAD, "GET", `${tasks}?cursor=-1`)).body)).toEqual(made.slice(0, 50));
   });
 
   it("refuses malformed fields instead of ignoring them", async () => {

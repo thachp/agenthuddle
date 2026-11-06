@@ -32,6 +32,28 @@ export const applyReviewFilter = (tasks: TaskSummary[], state: Pick<TaskViewStat
 export const NEWEST_QUERY = "&order=newest";
 export const REVIEW_QUERY = `&status=submitted&mine=true${NEWEST_QUERY}`;
 
+/** Past this many rows pushed off the first page, a long-open tab starts over from the newest rather than growing. */
+export const MAX_PUSHED_OFF = 1000;
+
+export type FirstPageHistory = { rows: TaskSummary[]; role: string | undefined; generation: number; pushedOff: TaskSummary[] };
+
+/**
+ * What a new read of the first page says about the rows already on screen. Tasks are never deleted and reads run newest
+ * first, so for someone who sees the same tasks, a first page only ever gains rows at its start, pushing others off its end.
+ * Those rows are kept, because a later page already read starts after where they were and nothing else would hold them.
+ * If it changes any other way, or the viewer's role does, they're seeing a narrower or wider room, and the list answers
+ * that with a 200 and no sign of it. Then `generation` counts up, and nothing read before it can be trusted. Starting over
+ * at the cap does the same, and every row is still there to load: it loses the reader's place, not a task.
+ */
+export function advanceFirstPage(seen: FirstPageHistory, rows: TaskSummary[], role: string | undefined): FirstPageHistory {
+  const ids = rows.map((task) => task.id);
+  const heldIds = seen.rows.map((task) => task.id);
+  const at = ids.indexOf(heldIds[0]);
+  const sameView = seen.role === role && (heldIds.length === 0 || (at >= 0 && ids.length >= heldIds.length && ids.slice(at).every((id, index) => id === heldIds[index])));
+  const pushedOff = sameView ? [...seen.rows.filter((task) => !ids.includes(task.id)), ...seen.pushedOff] : [];
+  return sameView && pushedOff.length <= MAX_PUSHED_OFF ? { rows, role, generation: seen.generation, pushedOff } : { rows, role, generation: seen.generation + 1, pushedOff: [] };
+}
+
 /** Each task once, where it first appeared, as its latest version. A version only goes up, so an older read can't undo a newer one. */
 export function mergeTasks(...lists: TaskSummary[][]) {
   const merged = new Map<string, TaskSummary>();

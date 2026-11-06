@@ -2218,6 +2218,7 @@ describe("capability mapping", () => {
     expect(() => toApiCall(task, { workspace_id: "w", task_id: "t", version: 1 })).toThrow();
     const query = toApiCall(CAPABILITIES.find((c) => c.name === "list_tasks")!, { workspace_id: "w", status: "open", extra: "x" });
     expect(query.path).toBe("/v1/workspaces/w/tasks?status=open");
+    expect(toApiCall(CAPABILITIES.find((c) => c.name === "list_tasks")!, { workspace_id: "w", order: "newest", cursor: 7 }).path).toBe("/v1/workspaces/w/tasks?cursor=7&order=newest");
   });
 });
 
@@ -2408,6 +2409,15 @@ describe("kernel journey across two organizations", () => {
     expect(second.data.id).toBe(first.data.id);
     expect((await lead.tool("list_tasks", { workspace_id: room })).data.tasks).toHaveLength(1);
     expect((await lead.tool("create_task", { ...args, title: "Different" })).code).toBe("idempotency_mismatch");
+  });
+
+  it("lets an agent ask for tasks newest first", async () => {
+    const { lead, architect, room } = await setup();
+    const make = (title: string) => lead.tool("create_task", { workspace_id: room, title, instructions: "A row", assignee: architect.id, idempotency_key: unique("k") });
+    const [first, second] = [(await make("First")).data.id, (await make("Second")).data.id];
+    expect((await lead.tool("list_tasks", { workspace_id: room })).data.tasks.map((task: { id: string }) => task.id)).toEqual([first, second]);
+    expect((await lead.tool("list_tasks", { workspace_id: room, order: "newest" })).data.tasks.map((task: { id: string }) => task.id)).toEqual([second, first]);
+    expect((await lead.tool("list_tasks", { workspace_id: room, order: "sideways" })).code).toBe("invalid_argument");
   });
 
   it("outsiders and uninvolved guests can't see tasks, and missing rooms look the same", async () => {

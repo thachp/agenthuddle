@@ -2261,6 +2261,8 @@ mod queries {
         let order = query_str(url, "order");
         let (position, direction) = match order.as_deref() {
             None | Some("oldest") => ("seq > ?", "ASC"),
+            // A position nothing could hold would read as the end of the list, and an agent's bad cursor shouldn't.
+            Some("newest") if cursor < 0 => return Err(ApiError::invalid_argument()),
             Some("newest") if cursor == 0 => ("? = 0", "DESC"),
             Some("newest") => ("seq < ?", "DESC"),
             Some(_) => return Err(ApiError::invalid_argument()),

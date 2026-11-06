@@ -13,7 +13,7 @@ import { useTaskPages } from "./task-pages";
 import { TaskProgress } from "./task-progress";
 import { canCreateTask, isArchivedRoom, roleOf, summaryOf, type Names, type Room, type TaskSummary } from "./task-model";
 import { TaskSheet } from "./task-sheet";
-import { applyReviewFilter, canceledChange, countText, hrefWithChanges, isLimitedViewer, mergeTasks, NEWEST_QUERY, onBoard, readViewState, REVIEW_QUERY, reviewChange, viewChange, type TaskView } from "./task-views";
+import { advanceFirstPage, applyReviewFilter, canceledChange, countText, hrefWithChanges, isLimitedViewer, mergeTasks, NEWEST_QUERY, onBoard, readViewState, REVIEW_QUERY, reviewChange, viewChange, type FirstPageHistory, type TaskView } from "./task-views";
 
 /**
  * Changing the view or a filter rearranges tasks the page already has, so it only moves the URL. Next and vinext both let
@@ -56,23 +56,10 @@ function useFocusFollowsTask() {
   });
 }
 
-/**
- * What the first page's reads say about the rows already on screen. Tasks are never deleted and reads run newest first, so
- * for someone who sees the same tasks, a first page only ever gains rows at its start, pushing others off its end. Those
- * rows are kept, because a later page already read starts after where they were and nothing else would hold them.
- * If it changes any other way, or the viewer's role does, they're seeing a narrower or wider room, and the list answers
- * that with a 200 and no sign of it. Then `generation` counts up, and nothing read before it can be trusted.
- */
 function useFirstPageHistory(firstPage: TaskSummary[], role: string | undefined) {
-  const [seen, setSeen] = useState({ rows: firstPage, role, generation: 0, pushedOff: [] as TaskSummary[] });
+  const [seen, setSeen] = useState<FirstPageHistory>({ rows: firstPage, role, generation: 0, pushedOff: [] });
   if (seen.rows === firstPage && seen.role === role) return seen;
-  const ids = firstPage.map((task) => task.id);
-  const heldIds = seen.rows.map((task) => task.id);
-  const at = ids.indexOf(heldIds[0]);
-  const sameView = seen.role === role && (heldIds.length === 0 || (at >= 0 && ids.length >= heldIds.length && ids.slice(at).every((id, index) => id === heldIds[index])));
-  const next = sameView
-    ? { rows: firstPage, role, generation: seen.generation, pushedOff: [...seen.rows.filter((task) => !ids.includes(task.id)), ...seen.pushedOff] }
-    : { rows: firstPage, role, generation: seen.generation + 1, pushedOff: [] };
+  const next = advanceFirstPage(seen, firstPage, role);
   setSeen(next);
   return next;
 }
