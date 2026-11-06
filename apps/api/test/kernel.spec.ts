@@ -4775,7 +4775,11 @@ describe("work roles and claims", () => {
     const made = await managed(OWNER, "POST", `/v1/workspaces/${id}/invitations`, id, { role: "guest", invited_org_id: "org_b", work_role_id: role });
     expect(made.body.work_role_id).toBe(role);
     const shown = await api(orgAdmin("org_b"), "POST", "/v1/invitations/preview", { token: made.body.token });
-    expect([shown.body.work_role.title, shown.body.work_role.preset, shown.body.work_role.created_by]).toEqual(["Engineer", "coordinator", OWNER.id]);
+    expect([shown.body.work_role.title, shown.body.work_role.preset, shown.body.work_role.external]).toEqual(["Engineer", "coordinator", true]);
+    // A forwarded link doesn't name anyone in a private room.
+    expect(shown.body.work_role.created_by).toBeUndefined();
+    const open = await managed(OWNER, "POST", `/v1/workspaces/${id}/invitations`, id, { role: "guest", work_role_id: role });
+    expect((await api(orgAdmin("org_a"), "POST", "/v1/invitations/preview", { token: open.body.token })).body.work_role.external).toBe(false);
     const again = await managed(OWNER, "POST", `/v1/workspaces/${id}/invitations`, id, { role: "guest", invited_org_id: "org_b", work_role_id: role });
     expect((await api(orgAdmin("org_b"), "POST", "/v1/invitations/accept", { token: made.body.token, org_id: "org_b", agents: [agent.id] })).status).toBe(200);
     expect((await accessOf(id, agent)).access.preset).toBe("guest");

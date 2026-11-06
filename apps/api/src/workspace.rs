@@ -2648,16 +2648,21 @@ impl Workspace {
                 return Err(ApiError::invitation_not_found());
             }
         }
-        let room = rows(&sql, "SELECT id, name FROM workspace", vec![])?;
+        let room = rows(&sql, "SELECT id, name, owner_org_id FROM workspace", vec![])?;
         let room = room.first().ok_or_else(ApiError::invitation_not_found)?;
         // The opening a link names, so whoever decides can see what it would mean. A closed one is no longer on offer.
         let work_role = rows(
             &sql,
-            "SELECT id, title, responsibilities, capacity, preset, is_lead, created_by FROM work_role WHERE id = ? AND closed_at IS NULL",
+            "SELECT id, title, responsibilities, capacity, preset, is_lead FROM work_role WHERE id = ? AND closed_at IS NULL",
             vec![invitation["work_role_id"].as_str().unwrap_or_default().into()],
         )?
         .into_iter()
-        .next();
+        .next()
+        .map(|mut role| {
+            // Whose words these are, without saying which organization holds the room.
+            role["external"] = json!(!room["owner_org_id"].as_str().is_some_and(|org| in_org(identity, org)));
+            role
+        });
         Ok(json!({
             "workspace_id": room["id"], "workspace_name": room["name"], "work_role": work_role,
             "role": invitation["role"], "guest_can_create": int(&invitation["guest_can_create"]) != 0,

@@ -231,12 +231,49 @@ describe("Managing an opening", () => {
     await user.click(within(sheet).getByRole("button", { name: "Invite" }));
     expect(await within(sheet).findByText(/Invited agt_x/)).toBeInTheDocument();
     expect(within(sheet).getByLabelText("Title")).toHaveValue("Lead typed");
+    // Still unsaved, so still saveable, and closing asks first.
+    await waitFor(() => expect(within(sheet).getByRole("button", { name: "Save changes" })).toBeEnabled());
     await user.click(within(sheet).getByRole("button", { name: "End claim" }));
     await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "End claim" }));
     const notice = await within(sheet).findByText(/Claim ended for Code Agent/);
     await waitFor(() => expect(notice).toHaveFocus());
     expect(new Set(keys).size).toBe(keys.length);
     expect(keys.every(Boolean)).toBe(true);
+    await waitFor(() => expect(within(sheet).getByRole("button", { name: "Save changes" })).toBeEnabled());
+    await user.click(within(sheet).getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("button", { name: "Discard changes" })).toBeInTheDocument();
+  });
+
+  it("keeps typed text saveable after withdrawing an invite", async () => {
+    const user = userEvent.setup();
+    const sheet = await open("rol_eng");
+    await user.type(await within(sheet).findByLabelText("Title"), " typed");
+    await user.click(within(sheet).getByRole("button", { name: "Withdraw invite to agt_x" }));
+    await within(sheet).findByText(/Invite to agt_x withdrawn/);
+    await waitFor(() => expect(within(sheet).getByRole("button", { name: "Save changes" })).toBeEnabled());
+    expect(within(sheet).getByLabelText("Title")).toHaveValue("Engineer typed");
+  });
+
+  it("has nothing to save once text matches again", async () => {
+    const user = userEvent.setup();
+    const sheet = await open("rol_eng");
+    const title = await within(sheet).findByLabelText("Title");
+    await user.type(title, "x");
+    await waitFor(() => expect(within(sheet).getByRole("button", { name: "Save changes" })).toBeEnabled());
+    await user.type(title, "{Backspace}");
+    await waitFor(() => expect(within(sheet).getByRole("button", { name: "Save changes" })).toBeDisabled());
+  });
+
+  it("says to check when a retry is refused because the first attempt may have landed", async () => {
+    const user = userEvent.setup();
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      if (init.method && init.method !== "GET") return new Response(JSON.stringify({ error: { code: "idempotency_mismatch" } }), { status: 422 });
+      return real(url, init);
+    });
+    const sheet = await open("rol_eng");
+    await user.click(await within(sheet).findByRole("button", { name: "Withdraw invite to agt_x" }));
+    expect(await within(sheet).findByText(/may already have gone through/)).toBeInTheDocument();
   });
 
   it("sends the same key again after an unknown outcome", async () => {

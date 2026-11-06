@@ -136,10 +136,11 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
           <dd className="break-all">{member.principal_id}</dd>
           {data.ended ? null : (
             <>
-              <dt className="text-muted-foreground">Role</dt>
-              <dd>{roleLabel(member.role)}</dd>
+              {/* Without the agent's access, a role could overstate what it can do. */}
               {member.access ? (
                 <>
+                  <dt className="text-muted-foreground">Role</dt>
+                  <dd>{roleLabel(member.role)}</dd>
                   <dt className="text-muted-foreground">Access</dt>
                   <dd>{accessLabel(member)}</dd>
                 </>
@@ -210,13 +211,13 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
                   This widens what the agent can do. It takes effect on its next request.
                 </p>
               ) : null}
-              {dirty && changesRole ? <p role="note" className="rounded-lg bg-muted p-3 text-sm">This also changes its role to {roleLabel(newRole)}.</p> : null}
+              {(dirty || data.holdsOpening) && changesRole ? <p role="note" className="rounded-lg bg-muted p-3 text-sm">This also changes its role to {roleLabel(newRole)}.</p> : null}
               {data.holdsOpening ? (
                 <p role="note" className="rounded-lg bg-muted p-3 text-sm">
-                  It holds the opening “{data.holdsOpening}”. If nobody sets its access while it holds that, releasing goes back to what it had before claiming. Saving here, even with nothing changed, counts as the room's decision, and then it keeps the narrower of this and what it had.
+                  It holds the opening “{data.holdsOpening}”. Releasing goes back to what it had before claiming, unless an owner or admin has set its access since, and then it keeps the narrower of the two. Saving here, even with nothing changed, counts as setting it.
                 </p>
               ) : null}
-              {dirty ? <p className="text-sm text-muted-foreground">Saving withdraws any role invites this agent has.</p> : null}
+              {dirty || data.holdsOpening ? <p className="text-sm text-muted-foreground">Saving withdraws any role invites this agent has.</p> : null}
             </fieldset>
           ) : (
             <p className="text-sm text-muted-foreground">{data.archived ? "Read-only while this workroom is archived." : "Read-only for you. Only this workroom's owner and appointed admins can change it."}</p>

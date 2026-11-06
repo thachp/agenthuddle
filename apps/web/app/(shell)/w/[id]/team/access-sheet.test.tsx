@@ -121,6 +121,15 @@ describe("Manage access, for the room's owner or admin", () => {
     expect(screen.getByText(/Open tasks naming it as reviewer/)).toBeInTheDocument();
   });
 
+  it("doesn't state a role to an agent's own organization, which isn't sent its access", async () => {
+    room = json(200, { ...(room.body as object), policy_version: null, members: [agentRow(AGENT, "org_b", "member")] });
+    connections[AGENT] = json(200, { id: AGENT, status: "active", generation: 1 });
+    show(agentOwner);
+    expect(await screen.findByRole("heading", { name: "Code Agent" })).toBeInTheDocument();
+    expect(screen.queryByText("Role")).toBeNull();
+    expect(screen.queryByText("Member")).toBeNull();
+  });
+
   it("calls a guest invited with create rights what it is, not Custom", async () => {
     const access = { preset: null, tasks: "own_create", artifacts: "own", conversations: "own", review: "when_named" };
     room = json(200, { ...(room.body as object), members: [{ ...agentRow(AGENT, "org_a", "guest"), guest_can_create: true, access }] });
@@ -147,6 +156,7 @@ describe("Manage access, for the room's owner or admin", () => {
     show(owner);
     expect(await screen.findByText(/It holds the opening “Lead”/)).toBeInTheDocument();
     expect(screen.getByText(/even with nothing changed/)).toBeInTheDocument();
+    expect(screen.getByText(/Saving withdraws any role invites/)).toBeInTheDocument();
     // Lockable at the values it has, without changing anything first.
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(sent).toHaveLength(1));

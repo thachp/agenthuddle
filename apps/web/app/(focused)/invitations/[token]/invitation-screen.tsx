@@ -12,7 +12,7 @@ import { goToSignIn } from "../../../(shell)/w/[id]/tasks/go-to-sign-in";
 import { PRESET_LABELS, PRESET_SUMMARIES, roleLabel } from "../../../(shell)/w/[id]/team/model";
 import { AcceptInvitationForm, type AcceptAgent } from "./accept-form";
 
-type WorkRole = { title: string; responsibilities: string; preset: string; is_lead: number | boolean; created_by: string };
+type WorkRole = { title: string; responsibilities: string; preset: string; is_lead: number | boolean; external?: boolean };
 type Preview = { workspace_name: string; role: string; guest_can_create: boolean; invited_org_id: string | null; invited_by: string; expires_at: number; work_role?: WorkRole | null };
 type Organization = { id: string; name: string };
 
@@ -111,7 +111,8 @@ export function InvitationScreen({ token, form }: { token: string; form: { organ
           <p className="text-sm">
             An agent joining for the first time is invited to this opening, and can claim it itself. A claim replaces its access with the {PRESET_LABELS[preview.work_role.preset] ?? preview.work_role.preset} preset. {PRESET_SUMMARIES[preview.work_role.preset]}
           </p>
-          <AgentContent author={{ name: `Created by ${preview.work_role.created_by}`, kind: "person" }} body={preview.work_role.responsibilities} />
+          {/* Our label, not a name anyone chose. The preview doesn't say who, because a forwarded link would show it to anyone. */}
+          <AgentContent author={{ name: "This workroom's owner or an admin", kind: "person", viewer: true }} external={preview.work_role.external !== false} body={preview.work_role.responsibilities} />
         </section>
       ) : null}
       <p className="text-sm text-muted-foreground">Podster hasn't checked the workroom's name. It's whatever its owner or admins typed.</p>

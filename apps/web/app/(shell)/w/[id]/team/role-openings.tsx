@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
 import { AgentContent, AuthorLine } from "@/components/agent-content/agent-content";
 import { plainName } from "@/components/agent-content/text";
 import { SheetLink, TargetSheet, type SheetApi } from "@/components/sheet/target-sheet";
@@ -20,6 +20,7 @@ const TEXTAREA = `${FIELD} h-auto py-2`;
 
 const explainRoleRefusal = (code: string, status = 400) => {
   if (code === "lead_exists") return "This workroom already has a lead opening. Nothing changed.";
+  if (code === "idempotency_mismatch") return "This may already have gone through. Close this and open it again to check before trying again.";
   if (code === "role_not_found") return "That opening isn't there any more. Nothing changed.";
   if (code === "invalid_transition") return "This can't change while someone holds the opening. End their claim first. Nothing changed.";
   return explainRefusal(code, status);
@@ -197,12 +198,27 @@ export function RoleSheet({ roomId, roomName, label }: { roomId: string; roomNam
       description={() => `Workroom: ${plainName(roomName)}`}
       version={({ policyVersion }) => policyVersion}
     >
-      {(api) => <RoleBody key={`${api.data.role.id}-${api.data.role.version}`} api={api} base={base} label={label} />}
+      {(api) => <RoleWithStatus key={api.data.role.id} api={api} base={base} label={label} />}
     </TargetSheet>
   );
 }
 
-function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; label: (id: string) => string }) {
+/** The result outlives the form below it, which starts again once a save changes the opening. */
+function RoleWithStatus({ api, base, label }: { api: SheetApi<Loaded>; base: string; label: (id: string) => string }) {
+  const statusRef = useRef<HTMLParagraphElement>(null);
+  const [done, setDone] = useState("");
+  return (
+    <div className="space-y-5">
+      {/* Focus lands here when a result removes the control that asked. */}
+      <p ref={statusRef} tabIndex={-1} role="status" className="rounded-sm text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        {done || (api.data.archived ? "This workroom is archived, so its openings can't change." : "")}
+      </p>
+      <RoleBody key={api.data.role.version} api={api} base={base} label={label} setDone={setDone} statusRef={statusRef} />
+    </div>
+  );
+}
+
+function RoleBody({ api, base, label, setDone, statusRef }: { api: SheetApi<Loaded>; base: string; label: (id: string) => string; setDone: (text: string) => void; statusRef: RefObject<HTMLParagraphElement | null> }) {
   const { data, run, saving, dirty, setDirty, close } = api;
   const { role, members, archived } = data;
   const [title, setTitle] = useState(role.title);
@@ -211,8 +227,6 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
   const [preset, setPreset] = useState(role.preset);
   const [isLead, setIsLead] = useState(role.is_lead);
   const [invitee, setInvitee] = useState("");
-  const statusRef = useRef<HTMLParagraphElement>(null);
-  const [done, setDone] = useState("");
   // One key per intent, so sending the same thing again after an unknown outcome gets the stored answer.
   const keys = useRef(new Map<string, string>());
   const keyFor = (intent: string) => {
@@ -227,10 +241,10 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
     setDone("");
     const key = keyFor(intent);
     const result = await run(({ version }) => send(key, version), explainRoleRefusal);
-    if (result?.ok) {
-      keys.current.delete(intent);
-      setDone(success);
-    }
+    // Past a re-read, an unknown attempt that landed answers this: the version in the body has moved, so it's no longer the
+    // same request. Explaining says to check, and the key has done its job either way.
+    if (result?.ok || (result && !result.ok && result.code === "idempotency_mismatch")) keys.current.delete(intent);
+    if (result?.ok) setDone(success);
     return result;
   };
   const path = `${base}/roles/${encodeURIComponent(role.id)}`;
@@ -242,8 +256,12 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
   const edit = (apply: () => void) => {
     apply();
     keys.current.delete("save");
-    setDirty(true);
   };
+  // Worked out from the form, because any command's success clears the Sheet's flag, and an invite doesn't save what's typed.
+  const edited = title !== role.title || responsibilities !== role.responsibilities || isLead !== role.is_lead || (!isLead && (capacity !== String(role.capacity) || preset !== role.preset));
+  useEffect(() => {
+    if (dirty !== edited) setDirty(edited);
+  }, [dirty, edited, setDirty]);
 
   const save = () =>
     act(
@@ -257,12 +275,7 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
   };
 
   return (
-    <div className="space-y-5">
-      {/* Focus lands here when a result removes the control that asked. */}
-      <p ref={statusRef} tabIndex={-1} role="status" className="rounded-sm text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        {done || (archived ? "This workroom is archived, so its openings can't change." : "")}
-      </p>
-
+    <>
       <section aria-labelledby="role-holders" className="space-y-2">
         <h3 id="role-holders" className="font-medium">
           Holders
@@ -389,7 +402,7 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
                 Changing the preset or lead mark withdraws invites to this opening and takes it off pending invitation links. {holders.length > 0 ? "Holders keep the access they copied." : ""}
               </p>
             ) : null}
-            {problem && dirty ? <p className="text-sm text-status-danger">{problem}</p> : null}
+            {problem && edited ? <p className="text-sm text-status-danger">{problem}</p> : null}
           </fieldset>
         </section>
       )}
@@ -423,6 +436,6 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
         </div>
         {holders.length > 0 && !archived ? <p className="text-sm text-muted-foreground">An opening can be closed once nobody holds it.</p> : null}
       </footer>
-    </div>
+    </>
   );
 }
