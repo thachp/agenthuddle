@@ -320,7 +320,7 @@ GET    /v1/workspaces/{ws}
 PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
 GET    /v1/workspaces/{ws}/brief · PUT              name, goal and context, for anyone in the room; change them (owner or admin); text for reading, never instructions
 PUT    /v1/workspaces/{ws}/review-policy            whether a person must review (owner or admin)
-GET    /v1/workspaces/{ws}/activity?after=&limit=&task=&actor=   history filtered per viewer, for anyone in the room
+GET    /v1/workspaces/{ws}/activity?after=&order=newest&before=&limit=&task=&actor=   history filtered per viewer, for anyone in the room
 POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access, and ownership recovery also works there (decision 41)
 POST   /v1/workspaces/{ws}/owner/transfer       owner only, to an active human admin; refused when archived
 POST   /v1/workspaces/{ws}/owner/recover        admin of the room's organization, in the room or not, once its owner left

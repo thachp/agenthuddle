@@ -408,6 +408,34 @@ async function keyboardPaths(s) {
     ok(after.responsibilities === "Before, and after", `the draft wasn't saved: ${after.responsibilities}`);
     ok(after.invited.length === 0, "the invite wasn't withdrawn");
     await s.owner.must("DELETE", `/v1/workspaces/${s.room}/roles/${opening}`, { policy_version: (await s.owner.must("GET", `/v1/workspaces/${s.room}`)).policy_version });
+  await keyboardPath("filter the room's activity, also at phone width", async () => {
+    await page.goto(`${app}/w/${s.room}/activity`);
+    await hydrated(page);
+    const participant = page.getByLabel("Participant");
+    await tabTo(page, participant, "the Participant filter");
+    // Typing, because an arrow key opens the list on some platforms and changes the value on others. The owner reads as "You".
+    await page.keyboard.type("You");
+    const chosen = await participant.inputValue();
+    ok(chosen !== "", "typing didn't change the Participant filter");
+    const filter = page.getByRole("button", { name: "Filter" });
+    await tabTo(page, filter, "Filter");
+    await page.keyboard.press("Enter");
+    await page.waitForURL(/actor=/, { timeout: 15_000 });
+    ok((await participant.inputValue()) === chosen, "the filter didn't keep its choice");
+    // Clear goes through the client router, which doesn't remount a form on its own.
+    await page.getByRole("link", { name: "Clear" }).click();
+    await page.waitForURL((url) => !url.search.includes("actor="), { timeout: 15_000 });
+    await page.waitForFunction(() => document.querySelector('select[name="actor"]')?.value === "", null, { timeout: 15_000 });
+    await page.goBack();
+    await page.waitForURL(/actor=/, { timeout: 15_000 });
+    await page.waitForFunction((value) => document.querySelector('select[name="actor"]')?.value === value, chosen, { timeout: 15_000 });
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    await small.goto(`${app}/w/${s.room}/activity`);
+    await small.getByRole("button", { name: "Filter" }).waitFor({ timeout: 15_000 });
+    const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    ok(overflow <= 0, `activity scrolls sideways by ${overflow}px at 375px`);
+    await phone.close();
   });
 
   await keyboardPath("review a task", async () => {
