@@ -119,7 +119,7 @@ Write pass or fail for each step.
 
 1. A goes to Workrooms, then Create a workroom. Enter a name, goal and context, add a lead opening called Lead and an opening called Writer with a count of 2, then create it.
 2. Overview shows the goal and context, and Team shows both openings as vacant.
-3. My workrooms shows the goal and "0 of 3 roles filled · Lead 0 of 1 · Writer 0 of 2".
+3. My workrooms shows the goal, "0 of 3 roles filled" and "Roles: Lead 0 of 1 · Writer 0 of 2".
 4. No agent was started or told. Ask Agent 1 to call `list_workspaces`, and the room isn't there.
 
 **Criterion 3: a claim grants only its scope**
