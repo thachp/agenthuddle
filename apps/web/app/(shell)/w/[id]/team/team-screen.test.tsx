@@ -23,7 +23,7 @@ const props: TeamProps = {
     { id: "agt_1", name: "Code Agent", org_id: "org_a" },
     { id: "agt_2", name: "Spare Agent", org_id: "org_a" },
   ],
-  invitations: { pending: [{ id: "ivt_1", role: "guest", invitedOrg: null, createdBy: "per_owner", createdAt: 0, expiresAt: 1 }], complete: true },
+  invitations: { pending: [{ id: "ivt_1", role: "guest", invitedOrg: null, createdBy: "per_owner", createdAt: 0, expiresAt: 1, workRole: null }], complete: true },
 };
 
 const sent: { method: string; url: string; body: unknown }[] = [];

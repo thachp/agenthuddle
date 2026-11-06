@@ -86,7 +86,7 @@ fn lead_field(body: &Value) -> R<Option<bool>> {
 fn role_json(row: &Value, filled: i64) -> Value {
     json!({
         "id": row["id"], "title": row["title"], "responsibilities": row["responsibilities"], "capacity": row["capacity"],
-        "filled": filled, "preset": row["preset"], "is_lead": int(&row["is_lead"]) != 0, "version": row["version"],
+        "filled": filled, "preset": row["preset"], "is_lead": int(&row["is_lead"]) != 0, "version": row["version"], "created_by": row["created_by"],
     })
 }
 

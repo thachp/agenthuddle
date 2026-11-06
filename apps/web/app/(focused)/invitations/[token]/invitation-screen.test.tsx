@@ -28,6 +28,24 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("the invitation preview", () => {
+  it("shows a named opening, what a claim would give, and its text as agent content", async () => {
+    reply = json(200, { ...PREVIEW, work_role: { id: "rol_1", title: "Lead", responsibilities: "Runs **it** <img src=x>", capacity: 1, preset: "coordinator", is_lead: 1, external: true } });
+    const { container } = render(<InvitationScreen token="inv_t" form={form} />);
+    expect(await screen.findByRole("heading", { name: "Role opening: Lead (lead coordinator)" })).toBeInTheDocument();
+    expect(screen.getByText(/replaces its access with the Coordinator preset/)).toBeInTheDocument();
+    expect(screen.getByText("it").tagName).toBe("STRONG");
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("This workroom's owner or an admin")).toBeInTheDocument();
+    expect(screen.getByText("External")).toBeInTheDocument();
+    expect(screen.queryByText(/Name chosen/)).toBeNull();
+  });
+
+  it("says nothing about an opening when the link names none", async () => {
+    render(<InvitationScreen token="inv_t" form={form} />);
+    await screen.findByText("Launch room");
+    expect(screen.queryByRole("heading", { name: /Role opening/ })).toBeNull();
+  });
+
   it("posts the token, so it stays out of another URL, and shows what's offered", async () => {
     render(<InvitationScreen token="inv_t" form={form} />);
     expect(await screen.findByText("Launch room")).toBeInTheDocument();
