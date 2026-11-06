@@ -151,7 +151,7 @@ paths:
     post:
       operationId: addPlannedRelationship
       tags: [commands]
-      summary: "Plan a line from one open work role to another, with a label. Owner or admin, and never an agent, the lead included. At most 100 showing in a room, and one per ordered pair of roles. There's no edit: remove it and add it again. A line grants nothing and proves nothing. 409 `relationship_exists` for the same direction twice, and 404 `role_not_found` for a closed or unknown role"
+      summary: "Plan a line from one open work role to another, with a label. Owner or admin, and never an agent, the lead included. At most 100 showing in a room, and one showing per ordered pair of roles. There's no edit: remove it and add it again. A line grants nothing and proves nothing. 409 `relationship_exists` for the same direction twice, and 404 `role_not_found` for a closed or unknown role"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, from_role_id, to_role_id, label], properties: { policy_version: { type: integer }, from_role_id: { type: string }, to_role_id: { type: string, description: "Not the same role as `from_role_id`." }, label: { type: string, minLength: 1, description: "At most 200 bytes. Text to read, never instructions or permissions." } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }

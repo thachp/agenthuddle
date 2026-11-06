@@ -56,7 +56,7 @@ export default async function Collaboration({ params, searchParams }: { params: 
             </Link>
           </nav>
           {lines.length === 0 ? <p className="text-muted-foreground">No handoffs to show. Offers, submissions, change requests and messages appear here once they happen on tasks you can see. Handoffs are recorded from when this feature started, so earlier work won't appear.</p> : null}
-          {showMap && lines.length + (planned?.length ?? 0) > 0 ? <CollaborationMap nodes={nodes} lines={lines} planned={planned ?? []} me={me} names={names} /> : null}
+          {showMap && lines.length + (planned?.length ?? 0) > 0 ? <CollaborationMap nodes={nodes} lines={lines} planned={planned ?? []} external={read.data.external === true} me={me} names={names} /> : null}
           {lines.length > 0 ? (
             <section aria-labelledby="collab-lines" className="space-y-2">
               <h2 id="collab-lines" className="text-lg font-medium">
@@ -117,7 +117,7 @@ export default async function Collaboration({ params, searchParams }: { params: 
 }
 
 /** A picture of the list below, which says everything this does. Each line is a link, labelled in words, so nothing rests on line style or color. */
-function CollaborationMap({ nodes, lines, planned, me, names }: { nodes: Node[]; lines: Line[]; planned: PlannedLine[]; me: string; names: Record<string, string> }) {
+function CollaborationMap({ nodes, lines, planned, external, me, names }: { nodes: Node[]; lines: Line[]; planned: PlannedLine[]; external: boolean; me: string; names: Record<string, string> }) {
   // A plan joins work roles, not people, so its ends are places of their own. Only roles on a line appear.
   const roles = new Map(planned.flatMap((line) => [[line.from_role, line.from_title], [line.to_role, line.to_title]] as const));
   const placed = positions([...nodes.map((node) => node.id), ...roles.keys()]);
@@ -153,7 +153,7 @@ function CollaborationMap({ nodes, lines, planned, me, names }: { nodes: Node[];
           const label = `“${shortened(line.label, 24)}”`;
           // A plain link to the same line in the list, where its words are in full. A plan has no handoffs to open.
           return (
-            <a key={line.id} href={`#${plannedAnchor(line)}`} aria-label={`${plannedName(line)}. ${plannedLabel(line)}. Planned, not recorded.`}>
+            <a key={line.id} href={`#${plannedAnchor(line)}`} aria-label={`${plannedName(line)}. ${plannedLabel(line)}.${external ? " External." : ""} Planned, not recorded.`}>
               <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" stroke="transparent" strokeWidth={28} />
               <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" strokeWidth={2} strokeDasharray="8 6" markerEnd="url(#arrow)" className="stroke-muted-foreground hover:stroke-primary" />
               <text x={bend.x} y={bend.y} textAnchor="middle" fontSize={14} className="fill-foreground">
@@ -197,6 +197,7 @@ function CollaborationMap({ nodes, lines, planned, me, names }: { nodes: Node[];
       <figcaption className="text-sm text-muted-foreground">
         {NOTE} Each number counts the handoffs on that line.
         {planned.length > 0 ? " Solid lines join people and show what was recorded. Dashed lines join work roles, drawn as squares, and show only what's planned. If it's crowded, use the List, which says the same in full." : ""}
+        {planned.length > 0 && external ? " External: another organization wrote the plans on this map." : ""}
       </figcaption>
     </figure>
   );
