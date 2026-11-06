@@ -84,6 +84,7 @@ function failureKind(status: number, code: string, earlierUnknown: boolean) {
 
 const launcherKey = (param: string, target: string) => `${param}:${target}`;
 let lastLauncher: HTMLElement | null = null;
+const pressListeners = new Set<(param: string, target: string) => void>();
 
 /**
  * Opens a Sheet from a list. It's a real link, so it can be opened in a new tab and shared, and it marks itself so focus
@@ -98,8 +99,11 @@ export function SheetLink({ param, target, onClick, ...props }: { param: string;
   return <Link {...props} onClick={(event) => {
     lastLauncher = event.currentTarget;
     onClick?.(event);
+    // A press for a new tab leaves this page as it is.
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    pressListeners.forEach((listener) => listener(param, target));
     // An SVG link's `target` is an object, which vinext's Link reads as a target and leaves to the browser, reloading the page.
-    if (event.currentTarget instanceof SVGElement && !event.defaultPrevented && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+    if (event.currentTarget instanceof SVGElement) {
       event.preventDefault();
       router.push(href, { scroll: false });
     }
@@ -133,6 +137,12 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
   // The target just found to be gone. Navigation is asynchronous, so the URL still names it for a moment.
   const left = useRef<string | null>(null);
 
+  // What was closed, and the URL then, until the URL stops naming it. A later navigation replaces one still in progress, so
+  // a link built from the old URL can land on this target again though no one asked for it.
+  const closed = useRef<{ target: string; search: string } | null>(null);
+  const [reopened, setReopened] = useState(0);
+  const searchText = search.toString();
+
   const navigate = useCallback((target: string | null) => router.push(hrefWith(pathname, new URLSearchParams(search.toString()), param, target), { scroll: false }), [router, pathname, search, param]);
 
   // Follows the URL, unless this Sheet still has something unfinished. Then the instance holds it and asks.
@@ -141,7 +151,29 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
     if (selected === bound || busy || (selected !== null && selected === left.current)) return;
     if (selected !== null) setGoneNotice(false);
     setBound(selected);
-  }, [selected, bound, busy]);
+  }, [selected, bound, busy, reopened]);
+
+  // That link meant something else, such as a filter, so the closing still stands.
+  useEffect(() => {
+    if (!closed.current) return;
+    if (selected !== closed.current.target) closed.current = null;
+    else if (searchText !== closed.current.search) {
+      closed.current.search = searchText;
+      navigate(null);
+    }
+  }, [selected, searchText, navigate]);
+
+  // Pressing the link while closing is on its way has an unchanged URL to go to, so the URL can't say this was asked for.
+  useEffect(() => {
+    const onPress = (pressedParam: string, target: string) => {
+      if (pressedParam !== param || closed.current?.target !== target) return;
+      closed.current = null;
+      left.current = null;
+      setReopened((count) => count + 1);
+    };
+    pressListeners.add(onPress);
+    return () => void pressListeners.delete(onPress);
+  }, [param]);
 
   useEffect(() => {
     if (goneNotice) noticeRef.current?.focus();
@@ -149,11 +181,12 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
 
   const onGone = useCallback(() => {
     left.current = bound;
+    closed.current = bound === null ? null : { target: bound, search: searchText };
     setBusy(false);
     setGoneNotice(true);
     setBound(null);
     navigate(null);
-  }, [navigate, bound]);
+  }, [navigate, bound, searchText]);
 
   return (
     <>
@@ -164,13 +197,16 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
       ) : null}
       {bound === null ? null : (
         <BoundSheet
-          key={bound}
+          key={`${bound}:${reopened}`}
           {...props}
           target={bound}
           selected={selected}
           onBusyChange={setBusy}
           onGone={onGone}
-          onClose={() => navigate(null)}
+          onClose={() => {
+            closed.current = { target: bound, search: searchText };
+            navigate(null);
+          }}
           onStay={() => navigate(bound)}
           onRefreshList={() => router.refresh()}
         />

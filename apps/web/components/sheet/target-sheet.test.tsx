@@ -1,10 +1,10 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Button } from "@/components/ui/button";
 import type { GatewayResult } from "@/lib/gateway/result";
-import { back, currentUrl, navigate, routerCalls, setHoldNavigation, settleNavigation, setUrl } from "@/test/next-navigation";
+import { back, currentUrl, dropHeldNavigation, navigate, routerCalls, setHoldNavigation, settleNavigation, setUrl } from "@/test/next-navigation";
 import { SheetLink, TargetSheet, type SheetBinding } from "./target-sheet";
 
 type Item = { id: string; title: string; version: number };
@@ -134,6 +134,84 @@ describe("TargetSheet", () => {
       expect(currentUrl()).toBe("/agents");
       expect(load).toHaveBeenCalledTimes(1);
       expect(screen.getByRole("alert")).toHaveTextContent("We can't find that.");
+    });
+
+    describe("while closing is still reaching the URL", () => {
+      const closeSlowly = async () => {
+        render(<Screen />);
+        await userEvent.click(screen.getByRole("link", { name: "Open B" }));
+        await title("Agent B");
+        setHoldNavigation(true);
+        await userEvent.keyboard("{Escape}");
+        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+        expect(currentUrl()).toBe("/agents?agent=b");
+      };
+
+      it("opens again when the same target's link is pressed, and pressing it isn't lost", async () => {
+        await closeSlowly();
+        await userEvent.click(screen.getByRole("link", { name: "Open B" }));
+        act(() => dropHeldNavigation());
+        expect(await title("Agent B")).toHaveFocus();
+        expect(currentUrl()).toBe("/agents?agent=b");
+      });
+
+      it("shows what's there now when it opens again, not a discarded draft", async () => {
+        render(<Screen />);
+        await userEvent.click(screen.getByRole("link", { name: "Open B" }));
+        await title("Agent B");
+        await userEvent.type(screen.getByRole("textbox"), "typed");
+        setHoldNavigation(true);
+        await userEvent.keyboard("{Escape}");
+        await userEvent.click(await screen.findByRole("button", { name: /Discard/ }));
+        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+        await userEvent.click(screen.getByRole("link", { name: "Open B" }));
+        act(() => dropHeldNavigation());
+        await title("Agent B");
+        expect(screen.getByRole("textbox")).toHaveValue("");
+      });
+
+      it("doesn't open for a press that goes to a new tab", async () => {
+        await closeSlowly();
+        fireEvent.click(screen.getByRole("link", { name: "Open B" }), { metaKey: true });
+        await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+        expect(screen.queryByRole("dialog")).toBeNull();
+      });
+
+      it("still closes when another link, carrying the old URL, replaces the closing", async () => {
+        await closeSlowly();
+        act(() => {
+          navigate("/agents?agent=b&view=board");
+          dropHeldNavigation();
+        });
+        await waitFor(() => expect(currentUrl()).toBe("/agents?view=board"));
+        expect(screen.queryByRole("dialog")).toBeNull();
+      });
+
+      it("looks again when a target found gone is pressed before the URL has caught up", async () => {
+        setUrl("/agents?agent=hidden");
+        setHoldNavigation(true);
+        const load = vi.fn(async () => null);
+        const Hidden = () => (
+          <>
+            <SheetLink param="agent" target="hidden">Open hidden</SheetLink>
+            <Screen load={load} />
+          </>
+        );
+        render(<Hidden />);
+        expect(await screen.findByRole("alert")).toBeInTheDocument();
+        await userEvent.click(screen.getByRole("link", { name: "Open hidden" }));
+        act(() => dropHeldNavigation());
+        await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+      });
+
+      it("can open again after the close has landed", async () => {
+        await closeSlowly();
+        await act(async () => settleNavigation());
+        expect(currentUrl()).toBe("/agents");
+        setHoldNavigation(false);
+        await userEvent.click(screen.getByRole("link", { name: "Open B" }));
+        expect(await title("Agent B")).toHaveFocus();
+      });
     });
 
     it("can open the same target again after not-found", async () => {
