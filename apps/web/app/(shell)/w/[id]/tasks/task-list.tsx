@@ -1,19 +1,20 @@
 "use client";
 
+import { memo } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { PrincipalName, TaskStatusBadge } from "./task-bits";
-import { nameOf, type Names, type Task } from "./task-model";
+import { nameOf, type Names, type TaskSummary } from "./task-model";
 import { countText, groupTasks } from "./task-views";
 
 /**
  * Grouped by state. The API gives tasks no creation or update time, so rows can't show the age the design asks for, and
- * they stay newest first within a group by the order they were created.
+ * they keep `groupTasks`'s order within a group.
  */
-export function TaskList({ tasks, partial, me, names }: { tasks: Task[]; partial: boolean; me: string; names: Names }) {
+export function TaskList({ tasks, partial, paged = false, me, names }: { tasks: TaskSummary[]; partial: boolean; paged?: boolean; me: string; names: Names }) {
   return (
     <div className="space-y-4">
-      {groupTasks(tasks).map((group) => {
+      {groupTasks(tasks, undefined, paged).map((group) => {
         if (group.tasks.length === 0) return null;
         return (
           <section key={group.key} className="space-y-2">
@@ -32,7 +33,8 @@ export function TaskList({ tasks, partial, me, names }: { tasks: Task[]; partial
   );
 }
 
-function TaskRow({ task, me, names }: { task: Task; me: string; names: Names }) {
+/** Memoized because a long list renders thousands of these, and most changes touch one. */
+const TaskRow = memo(function TaskRow({ task, me, names }: { task: TaskSummary; me: string; names: Names }) {
   return (
     <li className="grid gap-x-4 gap-y-1 p-3 lg:grid-cols-[minmax(0,2fr)_auto_minmax(0,1fr)_minmax(0,1fr)] lg:items-center">
       <div className="min-w-0">
@@ -53,4 +55,4 @@ function TaskRow({ task, me, names }: { task: Task; me: string; names: Names }) 
       </div>
     </li>
   );
-}
+});

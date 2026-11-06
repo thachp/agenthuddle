@@ -10,7 +10,7 @@ import { goToSignIn } from "./go-to-sign-in";
 import { TaskActions, type SavedEdit } from "./task-actions";
 import { TaskComposer } from "./task-composer";
 import { PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
-import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail } from "./task-model";
+import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail, type TaskSummary } from "./task-model";
 
 export type LoadedTask = TaskDetail & { workspace: string; room: Room };
 
@@ -24,8 +24,8 @@ export type TaskSheetProps = {
   room?: Room;
   /** Whether a task the viewer can read is filtered off the screen behind this Sheet. */
   outsideFilter?: (task: string) => boolean;
-  /** Called with each read of the open task, so a list past its first page can show what a person just did to it. */
-  onTaskRead?: (task: TaskDetail["task"]) => void;
+  /** Called with each read of the open task and each command's result, so a list past its first page can show what a person just did to it. */
+  onTaskRead?: (task: TaskSummary) => void;
 };
 
 async function read<T>(path: string, signal: AbortSignal) {
@@ -59,14 +59,16 @@ export function TaskSheet({ me, names, orgNames = {}, resolve, room, outsideFilt
       description={(data) => `Workroom: ${plainName(data.room.name)}`}
       version={(data) => data.task.version}
     >
-      {(api) => <TaskBody api={api} me={me} names={names} orgNames={orgNames} outside={outsideFilter?.(api.data.task.id) ?? false} />}
+      {(api) => <TaskBody api={api} me={me} names={names} orgNames={orgNames} outside={outsideFilter?.(api.data.task.id) ?? false} onTaskRead={onTaskRead} />}
     </TargetSheet>
   );
 }
 
+const isThisTask = (value: unknown, id: string): value is TaskSummary => typeof value === "object" && value !== null && (value as TaskSummary).id === id && typeof (value as TaskSummary).version === "number";
+
 const TAB_CLASS = "min-h-11 flex-1 rounded-md px-3 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-muted sm:min-h-8 sm:flex-none";
 
-function TaskBody({ api, me, names, orgNames, outside }: { api: SheetApi<LoadedTask>; me: string; names: Names; orgNames: Names; outside: boolean }) {
+function TaskBody({ api, me, names, orgNames, outside, onTaskRead }: { api: SheetApi<LoadedTask>; me: string; names: Names; orgNames: Names; outside: boolean; onTaskRead?: (task: TaskSummary) => void }) {
   const { data } = api;
   const { task } = data;
   // Outlives the action controls, which start fresh for each version, so the result stays on screen.
@@ -148,7 +150,17 @@ function TaskBody({ api, me, names, orgNames, outside }: { api: SheetApi<LoadedT
       </Tabs.Root>
 
       {/* Fresh for each version, so a draft or key from before a change can't go out against what's on screen now. */}
-      <TaskActions key={`${held.current.task.version}:${held.current.task.submission_no}`} api={{ ...api, data: held.current }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} returnFocus={returnFocus} />
+      <TaskActions key={`${held.current.task.version}:${held.current.task.submission_no}`} api={{
+          ...api,
+          data: held.current,
+          // A person can close the Sheet before the read after a command finishes, so the list takes the command's own answer.
+          run: (command, explain) =>
+            api.run(async (binding) => {
+              const result = await command(binding);
+              if (result.ok && isThisTask(result.data, task.id)) onTaskRead?.(result.data);
+              return result;
+            }, explain),
+        }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} returnFocus={returnFocus} />
     </div>
   );
 }

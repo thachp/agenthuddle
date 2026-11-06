@@ -177,13 +177,19 @@ async function seed() {
   const inLong = (title, extra = {}) => lead.must("create_task", { workspace_id: longRoom, title, instructions: "A row in a long list.", idempotency_key: crypto.randomUUID(), ...extra });
   const LONG_TASKS = 320;
   for (let start = 0; start < LONG_TASKS; start += 20) {
-    await Promise.all(Array.from({ length: Math.min(20, LONG_TASKS - start) }, (_, i) => inLong(`Long task ${String(start + i).padStart(3, "0")}`)));
+    await Promise.all(Array.from({ length: Math.min(20, LONG_TASKS - start) }, (_, i) => inLong(`Long task ${String(start + i).padStart(3, "0")}`, (start + i) % 5 === 0 ? { assignee: longWorker.id } : {})));
+  }
+  // Two pages, so one read ends the list.
+  const shortListRoom = await owner.createRoom("Two pages");
+  await owner.addAgent(shortListRoom, lead);
+  for (let start = 0; start < 60; start += 20) {
+    await Promise.all(Array.from({ length: 20 }, (_, i) => lead.must("create_task", { workspace_id: shortListRoom, title: `Short list ${String(start + i).padStart(2, "0")}`, instructions: "A row.", idempotency_key: crypto.randomUUID() })));
   }
   const lastReview = await inLong("The review past every loaded page", { assignee: longWorker.id, reviewer: owner.id });
   const lastTaken = await longWorker.must("accept_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastReview.version });
   await longWorker.must("submit_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastTaken.version, note: "Ready", artifacts: [], idempotency_key: crypto.randomUUID() });
 
-  return { longRoom, lastReview, LONG_TASKS, opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { longRoom, shortListRoom, lastReview, LONG_TASKS, opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -687,14 +693,12 @@ async function keyboardPaths(s) {
   const rows = (where) => where.locator('[data-sheet-launcher^="task:"]').count();
   const waitForRows = (where, above) => where.waitForFunction((n) => document.querySelectorAll('[data-sheet-launcher^="task:"]').length > n, above, { timeout: 30_000 });
   const everyRow = s.LONG_TASKS + 1;
-  /** Stops the page from loading by itself, for the paths that are about the button. */
+  /** Stops the page from loading by itself, for the paths that are about the button. The others keep scrolling live. */
   const buttonOnly = async () => {
     const own = await contextFor(s.owner).newPage();
     await own.addInitScript(() => {
-      window.IntersectionObserver = class {
-        observe() {}
-        disconnect() {}
-      };
+      const listen = window.addEventListener.bind(window);
+      window.addEventListener = (type, ...rest) => (type === "scroll" ? undefined : listen(type, ...rest));
     });
     return own;
   };
@@ -718,8 +722,8 @@ async function keyboardPaths(s) {
           await own.waitForFunction(() => document.activeElement?.textContent === "Load more", null, { timeout: 15_000 });
         }
       }
-      await own.waitForFunction(() => document.activeElement?.textContent?.startsWith("All "), null, { timeout: 15_000 });
-      ok((await own.getByText(`All ${everyRow} tasks shown.`).count()) === 1, "the end of the list doesn't say so");
+      await own.waitForFunction(() => document.activeElement?.textContent?.startsWith("End of the list"), null, { timeout: 15_000 });
+      ok((await own.getByText(`End of the list when it loaded: ${everyRow} tasks.`).count()) === 1, "the end of the list doesn't say so");
       // With everything loaded, the progress is a real one, for the whole set.
       ok((await own.getByRole("progressbar").count()) === 1, "progress still says partial with every task loaded");
     } finally {
@@ -788,6 +792,96 @@ async function keyboardPaths(s) {
     }
   });
 
+  await keyboardPath("focus when scrolling ends the list, with scrolling live", async () => {
+    const own = await contextFor(s.owner).newPage();
+    const url = `${app}/w/${s.shortListRoom}/tasks`;
+    try {
+      // Tabbing to the button scrolls it into view, which loads the last page and takes the button away.
+      await own.goto(url);
+      await hydrated(own);
+      const more = own.getByRole("button", { name: "Load more" });
+      await more.waitFor();
+      await more.focus();
+      await own.getByText(/End of the list when it loaded: 60 tasks/).waitFor({ timeout: 15_000 });
+      await own.waitForFunction(() => document.activeElement?.textContent?.startsWith("End of the list"), null, { timeout: 5000 }).catch(async () => {
+        throw new Error(`the last page took the focused button away, leaving focus on ${await activeText(own)}`);
+      });
+      // A reader on a row stays there. Pressing the button earlier doesn't change that.
+      await own.goto(url);
+      await hydrated(own);
+      const row = own.locator('[data-sheet-launcher^="task:"]').nth(3);
+      await row.waitFor();
+      await row.focus({ preventScroll: true });
+      await own.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      await own.getByText(/End of the list when it loaded: 60 tasks/).waitFor({ timeout: 15_000 });
+      ok(await row.evaluate((el) => el === document.activeElement), `the list ending moved focus from a row to ${await activeText(own)}`);
+    } finally {
+      await own.close();
+    }
+  });
+
+  await keyboardPath("several thousand rows stay usable", async () => {
+    const TARGET = 5000;
+    const own = await buttonOnly();
+    // Pages the server would have to hold thousands of tasks to answer, with instructions at their limit, which rows don't keep.
+    const instructions = "x".repeat(64 * 1024);
+    await own.route(/\/tasks\?cursor=\d+$/, (route) => {
+      const from = Number(new URL(route.request().url()).searchParams.get("cursor"));
+      const start = Math.max(from, 1000);
+      const tasks = Array.from({ length: 50 }, (_, i) => ({ id: `tsk_many_${start + i}`, title: `Many ${start + i}`, instructions, acceptance_criteria: null, requester: s.owner.id, assignee: null, reviewer: s.owner.id, status: i % 2 ? "open" : "completed", version: 1, due_at: null, follow_up_of: null, submission_no: 0, needs_attention: false }));
+      return route.fulfill({ json: { tasks, next_cursor: start + 50 } });
+    });
+    const cdp = await own.context().newCDPSession(own);
+    await cdp.send("HeapProfiler.enable");
+    await cdp.send("Performance.enable");
+    const heapMb = async () => {
+      await cdp.send("HeapProfiler.collectGarbage");
+      const { metrics } = await cdp.send("Performance.getMetrics");
+      return Math.round(metrics.find((metric) => metric.name === "JSHeapUsedSize").value / 1048576);
+    };
+    try {
+      await own.goto(longUrl());
+      await hydrated(own);
+      await own.evaluate(() => {
+        window.__longest = 0;
+        new PerformanceObserver((list) => list.getEntries().forEach((entry) => (window.__longest = Math.max(window.__longest, entry.duration)))).observe({ entryTypes: ["longtask"] });
+      });
+      const report = [];
+      for (const milestone of [1000, 3000, TARGET]) {
+        let page = 0;
+        for (let loaded = await rows(own); loaded < milestone; loaded = await rows(own)) {
+          page = await own.evaluate(async (before) => {
+            const started = performance.now();
+            window.__longest = 0;
+            document.querySelector("[data-task-load-more]").click();
+            while (document.querySelectorAll('[data-sheet-launcher^="task:"]').length <= before) await new Promise((done) => setTimeout(done, 5));
+            await new Promise(requestAnimationFrame);
+            return Math.round(performance.now() - started);
+          }, loaded);
+        }
+        const stats = await own.evaluate(() => ({ elements: document.querySelectorAll("*").length, longest: Math.round(window.__longest) }));
+        report.push(`${milestone} rows: last page ${page} ms, longest block ${stats.longest} ms, ${stats.elements} elements, ${await heapMb()} MB heap after GC`);
+        ok(page < 3000, `adding a page at ${milestone} rows took ${page} ms`);
+      }
+      const opened = Date.now();
+      await own.getByRole("link", { name: "Long task 001", exact: true }).click();
+      await own.getByRole("dialog").waitFor({ timeout: 30_000 });
+      const sheet = Date.now() - opened;
+      await own.keyboard.press("Escape");
+      await own.getByRole("dialog").waitFor({ state: "hidden", timeout: 30_000 });
+      const switched = await own.getByRole("link", { name: "Board", exact: true }).evaluate(async (link) => {
+        const started = performance.now();
+        link.click();
+        await new Promise((done) => requestAnimationFrame(() => setTimeout(done)));
+        return Math.round(performance.now() - started);
+      });
+      console.log(`measure ${TARGET} rows: ${report.join("; ")}; opening a Sheet ${sheet} ms; switching to Board ${switched} ms`);
+      ok(sheet < 5000, `opening a Sheet over ${TARGET} rows took ${sheet} ms`);
+    } finally {
+      await own.close();
+    }
+  });
+
   await keyboardPath("a long list loads near the bottom without moving the reader, and what it costs", async () => {
     for (const [view, query] of [["List", ""], ["Board", "?view=board"]]) {
       const own = await contextFor(s.owner).newPage();
@@ -802,6 +896,18 @@ async function keyboardPaths(s) {
         const firstScreen = Date.now() - opened;
         await hydrated(own);
         ok(reads.length <= 1, `${view}: ${reads.length} page reads before anyone scrolled`);
+        // Chromium anchors scrolling by itself, which would hide a page that doesn't. Safari has no such thing.
+        await own.addStyleTag({ content: "* { overflow-anchor: none !important; }" });
+        // One scroll is one person's action, and it asks for one page, however long the reader then sits there.
+        const readsBefore = reads.length;
+        await own.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+        await waitForRows(own, 50);
+        await own.waitForTimeout(3000);
+        ok(reads.length - readsBefore === 1, `${view}: one scroll made ${reads.length - readsBefore} reads and ${await rows(own)} rows`);
+        // Sitting at the very bottom, a scroll that goes nowhere asks for nothing either.
+        await own.evaluate(() => window.scrollBy(0, 0));
+        await own.waitForTimeout(300);
+        ok(reads.length - readsBefore === 1, `${view}: a scroll that went nowhere made another read`);
         const loadedAt = Date.now();
         let worst = 0;
         const shifts = [];
@@ -829,7 +935,7 @@ async function keyboardPaths(s) {
         ok(worst <= 2, `${view}: a row in view moved as rows arrived: ${shifts.join(", ")}px by page`);
         const sideways = await own.evaluate(() => document.documentElement.scrollWidth - innerWidth);
         ok(sideways <= 0, `${view}: the page scrolls sideways by ${sideways}px`);
-        const cost = await own.evaluate(() => ({ nodes: document.querySelectorAll("*").length, heapMb: Math.round((performance.memory?.usedJSHeapSize ?? 0) / 1048576) }));
+        const cost = await own.evaluate(() => ({ nodes: document.querySelectorAll("*").length }));
         // How long a person waits for the switch once every row is there.
         const other = own.getByRole("link", { name: view === "List" ? "Board" : "List", exact: true });
         const switched = await other.evaluate(async (link) => {
@@ -838,7 +944,7 @@ async function keyboardPaths(s) {
           await new Promise((done) => requestAnimationFrame(() => setTimeout(done)));
           return Math.round(performance.now() - started);
         });
-        console.log(`measure ${view}: ${everyRow} tasks, first screen ${firstScreen} ms, the rest ${allLoaded} ms over ${reads.length} reads, worst row shift ${worst}px, ${cost.nodes} elements, ${cost.heapMb} MB heap, switching view ${switched} ms`);
+        console.log(`measure ${view}: ${everyRow} tasks, first screen ${firstScreen} ms, the rest ${allLoaded} ms over ${reads.length} reads, worst row shift ${worst}px, ${cost.nodes} elements, switching view ${switched} ms`);
       } finally {
         await own.close();
       }

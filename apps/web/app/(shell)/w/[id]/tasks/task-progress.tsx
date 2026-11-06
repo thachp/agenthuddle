@@ -1,11 +1,11 @@
 import { progressOf, progressScope, type TaskViewState } from "./task-views";
-import type { Task } from "./task-model";
+import type { TaskSummary } from "./task-model";
 
 /**
  * Covers exactly the tasks it's given. When the read stopped early those are a page and not the workroom, so it gives the
  * loaded counts and no percentage or bar, which would read as the room's progress.
  */
-export function TaskProgress({ tasks, partial, state, limited }: { tasks: Task[]; partial: boolean; state: Pick<TaskViewState, "reviewMine">; limited: boolean }) {
+export function TaskProgress({ tasks, partial, state, limited }: { tasks: TaskSummary[]; partial: boolean; state: Pick<TaskViewState, "reviewMine">; limited: boolean }) {
   const { completed, active, percent } = progressOf(tasks);
   const scope = progressScope({ filtered: state.reviewMine, limited });
   return (

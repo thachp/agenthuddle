@@ -21,6 +21,16 @@ export type Task = {
   needs_attention: boolean;
 };
 
+/**
+ * A task as a list holds it. Rows don't show instructions or criteria, the Sheet reads its own, and at 64 KB of instructions
+ * a task, a long list would otherwise keep tens of megabytes it never uses.
+ */
+export type TaskSummary = Omit<Task, "instructions" | "acceptance_criteria">;
+export function summaryOf(task: TaskSummary): TaskSummary {
+  const { instructions: _instructions, acceptance_criteria: _criteria, ...summary } = task as Task;
+  return summary;
+}
+
 export type From = { id: string; org: string };
 export type Message = { id: string; seq: number; from: From; external: boolean; body: string; created_at: number };
 export type Artifact = { id: string; submission_no: number; uri: string; label: string; from: From; external: boolean; created_at: number };
