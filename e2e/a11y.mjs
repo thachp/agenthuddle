@@ -23,6 +23,8 @@ const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"];
 
 const target = new Target(gatewayBase, { pollMs: 150 });
 
+const CANT_FORMAT = "This text can't be formatted";
+
 /** What the screens need to show every state: each task status, an agent's text, an external author, and a pending link. */
 async function seed() {
   const [owner, partner] = [await signUp("Ada Owner"), await signUp("Bea Partner")];
@@ -44,14 +46,47 @@ async function seed() {
   await make("An offered task", { assignee: guest.id });
   const accepted = await make("An accepted task", { assignee: guest.id });
   await guest.must("accept_task", { ...at(accepted), version: accepted.version });
-  const submit = async (title, reviewer) => {
-    const task = await make(title, { assignee: guest.id, reviewer });
+  const submit = async (title, reviewer, extra = {}) => {
+    const task = await make(title, { assignee: guest.id, reviewer, ...extra });
     const taken = await guest.must("accept_task", { ...at(task), version: task.version });
     await guest.must("send_message", { ...at(task), body: "A question **about** scope, with `code` and <b>inert HTML</b>." });
     return guest.must("submit_task", { ...at(task), version: taken.version, note: "Ready for review", artifacts: [{ uri: "https://example.com/pr/1", label: "Pull request" }] });
   };
   const review = await submit("Task for keyboard review", owner.id);
-  const reviewScreen = await submit("Task for the review screen", owner.id);
+  const reviewScreen = await submit("Task for the review screen", owner.id, { instructions: `**Write** the design.\n\n# A heading\n\n- [x] A marked item\n- [ ] An unmarked item\n\n| Column one | Column two |\n| --- | --- |\n| ${"unbroken".repeat(30)} | **two** |\n\n| Narrow |\n| --- |\n| Fits |` });
+  // A few bytes that ask for millions of cells: instructions at their limit, which display cuts to 20,000 characters, and a message at its limit.
+  const paddedTable = (size) => {
+    const columns = Math.floor(size / 8);
+    return `${"|a".repeat(columns)}\n${"|-".repeat(columns)}\n${"a\n".repeat(Math.floor((size - 4 * columns) / 2) - 2)}`;
+  };
+  const oversized = await make("Task with oversized tables", { assignee: guest.id, instructions: paddedTable(20_000).padEnd(64 * 1024, "a\n") });
+  await guest.must("accept_task", { ...at(oversized), version: oversized.version });
+  await guest.must("send_message", { ...at(oversized), body: paddedTable(16 * 1024) });
+  // Text that has crashed the tab. Each gets its own task, in its own room, so one failure can't hide another.
+  const hostileRoom = await owner.createRoom("Hostile text");
+  await owner.addAgent(hostileRoom, lead);
+  const K16 = 16 * 1024;
+  const deepest = `${"- ".repeat(100)}x\n`;
+  const hostile = [];
+  for (const [label, instructions, note] of [
+    ["quotes at the limit", `${">".repeat(100)} deep`, null],
+    ["1,500 quotes", ">".repeat(1500), CANT_FORMAT],
+    ["1,750 quotes", ">".repeat(1750), CANT_FORMAT],
+    ["2,000 quotes", ">".repeat(2000), CANT_FORMAT],
+    ["3,000 quotes", ">".repeat(3000), CANT_FORMAT],
+    ["quotes at the message limit", ">".repeat(K16), CANT_FORMAT],
+    ["quotes at the instructions limit", ">".repeat(64 * 1024), CANT_FORMAT],
+    ["2 KB of bullets", "- ".repeat(1000), CANT_FORMAT],
+    ["bullets at the message limit", "- ".repeat(K16 / 2), CANT_FORMAT],
+    ["a mix at the message limit", "> - 1. ".repeat(Math.floor(K16 / 7)), CANT_FORMAT],
+    ["CRLF ladder", Array.from({ length: 170 }, (_, i) => `${">".repeat(i)} a`).join("\r\n"), CANT_FORMAT],
+    ["indented ladder", Array.from({ length: 125 }, (_, i) => `${"  ".repeat(i)}- a`).join("\n"), CANT_FORMAT],
+    ["tabs behind a quote at the message limit", Array.from({ length: 70 }, (_, i) => `> ${"\t".repeat(i)}${"- ".repeat(98)}x`).join("\n").slice(0, K16), CANT_FORMAT],
+    ["footnotes", "[^a]: ".repeat(Math.floor(K16 / 6)), CANT_FORMAT],
+    ["inline nesting", `${"*a _b ".repeat(1300)}x${" b_ a*".repeat(1300)}`, CANT_FORMAT],
+    ["the deepest allowed, repeated", deepest.repeat(Math.floor(K16 / deepest.length)), null],
+    ["wide tables repeated", `| ${"w".repeat(300)} |\n| - |\n\n`.repeat(Math.floor(K16 / 312)), "too large to show as a table"],
+  ]) hostile.push({ label, note, id: (await lead.must("create_task", { workspace_id: hostileRoom, title: `Hostile: ${label}`, instructions })).id });
   const done = await submit("A completed task", lead.id);
   await lead.must("verify_task", { ...at(done), submission_no: 1 });
   const canceled = await make("A canceled task");
@@ -91,7 +126,7 @@ async function seed() {
   await until(async () => (await owner.must("GET", "/v1/oversight/ownerless")).rooms.some((r) => r.workspace_id === ownerlessRoom), "the workroom reaching the ownerless list");
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
-  return { owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -472,6 +507,79 @@ async function keyboardPaths(s) {
     }
     await phone.close();
   });
+  await keyboardPath("agent text at phone width", async () => {
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    await small.goto(`${app}/w/${s.room}/tasks?task=${s.reviewScreen.id}`);
+    await hydrated(small);
+    const scroller = small.getByRole("group", { name: "Table in this text" }).first();
+    await scroller.waitFor({ timeout: 15_000 });
+    const sizes = await scroller.evaluate((el) => ({ page: document.documentElement.scrollWidth - window.innerWidth, sheet: el.closest('[role="dialog"]').scrollWidth - el.closest('[role="dialog"]').clientWidth, table: el.scrollWidth - el.clientWidth }));
+    ok(sizes.page <= 0, `the page scrolls sideways by ${sizes.page}px at 375px`);
+    ok(sizes.sheet <= 0, `the Sheet scrolls sideways by ${sizes.sheet}px at 375px`);
+    ok(sizes.table > 0, "the wide table doesn't scroll in its own container, so this check proves nothing");
+    await tabTo(small, scroller, "the table");
+    await small.keyboard.press("ArrowRight");
+    await small.waitForFunction((el) => el.scrollLeft > 0, await scroller.elementHandle(), { timeout: 5_000 }).catch(() => {});
+    ok(await scroller.evaluate((el) => el.scrollLeft > 0), "the arrow keys don't scroll the table");
+    const box = small.getByRole("checkbox", { name: "Author's mark, not verified by Podster" }).first();
+    ok(await box.isDisabled(), "a checklist mark isn't disabled");
+    const before = await box.isChecked();
+    await box.click({ force: true });
+    ok((await box.isChecked()) === before, "clicking a checklist mark changed it");
+    ok(await box.evaluate((el) => getComputedStyle(el.closest("li")).listStyleType === "none"), "a checklist item still has a bullet");
+    const marksNote = small.getByText("Podster hasn't verified them").first();
+    ok((await marksNote.boundingBox()).y < (await box.boundingBox()).y, "the note about checked boxes isn't above them");
+    ok((await small.getByRole("heading", { name: "A heading", level: 4 }).count()) > 0, "agent text's heading isn't at the fixed level");
+    const narrow = small.getByRole("group", { name: "Table in this text" }).nth(1);
+    ok((await narrow.getAttribute("tabindex")) === null, "a table that fits is still a tab stop");
+    await phone.close();
+  });
+
+  await keyboardPath("oversized agent tables don't freeze the Sheet", async () => {
+    const started = Date.now();
+    await page.goto(`${app}/w/${s.room}/tasks?task=${s.oversized.id}`);
+    await page.getByText("too large to show as a table").first().waitFor({ timeout: 15_000 });
+    await hydrated(page);
+    ok((await page.locator("table td").count()) < 2_500, "an oversized table still rendered as a table");
+    const responded = await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done(true))));
+    ok(responded && Date.now() - started < 15_000, `the Sheet took ${Date.now() - started}ms`);
+  });
+
+  for (const { label, note, id } of s.hostile) {
+    await keyboardPath(`hostile text: ${label}`, async () => {
+      const own = await contextFor(s.owner).newPage();
+      let crashed = false;
+      own.on("crash", () => (crashed = true));
+      try {
+        const started = Date.now();
+        await own.goto(`${app}/w/${s.hostileRoom}/tasks?task=${id}`);
+        await own.getByRole("dialog").getByText(`Hostile: ${label}`).first().waitFor({ timeout: 15_000 });
+        if (note) await own.getByRole("dialog").getByText(note).first().waitFor({ timeout: 15_000 });
+        else ok((await own.getByRole("dialog").getByText("can't be formatted").count()) === 0, "text within the limits wasn't formatted");
+        await hydrated(own);
+        const alive = await own.evaluate(() => new Promise((done) => requestAnimationFrame(() => done(true))));
+        ok(alive && !crashed, "the tab crashed");
+        ok(Date.now() - started < 15_000, `the Sheet took ${Date.now() - started}ms`);
+        if (label === "wide tables repeated") {
+          // Real Tab presses, because Chromium makes anything that overflows focusable by itself.
+          const article = own.getByRole("dialog").locator("article").first();
+          await own.waitForTimeout(300);
+          let stops = 0;
+          for (let i = 0; i < 400; i++) {
+            await own.keyboard.press("Tab");
+            const inside = await article.evaluate((el) => el.contains(document.activeElement));
+            if (inside) stops += 1;
+            else if (stops > 0) break;
+          }
+          ok(stops === 10, `the fallback left ${stops} tab stops in one body`);
+        }
+      } finally {
+        await own.close().catch(() => {});
+      }
+    });
+  }
+
   await keyboardPath("transfer ownership", async () => {
     await page.goto(`${app}/w/${s.transferRoom}/settings`);
     await hydrated(page);
