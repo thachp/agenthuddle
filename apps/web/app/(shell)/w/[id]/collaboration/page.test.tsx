@@ -179,6 +179,22 @@ describe("planned relationships", () => {
     expect(screen.getByText(/If it's crowded, use the List/)).toBeInTheDocument();
   });
 
+  it("marks another organization's plans on the map, in words and in each line's name", async () => {
+    withPlanned([line]);
+    const read = replies.get(path) as { data: Record<string, unknown> };
+    replies.set(path, { ok: true, data: { ...read.data, external: true } });
+    await show({ view: "map" });
+    expect(screen.getByRole("link", { name: "Planned: Architect **x** to Engineer. Label: “Hands <b>designs</b> to”. External. Planned, not recorded." })).toBeInTheDocument();
+    expect(screen.getByText(/External: another organization wrote the plans/)).toBeInTheDocument();
+  });
+
+  it("doesn't mark a room's own plans as external on the map", async () => {
+    withPlanned([line]);
+    await show({ view: "map" });
+    expect(screen.queryByText(/External/)).toBeNull();
+    expect(screen.getByRole("link", { name: /^Planned: Architect/ }).getAttribute("aria-label")).not.toContain("External");
+  });
+
   it("draws a map of plans alone, with nothing recorded yet", async () => {
     replies.set(path, { ok: true, data: { edges: [], nodes: [{ id: "per_me" }], planned: [line] } });
     await show({ view: "map" });
