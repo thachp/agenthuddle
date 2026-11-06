@@ -5696,10 +5696,13 @@ describe("task plans", () => {
     const b = await offer(tasks, { title: "B" });
     // Held, so anything this queued would still be here to count.
     await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hold_outbox (x)"));
-    const outbox = await count(id, "outbox");
     const events = await count(id, "event");
+    const inboxes = async () => (await Promise.all([LEAD, BOB, REVIEWER, OWNER].map(async (who) => (await api(who, "GET", "/v1/inbox")).body.events))).flat();
     expect((await set(LEAD, tasks, b.id, id, { duration_days: 2, predecessors: [a.id] })).status).toBe(200);
-    expect(await count(id, "outbox")).toBe(outbox);
+    const queued = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.type = 'task.plan_changed'").one().n);
+    expect(queued).toBe(0);
+    await runDurableObjectAlarm(stub(id));
+    expect((await inboxes()).some((e: any) => e.type === "task.plan_changed")).toBe(false);
     expect(await count(id, "event")).toBe(events + 1);
     expect((await api(BOB, "GET", `${tasks}/${b.id}`)).body.task.status).toBe("offered");
     const audit = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT * FROM task_plan_change").toArray()) as any[];
@@ -5842,44 +5845,152 @@ describe("task plans", () => {
     expect(whole.edges).toHaveLength(3);
   });
 
-  it("says it's incomplete over 3,000 tasks, holding the first 3,000 and edges only among them", async () => {
-    const { id, tasks } = await room();
-    const first = await offer(tasks, { title: "First" });
-    const second = await offer(tasks, { title: "Second" });
-    await set(LEAD, tasks, second.id, id, { predecessors: [first.id] });
-    await runInDurableObject(stub(id), (_: any, state: any) => {
-      const sql = state.storage.sql;
-      const names = sql.exec("PRAGMA table_info(task)").toArray().map((c: any) => c.name).filter((n: string) => n !== "seq");
-      const chosen = names.map((n: string) => (n === "id" ? "'tsk_seed' || g.n" : n === "title" ? "'Seed'" : `t.${n}`)).join(",");
-      for (let start = 0; start < 2998; start += 500) sql.exec(`WITH RECURSIVE g(n) AS (SELECT ${start} UNION ALL SELECT n + 1 FROM g WHERE n < ${Math.min(start + 499, 2997)}) INSERT INTO task (${names.join(",")}) SELECT ${chosen} FROM g, (SELECT * FROM task LIMIT 1) t`);
-    });
-    const full = await read(OWNER, id);
-    expect(full.tasks).toHaveLength(3000);
-    expect(full.complete).toBe(true);
-    // One more than a read holds, with an edge to it, seeded because a room may refuse so many new tasks.
-    await runInDurableObject(stub(id), (_: any, state: any) => {
-      const sql = state.storage.sql;
-      const names = sql.exec("PRAGMA table_info(task)").toArray().map((c: any) => c.name).filter((n: string) => n !== "seq");
-      const chosen = names.map((n: string) => (n === "id" ? "'tsk_beyond'" : `t.${n}`)).join(",");
-      sql.exec(`INSERT INTO task (${names.join(",")}) SELECT ${chosen} FROM (SELECT * FROM task LIMIT 1) t`);
-      sql.exec(`INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) VALUES ('tsk_beyond', '${first.id}', 'o', 1)`);
-    });
-    const beyond = { id: "tsk_beyond" };
-    const over = await read(OWNER, id);
-    expect(over.complete).toBe(false);
-    expect(over.tasks).toHaveLength(3000);
-    expect(over.plan_revision).toBe(1);
-    expect(over.tasks.some((t) => t.id === beyond.id)).toBe(false);
-    expect(over.edges).toEqual([{ predecessor: first.id, successor: second.id }]);
+  const seedFinished = (id: string, count: number, from = 0, title = "'Old'") => runInDurableObject(stub(id), (_: any, state: any) => {
+    const sql = state.storage.sql;
+    const names = sql.exec("PRAGMA table_info(task)").toArray().map((c: any) => c.name).filter((n: string) => n !== "seq");
+    const chosen = names.map((n: string) => (n === "id" ? "'tsk_old' || g.n" : n === "title" ? title : n === "status" ? "'completed'" : `t.${n}`)).join(",");
+    for (let start = from; start < from + count; start += 500) sql.exec(`WITH RECURSIVE g(n) AS (SELECT ${start} UNION ALL SELECT n + 1 FROM g WHERE n < ${Math.min(start + 499, from + count - 1)}) INSERT INTO task (${names.join(",")}) SELECT ${chosen} FROM g, (SELECT * FROM task LIMIT 1) t`);
+  });
+  const seedEdges = (id: string, successor: (n: string) => string, predecessor: (n: string) => string, count: number) => runInDurableObject(stub(id), (_: any, state: any) => {
+    for (let start = 0; start < count; start += 500) state.storage.sql.exec(`WITH RECURSIVE g(n) AS (SELECT ${start} UNION ALL SELECT n + 1 FROM g WHERE n < ${Math.min(start + 499, count - 1)}) INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) SELECT ${successor("g.n")}, ${predecessor("g.n")}, 'o', 1 FROM g`);
   });
 
-  it("refuses to pass 5,000 edges in a room", async () => {
+  it("over 3,000 tasks, holds every unfinished task first, with its whole predecessor list, so an edit can't erase what it didn't show", async () => {
+    const { id, tasks } = await room();
+    const oldest = await offer(tasks, { title: "Oldest and still open" });
+    await seedFinished(id, 3500);
+    const newest = await offer(tasks, { title: "Newest" });
+    const old = "tsk_old5";
+    // An open task whose predecessor is too old to be listed.
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) VALUES ('${newest.id}', '${old}', 'o', 1)`));
+    const plan = await read(OWNER, id);
+    expect(plan.complete).toBe(false);
+    expect(plan.tasks).toHaveLength(3000);
+    expect(plan.tasks[0].id).toBe(newest.id);
+    expect(plan.tasks.some((t) => t.id === oldest.id)).toBe(true);
+    expect(plan.tasks.some((t) => t.id === old)).toBe(false);
+    expect(plan.tasks.at(-1).status).toBe("completed");
+    expect(plan.edges).toEqual([{ predecessor: old, successor: newest.id }]);
+    // Sending back what it read keeps the old edge, and adds an estimate.
+    const predecessors = plan.edges.filter((e) => e.successor === newest.id).map((e) => e.predecessor);
+    expect((await set(LEAD, tasks, newest.id, id, { predecessors, duration_days: 3 })).status).toBe(200);
+    expect((await read(OWNER, id)).edges).toEqual([{ predecessor: old, successor: newest.id }]);
+    // A finished task too old to list can't lose anything by an edit that doesn't know about it.
+    await runInDurableObject(stub(id), (_: any, state: any) => {
+      state.storage.sql.exec(`INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) VALUES ('tsk_old7', '${old}', 'o', 1)`);
+      state.storage.sql.exec("UPDATE task SET duration_days = 9 WHERE id = 'tsk_old7'");
+    });
+    expect((await set(OWNER, tasks, "tsk_old7", id, {})).code).toBe("invalid_transition");
+    const kept = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n, (SELECT duration_days FROM task WHERE id = 'tsk_old7') AS days FROM task_dependency WHERE successor_id = 'tsk_old7'").one()) as any;
+    expect(kept).toMatchObject({ n: 1, days: 9 });
+  });
+
+  it("is complete at exactly 3,000 tasks", async () => {
+    const { id, tasks } = await room();
+    await offer(tasks, { title: "One" });
+    await seedFinished(id, 2999);
+    const plan = await read(OWNER, id);
+    expect(plan.tasks).toHaveLength(3000);
+    expect(plan.complete).toBe(true);
+  });
+
+  it("reads through its indexes, stopping early however large the room's history", async () => {
+    const { id, tasks } = await room();
+    const mine = await offer(tasks, { assignee: BOB.id, title: "Mine" });
+    await seedFinished(id, 8000);
+    await seedEdges(id, (n) => `'tsk_old' || (${n} + 1)`, (n) => `'tsk_old' || ${n}`, 4000);
+    // Someone named on nearly everything.
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`UPDATE task SET reviewer_id = '${BOB.id}', assignee_id = '${BOB.id}'`));
+    const costs = async (who: Who, ids: string[]) => (await api(who, "GET", `${planOf(id)}/costs?ids=${encodeURIComponent(JSON.stringify(ids))}`)).body;
+    const narrow = await costs(BOB, [mine.id, "tsk_old1"]);
+    for (const index of ["task_requester", "task_assignee", "task_reviewer"]) expect(narrow.own.plan).toContain(index);
+    expect(narrow.own.rows).toBe(3001);
+    expect(narrow.own.rows_read).toBeLessThan(4 * 3001 * 2);
+    expect(narrow.edges_from.plan).toContain("PRIMARY KEY");
+    expect(narrow.edges_from.rows_read).toBeLessThan(10);
+    expect(narrow.edges_before.plan).toContain("PRIMARY KEY");
+    const whole = await costs(OWNER, []);
+    expect(whole.finished.plan).not.toContain("TEMP B-TREE");
+    expect(whole.finished.rows).toBe(3001);
+    expect(whole.finished.rows_read).toBeLessThan(3100);
+    expect(whole.edges_finished.plan).toContain("SCAN d");
+    expect(whole.edges_finished.rows_read).toBeLessThan(2 * (5001 + 100));
+    // Reading what comes before one task walks only that, not the room's 4,000 edges.
+    const one = await costs(OWNER, ["tsk_old3"]);
+    expect(one.edges_before.rows).toBe(3);
+    expect(one.edges_before.rows_read).toBeLessThan(30);
+  });
+
+  it("counts only unfinished tasks' edges toward 5,000, so a room can't get stuck, and removing is always allowed", async () => {
+    const { id, tasks } = await room();
+    const [a, b, c] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "B" }), await offer(tasks, { title: "C" })];
+    await seedFinished(id, 2);
+    // 5,000 edges on finished tasks don't count.
+    await seedEdges(id, () => "'tsk_old0'", (n) => `'tsk_past' || ${n}`, 5000);
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id] })).status).toBe(200);
+    expect((await set(LEAD, tasks, b.id, id, {})).status).toBe(200);
+    // 5,000 on an unfinished task do.
+    await seedEdges(id, () => `'${c.id}'`, (n) => `'tsk_past' || ${n}`, 5000);
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id] })).code).toBe("limit_exceeded");
+    // Going down is still possible at the limit.
+    expect((await set(LEAD, tasks, c.id, id, { duration_days: 2, predecessors: Array.from({ length: 2 }, (_, n) => `tsk_past${n}`) })).status).toBe(200);
+  });
+
+  it("removes a canceled predecessor from a finished task, and nothing else", async () => {
+    const { id, tasks } = await room();
+    const [a, live, b] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "Live" }), await offer(tasks, { title: "B" })];
+    await set(LEAD, tasks, b.id, id, { predecessors: [a.id, live.id], duration_days: 2 });
+    expect((await api(LEAD, "POST", `${tasks}/${a.id}/cancel`, { version: a.version, reason: "no" })).status).toBe(200);
+    expect((await api(LEAD, "POST", `${tasks}/${b.id}/cancel`, { version: b.version, reason: "no" })).status).toBe(200);
+    // Changing the estimate, removing a live predecessor, adding one, or removing one with another change, is refused.
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id, live.id], duration_days: 3 })).code).toBe("invalid_transition");
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id], duration_days: 2 })).code).toBe("invalid_transition");
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [live.id], duration_days: 3 })).code).toBe("invalid_transition");
+    expect((await read(OWNER, id)).edges).toHaveLength(2);
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [live.id], duration_days: 2 })).status).toBe(200);
+    expect((await read(OWNER, id)).edges).toEqual([{ predecessor: live.id, successor: b.id }]);
+    // Sending what's already there is no edit, so it's not refused either.
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [live.id], duration_days: 2 })).status).toBe(200);
+  });
+
+  it("shows a plan edit only to someone who sees the whole room, in history and Activity", async () => {
+    const { id, tasks } = await room();
+    const hidden = await offer(tasks, { assignee: CAROL.id, title: "Hidden" });
+    const shared = await offer(tasks, { assignee: BOB.id, title: "Shared" });
+    const history = async (who: Who) => (await api(who, "GET", `${tasks}/${shared.id}`)).body.history as any[];
+    const activity = async (who: Who, query = "") => (await api(who, "GET", `/v1/workspaces/${id}/activity?order=newest${query}`)).body.events as any[];
+    const before = { history: await history(BOB), activity: await activity(BOB) };
+    expect((await set(LEAD, tasks, shared.id, id, { predecessors: [hidden.id] })).status).toBe(200);
+    expect(await history(BOB)).toEqual(before.history);
+    expect(await activity(BOB)).toEqual(before.activity);
+    expect((await activity(BOB, `&task=${shared.id}`)).some((e) => e.type === "task.plan_changed")).toBe(false);
+    expect((await history(OWNER)).some((e) => e.type === "task.plan_changed")).toBe(true);
+    expect((await activity(OWNER)).some((e) => e.type === "task.plan_changed")).toBe(true);
+    // A page isn't short because of what was left out.
+    for (let n = 0; n < 3; n++) await set(LEAD, tasks, shared.id, id, { predecessors: [hidden.id], duration_days: n + 1 });
+    expect(await activity(BOB, "&limit=2")).toHaveLength(2);
+  });
+
+  it("replays a stored answer to someone since narrowed, and changes nothing new", async () => {
     const { id, tasks } = await room();
     const [a, b] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "B" })];
-    await runInDurableObject(stub(id), (_: any, state: any) => {
-      for (let start = 0; start < 5000; start += 500) state.storage.sql.exec(`WITH RECURSIVE g(n) AS (SELECT ${start} UNION ALL SELECT n + 1 FROM g WHERE n < ${start + 499}) INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) SELECT 'tsk_x' || n, 'tsk_y' || n, 'o', 1 FROM g`);
-    });
-    expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id] })).code).toBe("limit_exceeded");
+    const worker: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    await asMember(id, worker, { preset: "member" });
+    const mine = await api(worker, "POST", tasks, { title: "Mine", instructions: "x", reviewer: REVIEWER.id });
+    const key = nextKey();
+    const body = { plan_revision: await revision(id), duration_days: 2, predecessors: [a.id] };
+    const first = await api(worker, "PUT", `${tasks}/${mine.body.id}/plan`, body, { key });
+    expect(first.status).toBe(200);
+    await set(LEAD, tasks, b.id, id, { duration_days: 5 });
+    const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${worker.id}/access`, { preset: "guest", scopes: { tasks: "own_create" }, policy_version: version })).status).toBe(200);
+    const after = await read(OWNER, id);
+    const replay = await api(worker, "PUT", `${tasks}/${mine.body.id}/plan`, body, { key });
+    // Only what it already sent and was told, with today's revision nowhere in it, and the plan stays as it was.
+    expect(replay.body).toEqual(first.body);
+    expect(replay.body.plan_revision).not.toBe(after.plan_revision);
+    expect(await read(OWNER, id)).toEqual(after);
+    expect((await api(worker, "PUT", `${tasks}/${mine.body.id}/plan`, { ...body, plan_revision: after.plan_revision })).code).toBe("not_allowed");
   });
 
   it("gives a room from before this migration an empty plan", async () => {

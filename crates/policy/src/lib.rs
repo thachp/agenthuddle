@@ -687,13 +687,19 @@ pub const EVENTS_FOR_EVERYONE: [&str; 8] = [
     "role.closed",
 ];
 
-/// Whether someone can see one event in a room's activity. A task's events follow the task, as it stands now. A room's
-/// own events follow the member list, apart from the ones above and what the viewer did themselves. Denies by default.
+/// A task's event only someone who sees the whole room gets. A plan edit can be about a task they can't see, so a party to the
+/// successor would otherwise learn a hidden edge had changed.
+pub const TASK_PLAN_CHANGED: &str = "task.plan_changed";
+
+/// Whether someone can see one event in a room's activity. A task's events follow the task, as it stands now, apart from
+/// plan edits. A room's own events follow the member list, apart from the ones above and what the viewer did themselves.
+/// Denies by default.
 pub fn can_see_event(caller: &Caller, kind: &str, actor: &str, task: Option<&Task>) -> bool {
     if caller.role == Role::None {
         return false;
     }
     match task {
+        Some(_) if kind == TASK_PLAN_CHANGED => sees_whole_room(caller),
         Some(task) => can_see_task(caller, task),
         None => {
             is_human_admin(caller)

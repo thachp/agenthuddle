@@ -2261,10 +2261,14 @@ describe("kernel journey across two organizations", () => {
     expect(read).not.toHaveProperty("plan_revision");
     expect(JSON.stringify(read)).not.toContain(first.id);
     const refused = await execute(architect, "set_task_plan", { workspace_id: room, task_id: first.id, plan_revision: 1, predecessors: [], idempotency_key: "plan-refused" });
-    expect(refused.status).not.toBe(200);
+    expect(refused.code).toBe("task_not_found");
     // Left out means not estimated.
     const cleared = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: set.plan_revision, predecessors: [], idempotency_key: "plan-clear" })).data;
     expect(cleared).toMatchObject({ duration_days: null, predecessors: [] });
+    // Null means the same, on both paths the schema reaches.
+    const nulled = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: cleared.plan_revision, duration_days: 4, predecessors: [], idempotency_key: "plan-four" })).data;
+    const backToBlank = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: nulled.plan_revision, duration_days: null, predecessors: [], idempotency_key: "plan-null" })).data;
+    expect(backToBlank.duration_days).toBeNull();
     expect((await dash(personA, "GET", `/v1/workspaces/${room}/plan`)).status).toBe(200);
   });
 

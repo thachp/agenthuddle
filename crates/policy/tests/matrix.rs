@@ -1134,3 +1134,14 @@ fn only_someone_who_sees_the_whole_room_gets_a_whole_plan() {
         Role::None
     )));
 }
+
+#[test]
+fn a_plan_edit_shows_only_to_someone_who_sees_the_whole_room() {
+    let t = task();
+    let mut party = caller(&t.reviewer, PrincipalKind::Agent, Role::Guest);
+    party.scopes.tasks = TaskScope::Own;
+    assert!(can_see_event(&party, "task.updated", "agt_x", Some(&t)));
+    assert!(!can_see_event(&party, TASK_PLAN_CHANGED, "agt_x", Some(&t)));
+    party.scopes.tasks = TaskScope::All;
+    assert!(can_see_event(&party, TASK_PLAN_CHANGED, "agt_x", Some(&t)));
+}

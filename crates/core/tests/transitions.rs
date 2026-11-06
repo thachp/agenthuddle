@@ -1283,20 +1283,50 @@ fn edges(list: &[(&str, &str)]) -> Vec<(String, String)> {
 
 #[test]
 fn a_plan_belongs_to_its_successor_while_the_task_is_unfinished() {
+    let change = |adds, duration, canceled| PlanChange {
+        adds_predecessors: adds,
+        changes_duration: duration,
+        removes_only_canceled: canceled,
+    };
     for status in [Open, Offered, Accepted, Submitted] {
-        assert_eq!(validate_task_plan("t", status, Some(1), &[]), Ok(()));
+        assert_eq!(
+            plan_change_allowed(status, change(true, true, false)),
+            Ok(())
+        );
     }
     for status in [Completed, Canceled] {
+        let refused = Err(CoreError::InvalidTransition);
         assert_eq!(
-            validate_task_plan("t", status, Some(1), &[]),
-            Err(CoreError::InvalidTransition)
+            plan_change_allowed(status, change(true, false, false)),
+            refused
+        );
+        assert_eq!(
+            plan_change_allowed(status, change(false, true, false)),
+            refused
+        );
+        assert_eq!(
+            plan_change_allowed(status, change(false, false, false)),
+            refused
+        );
+        // Removing a canceled predecessor, and nothing else, so its finish isn't withheld for good.
+        assert_eq!(
+            plan_change_allowed(status, change(false, false, true)),
+            Ok(())
+        );
+        assert_eq!(
+            plan_change_allowed(status, change(true, false, true)),
+            refused
+        );
+        assert_eq!(
+            plan_change_allowed(status, change(false, true, true)),
+            refused
         );
     }
 }
 
 #[test]
 fn a_duration_is_whole_days_from_1_to_260_and_blank_means_not_estimated() {
-    let duration = |days| validate_task_plan("t", Open, days, &[]);
+    let duration = |days| validate_task_plan("t", days, &[]);
     assert_eq!(duration(None), Ok(()));
     assert_eq!(duration(Some(1)), Ok(()));
     assert_eq!(duration(Some(260)), Ok(()));
@@ -1311,12 +1341,12 @@ fn a_duration_is_whole_days_from_1_to_260_and_blank_means_not_estimated() {
 #[test]
 fn predecessors_refuse_itself_a_duplicate_and_too_many() {
     let bad = Err(CoreError::InvalidArgument("predecessors"));
-    assert_eq!(validate_task_plan("t", Open, None, &ids(&["t"])), bad);
-    assert_eq!(validate_task_plan("t", Open, None, &ids(&["a", "a"])), bad);
+    assert_eq!(validate_task_plan("t", None, &ids(&["t"])), bad);
+    assert_eq!(validate_task_plan("t", None, &ids(&["a", "a"])), bad);
     let fifty: Vec<String> = (0..50).map(|n| format!("p{n}")).collect();
-    assert_eq!(validate_task_plan("t", Open, None, &fifty), Ok(()));
+    assert_eq!(validate_task_plan("t", None, &fifty), Ok(()));
     let more: Vec<String> = (0..51).map(|n| format!("p{n}")).collect();
-    assert_eq!(validate_task_plan("t", Open, None, &more), bad);
+    assert_eq!(validate_task_plan("t", None, &more), bad);
 }
 
 #[test]

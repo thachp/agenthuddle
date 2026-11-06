@@ -359,16 +359,12 @@ pub fn validate_planned_relationship(
 }
 
 /// A task's plan: a duration in whole working days, where none means Not estimated and there's no zero, and the tasks that
-/// come first. A plan belongs to its successor, so a finished task's plan no longer changes, though it can be `Submitted`.
+/// come first.
 pub fn validate_task_plan(
     successor: &str,
-    status: TaskStatus,
     duration_days: Option<i64>,
     predecessors: &[String],
 ) -> Result<(), CoreError> {
-    if status.is_terminal() {
-        return Err(CoreError::InvalidTransition);
-    }
     if duration_days.is_some_and(|days| !(1..=MAX_TASK_DURATION_DAYS).contains(&days)) {
         return Err(CoreError::InvalidArgument("duration_days"));
     }
@@ -378,6 +374,26 @@ pub fn validate_task_plan(
     let unique: BTreeSet<&str> = predecessors.iter().map(String::as_str).collect();
     if unique.len() != predecessors.len() || unique.contains(successor) {
         return Err(CoreError::InvalidArgument("predecessors"));
+    }
+    Ok(())
+}
+
+/// What an edit would do to a task's stored plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanChange {
+    pub adds_predecessors: bool,
+    pub changes_duration: bool,
+    /// Every predecessor it removes is canceled.
+    pub removes_only_canceled: bool,
+}
+
+/// A plan belongs to its successor, so a finished task's plan no longer changes, though a `Submitted` one's can. The one
+/// exception is removing a canceled predecessor, because that edge withholds a finish until someone does.
+pub fn plan_change_allowed(status: TaskStatus, change: PlanChange) -> Result<(), CoreError> {
+    let only_removes_canceled =
+        !change.adds_predecessors && !change.changes_duration && change.removes_only_canceled;
+    if status.is_terminal() && !only_removes_canceled {
+        return Err(CoreError::InvalidTransition);
     }
     Ok(())
 }

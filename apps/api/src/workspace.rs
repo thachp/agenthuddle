@@ -2162,6 +2162,10 @@ mod queries {
             let everyone = EVENTS_FOR_EVERYONE
                 .map(|kind| format!("'{kind}'"))
                 .join(", ");
+            query.push_str(&format!(
+                " AND type <> '{}'",
+                podster_policy::TASK_PLAN_CHANGED
+            ));
             query.push_str(&format!(" AND ((task_id IS NULL AND (type IN ({everyone}) OR actor_id = ?4)) OR task_id IN (SELECT id FROM task WHERE requester_id = ?4 OR assignee_id = ?4 OR reviewer_id = ?4))"));
         }
         query.push_str(if newest {
@@ -2305,7 +2309,7 @@ mod queries {
             messages.clear();
         }
         let messages: Vec<Value> = messages.iter().map(|m| message_json(m, &who.org)).collect();
-        let history = rows(sql, "SELECT seq, id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ? ORDER BY seq", vec![id.into()])?;
+        let history = rows(sql, "SELECT seq, id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ?1 AND (type <> ?2 OR ?3) ORDER BY seq", vec![id.into(), podster_policy::TASK_PLAN_CHANGED.into(), flag(sees_whole_room(&who.caller))])?;
         let marked = |row: &Value, id: &str, org: &str| -> Value {
             let mut out = row.clone();
             if let Some(map) = out.as_object_mut() {
@@ -3454,6 +3458,8 @@ impl Workspace {
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
                 ["plan"] => plan::read(&sql, &who.caller),
+                #[cfg(feature = "failpoints")]
+                ["plan", "costs"] => plan::read_costs(&sql, &who, &url),
                 ["roles"] => roles::list_roles(&sql, &who),
                 ["card"] => roles::read_card(&sql, &who),
                 ["collaboration"] => collaboration::read_map(&sql, &who),
