@@ -498,7 +498,9 @@ async function acceptance() {
 
   await check("AC-03", "people outside the room and agents can't reach access commands, whatever their label", async () => {
     const tools = await lead.tools();
-    ok(!tools.some((t) => /member|invit|role|revoke|disconnect|withdraw|admin|grant|scope/.test(t)), `an access tool is exposed: ${tools.join(", ")}`);
+    // Filling an opening is an agent's own act, needs an owner's or admin's invite, and M1-ROLES tests it. Nothing else may match.
+    const fillingAnOpening = ["list_role_openings", "claim_role", "release_role"];
+    ok(!tools.some((t) => !fillingAnOpening.includes(t) && /member|invit|role|revoke|disconnect|withdraw|admin|grant|scope/.test(t)), `an access tool is exposed: ${tools.join(", ")}`);
     rejected(await guest.execute("add_member", { workspace_id: room }), "an unknown capability");
     for (const [method, path, body] of [
       ["POST", members(), { principal_id: guest.id, kind: "agent", org_id: personB.org, role: "member", policy_version: 1 }],
@@ -550,6 +552,44 @@ async function acceptance() {
     refused(await worker.call("get_task", at), "task_not_found", "the task, once narrowed");
     const entries = (await personA.audit(scoped)).filter((e) => e.action === "member.access_changed" && e.target_id === worker.id);
     eq(entries.map((e) => JSON.parse(e.new_json).access.tasks), ["coordinate", "own_create"], "the audit of both changes");
+  });
+
+  await check("M1-ROLES", "an invited agent claims an opening and gets its preset, asking again takes nothing, and a replaced lead's tasks stay put; a Coordinator takes over only a task whose requester left", async () => {
+    const staffed = await personA.createRoom(roomName("staffed"));
+    const version = () => personA.policyVersion(staffed);
+    const lead = await McpAgent.connect(target, personA, "First lead");
+    const next = await McpAgent.connect(target, personA, "Next lead");
+    const leaver = await McpAgent.connect(target, personA, "Leaving member");
+    await personA.addAgent(staffed, lead, "guest");
+    await personA.addAgent(staffed, next, "guest");
+    await personA.addAgent(staffed, leaver, "member");
+    const roles = `/v1/workspaces/${staffed}/roles`;
+    const opening = await personA.must("POST", roles, { title: "Lead", responsibilities: "Coordinates", is_lead: true, policy_version: await version() });
+    eq([opening.capacity, opening.preset], [1, "coordinator"], "a lead opening");
+    const at = { workspace_id: staffed, role_id: opening.id };
+    refused(await lead.call("claim_role", { ...at, idempotency_key: key() }), "not_allowed", "a claim with no invite");
+    await personA.must("POST", `${roles}/${opening.id}/invites`, { principal_id: lead.id, policy_version: await version() });
+    eq((await lead.must("list_role_openings", { workspace_id: staffed }, false)).roles[0].mine, "invited", "what the agent reads");
+    eq((await lead.must("claim_role", at)).access.preset, "coordinator", "the preset it copied");
+    eq((await lead.must("claim_role", at)).status, "active", "asking again");
+    eq((await personA.must("GET", roles)).roles[0].filled, 1, "openings filled");
+    refused(await personB.dash("POST", `${roles}/${opening.id}/invites`, { principal_id: lead.id, policy_version: 1 }), "workspace_not_found", "a stranger inviting");
+    const own = await lead.must("create_task", { workspace_id: staffed, title: "Plan", instructions: "x", reviewer: personA.id });
+    const orphan = await leaver.must("create_task", { workspace_id: staffed, title: "Orphan", instructions: "x", reviewer: personA.id });
+    await personA.must("DELETE", `${roles}/${opening.id}/claims/${lead.id}`, { policy_version: await version() });
+    await personA.must("POST", `${roles}/${opening.id}/invites`, { principal_id: next.id, policy_version: await version() });
+    eq((await next.must("claim_role", at)).access.preset, "coordinator", "the next lead");
+    const task = (id) => personA.must("GET", `/v1/workspaces/${staffed}/tasks/${id}`);
+    eq((await task(own.id)).task.requester, lead.id, "a replaced lead's task stays with it");
+    const takeOver = (id, version) => next.call("set_requester", { workspace_id: staffed, task_id: id, version, requester: next.id, idempotency_key: key() });
+    refused(await takeOver(orphan.id, orphan.version), "not_allowed", "taking a task whose requester is still here");
+    await personA.must("DELETE", `/v1/workspaces/${staffed}/members/${leaver.id}`, { policy_version: await version() });
+    const flagged = (await task(orphan.id)).task;
+    eq(flagged.needs_attention, true, "the flag once the requester left");
+    const taken = await next.must("set_requester", { workspace_id: staffed, task_id: orphan.id, version: flagged.version, requester: next.id });
+    eq(taken.requester, next.id, "the takeover");
+    eq((await next.must("release_role", at)).access.preset, "guest", "access after releasing");
+    eq((await personA.must("GET", roles)).roles[0].filled, 0, "the opening once released");
   });
 
   await check("D22", "owner people can create tasks from the dashboard", async () => {

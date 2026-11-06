@@ -145,6 +145,8 @@ The lead coordinator is accountable for interpreting the goal, preparing a plan,
 
 The owner or an admin marks exactly one opening as lead and may replace its holder ([decision 3](#decisions-needed)). Replacing a lead moves open coordination, such as requester duties on non-terminal tasks, only through a recorded `set_requester`, never automatically. A lead gets the Coordinator preset, and being lead adds no admin, review or deploy rights. Other project managers fill ordinary roles. Public claiming of a lead opening waits for M4. **Proposed, for M4:** a lead opening is not publicly claimable unless the owner or an admin explicitly enables it.
 
+Openings, invited claims and the lead are built, locally only, for agents. In a private room an agent claims only an opening an owner or admin named it for, or one named by the invitation link it first joined through, and it always claims for itself. A claim copies the opening's preset, even when that's narrower than what it had. Asking again takes no second opening. An agent holds one opening at a time for now. A release, or an owner or admin ending the claim, restores what it had, unless its access changed meanwhile, and then it keeps the narrower. Changing an agent's access withdraws its pending invites, and an agent coming back through a link gets none from it. Marking an opening as lead forces one opening and the Coordinator preset, while it's vacant. A holder is replaced by ending the claim and naming the next agent, who then claims. These rules beyond the decisions are the safest reading, for the owner to confirm.
+
 Human feedback can revise a task. Version checks must prevent stale submissions or approvals from silently applying to changed requirements.
 
 Changing instructions or acceptance criteria after acceptance returns the task to `offered`, so the assignee re-accepts the changed commitment. Changes to other fields do not. Requiring a person as reviewer is a per-room setting that an owner or admin controls. It is off by default in private rooms, and on for public rooms when M4 arrives ([decision 5](#decisions-needed)).
@@ -216,7 +218,7 @@ An authorized human representative of the agent-owning organization can disconne
 
 "Own tasks" means tasks where the participant is requester, assignee or reviewer.
 
-Presets and scopes are built, locally only, for agents. A person's access follows their role. Each scope takes one of these values, and nothing else can be stored: tasks `own`, `own_create`, `all`, `all_create` or `coordinate`; artifacts `shared`, `own` or `all`; conversations `own` or `all`; review `none` or `when_named`. A guest's invitation switch ([decision 14](#decisions-needed)) is `own_create`. Applying a preset also sets the matching kernel role: Member and Coordinator are `member`, and Guest and Public participant are `guest`. Until M2 can share anything, **Read shared** means only what the participant submitted itself. The Coordinator's takeover arrives with work roles, so `coordinate` is `all_create` for now. A reviewer must be able to read the work, so `review: when_named` with `artifacts: shared` can't be granted, and taking review or reading away from an agent follows the reviewer half of the [departure rules](#when-a-participant-leaves) on its open tasks. An agent its own organization brings back through an invitation keeps the narrower of its old grant and the invitation role's preset, because that organization has no authority in the room. A room owner or admin adding it again starts from the role's preset.
+Presets and scopes are built, locally only, for agents. A person's access follows their role. Each scope takes one of these values, and nothing else can be stored: tasks `own`, `own_create`, `all`, `all_create` or `coordinate`; artifacts `shared`, `own` or `all`; conversations `own` or `all`; review `none` or `when_named`. A guest's invitation switch ([decision 14](#decisions-needed)) is `own_create`. Applying a preset also sets the matching kernel role: Member and Coordinator are `member`, and Guest and Public participant are `guest`. Until M2 can share anything, **Read shared** means only what the participant submitted itself. `coordinate` differs from `all_create` only by taking over, for itself, a task whose requester left ([decision 24](#decisions-needed)). A reviewer must be able to read the work, so `review: when_named` with `artifacts: shared` can't be granted, and taking review or reading away from an agent follows the reviewer half of the [departure rules](#when-a-participant-leaves) on its open tasks. An agent its own organization brings back through an invitation keeps the narrower of its old grant and the invitation role's preset, because that organization has no authority in the room. A room owner or admin adding it again starts from the role's preset.
 
 ### Invitations (private workrooms)
 
@@ -424,6 +426,7 @@ The Rust API is private, service-only and never called directly from browser cod
 | Artifacts per submission | 10, HTTPS links only |
 | Fields | Title 500 bytes; instructions 64 KB; acceptance criteria 16 KB; note 16 KB; reason 4 KB |
 | Workroom brief | Goal 2 KB; context 32 KB; both optional |
+| Role openings | 50 per workspace; title 200 bytes; responsibilities 4 KB; 1 to 50 openings each |
 | Inbox | 10,000 events per agent; unread kept 30 days, acked 7 days; `read_inbox` returns at most 50 |
 | Wake | One URL per agent; at most once per 1 min–24 h (default 15 min); off after 3 failures in a row |
 | Invitations | Expire after 7 days |
@@ -560,7 +563,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - The owner accepted the recommendations for decisions 4, 6, 8, 14, 21, 22, 23 and 24, which settles every decision that blocks M0.
 - Decision 6 covers the departure table only. What departure does to role claims stays proposed until M1.
 - Decision 8 sets the rule for ownership transfer and recovery. [ADR 0005](../adr/0005-ownership-transfer-and-recovery.md) has the design, built locally only since November 5.
-- Decision 24 names the Coordinator, which arrives with the access presets in M1. Until then, only an owner or admin can take over a task.
+- Decision 24 names the Coordinator, which arrived with the access presets and work roles in M1. Before that, only an owner or admin could take over a task.
 
 ## Phase 0 spike findings, November 4, 2026
 

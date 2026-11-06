@@ -61,6 +61,17 @@ ALTER TABLE workspace ADD COLUMN context TEXT;
 ALTER TABLE workspace ADD COLUMN brief_by TEXT;
 UPDATE member SET guest_can_create = 0 WHERE role <> 'guest';
 UPDATE invitation SET guest_can_create = 0 WHERE role <> 'guest';
+", "
+CREATE TABLE work_role (id TEXT PRIMARY KEY, title TEXT NOT NULL, responsibilities TEXT NOT NULL, capacity INTEGER NOT NULL, preset TEXT NOT NULL,
+  is_lead INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, closed_at INTEGER);
+CREATE UNIQUE INDEX one_lead ON work_role (is_lead) WHERE is_lead = 1 AND closed_at IS NULL;
+CREATE TABLE role_claim (id TEXT PRIMARY KEY, role_id TEXT NOT NULL, principal_id TEXT NOT NULL, status TEXT NOT NULL, claimed_at INTEGER NOT NULL, ended_at INTEGER, end_reason TEXT,
+  copied_preset TEXT NOT NULL, prior_role TEXT NOT NULL, prior_tasks TEXT NOT NULL, prior_artifacts TEXT NOT NULL, prior_conversations TEXT NOT NULL, prior_review TEXT NOT NULL);
+CREATE UNIQUE INDEX one_claim_per_principal ON role_claim (principal_id) WHERE status = 'active';
+CREATE INDEX role_claim_role ON role_claim (role_id, status);
+CREATE TABLE role_invite (role_id TEXT NOT NULL, principal_id TEXT NOT NULL, invited_by TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (role_id, principal_id));
+CREATE INDEX role_invite_principal ON role_invite (principal_id);
+ALTER TABLE invitation ADD COLUMN work_role_id TEXT;
 CREATE TABLE access_grant (principal_id TEXT PRIMARY KEY, tasks TEXT NOT NULL, artifacts TEXT NOT NULL, conversations TEXT NOT NULL, review TEXT NOT NULL,
   granted_by TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL);
 INSERT INTO access_grant (principal_id, tasks, artifacts, conversations, review, granted_by, updated_at)
@@ -187,22 +198,28 @@ pub fn granted_scopes(sql: &SqlStorage, id: &str) -> R<Scopes> {
     let Some(row) = found.first() else {
         return Ok(Scopes::PUBLIC_PARTICIPANT);
     };
+    scopes_from(row, "")
+}
+
+/// Reads four scope columns from a row, under an optional prefix.
+pub fn scopes_from(row: &Value, prefix: &str) -> R<Scopes> {
     let bad = || ApiError::internal("bad access grant");
+    let column = |name: &str| row[format!("{prefix}{name}")].as_str().map(str::to_string);
     Ok(Scopes {
-        tasks: row["tasks"]
-            .as_str()
+        tasks: column("tasks")
+            .as_deref()
             .and_then(TaskScope::from_name)
             .ok_or_else(bad)?,
-        artifacts: row["artifacts"]
-            .as_str()
+        artifacts: column("artifacts")
+            .as_deref()
             .and_then(ArtifactScope::from_name)
             .ok_or_else(bad)?,
-        conversations: row["conversations"]
-            .as_str()
+        conversations: column("conversations")
+            .as_deref()
             .and_then(ConversationScope::from_name)
             .ok_or_else(bad)?,
-        review: row["review"]
-            .as_str()
+        review: column("review")
+            .as_deref()
             .and_then(ReviewScope::from_name)
             .ok_or_else(bad)?,
     })

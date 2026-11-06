@@ -549,7 +549,7 @@ fn task_scope_decides_what_is_seen_and_created_whatever_the_role() {
 }
 
 #[test]
-fn the_coordinator_gets_no_takeover_until_work_roles_arrive() {
+fn the_coordinator_takes_over_only_a_task_whose_requester_left_and_only_for_itself() {
     let lead = Caller {
         scopes: Scopes::COORDINATOR,
         ..caller("stranger", Agent, Role::Member)
@@ -559,9 +559,138 @@ fn the_coordinator_gets_no_takeover_until_work_roles_arrive() {
         ..task()
     };
     assert_eq!(
+        authorize_requester_change(&lead, &orphan, "stranger"),
+        Verdict::Allow
+    );
+    assert_eq!(
+        authorize_requester_change(&lead, &orphan, "someone_else"),
+        Verdict::Forbidden
+    );
+    assert_eq!(
+        authorize_requester_change(&lead, &task(), "stranger"),
+        Verdict::Forbidden
+    );
+    // It's the scope, not any other, and the plain action stays with owners and admins.
+    assert_eq!(
         authorize_task(&lead, &orphan, A::SetRequester),
         Verdict::Forbidden
     );
+    for scope in [
+        TaskScope::Own,
+        TaskScope::OwnCreate,
+        TaskScope::All,
+        TaskScope::AllCreate,
+    ] {
+        let other = Caller {
+            scopes: Scopes {
+                tasks: scope,
+                ..Scopes::MEMBER
+            },
+            ..caller("req", Agent, Role::Member)
+        };
+        assert_ne!(
+            authorize_requester_change(&other, &orphan, "req"),
+            Verdict::Allow,
+            "{scope:?}"
+        );
+    }
+    let admin = caller("x", Person, Role::Admin);
+    assert_eq!(
+        authorize_requester_change(&admin, &task(), "anyone"),
+        Verdict::Allow
+    );
+    let agent_admin = Caller {
+        scopes: Scopes::COORDINATOR,
+        ..caller("req", Agent, Role::Admin)
+    };
+    assert_ne!(
+        authorize_requester_change(&agent_admin, &orphan, "req"),
+        Verdict::Allow
+    );
+    let outsider = Caller {
+        scopes: Scopes::COORDINATOR,
+        ..caller("x", Agent, Role::None)
+    };
+    assert_eq!(
+        authorize_requester_change(&outsider, &orphan, "x"),
+        Verdict::NotParticipant
+    );
+}
+
+#[test]
+fn only_agents_claim_roles() {
+    assert!(may_claim_role(Agent));
+    assert!(!may_claim_role(Person));
+}
+
+#[test]
+fn ending_a_claim_restores_what_was_had_and_otherwise_never_widens() {
+    // Nothing changed meanwhile: back to what it had, up or down.
+    assert_eq!(
+        scopes_after_claim(Scopes::GUEST, Scopes::COORDINATOR, Scopes::COORDINATOR),
+        Scopes::GUEST
+    );
+    assert_eq!(
+        scopes_after_claim(
+            Scopes::MEMBER,
+            Scopes::PUBLIC_PARTICIPANT,
+            Scopes::PUBLIC_PARTICIPANT
+        ),
+        Scopes::MEMBER
+    );
+    // The room changed it meanwhile: the narrower, whichever way it moved.
+    let adjusted = Scopes {
+        conversations: ConversationScope::Own,
+        ..Scopes::COORDINATOR
+    };
+    let ended = scopes_after_claim(Scopes::MEMBER, Scopes::COORDINATOR, adjusted);
+    assert_eq!(
+        ended,
+        Scopes {
+            conversations: ConversationScope::Own,
+            ..Scopes::MEMBER
+        }
+    );
+    assert_eq!(
+        scopes_after_claim(
+            Scopes::GUEST,
+            Scopes::PUBLIC_PARTICIPANT,
+            Scopes::COORDINATOR
+        ),
+        Scopes::GUEST
+    );
+    for prior in every_scopes() {
+        for current in every_scopes() {
+            let kept = scopes_after_claim(prior, Scopes::COORDINATOR, current);
+            if current != Scopes::COORDINATOR {
+                assert_eq!(kept, prior.narrower(current));
+            }
+        }
+    }
+}
+
+#[test]
+fn role_changes_are_named_in_the_denial_record() {
+    for (method, route, name) in [
+        ("POST", vec!["roles"], "role.create"),
+        ("PUT", vec!["roles", "r"], "role.update"),
+        ("DELETE", vec!["roles", "r"], "role.close"),
+        ("POST", vec!["roles", "r", "invites"], "role.invite"),
+        (
+            "DELETE",
+            vec!["roles", "r", "invites", "a"],
+            "role.withdraw_invite",
+        ),
+        ("POST", vec!["roles", "r", "claim"], "role.claim"),
+        ("POST", vec!["roles", "r", "release"], "role.release"),
+        (
+            "DELETE",
+            vec!["roles", "r", "claims", "a"],
+            "role.end_claim",
+        ),
+    ] {
+        assert_eq!(denied_change_name(method, &route), Some(name));
+    }
 }
 
 #[test]

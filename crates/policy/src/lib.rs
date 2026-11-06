@@ -49,7 +49,7 @@ pub enum TaskScope {
     OwnCreate,
     All,
     AllCreate,
-    /// `AllCreate`, plus taking over tasks whose requester left. That takeover arrives with work roles.
+    /// `AllCreate`, plus taking over tasks whose requester left, for itself (decision 24).
     Coordinate,
 }
 
@@ -404,6 +404,14 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("POST", ["invitations"]) => "invitation.create",
         ("DELETE", ["invitations", _]) => "invitation.withdraw",
         ("PUT", ["members", _, "access"]) => "member.change_access",
+        ("POST", ["roles"]) => "role.create",
+        ("PUT", ["roles", _]) => "role.update",
+        ("DELETE", ["roles", _]) => "role.close",
+        ("POST", ["roles", _, "invites"]) => "role.invite",
+        ("DELETE", ["roles", _, "invites", _]) => "role.withdraw_invite",
+        ("POST", ["roles", _, "claim"]) => "role.claim",
+        ("POST", ["roles", _, "release"]) => "role.release",
+        ("DELETE", ["roles", _, "claims", _]) => "role.end_claim",
         ("PUT", ["name"]) => "room.rename",
         ("PUT", ["brief"]) => "room.change_brief",
         ("POST", ["archive"]) => "room.archive",
@@ -573,6 +581,36 @@ pub fn authorize_task(caller: &Caller, task: &Task, action: TaskAction) -> Verdi
         Verdict::Allow
     } else {
         Verdict::Forbidden
+    }
+}
+
+/// Who can change a task's requester: an owner or admin, or someone with the Coordinator's scope taking over for itself a
+/// task whose requester left. The same scope gives no other way to move a task from someone still here.
+pub fn authorize_requester_change(caller: &Caller, task: &Task, requester: &str) -> Verdict {
+    match authorize_task(caller, task, TaskAction::SetRequester) {
+        Verdict::Forbidden
+            if caller.effective_scopes().tasks == TaskScope::Coordinate
+                && task.needs_requester
+                && requester == caller.id =>
+        {
+            Verdict::Allow
+        }
+        verdict => verdict,
+    }
+}
+
+/// Only agents claim role openings, unless the owner rules otherwise.
+pub fn may_claim_role(kind: PrincipalKind) -> bool {
+    kind == PrincipalKind::Agent
+}
+
+/// What someone keeps when a claim ends: what they had if nothing changed their grant meanwhile, and otherwise the
+/// narrower of the two, so ending a claim never widens anyone.
+pub fn scopes_after_claim(prior: Scopes, copied: Scopes, current: Scopes) -> Scopes {
+    if current == copied {
+        prior
+    } else {
+        prior.narrower(current)
     }
 }
 

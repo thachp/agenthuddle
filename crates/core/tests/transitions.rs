@@ -1113,3 +1113,93 @@ fn losing_review_changes_only_the_reviewer_and_only_on_open_tasks() {
             .needs_reviewer
     );
 }
+
+#[test]
+fn a_role_has_limits() {
+    assert_eq!(validate_role("Engineer", "Builds it", 1), Ok(()));
+    assert_eq!(
+        validate_role(
+            &"t".repeat(MAX_ROLE_TITLE_BYTES),
+            &"r".repeat(MAX_RESPONSIBILITIES_BYTES),
+            MAX_ROLE_CAPACITY
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        validate_role(&"t".repeat(MAX_ROLE_TITLE_BYTES + 1), "r", 1),
+        Err(CoreError::InvalidArgument("title"))
+    );
+    assert_eq!(
+        validate_role("t", &"r".repeat(MAX_RESPONSIBILITIES_BYTES + 1), 1),
+        Err(CoreError::InvalidArgument("responsibilities"))
+    );
+    assert_eq!(
+        validate_role(" ", "r", 1),
+        Err(CoreError::InvalidArgument("title"))
+    );
+    assert_eq!(
+        validate_role("t", "", 1),
+        Err(CoreError::InvalidArgument("responsibilities"))
+    );
+    for capacity in [0, -1, MAX_ROLE_CAPACITY + 1] {
+        assert_eq!(
+            validate_role("t", "r", capacity),
+            Err(CoreError::InvalidArgument("capacity"))
+        );
+    }
+}
+
+#[test]
+fn a_claim_needs_an_invite_and_an_opening_and_asking_again_takes_nothing() {
+    let free = ClaimState {
+        holds_this: false,
+        holds_another: false,
+        invited: true,
+        filled: 0,
+        capacity: 1,
+    };
+    assert_eq!(decide_claim(&free), Ok(ClaimOutcome::Claim));
+    assert_eq!(
+        decide_claim(&ClaimState { filled: 1, ..free }),
+        Err(ClaimRefusal::Full)
+    );
+    assert_eq!(
+        decide_claim(&ClaimState { filled: 2, ..free }),
+        Err(ClaimRefusal::Full)
+    );
+    assert_eq!(
+        decide_claim(&ClaimState {
+            holds_another: true,
+            ..free
+        }),
+        Err(ClaimRefusal::HoldsAnother)
+    );
+    assert_eq!(
+        decide_claim(&ClaimState {
+            invited: false,
+            ..free
+        }),
+        Err(ClaimRefusal::NotInvited)
+    );
+    // Someone uninvited learns nothing about whether it's full or what else they hold.
+    assert_eq!(
+        decide_claim(&ClaimState {
+            invited: false,
+            filled: 1,
+            holds_another: true,
+            ..free
+        }),
+        Err(ClaimRefusal::NotInvited)
+    );
+    // Asking again, even once it's over capacity, isn't a new claim.
+    assert_eq!(
+        decide_claim(&ClaimState {
+            holds_this: true,
+            invited: false,
+            filled: 5,
+            capacity: 1,
+            holds_another: false
+        }),
+        Ok(ClaimOutcome::AlreadyHeld)
+    );
+}

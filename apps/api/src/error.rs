@@ -28,6 +28,18 @@ impl ApiError {
     pub fn task_not_found() -> ApiError {
         ApiError::api(404, "task_not_found")
     }
+    pub fn role_not_found() -> ApiError {
+        ApiError::api(404, "role_not_found")
+    }
+    pub fn role_full() -> ApiError {
+        ApiError::api(409, "role_full")
+    }
+    pub fn already_claimed() -> ApiError {
+        ApiError::api(409, "already_claimed")
+    }
+    pub fn lead_exists() -> ApiError {
+        ApiError::api(409, "lead_exists")
+    }
     pub fn not_found() -> ApiError {
         ApiError::api(404, "not_found")
     }
