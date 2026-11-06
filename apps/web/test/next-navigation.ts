@@ -25,6 +25,12 @@ export const settleNavigation = () => {
   pending.forEach((apply) => apply());
 };
 
+/** A later navigation replaces one still in progress, so the held ones never land, as with a real router. */
+export const dropHeldNavigation = () => {
+  held = [];
+  holdNavigation = false;
+};
+
 export function setUrl(next: string) {
   url = new URL(next, "http://app.test");
   history.length = 0;
