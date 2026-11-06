@@ -52,6 +52,8 @@ async function seed() {
     await guest.must("send_message", { ...at(task), body: "A question **about** scope, with `code` and <b>inert HTML</b>." });
     return guest.must("submit_task", { ...at(task), version: taken.version, note: "Ready for review", artifacts: [{ uri: "https://example.com/pr/1", label: "Pull request" }] });
   };
+  await make("Plan the first step");
+  await make("Plan the second step");
   const review = await submit("Task for keyboard review", owner.id);
   const reviewScreen = await submit("Task for the review screen", owner.id, { instructions: `**Write** the design.\n\n# A heading\n\n- [x] A marked item\n- [ ] An unmarked item\n\n| Column one | Column two |\n| --- | --- |\n| ${"unbroken".repeat(30)} | **two** |\n\n| Narrow |\n| --- |\n| Fits |` });
   // A few bytes that ask for millions of cells: instructions at their limit, which display cuts to 20,000 characters, and a message at its limit.
@@ -656,6 +658,68 @@ async function keyboardPaths(s) {
     await small.getByRole("button", { name: "Save review setting" }).waitFor({ timeout: 15_000 });
     const settings = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     ok(settings <= 0, `settings scrolls sideways by ${settings}px at 375px`);
+    await phone.close();
+  });
+
+  await keyboardPath("set a task's plan, see a refusal, and at phone width", async () => {
+    const open = async (target, title) => {
+      await target.goto(`${app}/w/${s.room}/tasks`);
+      await hydrated(target);
+      await target.getByRole("link", { name: title }).click();
+      await target.getByRole("button", { name: "Show plan" }).waitFor({ timeout: 15_000 });
+    };
+    const dialog = page.getByRole("dialog");
+    await page.goto(`${app}/w/${s.room}/tasks`);
+    await hydrated(page);
+    await tabTo(page, page.getByRole("link", { name: "Plan the second step" }), "the task's link");
+    await page.keyboard.press("Enter");
+    const show = dialog.getByRole("button", { name: "Show plan" });
+    await show.waitFor({ timeout: 15_000 });
+    await tabTo(page, show, "Show plan");
+    await page.keyboard.press("Enter");
+    const edit = dialog.getByRole("button", { name: "Edit plan" });
+    await edit.waitFor({ timeout: 15_000 });
+    await dialog.getByText("Not estimated").waitFor({ timeout: 15_000 });
+    await tabTo(page, edit, "Edit plan");
+    await page.keyboard.press("Enter");
+    const days = dialog.getByLabel("Estimate in working days");
+    await page.waitForFunction(() => document.activeElement?.id === "plan-duration", undefined, { timeout: 15_000 });
+    await page.keyboard.type("3");
+    const add = dialog.getByRole("button", { name: "Add Plan the first step" });
+    await dialog.getByLabel("Add a task that comes first").fill("Plan the first");
+    await tabTo(page, add, "Add");
+    await page.keyboard.press("Enter");
+    await dialog.getByRole("button", { name: "Remove Plan the first step" }).waitFor({ timeout: 15_000 });
+    ok((await days.inputValue()) === "3", "the estimate didn't stay while adding a task");
+    const save = dialog.getByRole("button", { name: "Save plan" });
+    await tabTo(page, save, "Save plan");
+    await page.keyboard.press("Enter");
+    await dialog.getByText(/Plan saved/).waitFor({ timeout: 15_000 });
+    await dialog.getByText(/3 working days/).waitFor({ timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.textContent === "Edit plan", undefined, { timeout: 15_000 });
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden", timeout: 15_000 });
+
+    // The other way round would close a loop, and the refusal names no task.
+    await open(page, "Plan the first step");
+    await dialog.getByRole("button", { name: "Show plan" }).click();
+    await dialog.getByRole("button", { name: "Edit plan" }).click();
+    await dialog.getByLabel("Add a task that comes first").fill("Plan the second");
+    await dialog.getByRole("button", { name: "Add Plan the second step" }).click();
+    await dialog.getByRole("button", { name: "Save plan" }).click();
+    const refusal = dialog.getByRole("alert").filter({ hasText: "wait for itself" });
+    await refusal.waitFor({ timeout: 15_000 });
+    ok(await refusal.evaluate((el) => document.activeElement === el), "focus didn't move to the refusal");
+    ok(!(await refusal.textContent()).includes("Plan the"), "the refusal named a task");
+
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    await open(small, "Plan the second step");
+    await small.getByRole("button", { name: "Show plan" }).click();
+    await small.getByRole("button", { name: "Edit plan" }).click();
+    await small.getByLabel("Estimate in working days").waitFor({ timeout: 15_000 });
+    const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    ok(overflow <= 0, `the plan form scrolls sideways by ${overflow}px at 375px`);
     await phone.close();
   });
 
