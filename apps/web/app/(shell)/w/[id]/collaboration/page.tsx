@@ -1,28 +1,41 @@
 import Link from "next/link";
 import { AuthorLine } from "@/components/agent-content/agent-content";
-import { plainName } from "@/components/agent-content/text";
+import { plainName, truncate } from "@/components/agent-content/text";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
-import { loadWorkroom } from "@/lib/workroom";
+import { canManageWorkroom, isArchived, loadWorkroom } from "@/lib/workroom";
 import { Time } from "../activity/time";
 import { loadNames, orgRows } from "../tasks/load-tasks";
 import { kindOf, nameOf, shortNameOf, textNameOf } from "../tasks/task-model";
 import { MapBox } from "./map-box";
 import { LineSheet } from "./collaboration-sheet";
-import { lineSummary, linesOf, lineTarget, MAP_SIZE, positions, type CollaborationRead, type Line, type Node } from "./model";
+import { lineSummary, linesOf, lineTarget, MAP_SIZE, plannedAnchor, plannedLabel, plannedName, positions, type CollaborationRead, type Line, type Node, type PlannedLine } from "./model";
+import { PlannedLines, type RoleChoice } from "./planned-lines";
 
 const NOTE = "Lines describe work, not permissions.";
 
+const shortened = (text: string, max: number) => {
+  const cut = truncate(plainName(text), max);
+  return cut.truncated ? `${cut.text}…` : cut.text;
+};
+
 export default async function Collaboration({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const [{ id }, query] = await Promise.all([params, searchParams]);
-  await loadWorkroom(id);
+  const room = await loadWorkroom(id);
+  const canManage = canManageWorkroom(room);
   const showMap = query.view === "map";
-  const [read, identity, organizations] = await Promise.all([gatewayQuery<CollaborationRead>(`/api/v1/workspaces/${id}/collaboration`), getIdentity(), getOrganizations()]);
+  const [read, identity, organizations, roles] = await Promise.all([
+    gatewayQuery<CollaborationRead>(`/api/v1/workspaces/${id}/collaboration`),
+    getIdentity(),
+    getOrganizations(),
+    canManage ? gatewayQuery<{ roles: RoleChoice[] }>(`/api/v1/workspaces/${id}/roles`) : null,
+  ]);
   const me = identity.ok ? identity.data.id : "";
   const names = read.ok ? await loadNames(gatewayQuery, orgRows(organizations)) : {};
   const lines = read.ok ? linesOf(read.data.edges) : [];
   const nodes = read.ok ? read.data.nodes : [];
+  const planned = read.ok ? read.data.planned : undefined;
   const base = `/w/${id}/collaboration`;
   const now = Date.now();
   const sheetNames = Object.fromEntries(nodes.map((node) => [node.id, textNameOf(node.id, me, names)]));
@@ -43,7 +56,7 @@ export default async function Collaboration({ params, searchParams }: { params: 
             </Link>
           </nav>
           {lines.length === 0 ? <p className="text-muted-foreground">No handoffs to show. Offers, submissions, change requests and messages appear here once they happen on tasks you can see. Handoffs are recorded from when this feature started, so earlier work won't appear.</p> : null}
-          {showMap && lines.length > 0 ? <CollaborationMap nodes={nodes} lines={lines} me={me} names={names} /> : null}
+          {showMap && lines.length + (planned?.length ?? 0) > 0 ? <CollaborationMap nodes={nodes} lines={lines} planned={planned ?? []} external={read.data.external === true} me={me} names={names} /> : null}
           {lines.length > 0 ? (
             <section aria-labelledby="collab-lines" className="space-y-2">
               <h2 id="collab-lines" className="text-lg font-medium">
@@ -63,6 +76,17 @@ export default async function Collaboration({ params, searchParams }: { params: 
                 ))}
               </ul>
             </section>
+          ) : null}
+          {planned ? (
+            <PlannedLines
+              roomId={id}
+              lines={planned.map((line) => ({ ...line, setBy: line.created_by ? textNameOf(line.created_by, me, names) : null }))}
+              external={read.data.external === true}
+              roles={roles === null ? [] : roles.ok ? roles.data.roles.map(({ id: role, title }) => ({ id: role, title })) : null}
+              canManage={canManage}
+              archived={isArchived(room)}
+              policyVersion={canManage ? room.policy_version : null}
+            />
           ) : null}
           {nodes.length > 0 ? (
             <section aria-labelledby="collab-people" className="space-y-2">
@@ -93,12 +117,14 @@ export default async function Collaboration({ params, searchParams }: { params: 
 }
 
 /** A picture of the list below, which says everything this does. Each line is a link, labelled in words, so nothing rests on line style or color. */
-function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: Line[]; me: string; names: Record<string, string> }) {
-  const placed = positions(nodes.map((node) => node.id));
+function CollaborationMap({ nodes, lines, planned, external, me, names }: { nodes: Node[]; lines: Line[]; planned: PlannedLine[]; external: boolean; me: string; names: Record<string, string> }) {
+  // A plan joins work roles, not people, so its ends are places of their own. Only roles on a line appear.
+  const roles = new Map(planned.flatMap((line) => [[line.from_role, line.from_title], [line.to_role, line.to_title]] as const));
+  const placed = positions([...nodes.map((node) => node.id), ...roles.keys()]);
   return (
     <figure className="space-y-1">
       <MapBox>
-      <svg viewBox={`0 0 ${MAP_SIZE} ${MAP_SIZE}`} role="group" aria-label="Map of who has worked with whom. The list below says the same." className="h-auto w-full min-w-[560px]">
+      <svg viewBox={`0 0 ${MAP_SIZE} ${MAP_SIZE}`} role="group" aria-label={planned.length > 0 ? "Map of who has worked with whom, and of the planned relationships between work roles. The lists below say the same." : "Map of who has worked with whom. The list below says the same."} className="h-auto w-full min-w-[560px]">
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" className="fill-muted-foreground" />
@@ -118,6 +144,34 @@ function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: L
                 {line.total}
               </text>
             </SheetLink>
+          );
+        })}
+        {planned.map((line) => {
+          const [from, to] = [placed.get(line.from_role), placed.get(line.to_role)];
+          if (!from || !to) return null;
+          const bend = { x: (from.x + to.x) / 2 + (to.y - from.y) * 0.08, y: (from.y + to.y) / 2 - (to.x - from.x) * 0.08 };
+          const label = `“${shortened(line.label, 24)}”`;
+          // A plain link to the same line in the list, where its words are in full. A plan has no handoffs to open.
+          return (
+            <a key={line.id} href={`#${plannedAnchor(line)}`} aria-label={`${plannedName(line)}. ${plannedLabel(line)}.${external ? " External." : ""} Planned, not recorded.`}>
+              <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" stroke="transparent" strokeWidth={28} />
+              <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" strokeWidth={2} strokeDasharray="8 6" markerEnd="url(#arrow)" className="stroke-muted-foreground hover:stroke-primary" />
+              <text x={bend.x} y={bend.y} textAnchor="middle" fontSize={14} className="fill-foreground">
+                {label}
+              </text>
+            </a>
+          );
+        })}
+        {[...roles].map(([role, title]) => {
+          const at = placed.get(role);
+          if (!at) return null;
+          return (
+            <g key={role}>
+              <rect x={at.x - 6} y={at.y - 6} width={12} height={12} className="fill-muted-foreground" />
+              <text x={at.x} y={at.y - 12} textAnchor="middle" fontSize={14} className="fill-foreground">
+                {shortened(title, 20)}
+              </text>
+            </g>
           );
         })}
         {nodes.map((node) => {
@@ -140,7 +194,11 @@ function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: L
         })}
       </svg>
       </MapBox>
-      <figcaption className="text-sm text-muted-foreground">{NOTE} Each number counts the handoffs on that line.</figcaption>
+      <figcaption className="text-sm text-muted-foreground">
+        {NOTE} Each number counts the handoffs on that line.
+        {planned.length > 0 ? " Solid lines join people and show what was recorded. Dashed lines join work roles, drawn as squares, and show only what's planned. If it's crowded, use the List, which says the same in full." : ""}
+        {planned.length > 0 && external ? " External: another organization wrote the plans on this map." : ""}
+      </figcaption>
     </figure>
   );
 }

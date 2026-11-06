@@ -40,6 +40,12 @@ impl ApiError {
     pub fn lead_exists() -> ApiError {
         ApiError::api(409, "lead_exists")
     }
+    pub fn relationship_exists() -> ApiError {
+        ApiError::api(409, "relationship_exists")
+    }
+    pub fn relationship_not_found() -> ApiError {
+        ApiError::api(404, "relationship_not_found")
+    }
     pub fn not_found() -> ApiError {
         ApiError::api(404, "not_found")
     }

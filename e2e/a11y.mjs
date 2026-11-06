@@ -99,6 +99,7 @@ async function seed() {
   await guest.must("accept_task", { ...at(linkThread), version: linkThread.version });
   for (let i = 0; i < 6; i++) await guest.must("send_message", { ...at(linkThread), body: `[link ${i}](https://example.com/${i})\n\n${"## A heading\n\n- A bullet with some words\n- Another bullet\n\n".repeat(120)}`.slice(0, 8 * 1024) });
   const numberedBrief = await make("Task with a long numbered list", { instructions: Array.from({ length: 120 }, (_, i) => `${i + 1}. An item`).join("\n") });
+  const composeTask = await make("Task for the message box", { assignee: guest.id });
   // A long brief that has to end up formatted: this proves the worker runs, under the real CSP, from the real build.
   // Nothing limits this one but the clock: it parses for over a second, with nothing deep and little rendered.
   const slowBrief = await make("Task with a slow brief", { instructions: runOfMarks });
@@ -189,7 +190,10 @@ async function seed() {
   const lastTaken = await longWorker.must("accept_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastReview.version });
   await longWorker.must("submit_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastTaken.version, note: "Ready", artifacts: [], idempotency_key: crypto.randomUUID() });
 
-  return { longRoom, shortListRoom, lastReview, LONG_TASKS, opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  // Two openings and a planned line between them, so the Collaboration screens have a plan to show.
+  const plannedTo = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Delivery engineer with a long title that has to wrap", responsibilities: "Builds what's planned.", capacity: 1, preset: "member", policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
+  await owner.must("POST", `/v1/workspaces/${room}/collaboration/planned`, { from_role_id: opening, to_role_id: plannedTo, label: "Hands the plan to, with a label long enough that the map cuts it short", policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version });
+  return { longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -427,7 +431,7 @@ async function keyboardPaths(s) {
   await keyboardPath("manage a role opening, and the Team page at phone width", async () => {
     await page.goto(`${app}/w/${s.room}/team`);
     await hydrated(page);
-    const link = page.getByRole("link", { name: "Manage opening" });
+    const link = page.getByRole("link", { name: "Manage opening" }).first();
     await tabTo(page, link, "the opening's link");
     await page.keyboard.press("Enter");
     const close = page.getByRole("button", { name: "Close opening" });
@@ -542,6 +546,61 @@ async function keyboardPaths(s) {
     await box.focus();
     await small.keyboard.press("ArrowRight");
     await small.waitForFunction(() => document.activeElement?.scrollLeft > 0, null, { timeout: 15_000 });
+    await phone.close();
+  });
+
+  await keyboardPath("plan a line, reach it from the map, and remove it, also at phone width", async () => {
+    await page.goto(`${app}/w/${s.room}/collaboration?view=map`);
+    await hydrated(page);
+    const form = page.locator("form", { hasText: "Plan a line" });
+    // By keyboard alone: Tab to each field, and typing a role's first letters chooses it.
+    const from = form.getByRole("combobox", { name: "From role" });
+    const to = form.getByRole("combobox", { name: "To role" });
+    await tabTo(page, from, "the From role select", 120);
+    await page.keyboard.type("Delivery");
+    await page.waitForFunction((id) => document.activeElement?.value === id, s.plannedTo, { timeout: 15_000 });
+    await page.keyboard.press("Tab");
+    await to.evaluate((el) => new Promise((done) => (document.activeElement === el ? done() : el.addEventListener("focus", done, { once: true }))));
+    await page.keyboard.type("Lead");
+    await page.waitForFunction((id) => document.activeElement?.value === id, s.opening, { timeout: 15_000 });
+    ok((await from.inputValue()) === s.plannedTo && (await to.inputValue()) === s.opening, "the keyboard didn't choose both roles");
+    await page.keyboard.press("Tab");
+    await page.waitForFunction(() => document.activeElement?.tagName === "INPUT", null, { timeout: 15_000 });
+    await page.keyboard.type("Asks questions of");
+    await page.keyboard.press("Tab");
+    await page.waitForFunction(() => document.activeElement?.textContent === "Add planned line", null, { timeout: 15_000 });
+    await page.keyboard.press("Enter");
+    const dashed = page.locator('svg a[href^="#planned-"]', { hasText: "Asks questions of" });
+    await dashed.waitFor({ timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.getAttribute("role") === "status", null, { timeout: 15_000 });
+    const name = await dashed.getAttribute("aria-label");
+    ok(name?.startsWith("Planned: Delivery engineer") && name.includes("Asks questions of") && name.includes("not recorded"), `a planned line's name is ${name}`);
+    ok((await dashed.locator("path[stroke-dasharray]").count()) === 1, "a planned line isn't dashed");
+    await dashed.focus();
+    await page.waitForFunction(() => document.activeElement?.closest("svg") !== null, null, { timeout: 15_000 });
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.activeElement?.tagName === "LI" && document.activeElement.id.startsWith("planned-"), null, { timeout: 15_000 });
+    const row = page.locator(`li#${await page.evaluate(() => document.activeElement.id)}`);
+    ok((await row.textContent()).includes("Planned, not recorded"), "the list's row doesn't say it's planned");
+    await page.keyboard.press("Tab");
+    await page.waitForFunction(() => document.activeElement?.textContent === "Remove", null, { timeout: 15_000 });
+    await page.keyboard.press("Enter");
+    const confirm = page.getByRole("alertdialog");
+    await confirm.waitFor({ timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.closest('[role="alertdialog"]') !== null, null, { timeout: 15_000 });
+    await confirm.getByRole("button", { name: "Remove line" }).focus();
+    await page.waitForFunction(() => document.activeElement?.textContent === "Remove line", null, { timeout: 15_000 });
+    await page.keyboard.press("Enter");
+    await dashed.waitFor({ state: "detached", timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.getAttribute("role") === "status", null, { timeout: 15_000 });
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    for (const path of [`/w/${s.room}/collaboration`, `/w/${s.room}/collaboration?view=map`]) {
+      await small.goto(`${app}${path}`);
+      await small.getByRole("heading", { name: "Planned relationships" }).waitFor({ timeout: 15_000 });
+      const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      ok(overflow <= 0, `${path} scrolls sideways by ${overflow}px at 375px with a plan on it`);
+    }
     await phone.close();
   });
 
@@ -854,7 +913,10 @@ async function keyboardPaths(s) {
             const started = performance.now();
             window.__longest = 0;
             document.querySelector("[data-task-load-more]").click();
-            while (document.querySelectorAll('[data-sheet-launcher^="task:"]').length <= before) await new Promise((done) => setTimeout(done, 5));
+            while (document.querySelectorAll('[data-sheet-launcher^="task:"]').length <= before) {
+              if (performance.now() - started > 30_000) throw new Error(`no new rows after 30 s at ${before}: ${document.querySelector("[data-task-load-more]")?.textContent}, ${document.querySelector('[role="alert"]')?.textContent}`);
+              await new Promise((done) => setTimeout(done, 5));
+            }
             await new Promise(requestAnimationFrame);
             return Math.round(performance.now() - started);
           }, loaded);
@@ -1251,6 +1313,76 @@ async function keyboardPaths(s) {
       await own.close();
       if (viewport) await context.close();
     }
+  });
+
+  await keyboardPath("the message box's preview works by keyboard, and changes nothing that's sent", async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.composeTask.id}`);
+    const sheet = own.getByRole("dialog");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).click();
+    await hydrated(own);
+    const refused = [];
+    own.on("console", (message) => {
+      if (/Content Security Policy/.test(message.text())) refused.push(message.text());
+    });
+    const sent = [];
+    own.on("request", (request) => {
+      if (request.method() === "POST" && /\/messages$/.test(new URL(request.url()).pathname)) sent.push(request.postDataJSON().body);
+    });
+    const written = "_id ~/foo C:\\Users\\me **bold** `a\\_b`\n\ndef __init__(self, *args):\n\nhttps://ex.com/~me/_x?a=*b <img src=x onerror=\"window.pwned=1\"> [x](javascript:window.pwned=2)";
+    const box = sheet.getByLabel("Post a message");
+    await box.fill(written);
+    const toggle = sheet.getByRole("button", { name: /^(Preview|Edit)$/ });
+    await tabTo(own, sheet.getByRole("button", { name: "Post message" }), "the post button");
+    await toggle.focus();
+    await own.keyboard.press("Enter");
+    const preview = sheet.getByRole("region", { name: "Preview of your message" });
+    await preview.locator("strong").first().waitFor({ timeout: 15_000 });
+    ok((await toggle.innerText()).trim() === "Edit", "the toggle doesn't say how to get back");
+    ok((await preview.getByText("Not posted yet", { exact: false }).count()) === 2, "the preview doesn't say it isn't posted, before and after the card");
+    ok(await toggle.evaluate((el) => el === document.activeElement), "focus left the toggle");
+    ok((await preview.locator("img, script, iframe, a[href^='javascript']").count()) === 0, "hostile text became elements in the preview");
+    ok((await own.evaluate(() => window.pwned)) === undefined, "hostile text ran in the preview");
+    await audit(own, "Message preview");
+    await own.keyboard.press("Enter");
+    await box.waitFor({ timeout: 5_000 });
+    ok((await box.inputValue()) === written, "closing the preview changed the text");
+    ok((await toggle.innerText()).trim() === "Preview", "the toggle didn't go back");
+    await toggle.focus();
+    await own.keyboard.press("Enter");
+    await tabTo(own, sheet.getByRole("button", { name: "Post message" }), "the post button");
+    await own.keyboard.press("Enter");
+    await sheet.getByText("Posted.").waitFor({ timeout: 15_000 });
+    ok(sent[0] === written, `previewing changed what's sent: ${JSON.stringify(sent[0])}`);
+    ok(await box.evaluate((el) => el === document.activeElement), "focus didn't return to the box");
+    await box.fill(written);
+    await sheet.getByRole("button", { name: "Post message" }).click();
+    await own.waitForFunction(() => document.querySelector("#thread-message")?.value === "", null, { timeout: 15_000 });
+    ok(sent[1] === sent[0], "the body differs with and without previewing");
+    ok(refused.length === 0, `the policy refused something: ${refused[0]}`);
+    await own.close();
+  });
+
+  await keyboardPath("the message box's preview at phone width", async () => {
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const own = await phone.newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.composeTask.id}`);
+    const sheet = own.getByRole("dialog");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).click();
+    await hydrated(own);
+    await sheet.getByLabel("Post a message").fill(`A wide one: ${"unbroken".repeat(60)}\n\n| a | b |\n| - | - |\n| ${"wide".repeat(60)} | c |`);
+    const toggle = sheet.getByRole("button", { name: /^(Preview|Edit)$/ });
+    ok(((await toggle.boundingBox())?.height ?? 0) >= 44, "the toggle is under 44px tall at 375px");
+    await toggle.click();
+    await sheet.getByRole("region", { name: "Preview of your message" }).locator("table").waitFor({ timeout: 15_000 });
+    const sizes = await sheet.evaluate((dialog) => ({ page: document.documentElement.scrollWidth - window.innerWidth, sheet: dialog.scrollWidth - dialog.clientWidth }));
+    ok(sizes.page <= 0 && sizes.sheet <= 0, `the preview scrolls sideways at 375px: ${JSON.stringify(sizes)}`);
+    // A result too large to apply out of view still formats here, because the preview is in view.
+    await toggle.click();
+    await sheet.getByLabel("Post a message").fill("- item\n".repeat(600).trim());
+    await toggle.click();
+    await sheet.getByRole("region", { name: "Preview of your message" }).locator("li").nth(599).waitFor({ state: "attached", timeout: 15_000 });
+    await phone.close();
   });
 
   await keyboardPath("long messages are in the accessibility tree, off-screen too", async () => {
