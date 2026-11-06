@@ -4,6 +4,18 @@ import { afterEach, vi } from "vitest";
 
 afterEach(cleanup);
 
+// jsdom has no workers. Component tests get agent text formatted at once, through the real parser, and use-parsed-body.test.tsx
+// and parse-client.test.ts test the real path. The browser run in e2e/a11y.mjs is what shows it working.
+vi.mock("@/components/agent-content/use-parsed-body", async () => {
+  const { parseBody } = await import("@/components/agent-content/parse");
+  return {
+    useParsedBody: (text: string) => {
+      const parsed = parseBody(text);
+      return parsed ? { kind: "ready", tree: parsed.tree } : { kind: "failed" };
+    },
+  };
+});
+
 // jsdom has neither, and the Sidebar and Radix ask for them.
 vi.stubGlobal("matchMedia", (query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }));
 vi.stubGlobal(

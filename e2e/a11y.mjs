@@ -59,13 +59,53 @@ async function seed() {
     const columns = Math.floor(size / 8);
     return `${"|a".repeat(columns)}\n${"|-".repeat(columns)}\n${"a\n".repeat(Math.floor((size - 4 * columns) / 2) - 2)}`;
   };
+  const K16 = 16 * 1024;
   const oversized = await make("Task with oversized tables", { assignee: guest.id, instructions: paddedTable(20_000).padEnd(64 * 1024, "a\n") });
   await guest.must("accept_task", { ...at(oversized), version: oversized.version });
   await guest.must("send_message", { ...at(oversized), body: paddedTable(16 * 1024) });
+  // What a whole screen can cost: the shapes that took longest to parse, on one task. About 34 s to open before bodies were deferred.
+  const fill = (unit) => unit.repeat(Math.ceil(K16 / unit.length)).slice(0, K16);
+  const runOfMarks = `${"**".repeat(4095)}a${"**".repeat(4095)}`;
+  const heavy = [`${"*a _b ".repeat(1300)}x${" b_ a*".repeat(1300)}`, fill("]"), fill("a\n=\n"), fill(`${"- ".repeat(100)}x\n`), runOfMarks, fill("*"), fill("_")];
+  const heavyThread = await make("Task with a heavy thread", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(heavyThread), version: heavyThread.version });
+  for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(heavyThread), body: heavy[i % heavy.length] });
+  // And shorter ones, at and around the length that's parsed at once, where each message costs the main thread a little.
+  const short = (size) => ["*a _b ".repeat(Math.floor(size / 6)), "]".repeat(size), "a\n=\n".repeat(size / 4), "**".repeat(size / 2)];
+  const heavyShort = [...short(2_000), ...short(500), `${"- ".repeat(100)}x\n`.repeat(9), `${"- ".repeat(10)}x\n`.repeat(21)];
+  const shortThread = await make("Task with a heavy short thread", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(shortThread), version: shortThread.version });
+  for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(shortThread), body: heavyShort[i % heavyShort.length] });
+  // Unbroken text in scripts that cost a lot to lay out, at the message limit in bytes.
+  const byBytes = (unit) => unit.repeat(Math.floor(K16 / Buffer.byteLength(unit)));
+  const scripts = [byBytes("ع"), byBytes("ก"), byBytes("אa")];
+  const scriptThread = await make("Task with unbroken scripts", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(scriptThread), version: scriptThread.version });
+  for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(scriptThread), body: scripts[i % scripts.length] });
+  const oneScript = async (title, body) => {
+    const task = await make(title, { assignee: guest.id });
+    await guest.must("accept_task", { ...at(task), version: task.version });
+    for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(task), body });
+    return task;
+  };
+  const arabicThread = await oneScript("Task with unbroken Arabic", byBytes("ع"));
+  const hebrewLatinThread = await oneScript("Task with alternating directions", byBytes("אa"));
+  // Long bodies whose results soon use up what can be applied out of view: for keeping the reader's place, and for how far ahead they format.
+  const tallThread = await make("Task with tall messages", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(tallThread), version: tallThread.version });
+  for (let i = 0; i < 20; i++) await guest.must("send_message", { ...at(tallThread), body: `Message ${i} ${"**b** ".repeat(1500)}` });
+  // Long bodies with ordinary links, for reaching them by keyboard.
+  const linkThread = await make("Task with links in long messages", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(linkThread), version: linkThread.version });
+  for (let i = 0; i < 6; i++) await guest.must("send_message", { ...at(linkThread), body: `[link ${i}](https://example.com/${i})\n\n${"## A heading\n\n- A bullet with some words\n- Another bullet\n\n".repeat(120)}`.slice(0, 8 * 1024) });
+  const numberedBrief = await make("Task with a long numbered list", { instructions: Array.from({ length: 120 }, (_, i) => `${i + 1}. An item`).join("\n") });
+  // A long brief that has to end up formatted: this proves the worker runs, under the real CSP, from the real build.
+  // Nothing limits this one but the clock: it parses for over a second, with nothing deep and little rendered.
+  const slowBrief = await make("Task with a slow brief", { instructions: runOfMarks });
+  const longBrief = await make("Task with a long brief", { instructions: `**A bold start** and [a link](https://example.com/brief), caf&eacute;.\n\n${"Ordinary words in a long brief. ".repeat(150)}` });
   // Text that has crashed the tab. Each gets its own task, in its own room, so one failure can't hide another.
   const hostileRoom = await owner.createRoom("Hostile text");
   await owner.addAgent(hostileRoom, lead);
-  const K16 = 16 * 1024;
   const deepest = `${"- ".repeat(100)}x\n`;
   const hostile = [];
   for (const [label, instructions, note] of [
@@ -84,7 +124,9 @@ async function seed() {
     ["tabs behind a quote at the message limit", Array.from({ length: 70 }, (_, i) => `> ${"\t".repeat(i)}${"- ".repeat(98)}x`).join("\n").slice(0, K16), CANT_FORMAT],
     ["footnotes", "[^a]: ".repeat(Math.floor(K16 / 6)), CANT_FORMAT],
     ["inline nesting", `${"*a _b ".repeat(1300)}x${" b_ a*".repeat(1300)}`, CANT_FORMAT],
-    ["the deepest allowed, repeated", deepest.repeat(Math.floor(K16 / deepest.length)), null],
+    ["a mix at the limit", `${"> - ".repeat(50)}deep`, null],
+    ["the deepest allowed, once", deepest, null],
+    ["the deepest allowed, repeated", deepest.repeat(Math.floor(K16 / deepest.length)), CANT_FORMAT],
     ["wide tables repeated", `| ${"w".repeat(300)} |\n| - |\n\n`.repeat(Math.floor(K16 / 312)), "too large to show as a table"],
   ]) hostile.push({ label, note, id: (await lead.must("create_task", { workspace_id: hostileRoom, title: `Hostile: ${label}`, instructions })).id });
   const done = await submit("A completed task", lead.id);
@@ -127,7 +169,7 @@ async function seed() {
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
   const opening = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Lead coordinator", responsibilities: "Plans the work and **follows up**.", is_lead: true, policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
-  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -688,6 +730,7 @@ async function keyboardPaths(s) {
     ok((await marksNote.boundingBox()).y < (await box.boundingBox()).y, "the note about checked boxes isn't above them");
     ok((await small.getByRole("heading", { name: "A heading", level: 4 }).count()) > 0, "agent text's heading isn't at the fixed level");
     const narrow = small.getByRole("group", { name: "Table in this text" }).nth(1);
+    await small.waitForTimeout(200);
     ok((await narrow.getAttribute("tabindex")) === null, "a table that fits is still a tab stop");
     await phone.close();
   });
@@ -700,6 +743,264 @@ async function keyboardPaths(s) {
     ok((await page.locator("table td").count()) < 2_500, "an oversized table still rendered as a table");
     const responded = await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done(true))));
     ok(responded && Date.now() - started < 15_000, `the Sheet took ${Date.now() - started}ms`);
+  });
+
+  // The longest the main thread was blocked, from opening a screen to reading it to the end. Each shape used to block 300 ms to 2 s per body.
+  const LONGEST_BLOCK_MS = 700;
+  const watchBlocks = (context) => context.addInitScript(() => {
+    window.longestBlock = 0;
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) window.longestBlock = Math.max(window.longestBlock, entry.duration);
+    }).observe({ type: "longtask", buffered: true });
+  });
+  // A slow body has to be timed or laid out once, up to about 340 ms locally. Without skipped layout, these blocked for 922 ms on the Task Sheet and 2,226 ms on oversight.
+  const LONGEST_BLOCK_SCRIPTS_MS = 800;
+  const TAB_BACK_BLOCK_MS = 1_000;
+  const openHeavy = async (label, context, path, tab, longest = LONGEST_BLOCK_MS, idleWait = 3_000) => {
+    await watchBlocks(context);
+    const own = await context.newPage();
+    try {
+      const started = Date.now();
+      await own.goto(`${app}${path}`);
+      await own.getByRole("dialog").getByRole("tab", { name: tab }).waitFor({ timeout: 30_000 });
+      await hydrated(own);
+      await own.evaluate(() => new Promise((done) => requestAnimationFrame(done)));
+      const opened = Date.now() - started;
+      ok(opened < 10_000, `${label} took ${opened}ms to open`);
+      // What's on the page before the screen's own work starts isn't this code's cost, such as hydrating the shell.
+      const startup = await own.evaluate(() => {
+        const was = window.longestBlock;
+        window.longestBlock = 0;
+        return Math.round(was);
+      });
+      const switched = Date.now();
+      await own.getByRole("dialog").getByRole("tab", { name: tab }).click();
+      await own.getByRole("dialog").locator("article").first().waitFor({ timeout: 30_000 });
+      await own.evaluate(() => new Promise((done) => requestAnimationFrame(done)));
+      const shown = Date.now() - switched;
+      ok(shown < 10_000, `${label}'s tab took ${shown}ms to show`);
+      // Reading to the end pays for each body once, a body at a time, and input can get in between them.
+      const read = await own.getByRole("dialog").evaluate(async (sheet) => {
+        const started = performance.now();
+        for (const article of sheet.querySelectorAll("article")) {
+          article.scrollIntoView();
+          await new Promise((done) => setTimeout(() => requestAnimationFrame(done), 50));
+        }
+        return Math.round(performance.now() - started);
+      });
+      const blocked = await own.evaluate(() => Math.round(window.longestBlock));
+      ok(blocked < longest, `${label} blocked the main thread for ${blocked}ms`);
+      // Let what's idle finish, then switch away and back: whatever stayed laid out is laid out again, all at once.
+      await own.waitForTimeout(idleWait);
+      const stayed = await own.getByRole("dialog").evaluate((sheet) => {
+        const bodies = [...sheet.querySelectorAll("article > div")];
+        return `${bodies.filter((body) => body.style.contentVisibility === "visible").length} of ${bodies.length}`;
+      });
+      await own.evaluate(() => (window.longestBlock = 0));
+      await own.getByRole("dialog").getByRole("tab", { name: /^(Details)$/ }).click();
+      await own.evaluate(() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 50))));
+      await own.getByRole("dialog").getByRole("tab", { name: tab }).click();
+      await own.getByRole("dialog").locator("article").last().waitFor({ timeout: 30_000 });
+      await own.evaluate(() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 200))));
+      const tabBack = await own.evaluate(() => Math.round(window.longestBlock));
+      console.log(`     ${label}: ${stayed} stayed laid out, longest block on tabbing back ${tabBack}ms`);
+      ok(tabBack < TAB_BACK_BLOCK_MS, `${label} blocked for ${tabBack}ms on tabbing back`);
+      console.log(`     ${label}: opened in ${opened}ms (longest block ${startup}ms), tab showed in ${shown}ms, read to the end in ${read}ms, longest block ${blocked}ms`);
+    } finally {
+      await own.close().catch(() => {});
+    }
+  };
+  await keyboardPath("a heavy thread on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.heavyThread.id}`, /^Discussion/));
+  await keyboardPath("a heavy thread on oversight (50 messages)", () => openHeavy("oversight", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.heavyThread.id}`, "Thread"));
+  await keyboardPath("unbroken scripts on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, unbroken scripts", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.scriptThread.id}`, /^Discussion/, LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("unbroken scripts on oversight (50 messages)", () => openHeavy("oversight, unbroken scripts", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.scriptThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("unbroken Arabic on oversight (50 messages)", () => openHeavy("oversight, unbroken Arabic", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.arabicThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("alternating directions on oversight (50 messages)", () => openHeavy("oversight, alternating directions", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.hebrewLatinThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("a heavy short thread on oversight (50 messages)", () => openHeavy("oversight, short messages", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.shortThread.id}`, "Thread"));
+
+  await keyboardPath("a long brief formats in a worker, under the real CSP", async () => {
+    const own = await contextFor(s.owner).newPage();
+    const refused = [];
+    own.on("console", (message) => {
+      if (/Content Security Policy|Worker/.test(message.text())) refused.push(message.text());
+    });
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.longBrief.id}`);
+    const bold = own.getByRole("dialog").locator("article strong").filter({ hasText: "A bold start" });
+    await bold.waitFor({ timeout: 15_000 }).catch(() => {});
+    ok(await bold.isVisible(), `a long brief never formatted${refused.length ? `: ${refused[0]}` : ""}`);
+    ok((await own.getByRole("dialog").locator("article a").first().getAttribute("href")) === "https://example.com/brief", "a long brief's link didn't format");
+    ok((await own.getByRole("dialog").locator("article").first().innerText()).includes("café"), "a long brief's entity wasn't decoded");
+    ok(await own.evaluate(() => window.find("A bold start and")), "find-in-page can't match text that spans markup");
+    await own.close();
+  });
+
+  await keyboardPath("a body over the time limit falls back to plain text", async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.slowBrief.id}`);
+    await own.getByRole("dialog").getByText(CANT_FORMAT).first().waitFor({ timeout: 15_000 });
+    await own.close();
+  });
+
+  // Opens the tall thread's Discussion at its end, with nothing applied until then. What's near the top when the tab opens formats
+  // too, and each one that shrinks brings the next into range, so how many had by the jump depended on how fast the runner was: on
+  // CI, 6 of the 10 far above. Holding the worker back until after the jump leaves only what this is about.
+  const openTall = async (own) => {
+    let release;
+    const jumped = new Promise((done) => (release = done));
+    await own.route("**/static/workers/**", async (route) => {
+      await jumped;
+      await route.continue();
+    });
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.tallThread.id}`);
+    const sheet = own.getByRole("dialog");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).click();
+    await sheet.locator("article").last().waitFor({ timeout: 15_000 });
+    await sheet.evaluate((dialog) => dialog.querySelectorAll("article")[dialog.querySelectorAll("article").length - 1].scrollIntoView({ block: "end" }));
+    release();
+    // Settled once the last body has formatted and the count has stopped changing.
+    await sheet.locator("article").last().locator("strong").first().waitFor({ state: "attached", timeout: 20_000 });
+    let [count, steady] = [-1, 0];
+    for (let i = 0; i < 60 && steady < 4; i++) {
+      await own.waitForTimeout(250);
+      const now = await sheet.locator("article:has(strong)").count();
+      steady = now === count ? steady + 1 : 0;
+      count = now;
+    }
+    return sheet;
+  };
+
+  await keyboardPath("agent text formats ahead of the view, not everywhere", async () => {
+    const own = await contextFor(s.owner).newPage();
+    const sheet = await openTall(own);
+    const rows = await sheet.evaluate((dialog) => {
+      let scroller = dialog.querySelector("article").parentElement;
+      while (!/auto|scroll/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+      const top = scroller.getBoundingClientRect().top;
+      return [...dialog.querySelectorAll("article")].map((article) => ({ above: Math.round(top - article.getBoundingClientRect().bottom), formatted: article.querySelector("strong") !== null }));
+    });
+    const justAbove = rows.filter((row) => row.above > 100 && row.above < 1_000);
+    const farAbove = rows.filter((row) => row.above > 3_000);
+    console.log(`     ${justAbove.length} just above the view, ${farAbove.length} far above`);
+    ok(justAbove.length > 0 && justAbove.every((row) => row.formatted), `a body up to 1,000 px above the view isn't formatted: ${JSON.stringify(justAbove)}`);
+    // Each of these results is about 4,500 nodes, and only 20,000 can be applied out of view.
+    const appliedFarAbove = farAbove.length - farAbove.filter((row) => !row.formatted).length;
+    console.log(`     ${appliedFarAbove} of ${farAbove.length} far above were applied`);
+    ok(farAbove.length >= 8, `only ${farAbove.length} bodies were far above the view, so this proves little`);
+    ok(appliedFarAbove <= 4, `${appliedFarAbove} large results far above the view were applied, past what's allowed out of view`);
+    await own.close();
+  });
+
+  await keyboardPath("scrolling up keeps the reader's place", async () => {
+    for (const [label, viewport] of [["desktop", undefined], ["375px", { width: 375, height: 800 }]]) {
+      const context = viewport ? await browser.newContext({ reducedMotion: "reduce", viewport, storageState: await contextFor(s.owner).storageState() }) : contextFor(s.owner);
+      const own = await context.newPage();
+      const sheet = await openTall(own);
+      const shift = await sheet.evaluate(async (dialog) => {
+        let scroller = dialog.querySelector("article").parentElement;
+        while (!/auto|scroll/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+        const view = () => scroller.getBoundingClientRect();
+        const items = () => [...dialog.querySelectorAll("article")];
+        const formatted = () => items().filter((article) => article.querySelector("strong")).length;
+        const startedWith = formatted();
+        let worst = 0;
+        for (let step = 0; step < 60 && scroller.scrollTop > 0; step++) {
+          // Something in view that isn't changing: the first article already formatted, or a timestamp between two.
+          const inView = items().filter((article) => article.querySelector("strong") && article.getBoundingClientRect().bottom > view().top && article.getBoundingClientRect().top < view().bottom)[0];
+          if (!inView) break;
+          const before = inView.getBoundingClientRect().top;
+          const moved = Math.min(150, scroller.scrollTop);
+          scroller.scrollTop -= moved;
+          await new Promise((done) => setTimeout(done, 120));
+          worst = Math.max(worst, Math.abs(inView.getBoundingClientRect().top - before - moved));
+        }
+        return { worst: Math.round(worst), swapped: formatted() - startedWith };
+      });
+      const { worst, swapped } = shift;
+      console.log(`     scrolling up at ${label}: worst shift ${worst}px, across ${swapped} bodies that formatted on the way`);
+      ok(swapped > 0, `scrolling up at ${label} formatted nothing, so this proves nothing`);
+      ok(worst <= 20, `scrolling up at ${label} moved what was being read by ${worst}px`);
+      await own.close();
+      if (viewport) await context.close();
+    }
+  });
+
+  await keyboardPath("long messages are in the accessibility tree, off-screen too", async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.linkThread.id}`);
+    const sheet = own.getByRole("dialog");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).click();
+    await sheet.locator("article a").nth(5).waitFor({ state: "attached", timeout: 15_000 });
+    const headings = await sheet.locator("article h4").count();
+    const cdp = await own.context().newCDPSession(own);
+    const exposed = async () => {
+      const { nodes } = await cdp.send("Accessibility.getFullAXTree");
+      const named = (role, pattern) => nodes.filter((node) => !node.ignored && node.role?.value === role && pattern.test(node.name?.value ?? "")).length;
+      return { links: named("link", /^link \d/), headings: named("heading", /^A heading$/) };
+    };
+    let found = await exposed();
+    for (let i = 0; i < 40 && (found.links < 6 || found.headings < headings); i++) {
+      await own.waitForTimeout(250);
+      found = await exposed();
+    }
+    console.log(`     accessibility tree: ${found.links} of 6 links, ${found.headings} of ${headings} headings`);
+    ok(found.links === 6, `the accessibility tree has ${found.links} of 6 links in long messages`);
+    ok(found.headings === headings, `the accessibility tree has ${found.headings} of ${headings} headings in long messages`);
+    await own.close();
+  });
+
+  await keyboardPath("list numbers past 99 aren't clipped", async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.numberedBrief.id}`);
+    const list = own.getByRole("dialog").locator("article ol").first();
+    await list.waitFor({ timeout: 15_000 });
+    // Skipping layout contains paint, so what matters is the room from the list's text to the edge that clips it, skipped or not.
+    const room = await list.evaluate((ol) => {
+      const body = ol.closest("article > div");
+      body.style.contentVisibility = "auto";
+      return ol.querySelector("li").getBoundingClientRect().left - body.getBoundingClientRect().left;
+    });
+    ok(room >= 44, `list numbers have only ${room}px before they're clipped, and "100." needs about 30`);
+    await own.close();
+  });
+
+    await keyboardPath("Tab reaches every link in long messages", async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.linkThread.id}`);
+    const sheet = own.getByRole("dialog");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).focus();
+    await own.keyboard.press("Enter");
+    await sheet.locator("article a").nth(5).waitFor({ state: "attached", timeout: 15_000 });
+    // Find-in-page has to reach text that hasn't been laid out yet.
+    ok(await own.evaluate(() => window.find("link 5")), "find-in-page can't reach an off-screen message");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).focus();
+    const reached = new Set();
+    for (let i = 0; i < 40; i++) {
+      await own.keyboard.press("Tab");
+      const href = await own.evaluate(() => (document.activeElement?.closest("article") ? document.activeElement.getAttribute("href") : null));
+      if (href) reached.add(href);
+    }
+    ok(reached.size === 6, `Tab reached ${reached.size} of 6 links in long messages`);
+    await own.close();
+  });
+
+  await keyboardPath("nesting inside the limit at phone width", async () => {
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    for (const { label, id } of s.hostile.filter((shape) => shape.note === null)) {
+      await small.goto(`${app}/w/${s.hostileRoom}/tasks?task=${id}`);
+      await small.getByRole("dialog").getByText(`Hostile: ${label}`).first().waitFor({ timeout: 15_000 });
+      await hydrated(small);
+      const sizes = await small.getByRole("dialog").evaluate((sheet) => ({ page: document.documentElement.scrollWidth - window.innerWidth, sheet: sheet.scrollWidth - sheet.clientWidth, article: (sheet.querySelector("article")?.scrollWidth ?? 0) - (sheet.querySelector("article")?.clientWidth ?? 0) }));
+      console.log(`     ${label} at 375px overflows by ${JSON.stringify(sizes)}`);
+      ok(sizes.page <= 0, `${label} scrolls the page sideways by ${sizes.page}px at 375px`);
+      ok(sizes.sheet <= 0, `${label} scrolls the Sheet sideways by ${sizes.sheet}px at 375px`);
+      if (label === "quotes at the limit") {
+        const deepest = small.getByRole("dialog").locator("article blockquote").last();
+        await deepest.waitFor({ timeout: 15_000 });
+        ok((await deepest.evaluate((el) => getComputedStyle(el).boxShadow)) !== "none", "a quote at level 5 or deeper has no bar");
+      }
+    }
+    await phone.close();
   });
 
   for (const { label, note, id } of s.hostile) {
@@ -804,6 +1105,8 @@ async function run() {
       // A failed read would pass axe while hiding the screen.
       if (await page.getByText("Couldn't refresh").count()) throw new Error("the screen's read failed");
       if (sheet) await page.getByRole("dialog").waitFor({ timeout: 15_000 });
+      // This one's text has a table, which is formatted in the worker, and it's what shows tables to axe.
+      if (name === "Task Sheet, review") await page.locator("article table").first().waitFor({ timeout: 15_000 });
       await audit(page, name);
     } catch (error) {
       fail(name, error.message.split("\n")[0]);
