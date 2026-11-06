@@ -90,6 +90,50 @@ describe("Manage access, for the room's owner or admin", () => {
     expect(sent).toEqual([]);
   });
 
+  it("warns before a role change replaces access set apart from the role, and not otherwise", async () => {
+    const user = userEvent.setup();
+    const public_ = { preset: "public_participant", tasks: "own", artifacts: "shared", conversations: "own", review: "none" };
+    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: 7, members: [{ ...agentRow(AGENT, "org_a", "guest"), access: public_ }] });
+    show(owner);
+    const select = await screen.findByLabelText("Role in this workroom");
+    expect(screen.queryByRole("note")).toBeNull();
+    await user.selectOptions(select, "member");
+    expect(screen.getByRole("note")).toHaveTextContent(/can widen as well as narrow/);
+    await user.selectOptions(select, "guest");
+    expect(screen.queryByRole("note")).toBeNull();
+    await user.selectOptions(screen.getByLabelText("Creating tasks"), "allow");
+    expect(screen.getByRole("note")).toBeInTheDocument();
+  });
+
+  it("gives no warning when the switch already says what's chosen, because nothing resets", async () => {
+    const user = userEvent.setup();
+    const custom = { preset: null, tasks: "all_create", artifacts: "own", conversations: "own", review: "when_named" };
+    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: 7, members: [{ ...agentRow(AGENT, "org_a", "guest"), guest_can_create: true, access: custom }] });
+    show(owner);
+    const creating = await screen.findByLabelText("Creating tasks");
+    await user.selectOptions(creating, "allow");
+    expect(screen.queryByRole("note")).toBeNull();
+    await user.selectOptions(creating, "deny");
+    expect(screen.getByRole("note")).toBeInTheDocument();
+  });
+
+  it("gives no warning for a Public participant set to what it already has", async () => {
+    const user = userEvent.setup();
+    const public_ = { preset: "public_participant", tasks: "own", artifacts: "shared", conversations: "own", review: "none" };
+    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: 7, members: [{ ...agentRow(AGENT, "org_a", "guest"), guest_can_create: false, access: public_ }] });
+    show(owner);
+    await user.selectOptions(await screen.findByLabelText("Creating tasks"), "deny");
+    expect(screen.queryByRole("note")).toBeNull();
+  });
+
+  it("gives no warning when access is just what the role gives", async () => {
+    const user = userEvent.setup();
+    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: 7, members: [{ ...agentRow(), access: { preset: "member", tasks: "all_create", artifacts: "all", conversations: "all", review: "when_named" } }] });
+    show(owner);
+    await user.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    expect(screen.queryByRole("note")).toBeNull();
+  });
+
   it("AC-20: a stale form keeps the person's choice and offers the latest, and doesn't overwrite", async () => {
     commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(409, "version_conflict");
     show(owner);

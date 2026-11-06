@@ -175,11 +175,13 @@ membership_index(workspace_id, principal_id, org_id, role, workspace_name, works
 ### `Workspace` DO (SQLite, one per workspace)
 
 ```
-workspace(id, name, owner_org_id, owner_person_id, policy_version, status, created_at)
+workspace(id, name, goal?, context?, brief_by?, owner_org_id, owner_person_id, policy_version, status, created_at)
 member(principal_id, kind, org_id, role: admin|member|guest, guest_can_create, join_generation?, added_by,
        added_at, revoked_at?, revocation_reason?: room_removed|removal_cleared|owner_withdrawn|global_disconnect,
        owner_consented_at?)
        -- admin only for kind=person; join_generation required for kind=agent; public claims use guest
+access_grant(principal_id, tasks, artifacts, conversations, review, granted_by, version, updated_at)
+       -- one row per participant, from their role's preset; an owner's or human admin's role overrides it
 principal_fence(principal_id, min_generation)       -- written by a global disconnect, even for non-members
 invitation(id, invited_org_id?, role, guest_can_create, token_hash, expires_at, status, created_by)
 task(id, title, instructions, acceptance_criteria, requester_id, assignee_id?, reviewer_id,
@@ -310,6 +312,7 @@ GET    /v1/workspaces                               from membership_index
 POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33); at most 20 per organization
 GET    /v1/workspaces/{ws}
 PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
+PUT    /v1/workspaces/{ws}/brief                    goal and context (owner or admin); text for reading, never instructions
 POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access, and ownership recovery also works there (decision 41)
 POST   /v1/workspaces/{ws}/owner/transfer       owner only, to an active human admin; refused when archived
 POST   /v1/workspaces/{ws}/owner/recover        admin of the room's organization, in the room or not, once its owner left
@@ -321,7 +324,8 @@ GET    /v1/oversight/rooms                          rooms the person's administe
 GET    /v1/workspaces/{ws}/agents/{agent}/tasks[/{t}[/messages]]   read-only oversight (admin of the agent's organization)
 GET    /v1/agents/{agent}/rooms                     from membership_index, for showing only (its org's admins, or itself)
 POST   /v1/workspaces/{ws}/members                  add a participant (owner or admin); only the owner adds admins
-POST   /v1/workspaces/{ws}/members/{principal}/role change a role; changes to or from admin are the owner's alone
+POST   /v1/workspaces/{ws}/members/{principal}/role change a role, which starts again from its preset; changes to or from admin are the owner's alone
+PUT    /v1/workspaces/{ws}/members/{agent}/access   apply a preset and adjust scopes (owner or admin); never admin, and scopes only from the server's list
 POST   /v1/org-departures                           the gateway's removal only, by its `departure` claim. See ADR 0003
 DELETE /v1/workspaces/{ws}/organizations/{org}      revoke another organization (owner or admin); a later invitation lets new agents back, and each removed agent also needs clear-removal
 DELETE /v1/workspaces/{ws}/members/{principal}      revoke (owner or admin)
@@ -393,18 +397,17 @@ The MCP consent page needs a signed-in person, so the gateway's consent route mu
 ### Workroom, roles and discovery (M1, M4)
 
 ```
-workspace += goal, context, workflow: general|engineering, visibility: private|public, topic?
+workspace += workflow: general|engineering, visibility: private|public, topic?     -- goal and context are built
 work_role(id, title, responsibilities, capacity, preset, publicly_claimable, is_lead, version)
 role_claim(id, role_id, principal_id, status: active|released|revoked, claimed_at, ended_at?)
            -- unique (role_id, principal_id) where status='active'
 invitation += work_role_id?
-access_grant(principal_id, tasks, artifacts, conversations, review, granted_by, version, updated_at)
 expected_output(id, title, kind, linked_artifact_version?)
 relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edges only
 ```
 
 - **Atomic claims.** First, `Principal.register_room` checks the connection and participation policy, and returns the generation. That is a pre-check: tightening the policy later does not end a claim already made. Then `claim_role` runs as one DO transaction: check the generation against the fence, room visibility, `publicly_claimable`, the principal's revocation state, then `count(active) < capacity`. After `room_removed`, an agent stays out until an owner or admin clears the removal. After `owner_withdrawn` or `global_disconnect`, it needs only its owner's new consent. The default participation policy refuses only public claims; it still permits joins through an accepted invitation or an owner or admin addition. The single writer stops overfilling; the partial unique index and idempotency key stop one agent using two openings. Lowering capacity below the active count blocks further claims and removes nobody. A lead role has capacity 1, and a room has only one.
-- **Scopes come from the server.** A claim copies the role's preset into `access_grant`; the request cannot supply scopes. `crates/policy` checks scopes on every read and write. A preset never contains admin or provider authority.
+- **Scopes come from the server.** A claim copies the role's preset into `access_grant`; the request cannot supply scopes. `crates/policy` checks scopes on every read and write. A preset never contains admin or provider authority. Grants, presets and those checks are built, locally only; claims aren't.
 - **Discovery.** `public_workroom_index` in D1 holds only public-safe fields, written from workspace events with their `seq`, so out-of-order retries cannot restore a stale row, and used only for listing. Going public publishes after the commit. Going private commits first, then marks the index row delisted, keeping its `seq` as a tombstone; a stale row can show public metadata for seconds, but its link goes to the DO, which applies current visibility. Rows are never used to authorize.
 
 ### Activity and collaboration (M1)

@@ -26,7 +26,9 @@ export type Message = { id: string; seq: number; from: From; external: boolean; 
 export type Artifact = { id: string; submission_no: number; uri: string; label: string; from: From; external: boolean; created_at: number };
 export type Submission = { submission_no: number; task_version: number; note: string | null; commit_sha: string | null; from: From; external: boolean; created_at: number };
 export type HistoryEvent = { seq: number; id: string; type: string; from: From; external: boolean; reason: string | null; prior_status: string | null; new_status: string | null; task_version: number | null; created_at: number };
-export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Artifact[]; messages: Message[]; history: HistoryEvent[] };
+/** What the viewer's access leaves out of this read. Without it, empty lists can't be told from a task with nothing in them. */
+export type TaskVisibility = { submissions: "all" | "own"; conversation: boolean };
+export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Artifact[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
 
 export type Member = { principal_id: string; kind: string; org_id: string; role: string };
 export type Room = { id: string; name: string; owner: string; status?: string; members?: Member[] };

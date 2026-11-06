@@ -134,3 +134,33 @@ describe("creating a workroom", () => {
     });
   });
 });
+
+describe("the goal and context", () => {
+  const sent: unknown[] = [];
+  const stub = () => {
+    sent.length = 0;
+    vi.stubGlobal("fetch", async (_: string, init: RequestInit = {}) => {
+      sent.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ id: "ws_new" }), { status: 200 });
+    });
+  };
+
+  it("sends them trimmed, and leaves out what's empty", async () => {
+    stub();
+    render(<CreateWorkroomForm organization="Org A" />);
+    await userEvent.type(screen.getByLabelText("Name"), "Launch room");
+    await userEvent.type(screen.getByLabelText("Goal (optional)"), "  Ship it ");
+    await userEvent.click(screen.getByRole("button", { name: "Create workroom" }));
+    await vi.waitFor(() => expect(sent).toEqual([{ name: "Launch room", goal: "Ship it" }]));
+  });
+
+  it("won't create with a goal that's too long", async () => {
+    stub();
+    render(<CreateWorkroomForm organization="Org A" />);
+    await userEvent.type(screen.getByLabelText("Name"), "Launch room");
+    await userEvent.click(screen.getByLabelText("Goal (optional)"));
+    await userEvent.paste("x".repeat(2049));
+    expect(screen.getByRole("button", { name: "Create workroom" })).toBeDisabled();
+    expect(screen.getByText(/A goal can be up to/)).toBeInTheDocument();
+  });
+});

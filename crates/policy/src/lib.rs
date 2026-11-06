@@ -37,7 +37,286 @@ pub struct Caller {
     pub id: PrincipalId,
     pub kind: PrincipalKind,
     pub role: Role,
-    pub guest_can_create: bool,
+    /// The caller's stored grant. Owners and admins hold everything whatever this says, so use `effective_scopes`.
+    pub scopes: Scopes,
+}
+
+/// Which tasks a participant can see, and whether they can create them. Creating a task also lets them offer it, as
+/// its requester. "Own" means tasks where they're requester, assignee or reviewer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskScope {
+    Own,
+    OwnCreate,
+    All,
+    AllCreate,
+    /// `AllCreate`, plus taking over tasks whose requester left. That takeover arrives with work roles.
+    Coordinate,
+}
+
+/// Which artifacts and submissions a participant can read. Everyone can submit on tasks assigned to them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactScope {
+    /// Only what's been shared with the room, and what they submitted themselves. Nothing can be shared until M2.
+    Shared,
+    /// Everything on their own tasks.
+    Own,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversationScope {
+    Own,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewScope {
+    None,
+    WhenNamed,
+}
+
+/// What a participant can do in one workroom (decision 20). Managing access isn't here and can't be added: it comes
+/// only from being a human owner or admin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scopes {
+    pub tasks: TaskScope,
+    pub artifacts: ArtifactScope,
+    pub conversations: ConversationScope,
+    pub review: ReviewScope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    PublicParticipant,
+    Guest,
+    Member,
+    Coordinator,
+}
+
+impl Preset {
+    pub const ALL: [Preset; 4] = [
+        Preset::PublicParticipant,
+        Preset::Guest,
+        Preset::Member,
+        Preset::Coordinator,
+    ];
+
+    pub const fn scopes(self) -> Scopes {
+        match self {
+            Preset::PublicParticipant => Scopes::PUBLIC_PARTICIPANT,
+            Preset::Guest => Scopes::GUEST,
+            Preset::Member => Scopes::MEMBER,
+            Preset::Coordinator => Scopes::COORDINATOR,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Preset::PublicParticipant => "public_participant",
+            Preset::Guest => "guest",
+            Preset::Member => "member",
+            Preset::Coordinator => "coordinator",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Preset> {
+        Preset::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    /// The kernel role a preset maps onto. Neither is an administrator, and no preset can make one.
+    pub fn role_name(self) -> &'static str {
+        match self {
+            Preset::PublicParticipant | Preset::Guest => "guest",
+            Preset::Member | Preset::Coordinator => "member",
+        }
+    }
+}
+
+impl Scopes {
+    pub const PUBLIC_PARTICIPANT: Scopes = Scopes {
+        tasks: TaskScope::Own,
+        artifacts: ArtifactScope::Shared,
+        conversations: ConversationScope::Own,
+        review: ReviewScope::None,
+    };
+    pub const GUEST: Scopes = Scopes {
+        tasks: TaskScope::Own,
+        artifacts: ArtifactScope::Own,
+        conversations: ConversationScope::Own,
+        review: ReviewScope::WhenNamed,
+    };
+    pub const MEMBER: Scopes = Scopes {
+        tasks: TaskScope::AllCreate,
+        artifacts: ArtifactScope::All,
+        conversations: ConversationScope::All,
+        review: ReviewScope::WhenNamed,
+    };
+    pub const COORDINATOR: Scopes = Scopes {
+        tasks: TaskScope::Coordinate,
+        artifacts: ArtifactScope::All,
+        conversations: ConversationScope::All,
+        review: ReviewScope::WhenNamed,
+    };
+
+    /// The grant a kernel role starts with. A guest's switch from its invitation (decision 14) adds creating tasks.
+    pub fn for_role(role: Role, guest_can_create: bool) -> Scopes {
+        match role {
+            Role::Owner | Role::Admin | Role::Member => Scopes::MEMBER,
+            Role::Guest if guest_can_create => Scopes {
+                tasks: TaskScope::OwnCreate,
+                ..Scopes::GUEST
+            },
+            Role::Guest => Scopes::GUEST,
+            Role::None => Scopes::PUBLIC_PARTICIPANT,
+        }
+    }
+
+    /// The preset these scopes match, or `None` once they've been adjusted away from all four.
+    pub fn preset(self) -> Option<Preset> {
+        Preset::ALL.into_iter().find(|p| p.scopes() == self)
+    }
+
+    /// The most these two together allow, scope by scope. Used where someone without room authority brings a participant
+    /// back, so they can't undo what the room narrowed.
+    pub fn narrower(self, other: Scopes) -> Scopes {
+        let sees_all = self.tasks.sees_all() && other.tasks.sees_all();
+        let creates = self.tasks.can_create() && other.tasks.can_create();
+        Scopes {
+            tasks: match (sees_all, creates) {
+                (true, true) if self.tasks == other.tasks => self.tasks,
+                (true, true) => TaskScope::AllCreate,
+                (true, false) => TaskScope::All,
+                (false, true) => TaskScope::OwnCreate,
+                (false, false) => TaskScope::Own,
+            },
+            artifacts: match (self.artifacts, other.artifacts) {
+                (ArtifactScope::All, ArtifactScope::All) => ArtifactScope::All,
+                (ArtifactScope::Shared, _) | (_, ArtifactScope::Shared) => ArtifactScope::Shared,
+                _ => ArtifactScope::Own,
+            },
+            conversations: if self.conversations == ConversationScope::All
+                && other.conversations == ConversationScope::All
+            {
+                ConversationScope::All
+            } else {
+                ConversationScope::Own
+            },
+            review: if self.review == ReviewScope::WhenNamed
+                && other.review == ReviewScope::WhenNamed
+            {
+                ReviewScope::WhenNamed
+            } else {
+                ReviewScope::None
+            },
+        }
+    }
+
+    /// Whether these scopes let someone review: they must be able to read the work on tasks they're named on.
+    pub fn reviews(self) -> bool {
+        self.review == ReviewScope::WhenNamed && self.artifacts != ArtifactScope::Shared
+    }
+
+    /// Whether these scopes can be granted. Reviewing work you can't read isn't a review, so that pair is refused.
+    pub fn is_grantable(self) -> bool {
+        self.review == ReviewScope::None || self.reviews()
+    }
+
+    /// What an organization's admin sees when overseeing its agent: never more than the agent sees, and only its own tasks.
+    pub fn for_oversight(self) -> Scopes {
+        Scopes {
+            tasks: TaskScope::Own,
+            artifacts: match self.artifacts {
+                ArtifactScope::Shared => ArtifactScope::Shared,
+                ArtifactScope::Own | ArtifactScope::All => ArtifactScope::Own,
+            },
+            conversations: ConversationScope::Own,
+            review: ReviewScope::None,
+        }
+    }
+}
+
+impl TaskScope {
+    pub const ALL: [TaskScope; 5] = [
+        TaskScope::Own,
+        TaskScope::OwnCreate,
+        TaskScope::All,
+        TaskScope::AllCreate,
+        TaskScope::Coordinate,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            TaskScope::Own => "own",
+            TaskScope::OwnCreate => "own_create",
+            TaskScope::All => "all",
+            TaskScope::AllCreate => "all_create",
+            TaskScope::Coordinate => "coordinate",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<TaskScope> {
+        TaskScope::ALL.into_iter().find(|s| s.name() == name)
+    }
+
+    pub fn sees_all(self) -> bool {
+        !matches!(self, TaskScope::Own | TaskScope::OwnCreate)
+    }
+
+    pub fn can_create(self) -> bool {
+        !matches!(self, TaskScope::Own | TaskScope::All)
+    }
+}
+
+impl ArtifactScope {
+    pub const ALL: [ArtifactScope; 3] = [
+        ArtifactScope::Shared,
+        ArtifactScope::Own,
+        ArtifactScope::All,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ArtifactScope::Shared => "shared",
+            ArtifactScope::Own => "own",
+            ArtifactScope::All => "all",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<ArtifactScope> {
+        ArtifactScope::ALL.into_iter().find(|s| s.name() == name)
+    }
+}
+
+impl ConversationScope {
+    pub const ALL: [ConversationScope; 2] = [ConversationScope::Own, ConversationScope::All];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ConversationScope::Own => "own",
+            ConversationScope::All => "all",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<ConversationScope> {
+        ConversationScope::ALL
+            .into_iter()
+            .find(|s| s.name() == name)
+    }
+}
+
+impl ReviewScope {
+    pub const ALL: [ReviewScope; 2] = [ReviewScope::None, ReviewScope::WhenNamed];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ReviewScope::None => "none",
+            ReviewScope::WhenNamed => "when_named",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<ReviewScope> {
+        ReviewScope::ALL.into_iter().find(|s| s.name() == name)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,7 +403,9 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("DELETE", ["organizations", _]) => "organization.revoke",
         ("POST", ["invitations"]) => "invitation.create",
         ("DELETE", ["invitations", _]) => "invitation.withdraw",
+        ("PUT", ["members", _, "access"]) => "member.change_access",
         ("PUT", ["name"]) => "room.rename",
+        ("PUT", ["brief"]) => "room.change_brief",
         ("POST", ["archive"]) => "room.archive",
         ("POST", ["unarchive"]) => "room.unarchive",
         ("POST", ["owner", "transfer"]) => "owner.transfer",
@@ -180,17 +461,29 @@ fn is_human_admin(caller: &Caller) -> bool {
     caller.kind == PrincipalKind::Person && matches!(caller.role, Role::Owner | Role::Admin)
 }
 
+/// What someone can actually do. Only `crates/policy` applies this, so a stored row can't give an agent admin authority
+/// or take anything from a human admin. An agent stored with an admin role counts as a plain guest.
+pub fn effective_scopes(kind: PrincipalKind, role: Role, stored: Scopes) -> Scopes {
+    match (role, kind) {
+        (Role::Owner | Role::Admin, PrincipalKind::Person) => Scopes::COORDINATOR,
+        (Role::Owner | Role::Admin, PrincipalKind::Agent) => Scopes::GUEST,
+        (Role::Member | Role::Guest, _) => stored,
+        (Role::None, _) => Scopes::PUBLIC_PARTICIPANT,
+    }
+}
+
+impl Caller {
+    pub fn effective_scopes(&self) -> Scopes {
+        effective_scopes(self.kind, self.role, self.scopes)
+    }
+}
+
 pub fn authorize_workroom(caller: &Caller, action: WorkroomAction) -> Verdict {
     if caller.role == Role::None {
         return Verdict::NotParticipant;
     }
     let allowed = match action {
-        WorkroomAction::CreateTask => match caller.role {
-            Role::Owner | Role::Admin => is_human_admin(caller),
-            Role::Member => true,
-            Role::Guest => caller.guest_can_create,
-            Role::None => false,
-        },
+        WorkroomAction::CreateTask => caller.effective_scopes().tasks.can_create(),
         WorkroomAction::AppointAdmin | WorkroomAction::TransferOwner => {
             caller.kind == PrincipalKind::Person && caller.role == Role::Owner
         }
@@ -205,16 +498,49 @@ pub fn authorize_workroom(caller: &Caller, action: WorkroomAction) -> Verdict {
     }
 }
 
-/// Who can see a task. Guests see only tasks they're party to.
-pub fn can_see_task(caller: &Caller, task: &Task) -> bool {
-    let is_party = caller.id == task.requester
+fn is_party(caller: &Caller, task: &Task) -> bool {
+    caller.id == task.requester
         || caller.id == task.reviewer
-        || task.assignee.as_deref() == Some(caller.id.as_str());
-    match caller.role {
-        Role::Owner | Role::Admin => is_human_admin(caller) || is_party,
-        Role::Member => true,
-        Role::Guest => is_party,
-        Role::None => false,
+        || task.assignee.as_deref() == Some(caller.id.as_str())
+}
+
+/// Who can see a task: those whose scope covers all tasks, and otherwise only its parties.
+pub fn can_see_task(caller: &Caller, task: &Task) -> bool {
+    caller.role != Role::None
+        && (caller.effective_scopes().tasks.sees_all() || is_party(caller, task))
+}
+
+/// Whether the caller sees the whole room's tasks and participants, or only their own.
+pub fn sees_whole_room(caller: &Caller) -> bool {
+    caller.role != Role::None && caller.effective_scopes().tasks.sees_all()
+}
+
+/// How much of a submission's work the caller can read on a task they can see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactView {
+    /// Only what the caller submitted.
+    OwnSubmissions,
+    All,
+}
+
+/// What the caller can read on a task, beyond the task itself. Call this only for a task they may read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskView {
+    pub artifacts: ArtifactView,
+    /// The thread, and the reasons people gave in the task's history.
+    pub conversation: bool,
+}
+
+pub fn task_view(caller: &Caller, task: &Task) -> TaskView {
+    let scopes = caller.effective_scopes();
+    let party = is_party(caller, task);
+    TaskView {
+        artifacts: match scopes.artifacts {
+            ArtifactScope::All => ArtifactView::All,
+            ArtifactScope::Own if party => ArtifactView::All,
+            ArtifactScope::Own | ArtifactScope::Shared => ArtifactView::OwnSubmissions,
+        },
+        conversation: scopes.conversations == ConversationScope::All || party,
     }
 }
 
@@ -230,7 +556,8 @@ pub fn authorize_task(caller: &Caller, task: &Task, action: TaskAction) -> Verdi
     let is_reviewer = caller.id == task.reviewer;
     let admin = is_human_admin(caller);
     let allowed = match action {
-        TaskAction::Read | TaskAction::PostMessage => true,
+        TaskAction::Read => true,
+        TaskAction::PostMessage => task_view(caller, task).conversation,
         TaskAction::Update | TaskAction::Assign | TaskAction::SetReviewer | TaskAction::Cancel => {
             is_requester || admin
         }
@@ -238,7 +565,9 @@ pub fn authorize_task(caller: &Caller, task: &Task, action: TaskAction) -> Verdi
         TaskAction::Accept | TaskAction::Decline | TaskAction::Release | TaskAction::Submit => {
             is_assignee
         }
-        TaskAction::RequestChanges | TaskAction::Verify => is_reviewer && !is_assignee,
+        TaskAction::RequestChanges | TaskAction::Verify => {
+            is_reviewer && !is_assignee && caller.effective_scopes().reviews()
+        }
     };
     if allowed {
         Verdict::Allow
@@ -259,7 +588,15 @@ pub fn authorize_reviewer_change(caller: &Caller, task: &Task) -> Verdict {
     }
 }
 
-/// Whether a principal can be a task's reviewer: a current participant, and a person if the room requires one.
-pub fn can_review(kind: PrincipalKind, role: Role, room_requires_person: bool) -> bool {
-    role != Role::None && (!room_requires_person || kind == PrincipalKind::Person)
+/// Whether a principal can be a task's reviewer: a current participant whose scope allows it, and a person if the room
+/// requires one.
+pub fn can_review(
+    kind: PrincipalKind,
+    role: Role,
+    stored: Scopes,
+    room_requires_person: bool,
+) -> bool {
+    role != Role::None
+        && effective_scopes(kind, role, stored).reviews()
+        && (!room_requires_person || kind == PrincipalKind::Person)
 }
