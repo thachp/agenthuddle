@@ -69,3 +69,12 @@ export function PrincipalName({ id, label, me }: { id: string; label: string; me
 
 export const FIELD_CLASS =
   "w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50 md:text-sm dark:bg-input/30";
+
+/**
+ * A planning note, and never a state: the task keeps its own, and nothing holds back a command. A task that finished since
+ * the plan was read has nothing left to wait for. Titles in the words are whatever their authors wrote, and React keeps them text.
+ */
+export function BlockedLine({ status, words }: { status: string; words?: string }) {
+  if (!words || status === "completed" || status === "canceled") return null;
+  return <p className="text-xs break-words text-status-amber">{words}</p>;
+}

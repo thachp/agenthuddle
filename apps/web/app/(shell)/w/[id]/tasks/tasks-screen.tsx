@@ -9,6 +9,7 @@ import { NewTask } from "./new-task";
 import { TaskBoard } from "./task-board";
 import { TaskList } from "./task-list";
 import { TaskLoadMore } from "./task-load-more";
+import { planNote, type PlanSummary } from "./plan-summary";
 import { useTaskPages } from "./task-pages";
 import { TaskProgress } from "./task-progress";
 import { canCreateTask, isArchivedRoom, roleOf, summaryOf, type Names, type Room, type TaskSummary } from "./task-model";
@@ -37,6 +38,8 @@ function UrlLink({ href, onMove, ...props }: { href: string; onMove?: () => void
     />
   );
 }
+
+const NOTHING_BLOCKED: Record<string, string> = {};
 
 const VIEWS: { view: TaskView; label: string }[] = [
   { view: "list", label: "List" },
@@ -71,7 +74,7 @@ function useSteadyNames(names: Names) {
   return steady.current;
 }
 
-export type TasksRead = { room: Room; tasks: TaskSummary[]; cursor: number | null; me: string; names: Names; orgNames?: Names };
+export type TasksRead = { room: Room; tasks: TaskSummary[]; cursor: number | null; me: string; names: Names; orgNames?: Names; /** Null if that read failed. */ plan?: PlanSummary | null };
 
 /** What a refresh that fell over keeps showing. Access being lost never reaches here, because the page renders no tasks at all then. */
 export function KeptTasksScreen({ read }: { read: TasksRead | null }) {
@@ -81,7 +84,7 @@ export function KeptTasksScreen({ read }: { read: TasksRead | null }) {
   return <TasksScreen {...lastGood.current} stale={read === null} />;
 }
 
-export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNames, orgNames, stale = false }: TasksRead & { stale?: boolean }) {
+export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNames, orgNames, plan = null, stale = false }: TasksRead & { stale?: boolean }) {
   const pathname = usePathname();
   const search = useSearchParams();
   const router = useRouter();
@@ -126,6 +129,9 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
   const tasks = current(mergeTasks(createdNow, firstPage, pushedOff, roomPages.tasks));
   const filtered = askServer ? applyReviewFilter(current(mergeTasks(tasks, reviewPages.tasks)), state, me) : applyReviewFilter(tasks, state, me);
   const shown = state.view === "board" ? onBoard(filtered, state) : filtered;
+  // A room that fits on one page counts what's on screen, which already has what the person just did. Any longer one counts the same way however far they've read.
+  const every = paged && plan?.countsEvery ? (state.reviewMine ? plan.review : plan.all) : null;
+  const blocked = plan?.blocked ?? NOTHING_BLOCKED;
   const canceledHere = filtered.length - onBoard(filtered, { showCanceled: false }).length;
   // A task that's readable and just filtered away. One past the loaded pages can't be told apart from a match, so it says nothing.
   const outsideFilter = (id: string) => tasks.some((task) => task.id === id) && !shown.some((task) => task.id === id);
@@ -182,10 +188,10 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
           </Button>
         </p>
       ) : null}
-      <TaskProgress tasks={filtered} partial={more} state={state} limited={isLimitedViewer(role)} />
+      <TaskProgress tasks={filtered} every={every} partial={more} state={state} limited={plan ? !plan.whole : isLimitedViewer(role)} note={tasks.length > 0 ? planNote(plan) : null} />
       {tasks.length === 0 ? <p className="text-muted-foreground">{canCreate ? "No tasks yet. Create one and offer it to an agent in this workroom." : "No tasks you can see here yet. Tasks you're part of will show up here."}</p> : null}
       {tasks.length > 0 && filtered.length === 0 ? <p className="text-muted-foreground">{more ? "None of the loaded tasks are waiting for your review. There may be more that this page doesn't reach." : "No submissions are waiting for your review in this workroom."}</p> : null}
-      {state.view === "board" ? <TaskBoard tasks={shown} partial={more} showCanceled={state.showCanceled} selected={search.get("task")} me={me} names={names} /> : <TaskList tasks={shown} partial={more} me={me} names={names} />}
+      {state.view === "board" ? <TaskBoard blocked={blocked} tasks={shown} partial={more} showCanceled={state.showCanceled} selected={search.get("task")} me={me} names={names} /> : <TaskList blocked={blocked} tasks={shown} partial={more} me={me} names={names} />}
       {state.view === "board" && (state.showCanceled || canceledHere > 0) ? (
         <p className="text-sm text-muted-foreground">
           {state.showCanceled ? null : <>Canceled tasks hidden ({countText(canceledHere, more)}). </>}

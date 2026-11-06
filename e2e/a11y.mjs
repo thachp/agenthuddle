@@ -194,6 +194,10 @@ async function seed() {
   // Two openings and a planned line between them, so the Collaboration screens have a plan to show.
   const plannedTo = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Delivery engineer with a long title that has to wrap", responsibilities: "Builds what's planned.", capacity: 1, preset: "member", policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
   await owner.must("POST", `/v1/workspaces/${room}/collaboration/planned`, { from_role_id: opening, to_role_id: plannedTo, label: "Hands the plan to, with a label long enough that the map cuts it short", policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version });
+  // A task waiting on another, both on the first page.
+  const planned = await owner.must("GET", `/v1/workspaces/${longRoom}/plan`);
+  const longId = (title) => planned.tasks.find((task) => task.title === title).id;
+  await owner.must("PUT", `/v1/workspaces/${longRoom}/tasks/${longId("Long task 319")}/plan`, { plan_revision: planned.plan_revision, predecessors: [longId("Long task 318")] });
   return { longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
@@ -1034,6 +1038,34 @@ async function keyboardPaths(s) {
     } finally {
       await own.close();
     }
+  });
+
+  await keyboardPath("progress counts past the loaded pages, and Blocked shows in both views, at phone width too", async () => {
+    const own = await contextFor(s.owner).newPage();
+    try {
+      for (const query of ["", "?view=board"]) {
+        await own.goto(longUrl(query));
+        await hydrated(own);
+        ok((await own.getByRole("button", { name: "Load more" }).count()) === 1, "the room should still have pages to load");
+        const bar = own.getByRole("progressbar", { name: "Progress" });
+        const said = await bar.getAttribute("aria-valuetext");
+        ok(/^0 of 32\d completed, 0%$/.test(said), `progress past the first page reads ${said}`);
+        ok((await own.getByText(/partial/).count()) === 0, "progress still says partial with a complete plan");
+        await own.getByText("Blocked: waiting on “Long task 318”").waitFor({ timeout: 15_000 });
+        ok((await own.getByRole("heading", { name: /^Blocked/ }).count()) === 0, "Blocked became a column");
+      }
+    } finally {
+      await own.close();
+    }
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    for (const query of ["", "?view=board"]) {
+      await small.goto(longUrl(query));
+      await small.getByText("Blocked: waiting on “Long task 318”").waitFor({ timeout: 15_000 });
+      const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      ok(overflow <= 0, `tasks${query} scrolls sideways by ${overflow}px at 375px with Blocked on it`);
+    }
+    await phone.close();
   });
 
   await keyboardPath("a long list loads near the bottom without moving the reader, and what it costs", async () => {
