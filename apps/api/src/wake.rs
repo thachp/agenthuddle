@@ -7,11 +7,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use worker::*;
 
-const SEND_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
-    300
-} else {
-    10_000
-};
+const SEND_TIMEOUT_MS: u64 = 10_000;
 const USER_AGENT: &str = "Podster-Wake/1 (+https://podster.dev)";
 // Short in test builds, so retries can be watched.
 const RETRY_DELAY_SECS: u32 = if cfg!(feature = "failpoints") { 1 } else { 60 };
@@ -35,7 +31,13 @@ async fn send(url: &str, secret: &str, body: &str) -> bool {
             .send_with_signal(&signal)
             .await
     };
-    let timeout = Delay::from(Duration::from_millis(SEND_TIMEOUT_MS));
+    // In test builds only the hook that never answers gets a short wait. A real timeout on a slow machine is a failed send, and a false one.
+    let wait = if cfg!(feature = "failpoints") && url.contains("/hang") {
+        300
+    } else {
+        SEND_TIMEOUT_MS
+    };
+    let timeout = Delay::from(Duration::from_millis(wait));
     let delivered = match select(Box::pin(attempt), timeout).await {
         Either::Left((result, _)) => {
             let result: Result<Response> = result;
