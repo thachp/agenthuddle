@@ -4,7 +4,7 @@ import { plainName } from "@/components/agent-content/text";
 export type Edge = { from: string; to: string; kind: string; count: number; last_at: number };
 export type Node = { id: string; role_title?: string; last_active?: number; gone?: boolean };
 /** `planned` is left out for someone it doesn't reach, which doesn't mean there's no plan. */
-export type CollaborationRead = { edges: Edge[]; nodes: Node[]; planned?: PlannedLine[] };
+export type CollaborationRead = { edges: Edge[]; nodes: Node[]; planned?: PlannedLine[]; external?: boolean };
 export type Handoff = { kind: string; task_id: string; task_title: string; created_at: number };
 
 const KIND_LABELS: Record<string, [string, string]> = {
@@ -69,5 +69,8 @@ export const MAX_PLANNED_LINES = 100;
 
 /** The same words on the map and in the list, so nothing rests on the line being dashed. Text in them is someone's, and it's data. */
 export const plannedName = (line: Pick<PlannedLine, "from_title" | "to_title">) => `Planned: ${plainName(line.from_title)} to ${plainName(line.to_title)}`;
+
+/** Someone's words, marked as theirs wherever they appear. */
+export const plannedLabel = (line: Pick<PlannedLine, "label">) => `Label: “${plainName(line.label)}”`;
 
 export const plannedAnchor = (line: Pick<PlannedLine, "id">) => `planned-${line.id}`;

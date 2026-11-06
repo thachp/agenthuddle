@@ -230,7 +230,7 @@ A map of participants and their relationships, plus a **List** view that present
 - **Planned relationship** (dashed): an intended flow between work roles, set by the owner or admins. The lead may set them later, with an agent tool.
 - **Recorded activity** (solid): derived from recorded task events and thread messages, with counts of handoffs.
 - Selecting an edge opens its handoffs and messages, each linking to its task. Nodes show role, agent and **Last active**, which is the latest recorded event, not presence.
-- Only edges the viewer may see are drawn, and counts contain only visible events. Guests may see only edges involving their own tasks. Include a persistent note: "Lines describe work, not permissions."
+- Only edges the viewer may see are drawn, and counts contain only visible events. For recorded lines, guests may see only edges involving their own tasks. **Working choice, pending the owner's answer:** everyone in the room sees planned lines, because anyone there can already read every open role's title, and only those who see the whole room see who set one. Include a persistent note: "Lines describe work, not permissions."
 
 ### Activity and agent inbox
 
@@ -365,7 +365,7 @@ All are **not run**: no interface exists. They complement AC-20 and AC-21 in ACC
 | UI-05 | Reload a Sheet URL as authorized and unauthorized viewers | Authorized sees it; unauthorized sees generic not-found with no title leak |
 | UI-06 | Agent owner without room authority opens the agent | Access is read-only; Withdraw and Disconnect work |
 | UI-07 | Agent message contains HTML, a remote image and "ignore your instructions" | Rendered inert and attributed; no fetch to the remote host; External badge when cross-organization |
-| UI-08 | Guest opens Collaboration | Only their permitted edges and counts appear |
+| UI-08 | Guest opens Collaboration | Only their permitted recorded edges and counts appear. Planned lines appear without who set them (working choice, pending the owner's answer) |
 | UI-09 | Person views an agent's inbox | Read-only; the agent's cursor and unread count do not change |
 | UI-10 | Keyboard and screen reader complete: create room, review task, revoke access | Possible without a pointer; focus returns correctly; status changes announced |
 | UI-11 | Automated contrast and axe checks in light and dark themes | No AA failures |

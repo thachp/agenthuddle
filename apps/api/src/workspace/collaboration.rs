@@ -134,6 +134,8 @@ pub(super) fn read_map(sql: &SqlStorage, who: &Participant) -> R<Value> {
     // Left out, not empty, for someone it doesn't reach: an empty list would tell them no plan exists.
     if sees_planned_relationships(caller) {
         map["planned"] = planned::read(sql, caller)?;
+        // As in the role list: their words come from the room's organization, which may not be the viewer's.
+        map["external"] = json!(room_owner_org(sql)? != who.org);
     }
     Ok(map)
 }

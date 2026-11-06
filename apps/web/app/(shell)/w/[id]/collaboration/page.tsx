@@ -10,7 +10,7 @@ import { loadNames, orgRows } from "../tasks/load-tasks";
 import { kindOf, nameOf, shortNameOf, textNameOf } from "../tasks/task-model";
 import { MapBox } from "./map-box";
 import { LineSheet } from "./collaboration-sheet";
-import { lineSummary, linesOf, lineTarget, MAP_SIZE, plannedAnchor, plannedName, positions, type CollaborationRead, type Line, type Node, type PlannedLine } from "./model";
+import { lineSummary, linesOf, lineTarget, MAP_SIZE, plannedAnchor, plannedLabel, plannedName, positions, type CollaborationRead, type Line, type Node, type PlannedLine } from "./model";
 import { PlannedLines, type RoleChoice } from "./planned-lines";
 
 const NOTE = "Lines describe work, not permissions.";
@@ -81,6 +81,7 @@ export default async function Collaboration({ params, searchParams }: { params: 
             <PlannedLines
               roomId={id}
               lines={planned.map((line) => ({ ...line, setBy: line.created_by ? textNameOf(line.created_by, me, names) : null }))}
+              external={read.data.external === true}
               roles={roles === null ? [] : roles.ok ? roles.data.roles.map(({ id: role, title }) => ({ id: role, title })) : null}
               canManage={canManage}
               archived={isArchived(room)}
@@ -149,10 +150,10 @@ function CollaborationMap({ nodes, lines, planned, me, names }: { nodes: Node[];
           const [from, to] = [placed.get(line.from_role), placed.get(line.to_role)];
           if (!from || !to) return null;
           const bend = { x: (from.x + to.x) / 2 + (to.y - from.y) * 0.08, y: (from.y + to.y) / 2 - (to.x - from.x) * 0.08 };
-          const label = shortened(line.label, 24);
+          const label = `“${shortened(line.label, 24)}”`;
           // A plain link to the same line in the list, where its words are in full. A plan has no handoffs to open.
           return (
-            <a key={line.id} href={`#${plannedAnchor(line)}`} aria-label={`${plannedName(line)}: ${plainName(line.label)}. Planned, not recorded.`}>
+            <a key={line.id} href={`#${plannedAnchor(line)}`} aria-label={`${plannedName(line)}. ${plannedLabel(line)}. Planned, not recorded.`}>
               <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" stroke="transparent" strokeWidth={28} />
               <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" strokeWidth={2} strokeDasharray="8 6" markerEnd="url(#arrow)" className="stroke-muted-foreground hover:stroke-primary" />
               <text x={bend.x} y={bend.y} textAnchor="middle" fontSize={14} className="fill-foreground">
@@ -195,7 +196,7 @@ function CollaborationMap({ nodes, lines, planned, me, names }: { nodes: Node[];
       </MapBox>
       <figcaption className="text-sm text-muted-foreground">
         {NOTE} Each number counts the handoffs on that line.
-        {planned.length > 0 ? " Solid lines join people and show what was recorded. Dashed lines join work roles, drawn as squares, and show only what's planned." : ""}
+        {planned.length > 0 ? " Solid lines join people and show what was recorded. Dashed lines join work roles, drawn as squares, and show only what's planned. If it's crowded, use the List, which says the same in full." : ""}
       </figcaption>
     </figure>
   );

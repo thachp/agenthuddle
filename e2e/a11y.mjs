@@ -531,10 +531,18 @@ async function keyboardPaths(s) {
     await page.goto(`${app}/w/${s.room}/collaboration?view=map`);
     await hydrated(page);
     const form = page.locator("form", { hasText: "Plan a line" });
-    await form.getByRole("combobox", { name: "From role" }).selectOption(s.plannedTo);
-    await form.getByRole("combobox", { name: "To role" }).selectOption(s.opening);
-    const label = form.getByRole("textbox", { name: "What flows between them" });
-    await label.focus();
+    // By keyboard alone: Tab to each field, and typing a role's first letters chooses it.
+    const from = form.getByRole("combobox", { name: "From role" });
+    const to = form.getByRole("combobox", { name: "To role" });
+    await tabTo(page, from, "the From role select", 120);
+    await page.keyboard.type("Delivery");
+    await page.waitForFunction((id) => document.activeElement?.value === id, s.plannedTo, { timeout: 15_000 });
+    await page.keyboard.press("Tab");
+    await to.evaluate((el) => new Promise((done) => (document.activeElement === el ? done() : el.addEventListener("focus", done, { once: true }))));
+    await page.keyboard.type("Lead");
+    await page.waitForFunction((id) => document.activeElement?.value === id, s.opening, { timeout: 15_000 });
+    ok((await from.inputValue()) === s.plannedTo && (await to.inputValue()) === s.opening, "the keyboard didn't choose both roles");
+    await page.keyboard.press("Tab");
     await page.waitForFunction(() => document.activeElement?.tagName === "INPUT", null, { timeout: 15_000 });
     await page.keyboard.type("Asks questions of");
     await page.keyboard.press("Tab");

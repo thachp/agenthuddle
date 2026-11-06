@@ -1,16 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CommandNotice, useCommands, type Send } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD, MOBILE_TARGET } from "../team/field";
 import { explainRefusal } from "../team/model";
-import { MAX_PLANNED_LABEL_BYTES, MAX_PLANNED_LINES, plannedAnchor, plannedName, type PlannedLine } from "./model";
+import { MAX_PLANNED_LABEL_BYTES, MAX_PLANNED_LINES, plannedAnchor, plannedLabel, plannedName, type PlannedLine } from "./model";
 
 export type RoleChoice = { id: string; title: string };
 
@@ -25,6 +26,8 @@ const explainPlannedRefusal = (code: string, status = 400) => {
 type Props = {
   roomId: string;
   lines: (PlannedLine & { setBy: string | null })[];
+  /** The room belongs to another organization than the viewer's, so these are that organization's words. */
+  external: boolean;
   /** Null if that read failed. */
   roles: RoleChoice[] | null;
   canManage: boolean;
@@ -36,7 +39,7 @@ type Props = {
  * Plans, in words, for anyone the read gave them to. Text in them was written by the room's owner or an admin, and it's data.
  * If a read ever leaves them out, this section doesn't appear, so nobody is told there are none.
  */
-export function PlannedLines({ roomId, lines, roles, canManage, archived, policyVersion }: Props) {
+export function PlannedLines({ roomId, lines, external, roles, canManage, archived, policyVersion }: Props) {
   const commands = useCommands(policyVersion);
   const { send, noticeRef } = commands;
   const base = `/api/v1/workspaces/${encodeURIComponent(roomId)}/collaboration/planned`;
@@ -59,16 +62,21 @@ export function PlannedLines({ roomId, lines, roles, canManage, archived, policy
                 <p id={nameId} className="break-words font-medium">
                   {name}
                 </p>
-                <p className="break-words">{plainName(line.label)}</p>
-                <p className="break-words text-muted-foreground">{line.setBy ? `Set by ${plainName(line.setBy)}. ` : ""}Planned, not recorded.</p>
+                <p className="break-words">{plannedLabel(line)}</p>
+                {external ? <Badge variant="outline">External</Badge> : null}
+                <p className="break-words text-muted-foreground">{line.setBy ? `Set by ${plainName(line.setBy)}.` : "Set by the workroom's owner or an admin."} Planned, not recorded.</p>
                 {writable ? (
                   <ConfirmAction
                     label="Remove"
                     describedBy={nameId}
                     variant="ghost"
                     destructive
-                    title={<>Remove this planned line?</>}
-                    description={`${name}. This changes nobody's access and no task, and the record keeps that it was removed.`}
+                    title={
+                      <>
+                        Remove “{plainName(line.from_title)} to {plainName(line.to_title)}”?
+                      </>
+                    }
+                    description="This changes nobody's access and no task. Add the line again if you change your mind."
                     confirm="Remove line"
                     focusAfter={noticeRef}
                     action={() => send(`${base}/${encodeURIComponent(line.id)}`, {}, "Planned line removed.", { method: "DELETE", explain: explainPlannedRefusal })}
@@ -102,13 +110,21 @@ function AddLine({ base, roles, send }: { base: string; roles: RoleChoice[]; sen
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [label, setLabel] = useState("");
+  const [blank, setBlank] = useState(false);
   const [pending, setPending] = useState(false);
+  const labelField = useRef<HTMLInputElement>(null);
   const trimmed = label.trim();
   const tooLong = new TextEncoder().encode(trimmed).length > MAX_PLANNED_LABEL_BYTES;
   const same = from !== "" && from === to;
+  const labelProblem = tooLong ? `Keep this to ${MAX_PLANNED_LABEL_BYTES} bytes.` : blank && !trimmed ? "Say what flows between them. Spaces alone don't count." : null;
   const add = async (event: FormEvent) => {
     event.preventDefault();
-    if (pending || same || tooLong || !from || !to || !trimmed) return;
+    if (pending || same || tooLong || !from || !to) return;
+    if (!trimmed) {
+      setBlank(true);
+      labelField.current?.focus();
+      return;
+    }
     setPending(true);
     await send(base, { from_role_id: from, to_role_id: to, label: trimmed }, "Planned line added. It changes nobody's access.", {
       focus: true,
@@ -117,6 +133,7 @@ function AddLine({ base, roles, send }: { base: string; roles: RoleChoice[]; sen
         setFrom("");
         setTo("");
         setLabel("");
+        setBlank(false);
       },
     });
     setPending(false);
@@ -139,18 +156,31 @@ function AddLine({ base, roles, send }: { base: string; roles: RoleChoice[]; sen
         </label>
         <label className="min-w-0 space-y-1 text-sm">
           <span>To role</span>
-          <select className={FIELD} required value={to} aria-invalid={same} onChange={(event) => setTo(event.target.value)}>
+          <select className={FIELD} required value={to} aria-invalid={same} aria-describedby={same ? "planned-same" : undefined} onChange={(event) => setTo(event.target.value)}>
             <option value="">Choose a role</option>
             {choices}
           </select>
         </label>
       </div>
-      {same ? <p className="text-sm text-status-danger">Choose two different roles.</p> : null}
+      {/* Always there, so a screen reader announces a message when it appears. */}
+      <div role="alert">
+        {same ? (
+          <p id="planned-same" className="text-sm text-status-danger">
+            Choose two different roles.
+          </p>
+        ) : null}
+      </div>
       <label className="block space-y-1 text-sm">
         <span>What flows between them</span>
-        <Input value={label} required aria-invalid={tooLong} onChange={(event) => setLabel(event.target.value)} autoComplete="off" />
+        <Input ref={labelField} value={label} required aria-invalid={labelProblem !== null} aria-describedby={labelProblem ? "planned-label-problem" : undefined} onChange={(event) => setLabel(event.target.value)} autoComplete="off" />
       </label>
-      {tooLong ? <p className="text-sm text-status-danger">Keep this to {MAX_PLANNED_LABEL_BYTES} bytes.</p> : null}
+      <div role="alert">
+        {labelProblem ? (
+          <p id="planned-label-problem" className="text-sm text-status-danger">
+            {labelProblem}
+          </p>
+        ) : null}
+      </div>
       <Button type="submit" size="sm" disabled={pending} className={MOBILE_TARGET}>
         {pending ? "Adding…" : "Add planned line"}
       </Button>

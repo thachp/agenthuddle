@@ -154,7 +154,7 @@ describe("planned relationships", () => {
     const { container } = await show();
     const planned = section();
     expect(planned.getByText("Planned: Architect **x** to Engineer")).toBeInTheDocument();
-    expect(planned.getByText("Hands <b>designs</b> to")).toBeInTheDocument();
+    expect(planned.getByText("Label: “Hands <b>designs</b> to”")).toBeInTheDocument();
     expect(container.querySelector("b")).toBeNull();
     expect(planned.getByText(/Planned, not recorded/)).toBeInTheDocument();
     expect(planned.getByText(/isn't a record of anything that happened, and it grants nothing/)).toBeInTheDocument();
@@ -167,7 +167,7 @@ describe("planned relationships", () => {
     withPlanned([line]);
     const { container } = await show({ view: "map" });
     const map = screen.getByRole("group", { name: /planned relationships between work roles/ });
-    const link = within(map).getByRole("link", { name: "Planned: Architect **x** to Engineer: Hands <b>designs</b> to. Planned, not recorded." });
+    const link = within(map).getByRole("link", { name: "Planned: Architect **x** to Engineer. Label: “Hands <b>designs</b> to”. Planned, not recorded." });
     expect(link).toHaveAttribute("href", "#planned-rel_1");
     expect(link.querySelector("path[stroke-dasharray]")).not.toBeNull();
     expect(container.querySelector('[id="planned-rel_1"]')?.tagName).toBe("LI");
@@ -176,6 +176,7 @@ describe("planned relationships", () => {
     expect(recorded.querySelector("path[stroke-dasharray]")).toBeNull();
     expect(map.querySelectorAll("rect")).toHaveLength(2);
     expect(screen.getByText(/Dashed lines join work roles/)).toBeInTheDocument();
+    expect(screen.getByText(/If it's crowded, use the List/)).toBeInTheDocument();
   });
 
   it("draws a map of plans alone, with nothing recorded yet", async () => {
@@ -197,8 +198,9 @@ describe("planned relationships", () => {
     const { created_by: _hidden, ...line2 } = line;
     withPlanned([line2]);
     await show();
-    expect(section().queryByText(/Set by/)).toBeNull();
-    expect(section().getByText("Planned, not recorded.")).toBeInTheDocument();
+    expect(section().queryByText(/Set by You/)).toBeNull();
+    expect(section().queryByText("External")).toBeNull();
+    expect(section().getByText(/owner or an admin\. Planned, not recorded\./)).toBeInTheDocument();
   });
 
   it("says nothing's planned when the read says so", async () => {

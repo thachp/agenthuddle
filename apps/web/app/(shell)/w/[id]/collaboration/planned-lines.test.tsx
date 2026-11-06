@@ -9,7 +9,7 @@ const { PlannedLines } = await import("./planned-lines");
 
 const roles = [{ id: "rol_a", title: "Architect" }, { id: "rol_b", title: "Engineer" }];
 const line = { id: "rel_1", from_role: "rol_a", from_title: "Architect", to_role: "rol_b", to_title: "Engineer", label: "Hands designs to", created_by: "per_me", created_at: 1, setBy: "You" };
-const show = (lines = [line]) => render(<PlannedLines roomId="ws_1" lines={lines} roles={roles} canManage archived={false} policyVersion={3} />);
+const show = (lines: (Omit<typeof line, "setBy"> & { setBy: string | null })[] = [line], external = false) => render(<PlannedLines roomId="ws_1" lines={lines} external={external} roles={roles} canManage archived={false} policyVersion={3} />);
 const fill = async (from: string, to: string, label: string) => {
   const user = userEvent.setup();
   await user.selectOptions(screen.getByRole("combobox", { name: "From role" }), from);
@@ -42,14 +42,42 @@ describe("PlannedLines", () => {
   it("won't send a line from a role to itself, or a label over the limit", async () => {
     show([]);
     const user = await fill("rol_a", "rol_a", "x");
-    expect(screen.getByText("Choose two different roles.")).toBeInTheDocument();
+    const same = screen.getByText("Choose two different roles.");
+    expect(same.closest('[role="alert"]')).not.toBeNull();
+    expect(screen.getByRole("combobox", { name: "To role" })).toHaveAccessibleDescription("Choose two different roles.");
     await user.click(screen.getByRole("button", { name: "Add planned line" }));
     await user.selectOptions(screen.getByRole("combobox", { name: "To role" }), "rol_b");
     await user.click(screen.getByRole("textbox", { name: "What flows between them" }));
     await user.paste("é".repeat(100));
-    expect(screen.getByText(/Keep this to 200 bytes/)).toBeInTheDocument();
+    expect(screen.getByText(/Keep this to 200 bytes/).closest('[role="alert"]')).not.toBeNull();
+    expect(screen.getByRole("textbox", { name: "What flows between them" })).toHaveAccessibleDescription("Keep this to 200 bytes.");
     await user.click(screen.getByRole("button", { name: "Add planned line" }));
     expect(command).not.toHaveBeenCalled();
+  });
+
+  it("says so when a label is only spaces, announces it and goes back to the field", async () => {
+    show([]);
+    const user = await fill("rol_a", "rol_b", "   ");
+    await user.click(screen.getByRole("button", { name: "Add planned line" }));
+    expect(command).not.toHaveBeenCalled();
+    const field = screen.getByRole("textbox", { name: "What flows between them" });
+    expect(screen.getByText(/Spaces alone don't count/).closest('[role="alert"]')).not.toBeNull();
+    expect(field).toHaveAccessibleDescription(/Spaces alone don't count/);
+    expect(field).toHaveFocus();
+    await user.type(field, "Hands over");
+    expect(screen.queryByText(/Spaces alone/)).toBeNull();
+  });
+
+  it("marks a label as someone's words, says who set it even when it can't name them, and marks another organization's", () => {
+    const { setBy: _unknown, ...rest } = line;
+    const first = show([{ ...rest, setBy: null }], true);
+    expect(screen.getByText("Label: “Hands designs to”")).toBeInTheDocument();
+    expect(screen.getByText("Set by the workroom's owner or an admin. Planned, not recorded.")).toBeInTheDocument();
+    expect(screen.getByText("External")).toBeInTheDocument();
+    first.unmount();
+    show();
+    expect(screen.getByText("Set by You. Planned, not recorded.")).toBeInTheDocument();
+    expect(screen.queryByText("External")).toBeNull();
   });
 
   it("says what a refusal means, and keeps what was typed", async () => {
@@ -57,7 +85,7 @@ describe("PlannedLines", () => {
     show([]);
     const user = await fill("rol_a", "rol_b", "Again");
     await user.click(screen.getByRole("button", { name: "Add planned line" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("already planned, in that direction. Nothing changed.");
+    expect((await screen.findByText(/already planned, in that direction\. Nothing changed\./)).closest('[role="alert"]')).not.toBeNull();
     expect(screen.getByRole("textbox", { name: "What flows between them" })).toHaveValue("Again");
   });
 
@@ -67,6 +95,7 @@ describe("PlannedLines", () => {
     await user.click(screen.getByRole("button", { name: "Remove" }));
     expect(command).not.toHaveBeenCalled();
     const dialog = within(await screen.findByRole("alertdialog"));
+    expect(dialog.getByRole("heading", { name: "Remove “Architect to Engineer”?" })).toBeInTheDocument();
     expect(dialog.getByText(/changes nobody's access and no task/)).toBeInTheDocument();
     await user.click(dialog.getByRole("button", { name: "Remove line" }));
     await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
