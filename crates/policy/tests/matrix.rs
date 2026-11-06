@@ -926,26 +926,55 @@ fn activity_follows_the_task_and_the_member_list() {
     let admin = with("stranger", Person, Role::Admin, Scopes::PUBLIC_PARTICIPANT);
     let outsider = with("asg", Agent, Role::None, Scopes::MEMBER);
     let hidden = task();
-    assert!(!can_see_event(&guest, "task.offered", "req", Some(&hidden)));
+    assert!(!can_see_event(
+        &guest,
+        "task.offered",
+        "req",
+        Some(&hidden),
+        None
+    ));
     // Having done something on a task doesn't keep it visible once it's no longer theirs.
     assert!(!can_see_event(
         &guest,
         "task.accepted",
         "stranger",
-        Some(&hidden)
+        Some(&hidden),
+        None
     ));
-    assert!(can_see_event(&party, "task.offered", "req", Some(&hidden)));
-    assert!(can_see_event(&member, "task.offered", "req", Some(&hidden)));
-    assert!(can_see_event(&admin, "task.offered", "req", Some(&hidden)));
+    assert!(can_see_event(
+        &party,
+        "task.offered",
+        "req",
+        Some(&hidden),
+        None
+    ));
+    assert!(can_see_event(
+        &member,
+        "task.offered",
+        "req",
+        Some(&hidden),
+        None
+    ));
+    assert!(can_see_event(
+        &admin,
+        "task.offered",
+        "req",
+        Some(&hidden),
+        None
+    ));
     assert!(!can_see_event(
         &outsider,
         "task.offered",
         "req",
-        Some(&hidden)
+        Some(&hidden),
+        None
     ));
     for kind in EVENTS_FOR_EVERYONE {
-        assert!(can_see_event(&guest, kind, "owner", None), "{kind}");
-        assert!(!can_see_event(&outsider, kind, "owner", None), "{kind}");
+        assert!(can_see_event(&guest, kind, "owner", None, None), "{kind}");
+        assert!(
+            !can_see_event(&outsider, kind, "owner", None, None),
+            "{kind}"
+        );
     }
     for kind in [
         "member.added",
@@ -958,12 +987,21 @@ fn activity_follows_the_task_and_the_member_list() {
         "owner.transferred",
         "something.new",
     ] {
-        assert!(!can_see_event(&guest, kind, "owner", None), "{kind}");
-        assert!(can_see_event(&member, kind, "owner", None), "{kind}");
-        assert!(can_see_event(&admin, kind, "owner", None), "{kind}");
-        assert!(!can_see_event(&outsider, kind, "owner", None), "{kind}");
+        assert!(!can_see_event(&guest, kind, "owner", None, None), "{kind}");
+        assert!(can_see_event(&member, kind, "owner", None, None), "{kind}");
+        assert!(can_see_event(&admin, kind, "owner", None, None), "{kind}");
+        assert!(
+            !can_see_event(&outsider, kind, "owner", None, None),
+            "{kind}"
+        );
     }
-    assert!(can_see_event(&guest, "role.claimed", "stranger", None));
+    assert!(can_see_event(
+        &guest,
+        "role.claimed",
+        "stranger",
+        None,
+        None
+    ));
 }
 
 #[test]
@@ -1053,6 +1091,7 @@ fn planned_lines_reach_everyone_in_the_room_but_only_some_learn_who_set_them() {
         &caller("x", Agent, Role::Guest),
         "relationship.planned",
         "per_owner",
+        None,
         None
     ));
 }
@@ -1140,8 +1179,77 @@ fn a_plan_edit_shows_only_to_someone_who_sees_the_whole_room() {
     let t = task();
     let mut party = caller(&t.reviewer, PrincipalKind::Agent, Role::Guest);
     party.scopes.tasks = TaskScope::Own;
-    assert!(can_see_event(&party, "task.updated", "agt_x", Some(&t)));
-    assert!(!can_see_event(&party, TASK_PLAN_CHANGED, "agt_x", Some(&t)));
+    assert!(can_see_event(
+        &party,
+        "task.updated",
+        "agt_x",
+        Some(&t),
+        None
+    ));
+    assert!(!can_see_event(
+        &party,
+        TASK_PLAN_CHANGED,
+        "agt_x",
+        Some(&t),
+        None
+    ));
     party.scopes.tasks = TaskScope::All;
-    assert!(can_see_event(&party, TASK_PLAN_CHANGED, "agt_x", Some(&t)));
+    assert!(can_see_event(
+        &party,
+        TASK_PLAN_CHANGED,
+        "agt_x",
+        Some(&t),
+        None
+    ));
+}
+
+#[test]
+fn an_agent_limited_to_its_own_tasks_sees_notices_about_itself_and_nobody_elses() {
+    let mut guest = caller("agt_me", PrincipalKind::Agent, Role::Guest);
+    guest.scopes.tasks = TaskScope::Own;
+    for kind in NOTICES_ABOUT_SUBJECT {
+        assert!(
+            can_see_event(&guest, kind, "owner", None, Some("agt_me")),
+            "{kind}"
+        );
+        assert!(
+            !can_see_event(&guest, kind, "owner", None, Some("agt_other")),
+            "{kind}"
+        );
+        // An old event names nobody, so it stays hidden.
+        assert!(!can_see_event(&guest, kind, "owner", None, None), "{kind}");
+    }
+    // Only these kinds, whoever they're about.
+    for kind in [
+        "member.revoked",
+        "member.role_changed",
+        "member.access_changed",
+        "role.claimed",
+        "owner.transferred",
+        "something.new",
+    ] {
+        assert!(
+            !can_see_event(&guest, kind, "owner", None, Some("agt_me")),
+            "{kind}"
+        );
+    }
+    // The ruling is about agents.
+    let mut person = caller("per_me", PrincipalKind::Person, Role::Guest);
+    person.scopes.tasks = TaskScope::Own;
+    assert!(!can_see_event(
+        &person,
+        "member.added",
+        "owner",
+        None,
+        Some("per_me")
+    ));
+    // Someone outside the room gets nothing, even with their own ID on it.
+    let outsider = caller("agt_me", PrincipalKind::Agent, Role::None);
+    assert!(!can_see_event(
+        &outsider,
+        "member.added",
+        "owner",
+        None,
+        Some("agt_me")
+    ));
 }

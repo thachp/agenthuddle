@@ -691,10 +691,25 @@ pub const EVENTS_FOR_EVERYONE: [&str; 8] = [
 /// successor would otherwise learn a hidden edge had changed.
 pub const TASK_PLAN_CHANGED: &str = "task.plan_changed";
 
+/// Room events an agent limited to its own tasks sees when they're about it, as its inbox already tells it. Only these, and
+/// only about itself: someone else's would show who else is in the room.
+pub const NOTICES_ABOUT_SUBJECT: [&str; 3] = ["member.added", "role.invited", "role.claim_ended"];
+
+/// Whether this caller gets those notices. The ruling is about agents, so a limited person doesn't, for now.
+pub fn sees_notices_about_itself(caller: &Caller) -> bool {
+    caller.kind == PrincipalKind::Agent
+}
+
 /// Whether someone can see one event in a room's activity. A task's events follow the task, as it stands now, apart from
-/// plan edits. A room's own events follow the member list, apart from the ones above and what the viewer did themselves.
-/// Denies by default.
-pub fn can_see_event(caller: &Caller, kind: &str, actor: &str, task: Option<&Task>) -> bool {
+/// plan edits. A room's own events follow the member list, apart from the ones above, notices to an agent about itself and
+/// what the viewer did themselves. `subject` is who the event says it's about, and old events have none. Denies by default.
+pub fn can_see_event(
+    caller: &Caller,
+    kind: &str,
+    actor: &str,
+    task: Option<&Task>,
+    subject: Option<&str>,
+) -> bool {
     if caller.role == Role::None {
         return false;
     }
@@ -706,6 +721,9 @@ pub fn can_see_event(caller: &Caller, kind: &str, actor: &str, task: Option<&Tas
                 || sees_whole_room(caller)
                 || actor == caller.id
                 || EVENTS_FOR_EVERYONE.contains(&kind)
+                || (sees_notices_about_itself(caller)
+                    && NOTICES_ABOUT_SUBJECT.contains(&kind)
+                    && subject == Some(caller.id.as_str()))
         }
     }
 }

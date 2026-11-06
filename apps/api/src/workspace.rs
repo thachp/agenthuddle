@@ -23,9 +23,10 @@ use podster_policy::{
     can_review, can_see_event, can_see_task, denied_change_name, effective_scopes,
     is_authority_refusal, may_claim_role, may_decide_review, may_recover_ownership,
     org_departure_ends, owner_authority_holds, reads_every_thread, scopes_after_claim,
-    sees_planned_relationships, sees_who_planned, sees_whole_plan, sees_whole_room, task_view,
-    ArtifactScope, ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope,
-    Role, Scopes, TaskAction, TaskScope, Verdict, WorkroomAction, EVENTS_FOR_EVERYONE,
+    sees_notices_about_itself, sees_planned_relationships, sees_who_planned, sees_whole_plan,
+    sees_whole_room, task_view, ArtifactScope, ArtifactView, Caller, ConversationScope, Preset,
+    PrincipalKind, ReviewScope, Role, Scopes, TaskAction, TaskScope, Verdict, WorkroomAction,
+    EVENTS_FOR_EVERYONE,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -858,10 +859,11 @@ fn handle_add_member(
         Some(new_json.to_string()),
         now,
     )?;
-    record_event(
+    store::record_event_about(
         sql,
         "member.added",
         &caller.id,
+        Some(&principal),
         None,
         &Transition::NONE,
         (principal != caller.id).then(|| principal.clone()),
@@ -2156,7 +2158,7 @@ mod queries {
         let id = caller.id.as_str();
         // Someone who sees the whole room gets every task's and room's events. Otherwise, their own tasks, the room's
         // events for everyone, and what they did themselves.
-        let mut query = "SELECT seq, id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, created_at FROM event WHERE seq COMPARE ?1 AND (?2 IS NULL OR task_id = ?2) AND (?3 IS NULL OR actor_id = ?3)".replace("COMPARE", if newest { "<" } else { ">" });
+        let mut query = "SELECT seq, id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, created_at, subject_id FROM event WHERE seq COMPARE ?1 AND (?2 IS NULL OR task_id = ?2) AND (?3 IS NULL OR actor_id = ?3)".replace("COMPARE", if newest { "<" } else { ">" });
         let whole_room = sees_whole_room(caller);
         if !whole_room {
             let everyone = EVENTS_FOR_EVERYONE
@@ -2166,7 +2168,16 @@ mod queries {
                 " AND type <> '{}'",
                 podster_policy::TASK_PLAN_CHANGED
             ));
-            query.push_str(&format!(" AND ((task_id IS NULL AND (type IN ({everyone}) OR actor_id = ?4)) OR task_id IN (SELECT id FROM task WHERE requester_id = ?4 OR assignee_id = ?4 OR reviewer_id = ?4))"));
+            // Notices about the viewer themselves, for those who get them. An old event names no subject, so it stays hidden.
+            let about_themselves = if sees_notices_about_itself(caller) {
+                let notices = podster_policy::NOTICES_ABOUT_SUBJECT
+                    .map(|kind| format!("'{kind}'"))
+                    .join(", ");
+                format!(" OR (type IN ({notices}) AND subject_id = ?4)")
+            } else {
+                String::new()
+            };
+            query.push_str(&format!(" AND ((task_id IS NULL AND (type IN ({everyone}) OR actor_id = ?4{about_themselves})) OR task_id IN (SELECT id FROM task WHERE requester_id = ?4 OR assignee_id = ?4 OR reviewer_id = ?4))"));
         }
         query.push_str(if newest {
             " ORDER BY seq DESC"
@@ -2189,7 +2200,13 @@ mod queries {
                 Some(task_id) => load_task(sql, task_id)?,
                 None => None,
             };
-            if !can_see_event(caller, kind, actor, task.as_ref()) {
+            if !can_see_event(
+                caller,
+                kind,
+                actor,
+                task.as_ref(),
+                row["subject_id"].as_str(),
+            ) {
                 continue;
             }
             // Only something the viewer may see becomes the cursor, even if the query and policy ever disagree.
@@ -2209,7 +2226,7 @@ mod queries {
             events.push(json!({
                 "id": row["id"], "type": kind, "from": from,
                 "external": row["actor_org"].as_str() != Some(who.org.as_str()),
-                "task_id": row["task_id"], "task_title": task.as_ref().map(|t| t.title.clone()),
+                "task_id": row["task_id"], "task_title": task.as_ref().map(|t| t.title.clone()), "subject": row["subject_id"],
                 "reason": reason, "prior_status": row["prior_status"], "new_status": row["new_status"], "created_at": row["created_at"],
             }));
         }
@@ -2880,10 +2897,11 @@ impl Workspace {
                     ),
                     now,
                 )?;
-                record_event(
+                store::record_event_about(
                     &sql,
                     "member.added",
                     &person,
+                    Some(agent),
                     None,
                     &Transition::NONE,
                     [agent.clone()],

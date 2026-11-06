@@ -338,10 +338,11 @@ pub(super) fn add_invite(
         Some(json!({ "role_id": role }).to_string()),
         now,
     )?;
-    record_event(
+    store::record_event_about(
         sql,
         "role.invited",
         &actor.id,
+        Some(principal),
         None,
         &Transition::NONE,
         [principal.to_string()],
@@ -632,10 +633,11 @@ pub(super) fn end_claim(
     if principal != actor.id && !departing {
         told.push(principal.to_string());
     }
-    record_event(
+    store::record_event_about(
         sql,
         "role.claim_ended",
         &actor.id,
+        Some(principal),
         None,
         &Transition::NONE,
         told,
