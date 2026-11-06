@@ -6201,6 +6201,23 @@ describe("notices in a limited agent's Activity", () => {
     expect(all.map((e) => e.subject)).toEqual(expect.arrayContaining([me.id, other.id]));
   });
 
+  it("doesn't show a claim ended by its departure, which its inbox never told it, if it comes back limited", async () => {
+    const { id } = await room();
+    const me = fresh();
+    await add(id, me);
+    const role = await opening(id);
+    await invite(id, role, me);
+    expect((await api(me, "POST", `/v1/workspaces/${id}/roles/${role}/claim`, {})).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${me.id}`, { policy_version: await version(id) })).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${me.id}/clear-removal`, { policy_version: await version(id) })).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: me.id, kind: "agent", org_id: "org_a", role: "guest", policy_version: await version(id) })).status).toBe(200);
+    expect((await events(me, id)).some((e) => e.type === "role.claim_ended")).toBe(false);
+    // It joined twice and sees both, so this isn't hiding everything about it.
+    expect((await events(me, id)).filter((e) => e.type === "member.added").map((e) => e.subject)).toEqual([me.id, me.id]);
+    // Someone who sees the whole room still sees the event.
+    expect((await events(OWNER, id)).filter((e) => e.type === "role.claim_ended").map((e) => e.subject)).toEqual([null]);
+  });
+
   it("agrees with what the inbox told it, and the inbox still tells it", async () => {
     const { id } = await room();
     const me = fresh();

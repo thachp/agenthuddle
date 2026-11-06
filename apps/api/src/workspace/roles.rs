@@ -637,7 +637,8 @@ pub(super) fn end_claim(
         sql,
         "role.claim_ended",
         &actor.id,
-        Some(principal),
+        // Someone departing isn't told, so if they come back limited, their Activity mustn't show what their inbox never did.
+        (!departing).then_some(principal),
         None,
         &Transition::NONE,
         told,
