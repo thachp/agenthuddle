@@ -5,9 +5,11 @@
 //   node check-migrations.mjs --self-test
 //
 // It covers the `Workspace` object's list and both D1 folders. The `Principal` object's schemas use IF NOT EXISTS and have
-// no version, so there's no list to compare.
+// no version, so there's no list to compare. Two blind spots are accepted: the parser takes the first text that looks like
+// the list, so a decoy in a comment above it would be read instead, and SQL containing an escaped quote right before `];`
+// would end the list early.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 
 const STORE = "apps/api/src/store.rs";
 const D1_FOLDERS = ["apps/api/migrations", "apps/gateway/migrations"];
@@ -17,9 +19,18 @@ export function migrationList(source) {
   const start = source.indexOf("const MIGRATIONS: &[&str] = &[");
   if (start < 0) return null;
   const open = source.indexOf("[\"", start);
-  const close = source.indexOf("\"];", open);
-  if (open < 0 || close < 0) return null;
-  return source.slice(open + 1, close + 1);
+  if (open < 0) return null;
+  // rustfmt or a person may leave a trailing comma, and that isn't a change to any migration.
+  const close = /"\s*,?\s*\];/.exec(source.slice(open));
+  if (!close) return null;
+  return source.slice(open + 1, open + close.index + 1);
+}
+
+/** A D1 migration runs in name order, so one sorting before a merged one could run out of order or be skipped. */
+export function misplacedFiles(merged, current) {
+  const last = merged.toSorted().at(-1);
+  if (last === undefined) return [];
+  return current.filter((name) => !merged.includes(name) && name <= last);
 }
 
 /** Whether `merged` is an exact prefix, so everything after it is a new, whole migration. */
@@ -40,7 +51,11 @@ export function check(base) {
   if (merged === null || current === null) problems.push(`${STORE}: couldn't find the MIGRATIONS list, so nothing was checked. Update this script if the list moved.`);
   else if (!isExactPrefix(merged, current)) problems.push(`${STORE}: a merged migration changed. Restore it exactly and add a new one at the end. If ${base} has moved on, merge it first.`);
   for (const folder of D1_FOLDERS) {
-    for (const name of git("ls-tree", "--name-only", base, `${folder}/`).split("\n").filter(Boolean)) {
+    const mergedFiles = git("ls-tree", "--name-only", base, `${folder}/`).split("\n").filter(Boolean);
+    for (const name of misplacedFiles(mergedFiles, readdirSync(folder).map((file) => `${folder}/${file}`))) {
+      problems.push(`${name}: a new D1 migration has to sort after every merged one. Rename it.`);
+    }
+    for (const name of mergedFiles) {
       if (!existsSync(name)) problems.push(`${name}: a merged D1 migration was removed.`);
       else if (readFileSync(name, "utf8") !== git("show", `${base}:${name}`)) problems.push(`${name}: a merged D1 migration changed. Add a new file instead.`);
     }
@@ -55,6 +70,12 @@ function selfTest() {
   const cases = [
     ["found", list === merged],
     ["no list", migrationList("fn a() {}") === null],
+    ["a trailing comma in the source", migrationList(source(`${merged},\n`)) === merged],
+    ["an added one, parsed", isExactPrefix(list, migrationList(source(`${merged}, "\nCREATE TABLE c (w);\n",\n`)))],
+    ["an edited one, parsed", !isExactPrefix(list, migrationList(source(`${merged.replace("(z)", "(q)")},\n`)))],
+    ["a new file after the merged ones", misplacedFiles(["0001_a.sql", "0002_b.sql"], ["0001_a.sql", "0002_b.sql", "0003_c.sql"]).length === 0],
+    ["a new file between merged ones", misplacedFiles(["0001_a.sql", "0002_b.sql"], ["0001_a.sql", "0001a_insert.sql", "0002_b.sql"]).join() === "0001a_insert.sql"],
+    ["no merged files", misplacedFiles([], ["0001_a.sql"]).length === 0],
     ["unchanged", isExactPrefix(list, merged)],
     ["one added", isExactPrefix(list, `${merged}, "\nCREATE TABLE c (w);\n"`)],
     ["a trailing comma", isExactPrefix(list, `${merged},`)],

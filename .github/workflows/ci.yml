@@ -33,10 +33,11 @@ jobs:
         with:
           node-version: 22
       - run: node .github/scripts/check-migrations.mjs --self-test
-      # On a pull request this checks out the merge with the base, so a base that has moved on isn't a false alarm.
+      # On a pull request this checks out the merge with the base, so its first parent is what was merged when it was made,
+      # and re-running after another migration merges still compares like with like.
       - run: node .github/scripts/check-migrations.mjs "$BASE"
         env:
-          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
 
   contracts:
     runs-on: ubuntu-latest
