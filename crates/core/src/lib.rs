@@ -18,6 +18,9 @@ pub const MAX_LABEL_BYTES: usize = 256;
 pub const MAX_REFERENCE_BYTES: usize = 128;
 pub const MAX_GOAL_BYTES: usize = 2 * 1024;
 pub const MAX_CONTEXT_BYTES: usize = 32 * 1024;
+pub const MAX_ROLE_TITLE_BYTES: usize = 200;
+pub const MAX_RESPONSIBILITIES_BYTES: usize = 4 * 1024;
+pub const MAX_ROLE_CAPACITY: i64 = 50;
 
 pub type PrincipalId = String;
 
@@ -320,6 +323,62 @@ pub fn validate_brief(goal: Option<&str>, context: Option<&str>) -> Result<(), C
         return Err(CoreError::InvalidArgument("context"));
     }
     Ok(())
+}
+
+/// A work role's text and number of openings.
+pub fn validate_role(title: &str, responsibilities: &str, capacity: i64) -> Result<(), CoreError> {
+    require_text(title, "title", MAX_ROLE_TITLE_BYTES)?;
+    require_text(
+        responsibilities,
+        "responsibilities",
+        MAX_RESPONSIBILITIES_BYTES,
+    )?;
+    if !(1..=MAX_ROLE_CAPACITY).contains(&capacity) {
+        return Err(CoreError::InvalidArgument("capacity"));
+    }
+    Ok(())
+}
+
+/// What a room knows about someone asking to fill an opening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClaimState {
+    pub holds_this: bool,
+    pub holds_another: bool,
+    pub invited: bool,
+    pub filled: i64,
+    pub capacity: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimOutcome {
+    /// Asking again changes nothing and takes no second opening.
+    AlreadyHeld,
+    Claim,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimRefusal {
+    NotInvited,
+    Full,
+    HoldsAnother,
+}
+
+/// Whether a claim goes ahead. In a private room an opening is claimed only by invitation, and the other checks don't run
+/// first, so someone uninvited doesn't learn whether an opening is full.
+pub fn decide_claim(state: &ClaimState) -> Result<ClaimOutcome, ClaimRefusal> {
+    if state.holds_this {
+        return Ok(ClaimOutcome::AlreadyHeld);
+    }
+    if !state.invited {
+        return Err(ClaimRefusal::NotInvited);
+    }
+    if state.holds_another {
+        return Err(ClaimRefusal::HoldsAnother);
+    }
+    if state.filled >= state.capacity {
+        return Err(ClaimRefusal::Full);
+    }
+    Ok(ClaimOutcome::Claim)
 }
 
 /// Short references such as commit hashes and task IDs.

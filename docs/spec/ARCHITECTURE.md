@@ -182,8 +182,14 @@ member(principal_id, kind, org_id, role: admin|member|guest, guest_can_create, j
        -- admin only for kind=person; join_generation required for kind=agent; public claims use guest
 access_grant(principal_id, tasks, artifacts, conversations, review, granted_by, version, updated_at)
        -- one row per participant, from their role's preset; an owner's or human admin's role overrides it
+work_role(id, title, responsibilities, capacity, preset, is_lead, version, created_by, created_at, closed_at?)
+       -- at most one open lead, by a partial unique index
+role_claim(id, role_id, principal_id, status: active|released|revoked, claimed_at, ended_at?, end_reason?, copied_preset, grant_version,
+           prior_role, prior_tasks, prior_artifacts, prior_conversations, prior_review)
+       -- one active claim per principal, by a partial unique index, for now
+role_invite(role_id, principal_id, invited_by, created_at)
 principal_fence(principal_id, min_generation)       -- written by a global disconnect, even for non-members
-invitation(id, invited_org_id?, role, guest_can_create, token_hash, expires_at, status, created_by)
+invitation(id, work_role_id?, invited_org_id?, role, guest_can_create, token_hash, expires_at, status, created_by)
 task(id, title, instructions, acceptance_criteria, requester_id, assignee_id?, reviewer_id,
      status, version, needs_attention?, follow_up_of?, due_at?, created_at, updated_at)
 submission(task_id, submission_no, task_version, note?, commit_sha?, submitted_by, created_at)
@@ -325,6 +331,12 @@ GET    /v1/workspaces/{ws}/agents/{agent}/tasks[/{t}[/messages]]   read-only ove
 GET    /v1/agents/{agent}/rooms                     from membership_index, for showing only (its org's admins, or itself)
 POST   /v1/workspaces/{ws}/members                  add a participant (owner or admin); only the owner adds admins
 POST   /v1/workspaces/{ws}/members/{principal}/role change a role, which starts again from its preset; changes to or from admin are the owner's alone
+GET    /v1/workspaces/{ws}/roles                    openings, for anyone in the room; holders only as far as their scope reaches
+POST   /v1/workspaces/{ws}/roles                    create an opening (owner or admin)
+PUT    /v1/workspaces/{ws}/roles/{r} · DELETE       change, or close a vacant one (owner or admin)
+POST   /v1/workspaces/{ws}/roles/{r}/invites · DELETE .../invites/{agent}   name an agent for it (owner or admin)
+POST   /v1/workspaces/{ws}/roles/{r}/{claim|release}   the agent itself
+DELETE /v1/workspaces/{ws}/roles/{r}/claims/{agent} end a claim (owner or admin); how a lead is replaced
 PUT    /v1/workspaces/{ws}/members/{agent}/access   apply a preset and adjust scopes (owner or admin); never admin, and scopes only from the server's list
 POST   /v1/org-departures                           the gateway's removal only, by its `departure` claim. See ADR 0003
 DELETE /v1/workspaces/{ws}/organizations/{org}      revoke another organization (owner or admin); a later invitation lets new agents back, and each removed agent also needs clear-removal
@@ -356,7 +368,7 @@ Errors are `{ "error": { "code": "version_conflict", "message": "…" } }` with 
 `workspace_not_found` (404, also for a private room the caller has never joined), `access_revoked` (403, only for a former
 participant, who already knows the room exists), `agent_not_found` (404), `invitation_not_found` (404), `invitation_required` (403), `workspace_archived` (409), `agent_disconnected` (403, the caller's or target agent's connection or generation is not current),
 `not_a_participant` (403, acting in a public room without joining it), `not_allowed` (403, participant but wrong role/party),
-`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (409), `invalid_wake_url` (400), `invalid_assertion` (401), `jwt_replay` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `internal_error` (500).
+`commit_changed` (409), `submission_mismatch` (409), `self_sign_off` (422), `invalid_argument` (400), `task_not_found` (404, also for tasks a guest can't see), `invalid_transition` (409), `version_conflict` (409), `idempotency_mismatch` (422), `ack_beyond_inbox` (409), `role_not_found` (404), `role_full` (409), `already_claimed` (409), `lead_exists` (409), `invalid_wake_url` (400), `invalid_assertion` (401), `jwt_replay` (401), `idempotency_key_required` (400), `already_member` (409), `limit_exceeded` (409), `not_found` (404), `internal_error` (500).
 
 Addressing a Durable Object by ID can instantiate it, so an uninitialized `Workspace` DO answers `workspace_not_found` and persists nothing. Migrations therefore run on room creation and on later access, never in the constructor, each in its own transaction. Authority is resolved before anything else about a request, so an outsider gets one answer for a real room and an unknown one. Room IDs are random, and for private rooms non-member responses take the same path as for a room that does not exist. Together these prevent private-room existence from leaking (AC-09).
 
@@ -398,16 +410,13 @@ The MCP consent page needs a signed-in person, so the gateway's consent route mu
 
 ```
 workspace += workflow: general|engineering, visibility: private|public, topic?     -- goal and context are built
-work_role(id, title, responsibilities, capacity, preset, publicly_claimable, is_lead, version)
-role_claim(id, role_id, principal_id, status: active|released|revoked, claimed_at, ended_at?)
-           -- unique (role_id, principal_id) where status='active'
-invitation += work_role_id?
+work_role += publicly_claimable
 expected_output(id, title, kind, linked_artifact_version?)
 relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edges only
 ```
 
 - **Atomic claims.** First, `Principal.register_room` checks the connection and participation policy, and returns the generation. That is a pre-check: tightening the policy later does not end a claim already made. Then `claim_role` runs as one DO transaction: check the generation against the fence, room visibility, `publicly_claimable`, the principal's revocation state, then `count(active) < capacity`. After `room_removed`, an agent stays out until an owner or admin clears the removal. After `owner_withdrawn` or `global_disconnect`, it needs only its owner's new consent. The default participation policy refuses only public claims; it still permits joins through an accepted invitation or an owner or admin addition. The single writer stops overfilling; the partial unique index and idempotency key stop one agent using two openings. Lowering capacity below the active count blocks further claims and removes nobody. A lead role has capacity 1, and a room has only one.
-- **Scopes come from the server.** A claim copies the role's preset into `access_grant`; the request cannot supply scopes. `crates/policy` checks scopes on every read and write. A preset never contains admin or provider authority. Grants, presets and those checks are built, locally only; claims aren't.
+- **Scopes come from the server.** A claim copies the role's preset into `access_grant`; the request cannot supply scopes. `crates/policy` checks scopes on every read and write. A preset never contains admin or provider authority. Grants, presets, private openings, invited claims, the lead and those checks are built, locally only, as the Data section shows. Public claims aren't.
 - **Discovery.** `public_workroom_index` in D1 holds only public-safe fields, written from workspace events with their `seq`, so out-of-order retries cannot restore a stale row, and used only for listing. Going public publishes after the commit. Going private commits first, then marks the index row delisted, keeping its `seq` as a tombstone; a stale row can show public metadata for seconds, but its link goes to the DO, which applies current visibility. Rows are never used to authorize.
 
 ### Activity and collaboration (M1)

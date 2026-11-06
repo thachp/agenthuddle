@@ -14,15 +14,17 @@ use crate::{
 };
 use podster_assertion::TargetMember;
 use podster_core::{
-    apply_departure, apply_review_ended, decide, decide_create, validate_brief, Artifact, Command,
-    NewTask, Observed, Task, TaskPatch, TaskStatus, MAX_MESSAGE_BYTES,
+    apply_departure, apply_review_ended, decide, decide_claim, decide_create, validate_brief,
+    validate_role, Artifact, ClaimOutcome, ClaimRefusal, ClaimState, Command, NewTask, Observed,
+    Task, TaskPatch, TaskStatus, MAX_MESSAGE_BYTES,
 };
 use podster_policy::{
-    authorize_reviewer_change, authorize_task, authorize_workroom, can_review, can_see_task,
-    denied_change_name, effective_scopes, is_authority_refusal, may_recover_ownership,
-    org_departure_ends, owner_authority_holds, sees_whole_room, task_view, ArtifactScope,
-    ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope, Role, Scopes,
-    TaskAction, TaskScope, Verdict, WorkroomAction,
+    authorize_requester_change, authorize_reviewer_change, authorize_task, authorize_workroom,
+    can_review, can_see_task, denied_change_name, effective_scopes, is_authority_refusal,
+    may_claim_role, may_recover_ownership, org_departure_ends, owner_authority_holds,
+    scopes_after_claim, sees_whole_room, task_view, ArtifactScope, ArtifactView, Caller,
+    ConversationScope, Preset, PrincipalKind, ReviewScope, Role, Scopes, TaskAction, TaskScope,
+    Verdict, WorkroomAction,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -66,6 +68,8 @@ const MAX_ACCEPT_AGENTS: usize = 20;
 const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 type Identity = Verified;
+
+mod roles;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
 struct Participant {
@@ -449,6 +453,11 @@ fn handle_task_command(
     let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
     let verdict = if action == TaskAction::SetReviewer {
         authorize_reviewer_change(caller, &task)
+    } else if action == TaskAction::SetRequester {
+        // Authority first, so a malformed body can't tell someone a hidden task exists. `parse_command` refuses it next.
+        let requester = body["requester"].as_str().unwrap_or_default();
+        let here = participant(sql, &task.requester)?.is_some();
+        authorize_requester_change(caller, &task, requester, here)
     } else {
         authorize_task(caller, &task, action)
     };
@@ -878,6 +887,20 @@ fn handle_create_invitation(
         require_id(org)?;
     }
     let guest_can_create = guest_switch(&role, body, false)?;
+    // A link may name an opening. It must be one that's open now, and joining through it only invites the agent.
+    let work_role = field(body, "work_role_id")?;
+    if let Some(work_role) = &work_role {
+        require_id(work_role)?;
+        if rows(
+            sql,
+            "SELECT id FROM work_role WHERE id = ? AND closed_at IS NULL",
+            vec![work_role.as_str().into()],
+        )?
+        .is_empty()
+        {
+            return Err(ApiError::invalid_argument());
+        }
+    }
     let id = format!("ivt_{}", uuid::Uuid::new_v4().simple());
     let secret = format!(
         "{}{}",
@@ -885,8 +908,8 @@ fn handle_create_invitation(
         uuid::Uuid::new_v4().simple()
     );
     let expires_at = now + INVITATION_TTL_MS;
-    exec(sql, "INSERT INTO invitation (id, invited_org_id, role, guest_can_create, token_hash, expires_at, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)", vec![
-        id.as_str().into(), opt(&invited_org), role.as_str().into(), flag(guest_can_create), invitation_hash(&secret).into(), expires_at.into(), caller.id.as_str().into(), now.into(),
+    exec(sql, "INSERT INTO invitation (id, work_role_id, invited_org_id, role, guest_can_create, token_hash, expires_at, status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)", vec![
+        id.as_str().into(), opt(&work_role), opt(&invited_org), role.as_str().into(), flag(guest_can_create), invitation_hash(&secret).into(), expires_at.into(), caller.id.as_str().into(), now.into(),
     ])?;
     audit(
         sql,
@@ -894,12 +917,15 @@ fn handle_create_invitation(
         "invitation.created",
         &id,
         None,
-        Some(json!({ "role": role, "invited_org_id": invited_org }).to_string()),
+        Some(
+            json!({ "role": role, "invited_org_id": invited_org, "work_role_id": work_role })
+                .to_string(),
+        ),
         now,
     )?;
     // The token is returned once. Only its hash is stored, and `command` removes it from the idempotency record.
     Ok(
-        json!({ "id": id, "token": format!("inv_{room}.{id}.{secret}"), "role": role, "expires_at": expires_at }),
+        json!({ "id": id, "token": format!("inv_{room}.{id}.{secret}"), "role": role, "work_role_id": work_role, "expires_at": expires_at }),
     )
 }
 
@@ -1009,6 +1035,18 @@ fn handle_change_role(
     {
         scopes = Scopes::for_role(parse_role(&role), guest_can_create);
         store::write_grant(sql, principal, scopes, &caller.id, now)?;
+        roles::withdraw_role_invites(sql, principal)?;
+    } else if !rows(
+        sql,
+        "SELECT id FROM role_claim WHERE principal_id = ? AND status = 'active'",
+        vec![principal.into()],
+    )?
+    .is_empty()
+    {
+        // On someone holding an opening, saving the same thing is the room choosing to keep them there, as on the access
+        // route, and releasing the opening mustn't undo that.
+        store::write_grant(sql, principal, scopes, &caller.id, now)?;
+        roles::withdraw_role_invites(sql, principal)?;
     }
     let target_kind = member["kind"]
         .as_str()
@@ -1106,6 +1144,34 @@ fn adjust_scope(scopes: &mut Scopes, name: &str, value: &Value) -> R<()> {
     Ok(())
 }
 
+/// Someone who can't review any more can't stay named on open tasks, or they'd wait forever.
+fn review_after_change(
+    sql: &SqlStorage,
+    actor: &Caller,
+    principal: &str,
+    prior: Scopes,
+    next: Scopes,
+    now: i64,
+) -> R<()> {
+    if !prior.reviews() || next.reviews() {
+        return Ok(());
+    }
+    let named = rows(
+        sql,
+        "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled') AND reviewer_id = ?",
+        vec![principal.into()],
+    )?;
+    for row in &named {
+        let task = store::task_from_row(row)?;
+        let requester_ok = eligible_reviewer(sql, &task.requester)?;
+        if let Some(decision) = apply_review_ended(&task, principal, requester_ok) {
+            save_task(sql, &decision.task, now)?;
+            record_decision(sql, &decision, task.status, &actor.id, now)?;
+        }
+    }
+    Ok(())
+}
+
 /// Applies a preset to an agent, adjusts its scopes, or both. Only the server's values are stored, and a preset's role is
 /// never an administrator's. People's access follows their role here, because decision 20 is about agents.
 fn handle_change_access(
@@ -1148,7 +1214,15 @@ fn handle_change_access(
     let prior_role = text(&member["role"]).unwrap_or_default();
     let role = preset.map_or(prior_role.clone(), |p| p.role_name().to_string());
     let answer = |scopes| json!({ "principal_id": principal, "role": role, "access": access_json(PrincipalKind::Agent, parse_role(&role), scopes) });
-    if next == prior && role == prior_role {
+    // On someone holding an opening, an explicit call counts even with the same values: it's the room choosing to keep
+    // them there, and releasing the opening mustn't undo that.
+    let holds_opening = !rows(
+        sql,
+        "SELECT id FROM role_claim WHERE principal_id = ? AND status = 'active'",
+        vec![principal.into()],
+    )?
+    .is_empty();
+    if next == prior && role == prior_role && !holds_opening {
         return Ok(answer(prior));
     }
     let org = text(&member["org_id"]).unwrap_or_default();
@@ -1183,22 +1257,8 @@ fn handle_change_access(
         [principal.to_string()],
         now,
     )?;
-    // Someone who can't review any more can't stay named on open tasks, or they'd wait forever.
-    if prior.reviews() && !next.reviews() {
-        let named = rows(
-            sql,
-            "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled') AND reviewer_id = ?",
-            vec![principal.into()],
-        )?;
-        for row in &named {
-            let task = store::task_from_row(row)?;
-            let requester_ok = eligible_reviewer(sql, &task.requester)?;
-            if let Some(decision) = apply_review_ended(&task, principal, requester_ok) {
-                save_task(sql, &decision.task, now)?;
-                record_decision(sql, &decision, task.status, &caller.id, now)?;
-            }
-        }
-    }
+    review_after_change(sql, caller, principal, prior, next, now)?;
+    roles::withdraw_role_invites(sql, principal)?;
     Ok(answer(next))
 }
 
@@ -1313,6 +1373,12 @@ fn end_invitations_of(
     reason: &str,
     now: i64,
 ) -> R<()> {
+    // What they offered as a role's invites ends with their authority too, so being appointed again can't revive it.
+    exec(
+        sql,
+        "DELETE FROM role_invite WHERE invited_by = ?",
+        vec![creator.into()],
+    )?;
     let pending = rows(
         sql,
         "SELECT id FROM invitation WHERE created_by = ? AND status = 'pending'",
@@ -1383,6 +1449,11 @@ fn remove_member(
         .first()
         .and_then(|m| text(&m["org_id"]))
         .unwrap_or_default();
+    // Leaving ends claims and frees those openings (decision 42), and an invite can't outlive the place it was made for.
+    roles::end_claim(
+        sql, actor, actor_kind, principal, "revoked", reason, true, now,
+    )?;
+    roles::withdraw_role_invites(sql, principal)?;
     exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
     apply_departure_rules(sql, actor, principal, now)?;
     end_invitations_of(sql, &actor.id, actor_kind, principal, reason, now)?;
@@ -1967,11 +2038,11 @@ mod queries {
     /// Invitations still usable, for those who manage access. The token was shown once and isn't kept.
     pub fn list_invitations(sql: &SqlStorage, caller: &Caller, now: i64) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
-        let found = rows(sql, "SELECT id, invited_org_id, role, guest_can_create, created_by, created_at, expires_at FROM invitation WHERE status = 'pending' AND expires_at > ? ORDER BY created_at DESC LIMIT ?",
+        let found = rows(sql, "SELECT id, invited_org_id, work_role_id, role, guest_can_create, created_by, created_at, expires_at FROM invitation WHERE status = 'pending' AND expires_at > ? ORDER BY created_at DESC LIMIT ?",
             vec![now.into(), (INVITATIONS_LISTED + 1).into()])?;
         let truncated = found.len() as i64 > INVITATIONS_LISTED;
         let invitations: Vec<Value> = found.into_iter().take(INVITATIONS_LISTED as usize).map(|row| json!({
-            "id": row["id"], "invited_org_id": row["invited_org_id"], "role": row["role"], "guest_can_create": int(&row["guest_can_create"]) != 0,
+            "id": row["id"], "invited_org_id": row["invited_org_id"], "work_role_id": row["work_role_id"], "role": row["role"], "guest_can_create": int(&row["guest_can_create"]) != 0,
             "created_by": row["created_by"], "created_at": row["created_at"], "expires_at": row["expires_at"],
         })).collect();
         Ok(json!({ "invitations": invitations, "truncated": truncated }))
@@ -2408,8 +2479,16 @@ impl Workspace {
         }
         let room = rows(&sql, "SELECT id, name FROM workspace", vec![])?;
         let room = room.first().ok_or_else(ApiError::invitation_not_found)?;
+        // The opening a link names, so whoever decides can see what it would mean. A closed one is no longer on offer.
+        let work_role = rows(
+            &sql,
+            "SELECT id, title, responsibilities, capacity, preset, is_lead FROM work_role WHERE id = ? AND closed_at IS NULL",
+            vec![invitation["work_role_id"].as_str().unwrap_or_default().into()],
+        )?
+        .into_iter()
+        .next();
         Ok(json!({
-            "workspace_id": room["id"], "workspace_name": room["name"],
+            "workspace_id": room["id"], "workspace_name": room["name"], "work_role": work_role,
             "role": invitation["role"], "guest_can_create": int(&invitation["guest_can_create"]) != 0,
             "invited_org_id": invitation["invited_org_id"], "invited_by": invitation["created_by"], "expires_at": invitation["expires_at"],
         }))
@@ -2595,6 +2674,23 @@ impl Workspace {
                     [agent.clone()],
                     now,
                 )?;
+                // A first-time joiner may claim the opening the link names. An agent coming back gets no invite from
+                // its own organization's acceptance, because a claim could otherwise undo what the room narrowed.
+                if !returning {
+                    if let Some(work_role) = found["work_role_id"].as_str() {
+                        let open = !rows(
+                            &sql,
+                            "SELECT id FROM work_role WHERE id = ? AND closed_at IS NULL",
+                            vec![work_role.into()],
+                        )?
+                        .is_empty();
+                        if open {
+                            // The room's person made the offer, not the one accepting, and a claim rechecks them.
+                            let offered_by = text(&found["created_by"]).unwrap_or_default();
+                            roles::add_invite(&sql, &actor, &offered_by, work_role, agent, now)?;
+                        }
+                    }
+                }
                 joined.push(agent.clone());
             }
             // Accepting for agents already here changes nothing, so it doesn't use up the invitation.
@@ -3156,6 +3252,7 @@ impl Workspace {
                 [] => queries::get_workspace(&sql, &who),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
+                ["roles"] => roles::list_roles(&sql, &who),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
@@ -3283,6 +3380,93 @@ impl Workspace {
                     test_fail,
                     move |sql, who, now| {
                         handle_change_role(sql, &who.caller, &target, &body, target_member, now)
+                    },
+                )
+            }
+            (Method::Post, ["roles"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| roles::handle_create_role(sql, &who.caller, &body, now),
+            ),
+            (Method::Put, ["roles", _]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| {
+                    roles::handle_update_role(sql, &who.caller, &target, &body, now)
+                },
+            ),
+            (Method::Delete, ["roles", _]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| {
+                    roles::handle_close_role(sql, &who.caller, &target, &body, now)
+                },
+            ),
+            (Method::Post, ["roles", _, "invites"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| {
+                    roles::handle_invite_to_role(sql, &who.caller, &target, &body, now)
+                },
+            ),
+            (Method::Delete, ["roles", _, "invites", principal]) => {
+                let principal = (*principal).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        roles::handle_withdraw_role_invite(
+                            sql,
+                            &who.caller,
+                            &target,
+                            &principal,
+                            &body,
+                            now,
+                        )
+                    },
+                )
+            }
+            (Method::Post, ["roles", _, "claim"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| roles::handle_claim_role(sql, &who.caller, &target, now),
+            ),
+            (Method::Post, ["roles", _, "release"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| roles::handle_release_role(sql, &who.caller, &target, now),
+            ),
+            (Method::Delete, ["roles", _, "claims", principal]) => {
+                let principal = (*principal).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        roles::handle_end_claim(sql, &who.caller, &target, &principal, &body, now)
                     },
                 )
             }
