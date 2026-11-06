@@ -2,7 +2,7 @@ import { ReadFailure } from "@/components/shell/read-failure";
 import { getIdentity, getOrganizations, gatewayQuery } from "@/lib/gateway/server";
 import { canManageWorkroom, isArchived, loadWorkroom } from "@/lib/workroom";
 import { loadPeopleNames } from "../tasks/load-tasks";
-import { addableAgents, membersOf, toPending, type InvitationRow } from "./model";
+import { addableAgents, membersOf, toPending, type InvitationRow, type RoleRead } from "./model";
 import { TeamScreen, type AgentOption } from "./team-screen";
 
 type AgentRow = AgentOption & { revoked_at: number | null };
@@ -11,11 +11,12 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
   const { id } = await params;
   const room = await loadWorkroom(id);
   const canManage = canManageWorkroom(room);
-  const [identity, organizations, agents, invitations] = await Promise.all([
+  const [identity, organizations, agents, invitations, roles] = await Promise.all([
     getIdentity(),
     getOrganizations(),
     gatewayQuery<{ agents: AgentRow[]; truncated?: boolean }>("/api/agents"),
     canManage ? gatewayQuery<{ invitations: InvitationRow[]; truncated: boolean }>(`/api/v1/workspaces/${id}/invitations`) : null,
+    gatewayQuery<RoleRead>(`/api/v1/workspaces/${id}/roles`),
   ]);
   if (!identity.ok) {
     return (
@@ -45,6 +46,7 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
       // Without knowing the room's organization, listing every agent would offer ones the server refuses, so this reads as a failure.
       agents={agents.ok && roomOrg ? addableAgents(agentRows, roomOrg) : null}
       agentsPartial={agents.ok && agents.data.truncated === true}
+      roles={roles.ok ? roles.data : null}
       invitations={invitations?.ok ? { pending: invitations.data.invitations.map(toPending), complete: !invitations.data.truncated } : null}
     />
   );

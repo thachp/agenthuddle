@@ -60,102 +60,96 @@ describe("Manage access, for the room's owner or admin", () => {
     expect(within(sheet).getByText("Owner and admins only; can't be granted to agents.")).toBeInTheDocument();
     expect(within(sheet).getByRole("heading", { name: "Connected services" })).toBeInTheDocument();
     expect(within(sheet).getByText("Saving workroom access doesn't grant GitHub, merge or deployment access.")).toBeInTheDocument();
-    // No selector that could change the target: only the role.
-    expect(within(sheet).getAllByRole("combobox")).toHaveLength(1);
+    // No selector that could change the target: only the preset and its four scopes.
+    expect(within(sheet).getAllByRole("combobox")).toHaveLength(5);
   });
 
   it("marks an agent from another organization External", async () => {
     room = json(200, { ...(room.body as object), members: [agentRow(AGENT, "org_b", "guest")] });
     show(owner);
     expect(await screen.findByText("External")).toBeInTheDocument();
-    expect(screen.getByLabelText("Role in this workroom")).toHaveValue("guest");
+    expect(screen.getByLabelText("Preset")).toHaveValue("guest");
   });
 
-  it("saves the role against the version it read, without touching a guest's task setting", async () => {
+  it("saves a preset by name against the version it read", async () => {
     show(owner);
-    const role = await screen.findByLabelText("Role in this workroom");
+    const role = await screen.findByLabelText("Preset");
     await userEvent.selectOptions(role, "guest");
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(sent).toHaveLength(1));
-    expect(sent[0]).toEqual({ method: "POST", url: `/api/v1/workspaces/${ROOM}/members/${AGENT}/role`, body: { policy_version: 7, role: "guest" } });
+    expect(sent[0]).toEqual({ method: "PUT", url: `/api/v1/workspaces/${ROOM}/members/${AGENT}/access`, body: { policy_version: 7, preset: "guest" } });
   });
 
   it("AC-20: Cancel saves nothing", async () => {
     show(owner);
-    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await userEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
     await waitFor(() => expect(currentUrl()).toBe(`/w/${ROOM}/team`));
     expect(sent).toEqual([]);
   });
 
-  it("warns before a role change replaces access set apart from the role, and not otherwise", async () => {
-    const user = userEvent.setup();
-    const public_ = { preset: "public_participant", tasks: "own", artifacts: "shared", conversations: "own", review: "none" };
-    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: 7, members: [{ ...agentRow(AGENT, "org_a", "guest"), access: public_ }] });
+  it("shows real scopes, so a narrowed agent doesn't read as Member", async () => {
+    const access = { preset: null, tasks: "all_create", artifacts: "own", conversations: "own", review: "when_named" };
+    room = json(200, { ...(room.body as object), members: [{ ...agentRow(), access }] });
     show(owner);
-    const select = await screen.findByLabelText("Role in this workroom");
-    expect(screen.queryByRole("note")).toBeNull();
-    await user.selectOptions(select, "member");
-    expect(screen.getByRole("note")).toHaveTextContent(/can widen as well as narrow/);
-    await user.selectOptions(select, "guest");
-    expect(screen.queryByRole("note")).toBeNull();
-    await user.selectOptions(screen.getByLabelText("Creating tasks"), "allow");
-    expect(screen.getByRole("note")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Preset")).toHaveValue("custom");
+    expect(screen.getByLabelText("Artifacts")).toHaveValue("own");
+    expect(screen.getByText("Custom access")).toBeInTheDocument();
   });
 
-  it("gives no warning when the switch already says what's chosen, because nothing resets", async () => {
-    const user = userEvent.setup();
-    const custom = { preset: null, tasks: "all_create", artifacts: "own", conversations: "own", review: "when_named" };
-    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: 7, members: [{ ...agentRow(AGENT, "org_a", "guest"), guest_can_create: true, access: custom }] });
+  it("sends the scopes themselves once they match no preset, and names a preset when they do", async () => {
     show(owner);
-    const creating = await screen.findByLabelText("Creating tasks");
-    await user.selectOptions(creating, "allow");
-    expect(screen.queryByRole("note")).toBeNull();
-    await user.selectOptions(creating, "deny");
-    expect(screen.getByRole("note")).toBeInTheDocument();
+    await userEvent.selectOptions(await screen.findByLabelText("Conversations"), "own");
+    expect(screen.getByLabelText("Preset")).toHaveValue("custom");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]?.body).toEqual({ policy_version: 7, scopes: { tasks: "all_create", artifacts: "all", conversations: "own", review: "when_named" } });
   });
 
-  it("gives no warning for a Public participant set to what it already has", async () => {
-    const user = userEvent.setup();
-    const public_ = { preset: "public_participant", tasks: "own", artifacts: "shared", conversations: "own", review: "none" };
-    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: 7, members: [{ ...agentRow(AGENT, "org_a", "guest"), guest_can_create: false, access: public_ }] });
+  it("refuses to offer review without reading, before anything is sent", async () => {
     show(owner);
-    await user.selectOptions(await screen.findByLabelText("Creating tasks"), "deny");
-    expect(screen.queryByRole("note")).toBeNull();
+    await userEvent.selectOptions(await screen.findByLabelText("Artifacts"), "shared");
+    expect(screen.getByRole("alert")).toHaveTextContent(/can't review work/);
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    await userEvent.selectOptions(screen.getByLabelText("Review"), "none");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("note")).toHaveTextContent(/Open tasks naming it as reviewer/);
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
   });
 
-  it("gives no warning when access is just what the role gives", async () => {
-    const user = userEvent.setup();
-    room = json(200, { id: ROOM, name: "Launch room", owner: "per_owner", status: "active", policy_version: 7, members: [{ ...agentRow(), access: { preset: "member", tasks: "all_create", artifacts: "all", conversations: "all", review: "when_named" } }] });
+  it("says what saving means for an agent holding an opening", async () => {
+    connections["x"] = refusal(404, "x");
+    const fetchReal = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => (url.endsWith("/roles") ? new Response(JSON.stringify({ external: false, roles: [{ id: "rol_1", title: "Lead", holders: [AGENT] }] }), { status: 200 }) : fetchReal(url, init)));
     show(owner);
-    await user.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
-    expect(screen.queryByRole("note")).toBeNull();
+    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
+    expect(await screen.findByText(/It holds the opening “Lead”/)).toBeInTheDocument();
   });
 
   it("AC-20: a stale form keeps the person's choice and offers the latest, and doesn't overwrite", async () => {
-    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(409, "version_conflict");
+    commands[`PUT /api/v1/workspaces/${ROOM}/members/${AGENT}/access`] = refusal(409, "version_conflict");
     show(owner);
-    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     expect(await screen.findByRole("button", { name: "Review latest" })).toBeInTheDocument();
-    expect(screen.getByLabelText("Role in this workroom")).toHaveValue("guest");
+    expect(screen.getByLabelText("Preset")).toHaveValue("guest");
     expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
   });
 
   it("AC-20: a refusal from the server shows as a refusal, and nothing changed", async () => {
-    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(403, "not_allowed");
+    commands[`PUT /api/v1/workspaces/${ROOM}/members/${AGENT}/access`] = refusal(403, "not_allowed");
     show(owner);
-    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     expect(await screen.findByText(/nothing changed/)).toBeInTheDocument();
   });
 
   it("doesn't say nothing changed after a server error", async () => {
-    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(502, "bad_gateway");
+    commands[`PUT /api/v1/workspaces/${ROOM}/members/${AGENT}/access`] = refusal(502, "bad_gateway");
     show(owner);
-    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     expect(await screen.findByText(/We can't tell whether this saved/)).toBeInTheDocument();
     expect(screen.queryByText(/nothing changed/)).not.toBeInTheDocument();
@@ -164,16 +158,16 @@ describe("Manage access, for the room's owner or admin", () => {
   it("AC-21: a save stays bound to its own target after the URL moves on", async () => {
     room = json(200, { ...(room.body as object), members: [agentRow(), agentRow("agt_2")] });
     let release!: (reply: Reply) => void;
-    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = () => new Promise((resolve) => (release = resolve));
+    commands[`PUT /api/v1/workspaces/${ROOM}/members/${AGENT}/access`] = () => new Promise((resolve) => (release = resolve));
     show(owner);
-    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(sent).toHaveLength(1));
     act(() => navigate(`/w/${ROOM}/team?agent=agt_2`));
     expect(screen.getByRole("heading", { name: "Code Agent" })).toBeInTheDocument();
     await act(async () => release(json(200, {})));
     expect(await screen.findByRole("heading", { name: "agt_2" })).toBeInTheDocument();
-    expect(sent.map((request) => request.url)).toEqual([`/api/v1/workspaces/${ROOM}/members/${AGENT}/role`]);
+    expect(sent.map((request) => request.url)).toEqual([`/api/v1/workspaces/${ROOM}/members/${AGENT}/access`]);
   });
 
   it("UI-10: revoking by keyboard asks first, names both, and reports the server's result", async () => {
@@ -198,15 +192,15 @@ describe("Manage access, in an archived room", () => {
     room = json(200, { ...(room.body as object), status: "archived" });
     show(owner);
     expect(await screen.findByText("Read-only while this workroom is archived.")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Role in this workroom")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Preset")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Revoke workroom access" })).toBeInTheDocument();
   });
 
   it("explains workspace_archived if the room was archived after the read", async () => {
-    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(409, "workspace_archived");
+    commands[`PUT /api/v1/workspaces/${ROOM}/members/${AGENT}/access`] = refusal(409, "workspace_archived");
     show(owner);
-    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     expect(await screen.findByText(/This workroom is archived/)).toBeInTheDocument();
   });
@@ -220,15 +214,15 @@ describe("Manage access, after a lost response", () => {
       if (init.method) keys.push(new Headers(init.headers).get("idempotency-key"));
       return original(url, init);
     });
-    commands[`POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`] = refusal(502, "bad_gateway");
+    commands[`PUT /api/v1/workspaces/${ROOM}/members/${AGENT}/access`] = refusal(502, "bad_gateway");
     show(owner);
-    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await screen.findByText(/We can't tell whether this saved/);
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(keys).toHaveLength(2));
     expect(keys[1]).toBe(keys[0]);
-    await userEvent.selectOptions(screen.getByLabelText("Creating tasks"), "allow");
+    await userEvent.selectOptions(screen.getByLabelText("Preset"), "coordinator");
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(keys).toHaveLength(3));
     expect(keys[2]).not.toBe(keys[0]);
@@ -249,9 +243,9 @@ describe("Manage access, after a lost response, when a retry is refused", () => 
     [429, "rate_limited", /We still can't tell whether your earlier change saved/],
     [401, "sign_in_required", /You've been signed out, so we still can't tell/],
   ])("a %i doesn't claim nothing changed", async (status, code, text) => {
-    lostThen(refusal(status, code), `POST /api/v1/workspaces/${ROOM}/members/${AGENT}/role`);
+    lostThen(refusal(status, code), `PUT /api/v1/workspaces/${ROOM}/members/${AGENT}/access`);
     show(owner);
-    await userEvent.selectOptions(await screen.findByLabelText("Role in this workroom"), "guest");
+    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await screen.findByText(/We can't tell whether this saved/);
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));

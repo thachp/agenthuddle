@@ -4500,7 +4500,7 @@ describe("work roles and claims", () => {
     expect((await listed(id, role, LEAD)).invited).toBeUndefined();
     expect((await listed(id, role, LEAD)).filled).toBe(1);
     const guest = await listed(id, role, BOB);
-    expect([guest.title, guest.capacity, guest.available, guest.mine]).toEqual(["Engineer", 1, false, null]);
+    expect([guest.title, guest.capacity, guest.available, guest.mine, guest.created_by]).toEqual(["Engineer", 1, false, null, OWNER.id]);
     expect(guest.holders).toBeUndefined();
     expect(guest.filled).toBeUndefined();
     const wide = await opening(id, { title: "Wide", capacity: 3 });

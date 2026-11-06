@@ -7,6 +7,82 @@ export type Member = { principal_id: string; kind: "person" | "agent"; org_id: s
 /** What the API says this member can do. Sent only to them and to those who manage access. Display only. */
 export type MemberAccess = { preset: string | null; tasks: string; artifacts: string; conversations: string; review: string };
 
+export const presetOptions = ["public_participant", "guest", "member", "coordinator"];
+
+export const PRESET_LABELS: Record<string, string> = { public_participant: "Public participant", guest: "Guest", member: "Member", coordinator: "Coordinator" };
+
+export const PRESET_SUMMARIES: Record<string, string> = {
+  public_participant: "Sees only its own tasks and threads, reads only what it submitted, and can't review.",
+  guest: "Sees only its own tasks and threads, and reviews when named.",
+  member: "Sees every task and thread, creates and offers tasks, and reviews when named.",
+  coordinator: "Like Member, and can take over for itself a task whose requester left. No admin, merge or deploy rights.",
+};
+
+export type Scopes = Pick<MemberAccess, "tasks" | "artifacts" | "conversations" | "review">;
+
+/** Mirrors `crates/policy` so the form can show what's about to be sent. Rust decides what any of it means. */
+export const PRESET_SCOPES: Record<string, Scopes> = {
+  public_participant: { tasks: "own", artifacts: "shared", conversations: "own", review: "none" },
+  guest: { tasks: "own", artifacts: "own", conversations: "own", review: "when_named" },
+  member: { tasks: "all_create", artifacts: "all", conversations: "all", review: "when_named" },
+  coordinator: { tasks: "coordinate", artifacts: "all", conversations: "all", review: "when_named" },
+};
+
+export const SCOPE_CHOICES: { name: keyof Scopes; label: string; options: [string, string][] }[] = [
+  { name: "tasks", label: "Tasks", options: [["own", "Own tasks"], ["own_create", "Own tasks, and create"], ["all", "All tasks"], ["all_create", "All tasks, and create"], ["coordinate", "All tasks, create, and take over when a requester left"]] },
+  { name: "artifacts", label: "Artifacts", options: [["shared", "Only what it submitted"], ["own", "Its own tasks"], ["all", "All"]] },
+  { name: "conversations", label: "Conversations", options: [["own", "Its own task threads"], ["all", "All threads"]] },
+  { name: "review", label: "Review", options: [["none", "None"], ["when_named", "When named reviewer"]] },
+];
+
+export const scopesOf = ({ tasks, artifacts, conversations, review }: Scopes): Scopes => ({ tasks, artifacts, conversations, review });
+
+/** The access a member's row implies when the read doesn't include it, as an older answer wouldn't. */
+export const memberScopes = (member: Pick<Member, "role" | "guest_can_create" | "access">): Scopes => {
+  if (member.access) return scopesOf(member.access);
+  if (member.role === "guest") return member.guest_can_create ? { ...PRESET_SCOPES.guest!, tasks: "own_create" } : PRESET_SCOPES.guest!;
+  return PRESET_SCOPES.member!;
+};
+
+export const matchingPreset = (scopes: Scopes) => presetOptions.find((preset) => JSON.stringify(PRESET_SCOPES[preset]) === JSON.stringify(scopesOf(scopes))) ?? null;
+
+/** What to call someone's access. An agent's real scopes when the read has them, so a narrowed agent never reads as Member. */
+export function accessLabel(member: Pick<Member, "kind" | "role" | "access">) {
+  if (member.kind !== "agent" || !member.access) return roleLabel(member.role);
+  return member.access.preset ? (PRESET_LABELS[member.access.preset] ?? member.access.preset) : "Custom access";
+}
+
+export type RoleOpening = {
+  id: string;
+  title: string;
+  responsibilities: string;
+  capacity: number;
+  /** Only for someone who sees the whole room. Anyone else gets `available`. */
+  filled?: number;
+  available?: boolean;
+  preset: string;
+  is_lead: boolean;
+  version: number;
+  created_by: string;
+  mine: "claimed" | "invited" | null;
+  holders?: string[];
+  invited?: string[];
+};
+
+export type RoleRead = { roles: RoleOpening[]; external: boolean };
+
+const byteLength = (text: string) => new TextEncoder().encode(text).length;
+
+/** What's wrong with an opening before sending it, as `crates/core` would say. */
+export function roleFitsLimits(title: string, responsibilities: string, capacity: number): string | null {
+  if (!title.trim()) return "Give it a title.";
+  if (byteLength(title.trim()) > 200) return "That title's too long. It can be up to 200 bytes.";
+  if (!responsibilities.trim()) return "Say what this role is responsible for.";
+  if (byteLength(responsibilities.trim()) > 4096) return "Those responsibilities are too long. They can be up to 4,096 bytes.";
+  if (!Number.isInteger(capacity) || capacity < 1 || capacity > 50) return "Openings can be from 1 to 50.";
+  return null;
+}
+
 /** Whether this member's scopes are what their role alone gives, so a role change has nothing of theirs to replace. */
 export const accessIsRoleDefault = ({ role, access }: Pick<Member, "role" | "access">) => {
   if (!access) return true;

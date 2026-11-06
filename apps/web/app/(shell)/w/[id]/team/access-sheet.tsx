@@ -10,13 +10,13 @@ import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import type { Workroom } from "@/lib/workroom";
 import { ConfirmAction } from "./confirm-action";
 import { FIELD, MOBILE_TARGET } from "./field";
-import { accessIsRoleDefault, isExternal, membersOf, roleLabel, type Member, type Viewer } from "./model";
+import { accessLabel, isExternal, matchingPreset, memberScopes, membersOf, PRESET_LABELS, PRESET_SCOPES, PRESET_SUMMARIES, presetOptions, roleLabel, SCOPE_CHOICES, type Member, type RoleRead, type Scopes, type Viewer } from "./model";
 
 type Connection = { id: string; status: string; generation: number };
 type Ended = "revoked" | "withdrawn" | "disconnected";
 
 /** What the viewer may see of this agent's access. The API said so on this read; nothing here is remembered from the list. */
-type Access = { member: Member; policyVersion: number | null; archived: boolean; connection: Connection | null; ended: Ended | null };
+type Access = { member: Member; policyVersion: number | null; archived: boolean; connection: Connection | null; ended: Ended | null; holdsOpening: string | null };
 
 const CONNECTION_LABELS: Record<string, string> = { active: "Connected", disconnecting: "Disconnecting", disconnected: "Disconnected" };
 
@@ -47,7 +47,7 @@ export function AccessSheet({ roomId, roomName, viewer, names, orgNames }: Props
       size="md"
       noun="workroom's access"
       load={async (target, { signal }) => {
-        const [room, connection] = await Promise.all([clientQuery<Workroom>(`/api/v1/workspaces/${encodeURIComponent(roomId)}`, { signal }), clientQuery<Connection>(`/api/agents/${encodeURIComponent(target)}`, { signal })]);
+        const [room, roles, connection] = await Promise.all([clientQuery<Workroom>(`/api/v1/workspaces/${encodeURIComponent(roomId)}`, { signal }), clientQuery<RoleRead>(`/api/v1/workspaces/${encodeURIComponent(roomId)}/roles`, { signal }).catch(() => null), clientQuery<Connection>(`/api/agents/${encodeURIComponent(target)}`, { signal })]);
         if (!room.ok) {
           if (!reachable(room.status)) throw new Error(room.code);
           return null;
@@ -59,7 +59,8 @@ export function AccessSheet({ roomId, roomName, viewer, names, orgNames }: Props
         // result this Sheet remembers can't show to someone who has since lost their authority.
         if (policyVersion === null && !connection.ok) return null;
         if (!member) return ended.current?.target === target ? { ...ended.current.last, connection: connection.ok ? connection.data : ended.current.last.connection, ended: ended.current.how } : null;
-        return { member, policyVersion, archived: room.data.status === "archived", connection: connection.ok ? connection.data : null, ended: null };
+        const held = roles?.ok ? roles.data.roles.find((role) => role.holders?.includes(target)) : undefined;
+        return { member, policyVersion, archived: room.data.status === "archived", connection: connection.ok ? connection.data : null, ended: null, holdsOpening: held ? plainName(held.title) : null };
       }}
       title={(access) => label(access.member.principal_id)}
       description={() => `Workroom: ${plainName(roomName)}`}
@@ -80,9 +81,12 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
   const saveKey = useRef(crypto.randomUUID());
   const revokeKey = useRef(crypto.randomUUID());
   const isOwner = connection !== null && data.ended === null;
-  const [role, setRole] = useState<"member" | "guest">(member.role === "guest" ? "guest" : "member");
-  // The room's read doesn't say whether a guest may create tasks, so the default leaves it as the server has it.
-  const [guestCreate, setGuestCreate] = useState<"keep" | "allow" | "deny">("keep");
+  const saved = memberScopes(member);
+  const [scopes, setScopes] = useState<Scopes>(saved);
+  const preset = matchingPreset(scopes);
+  // Reviewing work you can't read isn't a review, and the server refuses that pair.
+  const reviewsUnread = scopes.artifacts === "shared" && scopes.review === "when_named";
+  const stopsReviewing = saved.review === "when_named" && saved.artifacts !== "shared" && (scopes.review === "none" || scopes.artifacts === "shared");
   const statusRef = useRef<HTMLParagraphElement>(null);
   const room = plainName(roomName);
   const memberPath = `/api/v1/workspaces/${encodeURIComponent(roomId)}/members`;
@@ -107,7 +111,9 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
   };
 
   const save = async () => {
-    const result = await run(({ target, version }) => clientCommand(`${memberPath}/${encodeURIComponent(target)}/role`, { policy_version: version, role, ...(role === "guest" && guestCreate !== "keep" ? { guest_can_create: guestCreate === "allow" } : {}) }, { idempotencyKey: saveKey.current }));
+    // A preset by name when the form matches one, which also sets the role that goes with it. Otherwise the scopes themselves.
+    const body = preset ? { preset } : { scopes };
+    const result = await run(({ target, version }) => clientCommand(`${memberPath}/${encodeURIComponent(target)}/access`, { policy_version: version, ...body }, { method: "PUT", idempotencyKey: saveKey.current }));
     if (!result?.ok) showTop();
   };
 
@@ -129,6 +135,8 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
             <>
               <dt className="text-muted-foreground">Role</dt>
               <dd>{roleLabel(member.role)}</dd>
+              <dt className="text-muted-foreground">Access</dt>
+              <dd>{accessLabel(member)}</dd>
             </>
           )}
           {connection ? (
@@ -155,27 +163,47 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
           {canEdit ? (
             <fieldset disabled={saving} className="space-y-3">
               <label className="block space-y-1 text-sm">
-                <span>Role in this workroom</span>
-                <select className={FIELD} value={role} onChange={(event) => edit(() => setRole(event.target.value as "member" | "guest"))}>
-                  <option value="member">Member: sees every task and thread</option>
-                  <option value="guest">Guest: sees only its own tasks</option>
+                <span>Preset</span>
+                <select className={FIELD} value={preset ?? "custom"} onChange={(event) => edit(() => setScopes(PRESET_SCOPES[event.target.value] ?? scopes))}>
+                  {presetOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {PRESET_LABELS[option]}
+                    </option>
+                  ))}
+                  {preset ? null : <option value="custom">Custom</option>}
                 </select>
               </label>
-              {role === "guest" ? (
-                <label className="block space-y-1 text-sm">
-                  <span>Creating tasks</span>
-                  <select className={FIELD} value={guestCreate} onChange={(event) => edit(() => setGuestCreate(event.target.value as "keep" | "allow" | "deny"))}>
-                    <option value="keep">Leave as it is</option>
-                    <option value="allow">Allow this guest to create tasks</option>
-                    <option value="deny">Don't allow it</option>
-                  </select>
-                </label>
-              ) : null}
-              {(role !== member.role || (guestCreate !== "keep" && (guestCreate === "allow") !== (member.guest_can_create ?? false))) && !accessIsRoleDefault(member) ? (
-                <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm">
-                  This agent's access has been set separately from its role. Saving replaces it with what the role gives, which can widen as well as narrow what the agent can do.
+              <p className="text-sm text-muted-foreground">{preset ? PRESET_SUMMARIES[preset] : "Adjusted from the presets below. No admin, merge or deploy rights come with any of these."}</p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {SCOPE_CHOICES.map((scope) => (
+                  <label key={scope.name} className="block space-y-1 text-sm">
+                    <span>{scope.label}</span>
+                    <select className={FIELD} value={scopes[scope.name]} onChange={(event) => edit(() => setScopes({ ...scopes, [scope.name]: event.target.value }))}>
+                      {scope.options.map(([value, text]) => (
+                        <option key={value} value={value}>
+                          {text}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+              {reviewsUnread ? (
+                <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-sm text-status-danger">
+                  An agent that reads only what it submitted can't review work. Change Artifacts, or set Review to None.
                 </p>
               ) : null}
+              {dirty && stopsReviewing && !reviewsUnread ? (
+                <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm">
+                  It can't review any more. Open tasks naming it as reviewer move to their requester if the requester can review, and otherwise are flagged for an owner or admin.
+                </p>
+              ) : null}
+              {dirty && data.holdsOpening ? (
+                <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm">
+                  It holds the opening “{data.holdsOpening}”. What you save here counts as the room's decision: when the claim ends, it keeps the narrower of this and what it had before claiming.
+                </p>
+              ) : null}
+              {dirty ? <p className="text-sm text-muted-foreground">Saving withdraws any role invites this agent has.</p> : null}
             </fieldset>
           ) : (
             <p className="text-sm text-muted-foreground">{data.archived ? "Read-only while this workroom is archived." : "Read-only for you. Only this workroom's owner and appointed admins can change it."}</p>
@@ -247,7 +275,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
               <Button
                 type="button"
                 className={MOBILE_TARGET}
-                disabled={!dirty || saving}
+                disabled={!dirty || saving || reviewsUnread}
                 onClick={() => void save()}
               >
                 {saving ? "Saving…" : "Save changes"}

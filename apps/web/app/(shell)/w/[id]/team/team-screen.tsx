@@ -14,7 +14,8 @@ import { CommandNotice, useCommands, type Send } from "./commands";
 import { ConfirmAction } from "./confirm-action";
 import { AccessSheet } from "./access-sheet";
 import { FIELD, MOBILE_TARGET } from "./field";
-import { isExternal, roleLabel, type Member, type PendingInvitation, type Viewer } from "./model";
+import { accessLabel, isExternal, roleLabel, type Member, type PendingInvitation, type RoleRead, type Viewer } from "./model";
+import { RoleOpenings, RoleSheet } from "./role-openings";
 
 export type AgentOption = { id: string; name: string; org_id: string };
 export type OrgOption = { id: string; name: string };
@@ -38,10 +39,12 @@ export type TeamProps = {
   agentsPartial?: boolean;
   /** Null if that read failed or isn't open to this viewer. */
   invitations: { pending: PendingInvitation[]; complete: boolean } | null;
+  /** The room's role openings, or null if that read failed. */
+  roles?: RoleRead | null;
 };
 
 export function TeamScreen(props: TeamProps) {
-  const { roomId, roomName, archived = false, owner, policyVersion, members, viewer, names, orgNames, orgs, agents, agentsPartial = false, invitations } = props;
+  const { roomId, roomName, archived = false, owner, policyVersion, members, viewer, names, orgNames, orgs, agents, agentsPartial = false, invitations, roles = { roles: [], external: false } } = props;
   const canManage = policyVersion !== null;
   const isOwner = viewer.id === owner;
   const commands = useCommands(policyVersion);
@@ -58,6 +61,8 @@ export function TeamScreen(props: TeamProps) {
         <h1 className="text-2xl font-semibold">Team</h1>
         <CommandNotice commands={commands} />
       </div>
+
+      <RoleOpenings base={base} room={room} read={roles} canManage={canManage} archived={archived} send={send} label={label} />
 
       <section aria-labelledby="participants" className="space-y-3">
         <h2 id="participants" className="text-lg font-medium">
@@ -79,7 +84,7 @@ export function TeamScreen(props: TeamProps) {
                 <div id={nameId} className="min-w-0 flex-1 basis-56">
                   <AuthorLine author={{ name, kind: member.kind, organization: orgLabel(member.org_id), viewer: self }} external={isExternal(member.org_id, viewer)} />
                 </div>
-                <Badge variant="secondary">{roleLabel(member.role)}</Badge>
+                <Badge variant="secondary">{accessLabel(member)}</Badge>
                 <div className="flex flex-wrap gap-2">
                   {member.kind === "agent" && (canManage || viewer.adminOrgs.includes(member.org_id)) ? (
                     <Button asChild size="sm" variant="outline" className={MOBILE_TARGET}>
@@ -134,9 +139,10 @@ export function TeamScreen(props: TeamProps) {
       </section>
 
       {canManage && !archived ? <AddParticipants base={base} isOwner={isOwner} orgs={orgs} agents={agents} agentsPartial={agentsPartial} orgNames={orgNames} memberIds={memberIds} send={send} /> : null}
-      {canManage ? <Invitations base={base} room={room} archived={archived} invitations={invitations} orgLabel={orgLabel} label={(id) => textNameOf(id, viewer.id, names)} send={send} focusAfter={noticeRef} /> : null}
+      {canManage ? <Invitations openings={roles?.roles ?? []} base={base} room={room} archived={archived} invitations={invitations} orgLabel={orgLabel} label={(id) => textNameOf(id, viewer.id, names)} send={send} focusAfter={noticeRef} /> : null}
 
       <AccessSheet roomId={roomId} roomName={roomName} viewer={viewer} names={names} orgNames={orgNames} />
+      <RoleSheet roomId={roomId} roomName={roomName} label={label} />
     </section>
   );
 }
@@ -258,10 +264,11 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
 
 type Created = { id: string; token?: string; role: string; expires_at: number };
 
-function Invitations({ base, room, archived, invitations, orgLabel, label, send, focusAfter }: { base: string; room: string; archived: boolean; invitations: TeamProps["invitations"]; orgLabel: (id: string) => string; label: (id: string) => string; send: Send; focusAfter: RefObject<HTMLDivElement | null> }) {
+function Invitations({ openings, base, room, archived, invitations, orgLabel, label, send, focusAfter }: { openings: RoleRead["roles"]; base: string; room: string; archived: boolean; invitations: TeamProps["invitations"]; orgLabel: (id: string) => string; label: (id: string) => string; send: Send; focusAfter: RefObject<HTMLDivElement | null> }) {
   const [role, setRole] = useState<"guest" | "member">("guest");
   const [invitedOrg, setInvitedOrg] = useState("");
   const [guestCanCreate, setGuestCanCreate] = useState(false);
+  const [opening, setOpening] = useState("");
   const [pending, setPending] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -284,7 +291,7 @@ function Invitations({ base, room, archived, invitations, orgLabel, label, send,
     setLink(null);
     setLostLink(null);
     setCopied(false);
-    const body = { role, ...(invitedOrg.trim() ? { invited_org_id: invitedOrg.trim() } : {}), ...(role === "guest" ? { guest_can_create: guestCanCreate } : {}) };
+    const body = { role, ...(invitedOrg.trim() ? { invited_org_id: invitedOrg.trim() } : {}), ...(role === "guest" ? { guest_can_create: guestCanCreate } : {}), ...(opening ? { work_role_id: opening } : {}) };
     // A retry's stored answer never repeats the secret, so that link can't be shown again and there's nothing to copy.
     const success = (created: Created) => (created.token ? "Invitation created. Copy its link now: it's shown only once." : null);
     await send<Created>(`${base}/invitations`, body, success, {
@@ -364,6 +371,20 @@ function Invitations({ base, room, archived, invitations, orgLabel, label, send,
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" className="mt-1 size-4" checked={guestCanCreate} onChange={(event) => setGuestCanCreate(event.target.checked)} />
             <span>Let these guests create tasks</span>
+          </label>
+        ) : null}
+        {openings.length > 0 ? (
+          <label className="block space-y-1 text-sm">
+            <span>Role opening (optional)</span>
+            <select className={FIELD} value={opening} onChange={(event) => setOpening(event.target.value)}>
+              <option value="">None</option>
+              {openings.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {plainName(option.title)}
+                </option>
+              ))}
+            </select>
+            <span className="block text-muted-foreground">An agent joining for the first time through this link is invited to it, and claims it itself.</span>
           </label>
         ) : null}
         <p className="text-sm text-muted-foreground">Without an organization ID, an admin of any organization holding the link can accept it. It expires after 7 days.</p>

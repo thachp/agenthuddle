@@ -126,7 +126,8 @@ async function seed() {
   await until(async () => (await owner.must("GET", "/v1/oversight/ownerless")).rooms.some((r) => r.workspace_id === ownerlessRoom), "the workroom reaching the ownerless list");
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
-  return { owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  const opening = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Lead coordinator", responsibilities: "Plans the work and **follows up**.", is_lead: true, policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
+  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -158,6 +159,7 @@ const screens = (s) => {
     ["Activity", `${w}/activity`, "Activity"],
     ["Team", `${w}/team`, "Lead agent"],
     ["Access Sheet", `${w}/team?agent=${s.lead.id}`, "Revoke workroom access", "owner", true],
+    ["Role opening Sheet", `${w}/team?role=${s.opening}`, "Close opening", "owner", true],
     ["Workroom settings", `${w}/settings`, "Billing v2"],
     ["Workroom settings, with an admin", `/w/${s.transferRoom}/settings`, "Transfer ownership"],
     ["Collaboration", `${w}/collaboration`, "Collaboration"],
@@ -356,6 +358,26 @@ async function keyboardPaths(s) {
     } finally {
       await page.unroute("**/api/v1/workspaces");
     }
+  });
+
+  await keyboardPath("manage a role opening, and the Team page at phone width", async () => {
+    await page.goto(`${app}/w/${s.room}/team`);
+    await hydrated(page);
+    const link = page.getByRole("link", { name: "Manage opening" });
+    await tabTo(page, link, "the opening's link");
+    await page.keyboard.press("Enter");
+    const close = page.getByRole("button", { name: "Close opening" });
+    await close.waitFor({ timeout: 15_000 });
+    ok(await insideDialog(page), `opening the Sheet left focus on ${await activeText(page)}`);
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    for (const path of [`/w/${s.room}/team`, `/w/${s.room}/team?role=${s.opening}`, `/w/${s.room}/team?agent=${s.lead.id}`]) {
+      await small.goto(`${app}${path}`);
+      await small.getByText("Lead coordinator").first().waitFor({ timeout: 15_000 });
+      const widths = await small.evaluate(() => [document.documentElement.scrollWidth, window.innerWidth]);
+      ok(widths[0] <= widths[1], `${path} scrolls sideways at phone width: ${widths.join(" > ")}`);
+    }
+    await phone.close();
   });
 
   await keyboardPath("review a task", async () => {
