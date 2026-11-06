@@ -132,6 +132,9 @@ export const canCreateTask = (role: string | undefined) => role === "owner" || r
 /** The API lists a room's owner apart from its members, so being absent from `members` doesn't mean having no role. */
 export const roleOf = (room: Pick<Room, "owner" | "members">, me: string) => (room.owner === me ? "owner" : room.members?.find((member) => member.principal_id === me)?.role);
 
+/** Everyone in the room, whether or not they could review. Being a requester, or having left, has nothing to do with reviewing. */
+const whoIsHere = (room: Pick<Room, "owner" | "members">) => [...new Set([room.owner, ...(room.members ?? []).map((member) => member.principal_id)])];
+
 /** Whether a member could review, as far as this read says. Access goes only to those who manage it, so anyone else can pick someone the server then refuses. */
 const canReview = (member: Member, room: Pick<Room, "require_person_review">) => {
   if (room.require_person_review && member.principal_id.startsWith("agt_")) return false;
@@ -147,8 +150,7 @@ export const reviewerChoices = (room: Pick<Room, "owner" | "members" | "require_
  */
 export function flagged(task: Pick<Task, "needs_attention" | "requester" | "reviewer">, room: Pick<Room, "owner" | "members">, role: string | undefined) {
   if (!task.needs_attention || role === "guest") return { requester: false, reviewer: false };
-  // Who's here, whether or not they could review, so a flag names who actually left.
-  const present = new Set([room.owner, ...(room.members ?? []).map((member) => member.principal_id)]);
+  const present = new Set(whoIsHere(room));
   return { requester: !present.has(task.requester), reviewer: !present.has(task.reviewer) };
 }
 
@@ -162,14 +164,16 @@ function choicesFor(ids: string[], current: string, task: Pick<Task, "needs_atte
   return ids.filter((id) => keepCurrent || id !== current);
 }
 export const newReviewerChoices = (room: Pick<Room, "owner" | "members" | "require_person_review">, task: Pick<Task, "assignee" | "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(reviewerChoices(room, task.assignee ?? ""), task.reviewer, task, room, role);
-export const newRequesterChoices = (room: Pick<Room, "owner" | "members">, task: Pick<Task, "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(reviewerChoices(room, ""), task.requester, task, room, role);
+export const newRequesterChoices = (room: Pick<Room, "owner" | "members">, task: Pick<Task, "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(whoIsHere(room), task.requester, task, room, role);
 
 /** The flag in words, including who can fix it, because that's often not the person reading. */
-export function flagText(task: Task, room: Pick<Room, "owner" | "members" | "status">, me: string, role: string | undefined) {
+export function flagText(task: Task, room: Pick<Room, "owner" | "members" | "status" | "require_person_review">, me: string, role: string | undefined) {
   const can = viewerActions(task, me, role);
   const need = flagged(task, room, role);
   const whom = need.requester && need.reviewer ? "a new reviewer and a new requester" : need.requester ? "a new requester" : need.reviewer ? "a new reviewer" : "a new reviewer or requester";
-  const opening = `Someone left this workroom, so this task needs ${whom}.`;
+  // Nobody named on it has left, so the flag came from what someone can do here, not from a departure.
+  const stillHere = !need.requester && !need.reviewer;
+  const opening = stillHere ? (room.require_person_review ? "This workroom requires a person to review, so this task needs a new reviewer." : "Its reviewer can't review here any more, or someone named on it left and came back, so this task needs a new reviewer or requester.") : `Someone left this workroom, so this task needs ${whom}.`;
   if (isArchivedRoom(room)) return `${opening} It can be fixed once the workroom is back.`;
   const fixable = need.requester === need.reviewer ? can.setRequester || can.setReviewer : need.requester ? can.setRequester : can.setReviewer;
   return `${opening} ${fixable ? "You can choose below." : "An owner or admin of this workroom can fix it."}`;

@@ -284,6 +284,20 @@ describe("who can be named reviewer", () => {
     expect(reviewerChoices({ ...room, require_person_review: true }, "")).toEqual(["per_owner", "per_m"]);
   });
 
+  it("offers every participant as requester, whether or not they could review", () => {
+    const task = { requester: "per_m", reviewer: "per_owner", needs_attention: false };
+    const personRoom = { ...room, require_person_review: true };
+    expect(newRequesterChoices(personRoom, task, "admin")).toEqual(expect.arrayContaining(["agt_a", "agt_public", "agt_unread"]));
+    expect(newRequesterChoices(room, task, "admin")).toContain("agt_public");
+  });
+
+  it("says why when nobody named on a flagged task has left", () => {
+    const flaggedTask = { needs_attention: true, requester: "per_m", reviewer: "agt_a", status: "open" } as never;
+    expect(flagText(flaggedTask, { ...room, require_person_review: true }, "per_owner", "owner")).toMatch(/^This workroom requires a person to review, so this task needs a new reviewer\./);
+    expect(flagText(flaggedTask, room, "per_owner", "owner")).toMatch(/^Its reviewer can't review here any more/);
+    expect(flagText(flaggedTask, room, "per_owner", "owner")).not.toMatch(/^Someone left/);
+  });
+
   it("still names who left, not who merely can't review", () => {
     const task = { needs_attention: true, requester: "agt_public", reviewer: "agt_gone" };
     expect(flagged(task, room, "admin")).toEqual({ requester: false, reviewer: true });

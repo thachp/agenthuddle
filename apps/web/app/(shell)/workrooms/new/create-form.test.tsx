@@ -209,22 +209,78 @@ describe("role openings when creating a workroom", () => {
     expect(sent[2]?.body).toEqual({ policy_version: 4, title: "Engineer", responsibilities: "Builds it", capacity: 1, preset: "member" });
   });
 
-  it("says the room exists when an opening fails, and won't make a second room", async () => {
+  const setUp = async (titles: string[]) => {
+    render(<CreateWorkroomForm organization="Org A" />);
+    await userEvent.type(screen.getByLabelText("Name"), "Launch room");
+    let n = 0;
+    for (const title of titles) {
+      n += 1;
+      await userEvent.click(screen.getByRole("button", { name: "Add an opening" }));
+      await fill(screen.getByRole("group", { name: `Opening ${n}` }), title, "x");
+    }
+    await userEvent.click(screen.getByRole("button", { name: "Create workroom" }));
+  };
+
+  it("says a refused opening wasn't added, keeps the room, and won't make a second", async () => {
     setUrl("/workrooms/new");
     stub();
     failRole = 2;
+    await setUp(["One", "Two"]);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("1 of 2 openings are confirmed");
+    expect(alert).toHaveTextContent("These weren't added: Two");
+    expect(within(alert).getByRole("link", { name: "Go to Team" })).toHaveAttribute("href", "/w/ws_new/team");
+    expect(within(alert).queryByRole("button", { name: "Try those again" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Create workroom" })).toBeDisabled();
+    expect(screen.getByRole("group", { name: "Opening 1" }).closest("fieldset")).toBeDisabled();
+    expect(sent.filter((r) => r.url === "/api/v1/workspaces")).toHaveLength(1);
+    await vi.waitFor(() => expect(alert.parentElement).toHaveFocus());
+  });
+
+  it("says check Team after an unknown outcome, and retries only those with the same key", async () => {
+    setUrl("/workrooms/new");
+    const keys: (string | null)[] = [];
+    let failing = true;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      const method = init.method ?? "GET";
+      if (method === "GET") return new Response(JSON.stringify({ policy_version: 3 }), { status: 200 });
+      if (url.endsWith("/roles")) {
+        keys.push(new Headers(init.headers).get("idempotency-key"));
+        if (failing) return new Response(JSON.stringify({ error: { code: "bad_gateway" } }), { status: 502 });
+        // The first attempt had landed, so the same key with a newer version is a different request.
+        return new Response(JSON.stringify({ error: { code: "idempotency_mismatch" } }), { status: 422 });
+      }
+      return new Response(JSON.stringify({ id: "ws_new" }), { status: 200 });
+    });
+    await setUp(["One"]);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("check Team before adding them yourself: One");
+    failing = false;
+    await userEvent.click(within(alert).getByRole("button", { name: "Try those again" }));
+    await vi.waitFor(() => expect(currentUrl()).toBe("/w/ws_new/overview"));
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it("shows progress, and caps what it will send at once", async () => {
+    render(<CreateWorkroomForm organization="Org A" />);
+    const add = screen.getByRole("button", { name: "Add an opening" });
+    for (let i = 0; i < 20; i++) await userEvent.click(add);
+    expect(add).toBeDisabled();
+    expect(screen.getByText(/You can add 20 here/)).toBeInTheDocument();
+  });
+
+  it("explains why a blank opening stops creating, and keeps focus when one is removed", async () => {
     render(<CreateWorkroomForm organization="Org A" />);
     await userEvent.type(screen.getByLabelText("Name"), "Launch room");
-    await userEvent.click(screen.getByRole("button", { name: "Add an opening" }));
-    await userEvent.click(screen.getByRole("button", { name: "Add an opening" }));
-    await fill(screen.getByRole("group", { name: "Opening 1" }), "One", "x");
-    await fill(screen.getByRole("group", { name: "Opening 2" }), "Two", "y");
-    await userEvent.click(screen.getByRole("button", { name: "Create workroom" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("created, with 1 of 2 openings");
-    expect(within(alert).getByRole("link")).toHaveAttribute("href", "/w/ws_new/team");
+    const add = screen.getByRole("button", { name: "Add an opening" });
+    await userEvent.click(add);
     expect(screen.getByRole("button", { name: "Create workroom" })).toBeDisabled();
-    expect(sent.filter((r) => r.url === "/api/v1/workspaces")).toHaveLength(1);
+    expect(screen.getByText("Finish or remove each opening above to create this workroom.")).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Opening 1" })).getByText("Give it a title.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Remove opening 1" }));
+    await vi.waitFor(() => expect(add).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Create workroom" })).toBeEnabled();
   });
 
   it("removes an opening by name, and says nothing launches agents", async () => {

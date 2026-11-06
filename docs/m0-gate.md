@@ -291,7 +291,7 @@ Removing someone from an organization now reaches their rooms, as [ADR 0003](adr
 
 ## Known follow-ups
 
-- **Agent role labels from the listing index.** `membership_index` holds a kernel role and no scopes, so a list built from it can't say what an agent can really do. The agent Sheet says "Joined as" and links to the room's Team screen for real access. Showing scopes there needs a read-model change, which the lead session deferred on 2026-11-05. A person's role on the workrooms list is accurate, because a person's access follows their role.
+- **Agent role labels from the listing index.** `membership_index` holds a kernel role and no scopes, so a list built from it can't say what an agent can really do. The agent Sheet says "Listed role" and links to the room's Team screen, where the room's owner and admins see real access. Showing scopes there needs a read-model change, which the lead session deferred on 2026-11-05. A person's role on the workrooms list is accurate, because a person's access follows their role.
 
 ## Gate rulings, 2026-11-05 UTC
 

@@ -84,7 +84,7 @@ describe("the agent Sheet", () => {
   it("UI-06: workroom access is read-only, and Withdraw and Disconnect are there", async () => {
     render(<Screen />);
     await opened();
-    expect(await screen.findByText("Active · Joined as member")).toBeInTheDocument();
+    expect(await screen.findByText("Active · Listed role: member")).toBeInTheDocument();
     expect(screen.getByText(/managed by each workroom's owner and admins/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Withdraw from Platform" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled();
@@ -92,11 +92,11 @@ describe("the agent Sheet", () => {
     expect(screen.queryByRole("button", { name: /role|grant|access/i })).toBeNull();
   });
 
-  it("doesn't imply a joined role is its full access, and links to the room's real access", async () => {
+  it("doesn't imply a listed role is its full access, and links to the room's Team", async () => {
     render(<Screen />);
     await opened();
-    expect(await screen.findByText(/Joined as member/)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "See its access" })).toHaveAttribute("href", expect.stringContaining("/w/ws_mine/team?agent="));
+    expect(await screen.findByText(/Listed role: member/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "See Team in Platform" })).toHaveAttribute("href", "/w/ws_mine/team");
   });
 
   it("UI-06: withdraws from a room the viewer has no role in, which only the inbox knows about", async () => {
@@ -305,7 +305,7 @@ describe("the agent's workrooms", () => {
     special = (url) => (url.endsWith("/rooms") ? Response.json({ rooms: [{ ...ROOMS[1], status: "archived" }], truncated: false }) : undefined);
     render(<Screen />);
     await opened();
-    expect(screen.getByText("Archived · Joined as guest")).toBeInTheDocument();
+    expect(screen.getByText("Archived · Listed role: guest")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Withdraw from Their room" })).toBeEnabled();
   });
 

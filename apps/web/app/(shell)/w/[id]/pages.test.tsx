@@ -80,8 +80,10 @@ describe("Overview", () => {
   it("shows the current lead and whether a person must review", async () => {
     replies.set("/api/v1/workspaces/ws_1/roles", { ok: true, data: { external: false, roles: [{ id: "rol_1", title: "Lead", is_lead: true, holders: ["agt_x"] }] } });
     room.require_person_review = true;
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_x", name: "Podster Admin" }] } });
     render(await Overview({ params }));
-    expect(screen.getByText("agt_x")).toBeInTheDocument();
+    // An agent's chosen name can't pass for Podster's own.
+    expect(screen.getByText(/Podster Admin/).textContent).toMatch(/chosen/i);
     expect(screen.getByText("Required")).toBeInTheDocument();
   });
 
@@ -93,6 +95,10 @@ describe("Overview", () => {
     replies.set("/api/v1/workspaces/ws_1/roles", { ok: true, data: { external: false, roles: [{ id: "rol_1", title: "Lead", is_lead: true, available: true }] } });
     render(await Overview({ params }));
     expect(screen.getByText("Lead: available")).toBeInTheDocument();
+    cleanup();
+    replies.set("/api/v1/workspaces/ws_1/roles", { ok: true, data: { external: false, roles: [{ id: "rol_1", title: "Lead", is_lead: true, available: false }] } });
+    render(await Overview({ params }));
+    expect(screen.getByText("Lead: filled")).toBeInTheDocument();
     cleanup();
     replies.set("/api/v1/workspaces/ws_1/roles", { ok: false, status: 503, code: "x" });
     render(await Overview({ params }));

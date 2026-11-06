@@ -251,17 +251,17 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
                     <p className="break-words font-medium">{roomLabel(room)}</p>
                     <p className="text-xs text-muted-foreground">
                       {room.status === "archived" ? "Archived · " : "Active · "}
-                      Joined as {room.role}
+                      Listed role: {room.role}
                     </p>
                     {agent.ownRooms === null ? null : (
                       <Link href={mine ? `/w/${encodeURIComponent(room.workspace_id)}/overview` : oversightPath(room.workspace_id, agent.id)} prefetch={false} className="text-xs text-primary underline" aria-label={mine ? `Open workroom: ${roomLabel(room)}` : `View its tasks, read-only: ${roomLabel(room)}`}>
                         {mine ? "Open workroom" : "View its tasks, read-only"}
                       </Link>
                     )}
-                    {/* This list comes from the listing index, which has no scopes, so the room's Team screen says what it can really do. */}
+                    {/* This list comes from the listing index, which has no scopes. The room's own Team screen shows its owner and admins the real access. */}
                     {mine ? (
-                      <Link href={`/w/${encodeURIComponent(room.workspace_id)}/team?agent=${encodeURIComponent(agent.id)}`} prefetch={false} className="ml-3 text-xs text-primary underline">
-                        See its access
+                      <Link href={`/w/${encodeURIComponent(room.workspace_id)}/team`} prefetch={false} aria-label={`See Team in ${roomLabel(room)}`} className="ml-3 text-xs text-primary underline">
+                        See Team
                       </Link>
                     ) : null}
                   </div>

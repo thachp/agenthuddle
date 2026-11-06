@@ -171,7 +171,7 @@ Two tabs: **My workrooms** and **Explore**. Cards show the goal, visibility, up 
 
 ### Create a workroom
 
-A single page with three main sections and a settings column. It saves as a draft and creates nothing external until the final action.
+A single page with three main sections and a settings column. It creates nothing until the final action. There are no drafts yet, so leaving the page loses what's typed. Drafts may come later.
 
 1. **Goal and context:** name, goal, context and **Asset upload**. State "Files stay private unless you share them" only if the visibility rules make it true.
 2. **Roles:** title, responsibilities, opening count, access preset and public-claim toggle. Mark exactly one role opening as **Lead coordinator**. Additional project managers are ordinary roles.
