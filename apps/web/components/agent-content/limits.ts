@@ -1,8 +1,8 @@
 /**
- * What one piece of agent text may cost the person reading it. These limits are per body, so a long thread still adds up.
+ * What one piece of agent text may cost the person reading it. These limits are per body, and they don't bound a whole screen.
  *
- * - Nesting is checked before parsing, because the parser itself overflows the stack or takes seconds, and because a tree that
- *   deep can crash the renderer, which no error boundary can catch.
+ * - Quote and list nesting is checked before parsing, because the parser itself overflows the stack or takes seconds, and because
+ *   a tree that deep can crash the renderer, which no error boundary can catch.
  * - Table size is checked after parsing and before conversion, because GFM pads every row to the header's width during
  *   conversion, so a few bytes can ask for millions of cells.
  */
@@ -19,16 +19,24 @@ export const NOTE_CLASS = "text-xs text-muted-foreground";
 /** Wraps instead of scrolling, so plain text never adds a tab stop. */
 export const PLAIN_TEXT_CLASS = "whitespace-pre-wrap";
 
-const CONTAINER = /[ \t]*(?:>|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$)|\[\^[^\]\s]+\]:)/y;
+const CONTAINER = />|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$)|\[\^[^\]\s]+\]:/y;
 
-/** Counts the containers each line could open: markers in any mix, plus indentation, which is how a list nests across lines. It may overcount, and never undercounts by much. */
+/**
+ * Counts the containers each line could open: markers in any mix, plus whitespace anywhere before or between them, since a list
+ * level takes at least two columns however it's reached. It may overcount, and is meant never to undercount.
+ */
 export function nestedTooDeep(text: string) {
   for (const line of text.split(/\r\n|\n|\r/)) {
-    let indent = 0;
-    while (line[indent] === " " || line[indent] === "\t") indent += 1;
-    let depth = line.slice(0, indent).replaceAll("\t", "    ").length >> 1;
-    CONTAINER.lastIndex = 0;
-    while (depth <= MAX_NESTING && CONTAINER.test(line)) depth += 1;
+    let [at, depth] = [0, 0];
+    while (depth <= MAX_NESTING) {
+      let width = 0;
+      for (; line[at] === " " || line[at] === "\t"; at += 1) width += line[at] === "\t" ? 4 : 1;
+      depth += width >> 1;
+      CONTAINER.lastIndex = at;
+      if (!CONTAINER.test(line)) break;
+      at = CONTAINER.lastIndex;
+      depth += 1;
+    }
     if (depth > MAX_NESTING) return true;
   }
   return false;
@@ -49,8 +57,8 @@ const paragraph = (text: string, className: string): MdNode => ({ type: "paragra
 
 const deeperThan = (node: MdNode, limit: number): boolean => limit < 0 || Boolean(node.children?.some((child) => deeperThan(child, limit - 1)));
 
-/** Whether anything would show. Spaces, invisible characters and a link with no text don't count. */
-const shows = (node: MdNode): boolean => node.type === "image" || (typeof node.value === "string" && node.value.replace(/[\s\p{Cf}]/gu, "") !== "") || Boolean(node.children?.some(shows));
+/** Whether anything would show. Spaces, characters meant to be invisible, the braille blank and a link with no text don't count. Other characters that a given font draws as blank still do. */
+const shows = (node: MdNode): boolean => node.type === "image" || node.type === "imageReference" || (typeof node.value === "string" && node.value.replace(/[\s\p{Cf}\p{Default_Ignorable_Code_Point}\u2800]/gu, "") !== "") || Boolean(node.children?.some(shows));
 
 export function remarkBodyLimits() {
   return (tree: MdNode, file: { value: unknown }) => {

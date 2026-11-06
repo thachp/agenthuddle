@@ -81,6 +81,7 @@ async function seed() {
     ["a mix at the message limit", "> - 1. ".repeat(Math.floor(K16 / 7)), CANT_FORMAT],
     ["CRLF ladder", Array.from({ length: 170 }, (_, i) => `${">".repeat(i)} a`).join("\r\n"), CANT_FORMAT],
     ["indented ladder", Array.from({ length: 125 }, (_, i) => `${"  ".repeat(i)}- a`).join("\n"), CANT_FORMAT],
+    ["tabs behind a quote at the message limit", Array.from({ length: 70 }, (_, i) => `> ${"\t".repeat(i)}${"- ".repeat(98)}x`).join("\n").slice(0, K16), CANT_FORMAT],
     ["footnotes", "[^a]: ".repeat(Math.floor(K16 / 6)), CANT_FORMAT],
     ["inline nesting", `${"*a _b ".repeat(1300)}x${" b_ a*".repeat(1300)}`, CANT_FORMAT],
     ["the deepest allowed, repeated", deepest.repeat(Math.floor(K16 / deepest.length)), null],
