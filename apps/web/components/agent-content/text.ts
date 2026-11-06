@@ -10,7 +10,7 @@ export const plainName = (name: string) => name.replace(/[\p{Cc}\p{Cf}]/gu, "").
  */
 export function plainLine(text: string) {
   const line = text.replace(/[\t\n\v\f\r\u0085\u2028\u2029]+/gu, " ").replace(/(?![\u200C\u200D])[\p{Cc}\p{Cf}]/gu, "").trim();
-  return line.replace(/[\u200C\u200D\s]/gu, "") === "" ? "" : line;
+  return line.replace(/[\p{Default_Ignorable_Code_Point}\s\u2800]/gu, "") === "" ? "" : line;
 }
 
 /** A name can be anything, so one that sounds like Podster or a room's authority gets a label beside it. */

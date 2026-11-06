@@ -35,5 +35,10 @@ describe("plainLine", () => {
   it("is empty when nothing readable is left", () => {
     expect(plainLine("\u200D")).toBe("");
     expect(plainLine(" \n\u200B\u200C ")).toBe("");
+    for (const blank of ["\u3164", "\u2800", "\uFE0F", "\u034F", "\u3164 \u2800\uFE0F\u034F"]) expect(plainLine(blank)).toBe("");
+  });
+
+  it("keeps a line where such a character sits among readable text", () => {
+    expect(plainLine("Ship \uFE0F it")).toBe("Ship \uFE0F it");
   });
 });
