@@ -29,7 +29,8 @@ export const canceledChange = (showCanceled: boolean): Changes => ({ canceled: s
 /** The task filter both views share. Hiding canceled tasks is how the Board is arranged, so `onBoard` adds that. */
 export const applyReviewFilter = (tasks: TaskSummary[], state: Pick<TaskViewState, "reviewMine">, me: string) => (state.reviewMine ? tasks.filter((task) => task.status === "submitted" && task.reviewer === me) : tasks);
 /** What the server can narrow "Needs my review" to, so it finds reviews past the loaded pages. `applyReviewFilter` narrows the rest. */
-export const REVIEW_QUERY = "&status=submitted&mine=true";
+export const NEWEST_QUERY = "&order=newest";
+export const REVIEW_QUERY = `&status=submitted&mine=true${NEWEST_QUERY}`;
 
 /** Each task once, where it first appeared, as its latest version. A version only goes up, so an older read can't undo a newer one. */
 export function mergeTasks(...lists: TaskSummary[][]) {
@@ -49,15 +50,13 @@ export const BOARD_COLUMNS: TaskStatus[] = ["open", "offered", "accepted", "subm
 export type TaskGroup = { key: string; label: string; tasks: TaskSummary[] };
 
 /**
- * Newest first within each group, for every view. A room too long for one page is the exception, and stays in the order it
- * loads: the API pages oldest first, so reversing would put each new page above the reader, where they'd never see it.
- * The API can add a state before this does, and those tasks are still the viewer's and still count toward progress, so they
- * get a group of their own rather than vanishing.
+ * Keeps the order it's given, which is newest first from the Tasks page's reads, so a new page lands below what's there
+ * within each group. The API can add a state before this does, and those tasks are still the viewer's and still count
+ * toward progress, so they get a group of their own rather than vanishing.
  */
-export function groupTasks(tasks: TaskSummary[], order: TaskStatus[] = GROUP_ORDER, paged = false): TaskGroup[] {
-  const arrange = (list: TaskSummary[]) => (paged ? list : list.toReversed());
-  const groups = order.map((status) => ({ key: status, label: TASK_STATUS[status].label, tasks: arrange(tasks.filter((task) => task.status === status)) }));
-  const unknown = arrange(tasks.filter((task) => !TASK_STATUSES.includes(task.status)));
+export function groupTasks(tasks: TaskSummary[], order: TaskStatus[] = GROUP_ORDER): TaskGroup[] {
+  const groups = order.map((status) => ({ key: status, label: TASK_STATUS[status].label, tasks: tasks.filter((task) => task.status === status) }));
+  const unknown = tasks.filter((task) => !TASK_STATUSES.includes(task.status));
   return unknown.length > 0 ? [...groups, { key: "unknown", label: "Unknown state", tasks: unknown }] : groups;
 }
 

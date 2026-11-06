@@ -37,8 +37,8 @@ describe("filters and groups", () => {
     expect(onBoard(tasks, { showCanceled: true })).toBe(tasks);
   });
 
-  it("keeps every column in the spec's order, empty ones too, with the newest task first", () => {
-    const groups = groupTasks([task("old", "open"), task("new", "open")], BOARD_COLUMNS);
+  it("keeps every column in the spec's order, empty ones too, and tasks in the order they were read", () => {
+    const groups = groupTasks([task("new", "open"), task("old", "open")], BOARD_COLUMNS);
     expect(groups.map((g) => g.label)).toEqual(["Open", "Awaiting acceptance", "Accepted", "Awaiting review", "Completed"]);
     expect(groups[0].tasks.map((t) => t.id)).toEqual(["new", "old"]);
     expect(groups[1].tasks).toEqual([]);

@@ -2257,10 +2257,18 @@ mod queries {
                 return Err(ApiError::invalid_argument());
             }
         }
+        // Oldest first unless asked. A cursor is the last row's position either way, and no row sits at 0, so 0 is the start.
+        let order = query_str(url, "order");
+        let (position, direction) = match order.as_deref() {
+            None | Some("oldest") => ("seq > ?", "ASC"),
+            Some("newest") if cursor == 0 => ("? = 0", "DESC"),
+            Some("newest") => ("seq < ?", "DESC"),
+            Some(_) => return Err(ApiError::invalid_argument()),
+        };
         // Someone limited to their own tasks only ever receives those, so the query itself is narrowed before policy re-checks each row.
         let narrow = mine || !sees_whole_room(caller);
-        let found = rows(sql, "SELECT * FROM task WHERE seq > ? AND (? IS NULL OR status = ?)
-            AND (? = 0 OR requester_id = ? OR assignee_id = ? OR reviewer_id = ?) ORDER BY seq LIMIT ?", vec![
+        let found = rows(sql, &format!("SELECT * FROM task WHERE {position} AND (? IS NULL OR status = ?)
+            AND (? = 0 OR requester_id = ? OR assignee_id = ? OR reviewer_id = ?) ORDER BY seq {direction} LIMIT ?"), vec![
             cursor.into(), opt(&status), opt(&status), i64::from(narrow).into(), caller.id.as_str().into(), caller.id.as_str().into(), caller.id.as_str().into(), PAGE_SIZE.into(),
         ])?;
         let mut tasks = Vec::new();

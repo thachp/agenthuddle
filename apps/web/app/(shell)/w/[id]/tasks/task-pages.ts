@@ -95,10 +95,10 @@ export function useTaskPages(workspace: string, filter: string, start: number | 
             setStored((before) => {
               const now = before.generation === generation ? before : nothingHeld(generation);
               if (!replace) return { ...now, tasks: [...now.tasks, ...rows], firstPageRows: now.pages === 0 ? rows.length : now.firstPageRows, laterFrom: now.pages === 1 ? from : now.laterFrom, cursor: next, pages: now.pages + 1, announce: { count: rows.length }, lost: false };
-              // Later pages stay, as the reader's place, only if the new first page reaches where they start. An old task can join a
-              // filtered list at a low position, which ends the first page sooner, and a row between the two would then be on
-              // neither and nothing would fetch it. Rows past that point overlap at most, and `mergeTasks` removes those.
-              const keepLater = next !== null && now.laterFrom !== null && next >= now.laterFrom;
+              // Later pages stay, as the reader's place, only if the new first page reaches where they start. Rows run newest first,
+              // so a task joining the list ends the first page earlier, at a higher position, and a row between the two would then
+              // be on neither and nothing would fetch it. Rows past that point overlap at most, and `mergeTasks` removes those.
+              const keepLater = next !== null && now.laterFrom !== null && next <= now.laterFrom;
               return { ...now, tasks: keepLater ? [...rows, ...now.tasks.slice(now.firstPageRows)] : rows, firstPageRows: rows.length, laterFrom: keepLater ? now.laterFrom : null, cursor: keepLater ? now.cursor : next, pages: keepLater ? now.pages : 1, announce: null, lost: false };
             });
             setStatus("idle");

@@ -372,7 +372,8 @@ paths:
       parameters:
         - { name: status, in: query, schema: { $ref: "#/components/schemas/TaskStatus" } }
         - { name: mine, in: query, schema: { type: boolean } }
-        - { name: cursor, in: query, schema: { type: integer } }
+        - { name: cursor, in: query, description: "The next_cursor of the page before, in the same order. 0 or absent is the start.", schema: { type: integer } }
+        - { name: order, in: query, description: "Oldest first unless asked.", schema: { type: string, enum: [oldest, newest] } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
     post:
       operationId: createTask

@@ -13,7 +13,7 @@ import { useTaskPages } from "./task-pages";
 import { TaskProgress } from "./task-progress";
 import { canCreateTask, isArchivedRoom, roleOf, summaryOf, type Names, type Room, type TaskSummary } from "./task-model";
 import { TaskSheet } from "./task-sheet";
-import { applyReviewFilter, canceledChange, countText, hrefWithChanges, isLimitedViewer, mergeTasks, onBoard, readViewState, REVIEW_QUERY, reviewChange, viewChange, type TaskView } from "./task-views";
+import { applyReviewFilter, canceledChange, countText, hrefWithChanges, isLimitedViewer, mergeTasks, NEWEST_QUERY, onBoard, readViewState, REVIEW_QUERY, reviewChange, viewChange, type TaskView } from "./task-views";
 
 /**
  * Changing the view or a filter rearranges tasks the page already has, so it only moves the URL. Next and vinext both let
@@ -57,18 +57,24 @@ function useFocusFollowsTask() {
 }
 
 /**
- * Counts up when later pages can't be trusted. Tasks are never deleted and the API pages oldest first, so a first page only
- * ever grows at its end for someone who sees the same tasks. If it changes any other way, or the viewer's role does, they're
- * seeing a narrower or wider room, and the list answers that with a 200 and no sign of it. Rows read before it would stay.
+ * What the first page's reads say about the rows already on screen. Tasks are never deleted and reads run newest first, so
+ * for someone who sees the same tasks, a first page only ever gains rows at its start, pushing others off its end. Those
+ * rows are kept, because a later page already read starts after where they were and nothing else would hold them.
+ * If it changes any other way, or the viewer's role does, they're seeing a narrower or wider room, and the list answers
+ * that with a 200 and no sign of it. Then `generation` counts up, and nothing read before it can be trusted.
  */
-function useListGeneration(firstPage: TaskSummary[], role: string | undefined) {
+function useFirstPageHistory(firstPage: TaskSummary[], role: string | undefined) {
+  const [seen, setSeen] = useState({ rows: firstPage, role, generation: 0, pushedOff: [] as TaskSummary[] });
+  if (seen.rows === firstPage && seen.role === role) return seen;
   const ids = firstPage.map((task) => task.id);
-  const [seen, setSeen] = useState({ ids, role, generation: 0 });
-  const sameView = seen.role === role && seen.ids.every((id, index) => ids[index] === id);
-  if (sameView && seen.ids.length === ids.length) return seen.generation;
-  const next = { ids, role, generation: sameView ? seen.generation : seen.generation + 1 };
+  const heldIds = seen.rows.map((task) => task.id);
+  const at = ids.indexOf(heldIds[0]);
+  const sameView = seen.role === role && (heldIds.length === 0 || (at >= 0 && ids.length >= heldIds.length && ids.slice(at).every((id, index) => id === heldIds[index])));
+  const next = sameView
+    ? { rows: firstPage, role, generation: seen.generation, pushedOff: [...seen.rows.filter((task) => !ids.includes(task.id)), ...seen.pushedOff] }
+    : { rows: firstPage, role, generation: seen.generation + 1, pushedOff: [] };
   setSeen(next);
-  return next.generation;
+  return next;
 }
 
 /** Every read makes new names, and the same names shouldn't render thousands of memoized rows again. */
@@ -100,8 +106,8 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
   const role = roleOf(room, me);
   const canCreate = canCreateTask(role) && !isArchivedRoom(room);
 
-  const generation = useListGeneration(firstPage, role);
-  const roomPages = useTaskPages(room.id, "", cursor, generation, firstPage);
+  const { generation, pushedOff } = useFirstPageHistory(firstPage, role);
+  const roomPages = useTaskPages(room.id, NEWEST_QUERY, cursor, generation, firstPage);
   // Only a room that fits on one page is read whole every time. Any other can have reviews this screen hasn't read, so the
   // filter asks the server, each time it's turned on and each time the page reads again.
   const paged = cursor !== null;
@@ -128,7 +134,9 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
   const openedNow = opened.generation === generation ? opened.tasks : {};
   const current = (list: TaskSummary[]) => list.map((task) => (openedNow[task.id] && openedNow[task.id].version > task.version ? openedNow[task.id] : task));
 
-  const tasks = current(mergeTasks(firstPage, roomPages.tasks, created.generation === generation ? created.tasks : []));
+  // A created task goes on top until a read of the first page has it, which then puts it wherever it belongs.
+  const createdNow = created.generation === generation ? created.tasks.filter((task) => !firstPage.some((row) => row.id === task.id)) : [];
+  const tasks = current(mergeTasks(createdNow, firstPage, pushedOff, roomPages.tasks));
   const filtered = askServer ? applyReviewFilter(current(mergeTasks(tasks, reviewPages.tasks)), state, me) : applyReviewFilter(tasks, state, me);
   const shown = state.view === "board" ? onBoard(filtered, state) : filtered;
   const canceledHere = filtered.length - onBoard(filtered, { showCanceled: false }).length;
@@ -150,7 +158,7 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
         <h1 className="text-2xl font-semibold">Tasks</h1>
         <p className="text-muted-foreground">Offered, accepted and submitted work, and what needs your review.</p>
       </div>
-      {canCreate ? <NewTask room={room} me={me} names={names} onTask={(task) => setCreated((held) => ({ generation, tasks: [...(held.generation === generation ? held.tasks : []), summaryOf(task)] }))} /> : null}
+      {canCreate ? <NewTask room={room} me={me} names={names} onTask={(task) => setCreated((held) => ({ generation, tasks: [summaryOf(task), ...(held.generation === generation ? held.tasks : [])] }))} /> : null}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <nav aria-label="Task view">
           <ul className="flex w-fit gap-1 rounded-lg border p-1">
@@ -190,7 +198,7 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
       <TaskProgress tasks={filtered} partial={more} state={state} limited={isLimitedViewer(role)} />
       {tasks.length === 0 ? <p className="text-muted-foreground">{canCreate ? "No tasks yet. Create one and offer it to an agent in this workroom." : "No tasks you can see here yet. Tasks you're part of will show up here."}</p> : null}
       {tasks.length > 0 && filtered.length === 0 ? <p className="text-muted-foreground">{more ? "None of the loaded tasks are waiting for your review. There may be more that this page doesn't reach." : "No submissions are waiting for your review in this workroom."}</p> : null}
-      {state.view === "board" ? <TaskBoard tasks={shown} partial={more} paged={paged} showCanceled={state.showCanceled} selected={search.get("task")} me={me} names={names} /> : <TaskList tasks={shown} partial={more} paged={paged} me={me} names={names} />}
+      {state.view === "board" ? <TaskBoard tasks={shown} partial={more} showCanceled={state.showCanceled} selected={search.get("task")} me={me} names={names} /> : <TaskList tasks={shown} partial={more} me={me} names={names} />}
       {state.view === "board" && (state.showCanceled || canceledHere > 0) ? (
         <p className="text-sm text-muted-foreground">
           {state.showCanceled ? null : <>Canceled tasks hidden ({countText(canceledHere, more)}). </>}

@@ -646,6 +646,30 @@ describe("review findings", () => {
     expect((await api(LEAD, "POST", `${path}/assign`, { version: 1, assignee: CAROL.id })).body.assignee).toBe(CAROL.id);
   });
 
+  it("lists tasks newest first when asked, a page at a time with no row twice, and oldest first otherwise", async () => {
+    const { tasks } = await room();
+    const made: string[] = [];
+    for (let i = 0; i < 52; i += 1) made.push((await offer(tasks)).id);
+    const ids = (body: { tasks: { id: string }[] }) => body.tasks.map((t) => t.id);
+
+    const first = (await api(LEAD, "GET", `${tasks}?order=newest`)).body;
+    expect(ids(first)).toEqual(made.toReversed().slice(0, 50));
+    expect(first.next_cursor).toEqual(expect.any(Number));
+    const second = (await api(LEAD, "GET", `${tasks}?order=newest&cursor=${first.next_cursor}`)).body;
+    expect(ids(second)).toEqual(made.toReversed().slice(50));
+    expect(second.next_cursor).toBeNull();
+
+    // 0 is the start in either order, so a caller holding no cursor can say so.
+    expect(ids((await api(LEAD, "GET", `${tasks}?order=newest&cursor=0`)).body)).toEqual(ids(first));
+    // Filters apply to the same rows. BOB is every task's assignee.
+    expect(ids((await api(BOB, "GET", `${tasks}?order=newest&mine=true&status=offered`)).body)).toEqual(ids(first));
+    expect((await api(LEAD, "GET", `${tasks}?order=newest&status=submitted`)).body.tasks).toEqual([]);
+
+    expect(ids((await api(LEAD, "GET", tasks)).body)).toEqual(made.slice(0, 50));
+    expect(ids((await api(LEAD, "GET", `${tasks}?order=oldest`)).body)).toEqual(made.slice(0, 50));
+    expect((await api(LEAD, "GET", `${tasks}?order=sideways`)).code).toBe("invalid_argument");
+  });
+
   it("refuses malformed fields instead of ignoring them", async () => {
     const { tasks } = await room();
     expect((await api(LEAD, "POST", tasks, { title: "x", instructions: "y", assignee: 5 })).code).toBe("invalid_argument");
