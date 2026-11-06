@@ -401,7 +401,7 @@ describe("My workrooms", () => {
   it("keeps a multi-line goal's words apart, and shows no goal when nothing readable is left", async () => {
     const roles = { count: 0, with_openings: 0, filled: 0, capacity: 0, listed: [] };
     const row = (workspace_id: string, goal: string) => ({ workspace_id, workspace_name: workspace_id, role: "member", card: { goal, goal_cut: false, external: false, roles } });
-    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [row("a", "Ship the beta\nThen write docs"), row("b", "\u200D")] } });
+    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [row("a", "Ship the beta\nThen write docs"), row("b", "\u200D"), row("c", "\u3164"), row("d", "\u2800\uFE0F\u034F")] } });
     render(await MyWorkrooms());
     expect(screen.getByText(/Ship the beta Then write docs/)).toBeInTheDocument();
     expect(screen.getAllByText(/Goal:/)).toHaveLength(1);
@@ -425,6 +425,7 @@ describe("My workrooms", () => {
     expect(past).not.toMatch(/aren't in a workroom/);
     expect(past).toMatch(/No workrooms to show on this page/);
     expect(await empty({})).toMatch(/aren't in a workroom/);
+    expect(await empty({}, { offset: "0" })).toMatch(/aren't in a workroom/);
   });
 
   it("says so when a room can't answer, and keeps the rest of the row", async () => {

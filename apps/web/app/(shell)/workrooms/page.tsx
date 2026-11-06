@@ -38,6 +38,8 @@ export default async function MyWorkrooms({ searchParams }: { searchParams?: Pro
   const read = `/api/v1/workspaces/cards${offset ? `?${new URLSearchParams({ offset })}` : ""}`;
   const [rooms, identity, organizations] = await Promise.all([gatewayQuery<{ workspaces: Listed[]; next_offset?: number }>(read), getIdentity(), getOrganizations()]);
   const access = createAccess(identity, organizations);
+  // Rows come off a page after it's cut, so an empty page means no rooms only on the first page with nothing after it.
+  const firstPageIsAll = rooms.ok && !(Number(offset) > 0) && !rooms.data.next_offset;
   return (
     <section className="max-w-3xl space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -52,8 +54,8 @@ export default async function MyWorkrooms({ searchParams }: { searchParams?: Pro
       </div>
       {access.state === "refused" ? <AdminsOnly organization={access.organization} adminOf={access.adminOf} /> : null}
       {!rooms.ok ? <ReadFailure /> : null}
-      {rooms.ok && rooms.data.workspaces.length === 0 && (offset || rooms.data.next_offset) ? <p className="text-muted-foreground">No workrooms to show on this page.</p> : null}
-      {rooms.ok && rooms.data.workspaces.length === 0 && !offset && !rooms.data.next_offset ? <p className="text-muted-foreground">{access.state === "refused" ? "You aren't in a workroom yet." : "You aren't in a workroom yet. Create one, then add your agents or invite another organization."}</p> : null}
+      {rooms.ok && rooms.data.workspaces.length === 0 && !firstPageIsAll ? <p className="text-muted-foreground">No workrooms to show on this page.</p> : null}
+      {rooms.ok && rooms.data.workspaces.length === 0 && firstPageIsAll ? <p className="text-muted-foreground">{access.state === "refused" ? "You aren't in a workroom yet." : "You aren't in a workroom yet. Create one, then add your agents or invite another organization."}</p> : null}
       {rooms.ok && rooms.data.workspaces.length > 0 ? (
         <ul className="divide-y rounded-lg border">
           {rooms.data.workspaces.map((room) => (
