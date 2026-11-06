@@ -93,7 +93,17 @@ export function SheetLink({ param, target, onClick, ...props }: { param: string;
   if (useContext(InsideSheet)) throw new Error("A Sheet can't open another Sheet. Close it, then open the other.");
   const pathname = usePathname();
   const search = useSearchParams();
-  return <Link {...props} onClick={(event) => { lastLauncher = event.currentTarget; onClick?.(event); }} href={hrefWith(pathname, new URLSearchParams(search.toString()), param, target)} scroll={false} prefetch={false} data-sheet-launcher={launcherKey(param, target)} />;
+  const router = useRouter();
+  const href = hrefWith(pathname, new URLSearchParams(search.toString()), param, target);
+  return <Link {...props} onClick={(event) => {
+    lastLauncher = event.currentTarget;
+    onClick?.(event);
+    // An SVG link's `target` is an object, which vinext's Link reads as a target and leaves to the browser, reloading the page.
+    if (event.currentTarget instanceof SVGElement && !event.defaultPrevented && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      router.push(href, { scroll: false });
+    }
+  }} href={href} scroll={false} prefetch={false} data-sheet-launcher={launcherKey(param, target)} />;
 }
 
 function focusLauncher(param: string, target: string) {
