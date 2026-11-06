@@ -569,7 +569,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 62 | Who edits a task's plan | **Decided:** the task's requester or a human admin, and only someone who sees the whole room. A person or agent limited to their own tasks can't, because refusing a cycle could reveal a hidden link. Agents get it under the same rule | Planning |
 | 63 | Plan edits on finished tasks | **Decided:** a dependency belongs to its successor. Refused if the successor is terminal or the room is archived. Allowed in `submitted`, and removing a canceled predecessor is allowed. A plan edit never re-offers a task | Planning |
 | 64 | Conflicting plan edits | **Decided:** one `plan_revision` per room, and plan writes leave `task.version` alone, so an estimate edit can't fail an accept or approval in progress | Planning |
-| 65 | Plan commands | **Decided:** one `set_task_plan`, with duration and the full predecessor list, separate from `update_task`. It's audited and wakes nobody. At most 50 predecessors per task and 5,000 edges per room. Built so the limit counts only unfinished tasks' edges, because a finished task's can't be edited and would otherwise fill a room for good, and an edit is refused if its predecessors have over 25,000 ancestor edges when any is being added, to bound the cycle check. **Both await the owner's confirmation.** | Planning |
+| 65 | Plan commands | **Decided:** one `set_task_plan`, with duration and the full predecessor list, separate from `update_task`. It's audited and wakes nobody. At most 50 predecessors per task and 5,000 edges across unfinished tasks ([decision 74](#decisions-needed)) | Planning |
 | 66 | Plan read | **Decided:** one read returning slim rows, edges, the revision and `complete`, with the forecast worked out in `crates/core`. `complete` is false for anyone who doesn't see the whole room and for rooms over 3,000 tasks, and those get no forecast. Oversight gets no plan read at first | Planning |
 | 67 | Task duration | **Decided:** whole working days, 1 to 260. Blank means Not estimated, and there's no zero | Planning |
 | 68 | Baseline or live forecast | **Decided:** baseline only, labeled "Baseline plan", with the time the plan last changed. A live forecast shows as unavailable and comes after real use, starting with 7 days as stale | Planning |
@@ -578,7 +578,13 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 71 | How the Gantt is drawn | **Decided:** table first, with CSS grid and SVG and no library | Planning |
 | 72 | Capacity | **Decided:** fixed text, "No capacity/resource leveling", with no data behind it | Planning |
 | 73 | Left out of the first Gantt | **Decided:** a forecast from the visible subset, not-before dates and dragging bars | Planning |
+| 74 | What the 5,000-edge limit counts | **Decided:** unfinished tasks' edges only, because a finished task's can't be edited and would otherwise fill a room for good | Planning |
+| 75 | How far a cycle check walks | **Decided:** an edit that adds a predecessor is refused if its predecessors have over 25,000 ancestor edges, which bounds the check at about 100 ms, measured locally. A chain that long can't take a new successor | Planning |
+| 76 | Whether guests see planned lines | **Decided:** yes, guests keep seeing planned lines | M1 |
+| 77 | A plan read that fits an agent | **Decided:** `get_plan` gets an unfinished-only option, built as `scope=unfinished`. The name is the implementer's choice. The default read doesn't change | Planning |
 ## M2 and planning decisions, November 6, 2026
+
+- The owner accepted the open plan questions, now decisions 74 to 77, saying "accept all".
 
 - The owner accepted the M2 and task-planning recommendations, now decisions 50 to 60 and 62 to 73, saying "i agreed", along with automatic loading and a visible **Load more** button for long lists, now decision 61.
 - None of it is built. The design behind decisions 50 to 59 is proposed in [ADR 0006](../adr/0006-uploads-and-scanning.md), and the order of work is in the [M2 plan](../m2-plan.md).

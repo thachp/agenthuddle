@@ -6074,6 +6074,81 @@ describe("task plans", () => {
     expect((await api(worker, "PUT", `${tasks}/${mine.body.id}/plan`, { ...body, plan_revision: after.plan_revision })).code).toBe("not_allowed");
   });
 
+  describe("scope=unfinished", () => {
+    const unfinished = async (who: Who, id: string) => {
+      const r = await api(who, "GET", `${planOf(id)}?scope=unfinished`);
+      expect(r.status).toBe(200);
+      return r.body as { complete: boolean; tasks: any[]; edges: any[]; plan_revision?: number; plan_changed_at?: number };
+    };
+    const finish = (tasks: string, t: any) => api(LEAD, "POST", `${tasks}/${t.id}/cancel`, { version: t.version, reason: "no" });
+
+    it("leaves out finished tasks, keeps each unfinished one's whole predecessor list and revision, and is never complete", async () => {
+      const { id, tasks } = await room();
+      const [done, open] = [await offer(tasks, { title: "Done" }), await offer(tasks, { title: "Open" })];
+      await set(LEAD, tasks, open.id, id, { predecessors: [done.id], duration_days: 2 });
+      expect((await finish(tasks, done)).status).toBe(200);
+      const small = await unfinished(OWNER, id);
+      expect(small.complete).toBe(false);
+      expect(small.tasks.map((t) => t.id)).toEqual([open.id]);
+      expect(small.tasks[0].duration_days).toBe(2);
+      // A finished predecessor is only an ID, and the list is whole, so an edit from this can't erase it.
+      expect(small.edges).toEqual([{ predecessor: done.id, successor: open.id }]);
+      expect(small.plan_revision).toBe(1);
+      const predecessors = small.edges.map((e) => e.predecessor);
+      expect((await set(LEAD, tasks, open.id, id, { predecessors, duration_days: 3 })).status).toBe(200);
+      expect((await unfinished(OWNER, id)).edges).toEqual(small.edges);
+      // A room with nothing finished still says it isn't complete, so the answer doesn't depend on what's there.
+      const fresh = await room();
+      await offer(fresh.tasks, { title: "One" });
+      expect((await unfinished(OWNER, fresh.id)).complete).toBe(false);
+    });
+
+    it("leaves the default read as it was", async () => {
+      const { id, tasks } = await room();
+      const [done, open] = [await offer(tasks, { title: "Done" }), await offer(tasks, { title: "Open" })];
+      await set(LEAD, tasks, open.id, id, { predecessors: [done.id] });
+      await finish(tasks, done);
+      const full = await read(OWNER, id);
+      expect(full.complete).toBe(true);
+      expect(full.tasks.map((t) => t.id).sort()).toEqual([done.id, open.id].sort());
+    });
+
+    it("shows a narrowed viewer only tasks they're named on and edges between those, with no revision", async () => {
+      const { id, tasks } = await room();
+      const [mine, also, gone] = [await offer(tasks, { assignee: BOB.id, title: "Mine" }), await offer(tasks, { assignee: BOB.id, title: "Also mine" }), await offer(tasks, { assignee: BOB.id, title: "Mine, gone" })];
+      const hidden = await offer(tasks, { assignee: CAROL.id, title: "Secret project" });
+      const finishedHidden = await offer(tasks, { assignee: CAROL.id, title: "Secret, finished" });
+      await set(LEAD, tasks, also.id, id, { predecessors: [mine.id, hidden.id, gone.id, finishedHidden.id], duration_days: 4 });
+      await finish(tasks, gone);
+      await finish(tasks, finishedHidden);
+      const small = await unfinished(BOB, id);
+      const full = await read(BOB, id);
+      expect(small.complete).toBe(false);
+      expect(small).not.toHaveProperty("plan_revision");
+      expect(small).not.toHaveProperty("plan_changed_at");
+      expect(small.tasks.map((t) => t.id).sort()).toEqual([mine.id, also.id].sort());
+      // Both ends have to be listed, so their own finished predecessor drops out too.
+      expect(small.edges).toEqual([{ predecessor: mine.id, successor: also.id }]);
+      for (const t of small.tasks) expect(full.tasks).toContainEqual(t);
+      for (const e of small.edges) expect(full.edges).toContainEqual(e);
+      for (const secret of [hidden.id, finishedHidden.id, "Secret", gone.id]) expect(JSON.stringify(small)).not.toContain(secret);
+      expect((await api(OUTSIDER, "GET", `${planOf(id)}?scope=unfinished`)).status).toBe(404);
+    });
+
+    it("refuses any other value, and reads through the status index however many finished tasks name a viewer", async () => {
+      const { id, tasks } = await room();
+      await offer(tasks, { assignee: BOB.id, title: "Mine" });
+      for (const scope of ["finished", "", "UNFINISHED"]) expect((await api(OWNER, "GET", `${planOf(id)}?scope=${scope}`)).code).toBe("invalid_argument");
+      await seedFinished(id, 6000);
+      await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`UPDATE task SET assignee_id = '${BOB.id}'`));
+      const costs = (await api(BOB, "GET", `${planOf(id)}/costs`)).body;
+      expect(costs.own_unfinished.plan).toContain("task_status");
+      expect(costs.own_unfinished.rows).toBe(1);
+      expect(costs.own_unfinished.rows_read).toBeLessThan(20);
+      expect((await unfinished(BOB, id)).tasks).toHaveLength(1);
+    });
+  });
+
   it("gives a room from before this migration an empty plan", async () => {
     const { id, tasks } = await room();
     const a = await offer(tasks, { title: "A" });

@@ -230,6 +230,13 @@ fn own_tasks() -> String {
     )
 }
 
+/// From the status index, which holds at most what a room lets stay unfinished, however many finished tasks name this viewer.
+fn own_unfinished_tasks() -> String {
+    format!(
+        "SELECT {SLIM} FROM task INDEXED BY task_status WHERE status IN {UNFINISHED} AND (requester_id = ?1 OR assignee_id = ?1 OR reviewer_id = ?1) ORDER BY seq DESC"
+    )
+}
+
 const EDGES_FROM: &str = "SELECT predecessor_id, successor_id FROM task_dependency WHERE successor_id IN (SELECT value FROM json_each(?1)) AND +predecessor_id IN (SELECT value FROM json_each(?1)) LIMIT ?2";
 
 fn pair(row: &Value) -> Option<(String, String)> {
@@ -245,10 +252,28 @@ fn pair(row: &Value) -> Option<(String, String)> {
 /// examined, at 50 per task on 3,000 tasks, because the query filters out hidden predecessors before the limit counts. That
 /// doesn't depend on the room's history. Someone limited to their own tasks gets those, with the edges between them, and no
 /// revision or time, because those move with tasks they can't see.
-pub(super) fn read(sql: &SqlStorage, caller: &Caller) -> R<Value> {
+///
+/// `scope=unfinished` leaves out finished tasks, so `complete` is always false, though someone who sees the whole room still
+/// gets what's needed to edit: every unfinished task, each one's whole predecessor list, and the revision.
+pub(super) fn read(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
     let whole = sees_whole_plan(caller);
     let room = MAX_PLAN_TASKS + 1;
-    let found = if whole {
+    // Smaller, for a reader such as an agent's tool. Someone narrowed still gets only tasks they're named on, and edges with both
+    // ends among those. It has no per-column cut, so it can list an old task of theirs the full read's newest rows left out.
+    let unfinished_only = match query_str(url, "scope").as_deref() {
+        None => false,
+        Some("unfinished") => true,
+        Some(_) => return Err(ApiError::invalid_argument()),
+    };
+    let found = if unfinished_only && whole {
+        rows(sql, &unfinished_tasks(), vec![])?
+    } else if unfinished_only {
+        rows(
+            sql,
+            &own_unfinished_tasks(),
+            vec![caller.id.as_str().into()],
+        )?
+    } else if whole {
         let mut found = rows(sql, &unfinished_tasks(), vec![])?;
         let left = (room - found.len() as i64).max(0);
         found.extend(rows(sql, &finished_tasks(), vec![left.into()])?);
@@ -276,7 +301,11 @@ pub(super) fn read(sql: &SqlStorage, caller: &Caller) -> R<Value> {
     let (mut listed, cut): (Vec<(String, String)>, bool) = if whole {
         let columns = "d.predecessor_id, d.successor_id";
         let unfinished = rows(sql, &edges_of(UNFINISHED, columns), vec![])?;
-        let finished = rows(sql, FINISHED_EDGES, vec![edge_limit.into()])?;
+        let finished = if unfinished_only {
+            vec![]
+        } else {
+            rows(sql, FINISHED_EDGES, vec![edge_limit.into()])?
+        };
         let cut = finished.len() as i64 > MAX_PLAN_EDGES;
         // Someone who sees the whole room can have a predecessor too old to be listed, because it's still part of this plan.
         let edges = unfinished
@@ -309,7 +338,7 @@ pub(super) fn read(sql: &SqlStorage, caller: &Caller) -> R<Value> {
         .iter()
         .map(|(from, to)| json!({ "predecessor": from, "successor": to }))
         .collect();
-    let mut plan = json!({ "complete": whole && !over && !cut, "tasks": tasks, "edges": edges });
+    let mut plan = json!({ "complete": whole && !over && !cut && !unfinished_only, "tasks": tasks, "edges": edges });
     if whole {
         let (revision, changed_at) = plan_state(sql)?;
         plan["plan_revision"] = json!(revision);
@@ -341,6 +370,7 @@ pub(super) fn read_costs(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Va
         "unfinished": cost(&unfinished_tasks(), vec![])?,
         "finished": cost(&finished_tasks(), vec![room.into()])?,
         "own": cost(&own_tasks(), vec![id.into(), room.into()])?,
+        "own_unfinished": cost(&own_unfinished_tasks(), vec![id.into()])?,
         "edges_unfinished": cost(&edges_of(UNFINISHED, "d.predecessor_id, d.successor_id"), vec![])?,
         "edges_finished": cost(FINISHED_EDGES, vec![(MAX_PLAN_EDGES + 1).into()])?,
         "edges_from": cost(EDGES_FROM, vec![ids.as_str().into(), (MAX_PLAN_EDGES + 1).into()])?,
