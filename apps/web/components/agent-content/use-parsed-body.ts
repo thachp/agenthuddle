@@ -1,6 +1,6 @@
 import { flushSync } from "react-dom";
-import { useEffect, useMemo, useState, type RefObject } from "react";
-import { APPLY_ANYWHERE_NODES, parsesAtOnce } from "./limits";
+import { useEffect, useMemo, useState, useSyncExternalStore, type RefObject } from "react";
+import { APPLY_ANYWHERE_NODES, APPLY_OUT_OF_VIEW_NODES, parsesAtOnce } from "./limits";
 import { parseBody, type ParsedBody } from "./parse";
 import { cachedParse, prioritizeParse, requestParse } from "./parse-client";
 
@@ -11,6 +11,12 @@ const AHEAD = "1500px 0px";
 export type BodyState = { kind: "pending" } | { kind: "failed" } | { kind: "ready"; tree: ParsedBody["tree"] };
 
 const PENDING: BodyState = { kind: "pending" };
+
+const noSubscription = () => () => {};
+const notYetOnTheServer = () => undefined;
+
+/** Results applied out of view on this page, so they can be reached with Tab without adding up without limit. */
+let outOfViewNodes = 0;
 
 const stateOf = (parsed: ParsedBody | null): BodyState => (parsed ? { kind: "ready", tree: parsed.tree } : { kind: "failed" });
 
@@ -50,9 +56,14 @@ export function useParsedBody(text: string, article: RefObject<HTMLElement | nul
     if (atOnce || !element) return;
     const scroller = scrollerOf(element);
     let [isNear, result, done]: [boolean, ParsedBody | null | undefined, boolean] = [false, undefined, false];
+    let counted = 0;
     const applyIfDue = () => {
       if (done || result === undefined) return;
-      if (result && !isNear && result.nodes > APPLY_ANYWHERE_NODES) return;
+      if (result && !isNear && result.nodes > APPLY_ANYWHERE_NODES) {
+        if (outOfViewNodes + result.nodes > APPLY_OUT_OF_VIEW_NODES) return;
+        counted = result.nodes;
+        outOfViewNodes += counted;
+      }
       done = true;
       observer?.disconnect();
       const state = stateOf(result);
@@ -77,15 +88,17 @@ export function useParsedBody(text: string, article: RefObject<HTMLElement | nul
     });
     return () => {
       done = true;
+      outOfViewNodes -= counted;
       observer?.disconnect();
       stop();
     };
   }, [text, atOnce, article]);
 
+  // Seen before, such as a Sheet opened again. The server's snapshot is what hydration uses, so a cached result can't mismatch the server's plain text.
+  const cached = useSyncExternalStore(noSubscription, () => (atOnce ? undefined : cachedParse(text)), notYetOnTheServer);
   if (atOnce) return atOnce;
   if (applied?.text === text) return applied.state;
-  // Seen before, such as a Sheet opened again. Only what's cheap to apply, so this can't block either.
-  const cached = cachedParse(text);
+  // Only what's cheap to apply, so this can't block either.
   if (cached === null || (cached && cached.nodes <= APPLY_ANYWHERE_NODES)) return stateOf(cached);
   return PENDING;
 }

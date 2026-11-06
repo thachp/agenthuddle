@@ -1,50 +1,71 @@
-import { PARSE_TIME_LIMIT_MS } from "./limits";
+import { MAX_CACHED_NODES, PARSE_TIME_LIMIT_MS, WORKER_RETRY_AFTER_MS, WORKER_START_LIMIT_MS } from "./limits";
 import type { ParsedBody } from "./parse";
 
 type Listener = (parsed: ParsedBody | null) => void;
 type Reply = { ready: true } | { text: string; parsed: ParsedBody | null };
 
-/** Finished results, so nothing is parsed twice. A worker's result is data, and these bound what it can hold on to. */
+/** Finished results, so nothing is parsed twice. Bounded by size as well as count, because a result can be large. */
 const MAX_CACHED = 300;
 const cache = new Map<string, ParsedBody | null>();
+let cachedNodes = 0;
 const waiting = new Map<string, Set<Listener>>();
 const near = new Set<string>();
 
 let worker: Worker | null = null;
 let ready = false;
-let unavailable = false;
+let startsFailed = 0;
+let unavailableUntil = 0;
 let current: string | null = null;
 let timer: ReturnType<typeof setTimeout> | undefined;
 
-function settle(text: string, parsed: ParsedBody | null) {
-  if (cache.size >= MAX_CACHED) cache.delete(cache.keys().next().value as string);
+const unavailable = () => Date.now() < unavailableUntil;
+
+function remember(text: string, parsed: ParsedBody | null) {
   cache.set(text, parsed);
+  cachedNodes += parsed?.nodes ?? 0;
+  while (cache.size > MAX_CACHED || cachedNodes > MAX_CACHED_NODES) {
+    const oldest = cache.keys().next().value as string;
+    cachedNodes -= cache.get(oldest)?.nodes ?? 0;
+    cache.delete(oldest);
+  }
+}
+
+function notify(text: string, parsed: ParsedBody | null) {
   const listeners = waiting.get(text);
   waiting.delete(text);
   near.delete(text);
   listeners?.forEach((listener) => listener(parsed));
 }
 
-function startWorker() {
+function settle(text: string, parsed: ParsedBody | null) {
+  remember(text, parsed);
+  notify(text, parsed);
+}
+
+function startWorker(): void {
   ready = false;
+  let started: Worker;
   try {
-    worker = new Worker(new URL("./parse.worker.ts", import.meta.url), { type: "module" });
+    started = new Worker(new URL("./parse.worker.ts", import.meta.url), { type: "module" });
   } catch {
-    return giveUp();
+    return startFailed();
   }
-  worker.onmessage = ({ data }: MessageEvent<Reply>) => {
+  worker = started;
+  timer = setTimeout(startFailed, WORKER_START_LIMIT_MS);
+  started.onmessage = ({ data }: MessageEvent<Reply>) => {
+    clearTimeout(timer);
     if ("ready" in data) {
       ready = true;
+      startsFailed = 0;
     } else {
-      clearTimeout(timer);
       current = null;
       settle(data.text, data.parsed);
     }
     pump();
   };
-  worker.onerror = () => {
-    // Before it's ready this is a worker that can't load, such as one a policy refuses. After, it's one body that broke it.
-    if (!ready) return giveUp();
+  started.onerror = () => {
+    // Before it's ready this is a worker that can't load, such as one a policy refuses or whose file is gone. After, it's one body that broke it.
+    if (!ready) return startFailed();
     const failed = current;
     endWorker();
     if (failed !== null) settle(failed, null);
@@ -60,15 +81,18 @@ function endWorker() {
   current = null;
 }
 
-/** Without a worker text stays plain. Parsing here instead would hand back the cost this exists to bound. */
-function giveUp() {
+/** Once more, then text stays plain for now. Parsing here instead would hand back the cost this exists to bound. It's not the text's fault, so it isn't remembered. */
+function startFailed(): void {
   endWorker();
-  unavailable = true;
-  [...waiting.keys()].forEach((text) => settle(text, null));
+  startsFailed += 1;
+  if (startsFailed < 2) return startWorker();
+  startsFailed = 0;
+  unavailableUntil = Date.now() + WORKER_RETRY_AFTER_MS;
+  [...waiting.keys()].forEach((text) => notify(text, null));
 }
 
 function pump() {
-  if (unavailable || current !== null) return;
+  if (unavailable() || current !== null) return;
   const next = [...near].find((text) => waiting.has(text)) ?? waiting.keys().next().value;
   if (next === undefined) return;
   if (!worker) startWorker();
@@ -76,9 +100,8 @@ function pump() {
   current = next;
   worker.postMessage({ text: next });
   timer = setTimeout(() => {
-    const text = next;
     endWorker();
-    settle(text, null);
+    settle(next, null);
     pump();
   }, PARSE_TIME_LIMIT_MS);
 }
@@ -88,7 +111,7 @@ export const cachedParse = (text: string) => cache.get(text);
 /** Calls back once with the result, never during this call. Returns how to stop waiting. */
 export function requestParse(text: string, listener: Listener) {
   const cached = cache.get(text);
-  if (cached !== undefined || unavailable) {
+  if (cached !== undefined || unavailable()) {
     let live = true;
     queueMicrotask(() => {
       if (live) listener(cached ?? null);
@@ -119,7 +142,9 @@ export function prioritizeParse(text: string) {
 export function resetParseClient() {
   endWorker();
   cache.clear();
+  cachedNodes = 0;
   waiting.clear();
   near.clear();
-  unavailable = false;
+  startsFailed = 0;
+  unavailableUntil = 0;
 }

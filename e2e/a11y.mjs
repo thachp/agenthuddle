@@ -76,14 +76,20 @@ async function seed() {
   const shortThread = await make("Task with a heavy short thread", { assignee: guest.id });
   await guest.must("accept_task", { ...at(shortThread), version: shortThread.version });
   for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(shortThread), body: heavyShort[i % heavyShort.length] });
-  // Long bodies whose result is too large to apply out of view, each about 1,000 px tall as plain text: for keeping the reader's place, and for how far ahead they format.
+  // Unbroken text in scripts that cost a lot to lay out, at the message limit in bytes.
+  const byBytes = (unit) => unit.repeat(Math.floor(K16 / Buffer.byteLength(unit)));
+  const scripts = [byBytes("ع"), byBytes("ก"), byBytes("אa")];
+  const scriptThread = await make("Task with unbroken scripts", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(scriptThread), version: scriptThread.version });
+  for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(scriptThread), body: scripts[i % scripts.length] });
+  // Long bodies whose results soon use up what can be applied out of view: for keeping the reader's place, and for how far ahead they format.
   const tallThread = await make("Task with tall messages", { assignee: guest.id });
   await guest.must("accept_task", { ...at(tallThread), version: tallThread.version });
-  for (let i = 0; i < 20; i++) await guest.must("send_message", { ...at(tallThread), body: `Message ${i} ${"**b** ".repeat(500)}` });
+  for (let i = 0; i < 20; i++) await guest.must("send_message", { ...at(tallThread), body: `Message ${i} ${"**b** ".repeat(1500)}` });
   // Long bodies with ordinary links, for reaching them by keyboard.
   const linkThread = await make("Task with links in long messages", { assignee: guest.id });
   await guest.must("accept_task", { ...at(linkThread), version: linkThread.version });
-  for (let i = 0; i < 3; i++) await guest.must("send_message", { ...at(linkThread), body: `[link ${i}a](https://example.com/${i}a) ${"word ".repeat(600)} [link ${i}b](https://example.com/${i}b)` });
+  for (let i = 0; i < 6; i++) await guest.must("send_message", { ...at(linkThread), body: `[link ${i}](https://example.com/${i})\n\n${"## A heading\n\n- A bullet with some words\n- Another bullet\n\n".repeat(120)}`.slice(0, 8 * 1024) });
   // A long brief that has to end up formatted: this proves the worker runs, under the real CSP, from the real build.
   // Nothing limits this one but the clock: it parses for over a second, with nothing deep and little rendered.
   const slowBrief = await make("Task with a slow brief", { instructions: runOfMarks });
@@ -154,7 +160,7 @@ async function seed() {
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
   const opening = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Lead coordinator", responsibilities: "Plans the work and **follows up**.", is_lead: true, policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
-  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, tallThread, linkThread, longBrief, slowBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, tallThread, linkThread, longBrief, slowBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -581,6 +587,7 @@ async function keyboardPaths(s) {
     ok((await marksNote.boundingBox()).y < (await box.boundingBox()).y, "the note about checked boxes isn't above them");
     ok((await small.getByRole("heading", { name: "A heading", level: 4 }).count()) > 0, "agent text's heading isn't at the fixed level");
     const narrow = small.getByRole("group", { name: "Table in this text" }).nth(1);
+    await small.waitForTimeout(200);
     ok((await narrow.getAttribute("tabindex")) === null, "a table that fits is still a tab stop");
     await phone.close();
   });
@@ -644,6 +651,8 @@ async function keyboardPaths(s) {
   };
   await keyboardPath("a heavy thread on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.heavyThread.id}`, /^Discussion/));
   await keyboardPath("a heavy thread on oversight (50 messages)", () => openHeavy("oversight", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.heavyThread.id}`, "Thread"));
+  await keyboardPath("unbroken scripts on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, unbroken scripts", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.scriptThread.id}`, /^Discussion/));
+  await keyboardPath("unbroken scripts on oversight (50 messages)", () => openHeavy("oversight, unbroken scripts", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.scriptThread.id}`, "Thread"));
   await keyboardPath("a heavy short thread on oversight (50 messages)", () => openHeavy("oversight, short messages", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.shortThread.id}`, "Thread"));
 
   await keyboardPath("a long brief formats in a worker, under the real CSP", async () => {
@@ -669,14 +678,31 @@ async function keyboardPaths(s) {
     await own.close();
   });
 
-  // Opens the tall thread's Discussion, jumps to the end, and lets the worker finish everything, so only what's near has been applied.
+  // Opens the tall thread's Discussion at its end, with nothing applied until then. What's near the top when the tab opens formats
+  // too, and each one that shrinks brings the next into range, so how many had by the jump depended on how fast the runner was: on
+  // CI, 6 of the 10 far above. Holding the worker back until after the jump leaves only what this is about.
   const openTall = async (own) => {
+    let release;
+    const jumped = new Promise((done) => (release = done));
+    await own.route("**/static/workers/**", async (route) => {
+      await jumped;
+      await route.continue();
+    });
     await own.goto(`${app}/w/${s.room}/tasks?task=${s.tallThread.id}`);
     const sheet = own.getByRole("dialog");
     await sheet.getByRole("tab", { name: /^Discussion/ }).click();
     await sheet.locator("article").last().waitFor({ timeout: 15_000 });
     await sheet.evaluate((dialog) => dialog.querySelectorAll("article")[dialog.querySelectorAll("article").length - 1].scrollIntoView({ block: "end" }));
-    await own.waitForTimeout(3_000);
+    release();
+    // Settled once the last body has formatted and the count has stopped changing.
+    await sheet.locator("article").last().locator("strong").first().waitFor({ state: "attached", timeout: 20_000 });
+    let [count, steady] = [-1, 0];
+    for (let i = 0; i < 60 && steady < 4; i++) {
+      await own.waitForTimeout(250);
+      const now = await sheet.locator("article:has(strong)").count();
+      steady = now === count ? steady + 1 : 0;
+      count = now;
+    }
     return sheet;
   };
 
@@ -693,9 +719,11 @@ async function keyboardPaths(s) {
     const farAbove = rows.filter((row) => row.above > 3_000);
     console.log(`     ${justAbove.length} just above the view, ${farAbove.length} far above`);
     ok(justAbove.length > 0 && justAbove.every((row) => row.formatted), `a body up to 1,000 px above the view isn't formatted: ${JSON.stringify(justAbove)}`);
-    // The first few were near when the tab opened, before the jump to the end, and stay formatted.
-    const plainFarAbove = farAbove.filter((row) => !row.formatted).length;
-    ok(plainFarAbove >= farAbove.length / 2, `large results far above the view were applied: only ${plainFarAbove} of ${farAbove.length} stayed plain`);
+    // Each of these results is about 4,500 nodes, and only 20,000 can be applied out of view.
+    const appliedFarAbove = farAbove.length - farAbove.filter((row) => !row.formatted).length;
+    console.log(`     ${appliedFarAbove} of ${farAbove.length} far above were applied`);
+    ok(farAbove.length >= 8, `only ${farAbove.length} bodies were far above the view, so this proves little`);
+    ok(appliedFarAbove <= 4, `${appliedFarAbove} large results far above the view were applied, past what's allowed out of view`);
     await own.close();
   });
 
@@ -740,6 +768,9 @@ async function keyboardPaths(s) {
     await sheet.getByRole("tab", { name: /^Discussion/ }).focus();
     await own.keyboard.press("Enter");
     await sheet.locator("article a").nth(5).waitFor({ state: "attached", timeout: 15_000 });
+    // Find-in-page has to reach text that hasn't been laid out yet.
+    ok(await own.evaluate(() => window.find("link 5")), "find-in-page can't reach an off-screen message");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).focus();
     const reached = new Set();
     for (let i = 0; i < 40; i++) {
       await own.keyboard.press("Tab");
@@ -872,6 +903,8 @@ async function run() {
       // A failed read would pass axe while hiding the screen.
       if (await page.getByText("Couldn't refresh").count()) throw new Error("the screen's read failed");
       if (sheet) await page.getByRole("dialog").waitFor({ timeout: 15_000 });
+      // This one's text has a table, which is formatted in the worker, and it's what shows tables to axe.
+      if (name === "Task Sheet, review") await page.locator("article table").first().waitFor({ timeout: 15_000 });
       await audit(page, name);
     } catch (error) {
       fail(name, error.message.split("\n")[0]);

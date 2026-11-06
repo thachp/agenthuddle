@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PARSE_TIME_LIMIT_MS } from "./limits";
-import { prioritizeParse, requestParse, resetParseClient } from "./parse-client";
+import { MAX_CACHED_NODES, PARSE_TIME_LIMIT_MS, WORKER_RETRY_AFTER_MS, WORKER_START_LIMIT_MS } from "./limits";
+import { cachedParse, prioritizeParse, requestParse, resetParseClient } from "./parse-client";
 import { FakeWorker } from "./test-worker";
 
 beforeEach(() => {
@@ -118,11 +118,68 @@ describe("parsing in a worker", () => {
     expect(later).toHaveBeenCalledWith(null);
   });
 
-  it("gives plain text when the worker can't load", () => {
+  it("tries a worker that can't load once more, then gives plain text", () => {
     const listener = vi.fn();
     requestParse("text", listener);
     FakeWorker.last.onerror?.();
+    expect(listener).not.toHaveBeenCalled();
+    expect(FakeWorker.all).toHaveLength(2);
+    FakeWorker.last.onerror?.();
     expect(listener).toHaveBeenCalledWith(null);
+    expect(FakeWorker.all).toHaveLength(2);
+  });
+
+  it("recovers on the second try", () => {
+    const listener = vi.fn();
+    requestParse("text", listener);
+    FakeWorker.last.onerror?.();
+    FakeWorker.last.ready();
+    FakeWorker.last.answer();
+    expect(listener.mock.calls[0][0]).not.toBeNull();
+  });
+
+  it("doesn't wait for ever on a worker that never says it's ready", () => {
+    const listener = vi.fn();
+    requestParse("text", listener);
+    const hung = FakeWorker.last;
+    vi.advanceTimersByTime(WORKER_START_LIMIT_MS);
+    expect(hung.terminated).toBe(true);
+    expect(listener).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(WORKER_START_LIMIT_MS);
+    expect(FakeWorker.last.terminated).toBe(true);
+    expect(listener).toHaveBeenCalledWith(null);
+  });
+
+  it("tries again for later text after a while, and hasn't blamed the text that was waiting", async () => {
+    FakeWorker.refuse = true;
+    requestParse("text", vi.fn());
+    FakeWorker.refuse = false;
+    const soon = vi.fn();
+    requestParse("soon", soon);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(soon).toHaveBeenCalledWith(null);
+    expect(FakeWorker.all).toHaveLength(0);
+    vi.advanceTimersByTime(WORKER_RETRY_AFTER_MS);
+    const listener = vi.fn();
+    requestParse("text", listener);
+    FakeWorker.last.ready();
+    expect(FakeWorker.last.asked).toEqual(["text"]);
+    FakeWorker.last.answer();
+    expect(listener.mock.calls[0][0]).not.toBeNull();
+  });
+
+  it("forgets the oldest results once they add up, whatever their count", () => {
+    const body = (index: number) => `${index}\n${"- a\n".repeat(3000)}`;
+    const count = Math.ceil(MAX_CACHED_NODES / 9_000) + 1;
+    requestParse(body(0), vi.fn());
+    FakeWorker.last.ready();
+    FakeWorker.last.answer();
+    for (let index = 1; index < count; index++) {
+      requestParse(body(index), vi.fn());
+      FakeWorker.last.answer();
+    }
+    expect(cachedParse(body(count - 1))).toBeTruthy();
+    expect(cachedParse(body(0))).toBeUndefined();
   });
 
   it("goes on after one body breaks a worker", () => {

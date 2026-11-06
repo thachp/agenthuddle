@@ -1,8 +1,11 @@
 import { act, render, screen } from "@testing-library/react";
+import { hydrateRoot } from "react-dom/client";
+import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentContent } from "./agent-content";
-import { APPLY_ANYWHERE_NODES, CANT_FORMAT_NOTE, PARSE_AT_ONCE_CHARS, PARSE_TIME_LIMIT_MS } from "./limits";
-import { resetParseClient } from "./parse-client";
+import { APPLY_ANYWHERE_NODES, APPLY_OUT_OF_VIEW_NODES, CANT_FORMAT_NOTE, PARSE_AT_ONCE_CHARS, PARSE_TIME_LIMIT_MS, parsesAtOnce } from "./limits";
+import { parseBody } from "./parse";
+import { resetParseClient, requestParse } from "./parse-client";
 import { FakeWorker } from "./test-worker";
 
 vi.unmock("@/components/agent-content/use-parsed-body");
@@ -71,12 +74,42 @@ describe("what shows while text is parsed", () => {
     expect(container.querySelector("a")).toHaveAttribute("href", "https://example.com/");
   });
 
-  it("holds a large result until it's near the view", () => {
-    const container = show(big);
+  it("applies a large result out of view, so Tab can reach its links, until they add up", () => {
+    const nodes = parseBody(big)!.nodes;
+    const fit = Math.floor(APPLY_OUT_OF_VIEW_NODES / nodes);
+    const bodies = Array.from({ length: fit + 1 }, (_, index) => `${index} ${big}`);
+    const { container } = render(
+      <>
+        {bodies.map((body) => (
+          <AgentContent key={body} author={author} body={body} />
+        ))}
+      </>,
+    );
     act(() => FakeWorker.last.ready());
-    answer();
-    expect(formatted(container)).toBe(false);
-    near();
+    for (const body of bodies) answer(body);
+    const articles = [...container.querySelectorAll("article")];
+    expect(articles.slice(0, fit).every(formatted)).toBe(true);
+    expect(formatted(articles[fit])).toBe(false);
+    near(fit);
+    expect(formatted(articles[fit])).toBe(true);
+  });
+
+  it("frees what's applied out of view when it goes", () => {
+    const nodes = parseBody(big)!.nodes;
+    const bodies = Array.from({ length: Math.floor(APPLY_OUT_OF_VIEW_NODES / nodes) }, (_, index) => `${index} ${big}`);
+    const first = render(
+      <>
+        {bodies.map((body) => (
+          <AgentContent key={body} author={author} body={body} />
+        ))}
+      </>,
+    );
+    act(() => FakeWorker.last.ready());
+    for (const body of bodies) answer(body);
+    first.unmount();
+    const later = `later ${big}`;
+    const container = show(later);
+    answer(later);
     expect(formatted(container)).toBe(true);
   });
 
@@ -108,6 +141,36 @@ describe("what shows while text is parsed", () => {
     });
     expect(formatted(container)).toBe(false);
     expect(container).toHaveTextContent(CANT_FORMAT_NOTE);
+  });
+
+  it("shows plain text with a note when a worker never starts", () => {
+    vi.useFakeTimers();
+    const container = show(small);
+    expect(container).not.toHaveTextContent(CANT_FORMAT_NOTE);
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(container).toHaveTextContent(CANT_FORMAT_NOTE);
+    expect(container).toHaveTextContent("**bold**");
+  });
+
+  it("hydrates over the server's plain text, even when the result is already cached", async () => {
+    const onRecoverableError = vi.fn();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    host.innerHTML = renderToString(<AgentContent author={author} body={small} />);
+    expect(host.querySelector("strong")).toBeNull();
+    requestParse(small, () => {});
+    act(() => FakeWorker.last.ready());
+    act(() => FakeWorker.last.answer());
+    const root = await act(async () => hydrateRoot(host, <AgentContent author={author} body={small} />, { onRecoverableError }));
+    expect(onRecoverableError).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    expect(formatted(host)).toBe(true);
+    act(() => root.unmount());
+    host.remove();
+    error.mockRestore();
   });
 
   it("shows plain text with a note when workers are refused", () => {
@@ -145,6 +208,47 @@ describe("what shows while text is parsed", () => {
     expect(container).toHaveTextContent("more");
     answer();
     expect(formatted(container)).toBe(true);
+  });
+});
+
+describe("what's parsed on the main thread", () => {
+  const atTheLimit = (unit: string) => unit.repeat(Math.floor(PARSE_AT_ONCE_CHARS / unit.length));
+
+  it.each([
+    ["bullets", "- \n"],
+    ["emphasis", "*a* "],
+    ["links", "[a](b) "],
+    ["headings", "# a\n"],
+    ["breaks", "a  \n"],
+    ["rules", "---\n"],
+    ["checkboxes", "- [x] a\n"],
+    ["footnote calls", "[^a] "],
+    ["quotes", "> a\n\n"],
+  ])("stays under what can be applied anywhere, with %s", (_, unit) => {
+    const body = `${atTheLimit(unit)}\n\n[^a]: b`.slice(0, PARSE_AT_ONCE_CHARS);
+    expect(parsesAtOnce(body)).toBe(true);
+    expect(parseBody(body)!.nodes).toBeLessThanOrEqual(APPLY_ANYWHERE_NODES);
+  });
+
+  it("sends a table to the worker, however short", () => {
+    const table = `${"|a".repeat(44)}\n${"|-".repeat(44)}\n${"a\n".repeat(43)}`;
+    expect(table.length).toBeLessThanOrEqual(PARSE_AT_ONCE_CHARS);
+    expect(parsesAtOnce(table)).toBe(false);
+  });
+});
+
+describe("skipping layout off-screen", () => {
+  const bodyOf = (container: Element) => container.querySelector("article > div") as HTMLElement;
+
+  it("applies to long text, and leaves room for a focus ring", () => {
+    const body = bodyOf(show(small));
+    expect(body.style.contentVisibility).toBe("auto");
+    expect(body.style.getPropertyValue("contain-intrinsic-size")).toMatch(/^auto \d+px$/);
+    expect(body).toHaveClass("p-1");
+  });
+
+  it("doesn't apply to short text", () => {
+    expect(bodyOf(show("**short**")).style.contentVisibility).toBe("");
   });
 });
 

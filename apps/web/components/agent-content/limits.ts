@@ -15,7 +15,15 @@ export const MAX_TABLE_CELLS_PER_BODY = 2_000;
 export const MAX_RENDERED_NODES = 10_000;
 /** A result this small is applied as soon as it's ready, even out of view or in a hidden tab, so its links can be reached with Tab. */
 export const APPLY_ANYWHERE_NODES = 1_000;
+/** Larger results are too, until the ones out of view add up to this. It covers a thread of ordinary briefs, and past it they wait for the view. */
+export const APPLY_OUT_OF_VIEW_NODES = 20_000;
+/** What finished results may hold on to. Around 70 bytes a node, this is about 15 MB. */
+export const MAX_CACHED_NODES = 200_000;
 export const PARSE_TIME_LIMIT_MS = 500;
+/** How long a worker gets to load and say it's ready, twice, before text stays plain. */
+export const WORKER_START_LIMIT_MS = 3_000;
+/** A worker that wouldn't start is tried again for later text after this long, such as when a deploy has replaced its file. */
+export const WORKER_RETRY_AFTER_MS = 60_000;
 /** Text this short and this shallow is parsed where it's rendered, on the server too, so ordinary messages don't flash. */
 export const PARSE_AT_ONCE_CHARS = 500;
 export const PARSE_AT_ONCE_NESTING = 10;
@@ -52,7 +60,8 @@ function nestedPast(text: string, limit: number) {
 
 export const nestedTooDeep = (text: string) => nestedPast(text, MAX_NESTING);
 
-export const parsesAtOnce = (text: string) => text.length <= PARSE_AT_ONCE_CHARS && !nestedPast(text, PARSE_AT_ONCE_NESTING);
+/** A table's cells cost far more than their characters, so any `|` goes to the worker. Everything else this short stays under APPLY_ANYWHERE_NODES. */
+export const parsesAtOnce = (text: string) => text.length <= PARSE_AT_ONCE_CHARS && !text.includes("|") && !nestedPast(text, PARSE_AT_ONCE_NESTING);
 
 type MdNode = {
   type: string;

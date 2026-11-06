@@ -5,7 +5,7 @@ import { toJsxRuntime, type Components } from "hast-util-to-jsx-runtime";
 import { Component, memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import { Badge } from "@/components/ui/badge";
-import { CANT_FORMAT_NOTE, NOTE_CLASS, PLAIN_TEXT_CLASS } from "./limits";
+import { CANT_FORMAT_NOTE, NOTE_CLASS, PARSE_AT_ONCE_CHARS, PLAIN_TEXT_CLASS } from "./limits";
 import { useParsedBody, type BodyState } from "./use-parsed-body";
 import { authoritySoundingName, chosenNameLabel, destinationHost, plainName, safeLinkUrl, truncate } from "./text";
 
@@ -86,6 +86,16 @@ const COMPONENTS: Partial<Components> = {
   },
 };
 
+/**
+ * Long unbroken text is slow to lay out however it was parsed: Arabic, Thai or mixed-direction text can take 100 ms a body. This skips
+ * that until it's near the view, and leaves it findable and reachable by keyboard. Skipping contains paint, so the classes beside this
+ * leave room for a focus ring at the edge. The size only stands in until the first layout.
+ */
+function offScreenLayoutSkipped(text: string) {
+  if (text.length <= PARSE_AT_ONCE_CHARS) return {};
+  return { style: { contentVisibility: "auto", containIntrinsicSize: `auto ${Math.ceil(text.length / 50) * 20}px` } } as const;
+}
+
 function PlainText({ text }: { text: string }) {
   return (
     <>
@@ -134,7 +144,7 @@ export function AgentContent({ author, external = false, body, maxLength }: { au
       <AuthorLine author={author} external={external} />
       {/* From the fifth level, nesting stops indenting, or 100 levels push text 1,000 px out of a Sheet at phone width. Without kerning,
           a long run of `*` or `_` lays out in 1 ms instead of 350 ms: kerning pairs make the shaper redo the run for every line. */}
-      <div className="mt-2 space-y-2 [font-kerning:none] break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_.task-list-item]:list-none [&_ul]:list-disc [&_ul]:pl-5 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:border-l-0 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:pl-0 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_blockquote]:shadow-[inset_2px_0_0_var(--border)]">
+      <div {...offScreenLayoutSkipped(text)} className={`[font-kerning:none] break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_.task-list-item]:list-none [&_ul]:list-disc [&_ul]:pl-5 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:border-l-0 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:pl-0 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_blockquote]:shadow-[inset_2px_0_0_var(--border)] ${text.length > PARSE_AT_ONCE_CHARS ? "-mx-1 -mb-1 mt-1 space-y-2 p-1" : "mt-2 space-y-2"}`}>
         <Body text={text} state={state} />
       </div>
       {truncated ? <p className="mt-2 text-xs text-muted-foreground">Shortened for display.</p> : null}
