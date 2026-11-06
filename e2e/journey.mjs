@@ -853,7 +853,27 @@ async function acceptance() {
     refused(await lead.call("set_reviewer", { ...where, version: submitted.version, reviewer: lead.id, idempotency_key: key() }), "not_allowed", "the requester swapping");
     eq((await personA.must("POST", `/v1/workspaces/${room}/tasks/${offered.id}/set-reviewer`, { version: submitted.version, reviewer: lead.id })).reviewer, lead.id, "the owner swapping");
   });
-  report.gap("AC-30+", "rooms that require a person to review", "there's no such room setting yet (`can_review` is always passed false in apps/api), so the policy cases of AC-30 can't run. Room-level person review is decision 5, for M1.");
+  await check("AC-30+", "where a room requires a person to review, agents can't be named or decide, and an agent's activity shows only what it may see", async () => {
+    const reviewed = await personA.createRoom(roomName("reviewed"), { goal: "Ship" });
+    const version = () => personA.policyVersion(reviewed);
+    const author = await McpAgent.connect(target, personA, "Requiring author");
+    const outsiderTask = await McpAgent.connect(target, personA, "Narrow agent");
+    await personA.addAgent(reviewed, author, "member");
+    await personA.addAgent(reviewed, outsiderTask, "guest");
+    const early = await author.must("create_task", { workspace_id: reviewed, title: "Early", instructions: "x" });
+    refused(await personB.dash("PUT", `/v1/workspaces/${reviewed}/review-policy`, { require_person: true, policy_version: 1 }), "workspace_not_found", "a stranger changing it");
+    await personA.must("PUT", `/v1/workspaces/${reviewed}/review-policy`, { require_person: true, policy_version: await version() });
+    eq((await author.must("get_workspace", { workspace_id: reviewed }, false)).require_person_review, true, "the setting in the room read");
+    refused(await author.call("create_task", { workspace_id: reviewed, title: "x", instructions: "y", idempotency_key: key() }), "invalid_argument", "an agent defaulting to itself as reviewer");
+    const flagged = (await personA.must("GET", `/v1/workspaces/${reviewed}/tasks/${early.id}`)).task;
+    eq(flagged.needs_attention, true, "a task whose reviewer and requester are agents");
+    eq((await personA.must("POST", `/v1/workspaces/${reviewed}/tasks/${early.id}/set-reviewer`, { reviewer: personA.id, version: flagged.version })).needs_attention, false, "a person fixes it");
+    eq((await outsiderTask.must("get_workroom_brief", { workspace_id: reviewed }, false)).goal, "Ship", "the brief");
+    const seen = (await outsiderTask.must("list_activity", { workspace_id: reviewed }, false)).events;
+    ok(seen.some((e) => e.type === "workspace.created"), "a guest sees the room's own events");
+    ok(!seen.some((e) => e.task_id === early.id), "a guest doesn't see another task's events");
+    ok((await author.must("list_activity", { workspace_id: reviewed, task: early.id }, false)).events.length > 0, "a member sees that task's events");
+  });
 
   await check("D4", "changing instructions or criteria sends an accepted task back for re-acceptance, and a title doesn't", async () => {
     const offered = await lead.must("create_task", { workspace_id: room, title: "Edit me", instructions: "x", assignee: guest.id });
