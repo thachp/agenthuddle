@@ -5916,6 +5916,13 @@ describe("task plans", () => {
     expect(whole.finished.rows_read).toBeLessThan(3100);
     expect(whole.edges_finished.plan).toContain("SCAN d");
     expect(whole.edges_finished.rows_read).toBeLessThan(2 * (5001 + 100));
+    // Unfinished work is found through its status, and there's at most 1,000 of it, not through the 8,000 finished tasks.
+    expect(whole.unfinished.plan).toContain("task_status");
+    expect(whole.unfinished.rows_read).toBeLessThan(10);
+    expect(whole.edges_unfinished.plan).toContain("task_status");
+    expect(whole.edges_unfinished.rows_read).toBeLessThan(10);
+    expect(whole.edges_count.plan).toContain("task_status");
+    expect(whole.edges_count.rows_read).toBeLessThan(10);
     // Reading what comes before one task walks only that, not the room's 4,000 edges.
     const one = await costs(OWNER, ["tsk_old3"]);
     expect(one.edges_before.rows).toBe(3);
@@ -5935,6 +5942,37 @@ describe("task plans", () => {
     expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id] })).code).toBe("limit_exceeded");
     // Going down is still possible at the limit.
     expect((await set(LEAD, tasks, c.id, id, { duration_days: 2, predecessors: Array.from({ length: 2 }, (_, n) => `tsk_past${n}`) })).status).toBe(200);
+  });
+
+  it("refuses a loop closed through a finished task", async () => {
+    const { id, tasks } = await room();
+    const [s, f] = [await offer(tasks, { title: "S" }), await offer(tasks, { title: "F" })];
+    await set(LEAD, tasks, f.id, id, { predecessors: [s.id] });
+    expect((await api(LEAD, "POST", `${tasks}/${f.id}/cancel`, { version: f.version, reason: "no" })).status).toBe(200);
+    expect((await set(LEAD, tasks, s.id, id, { predecessors: [f.id] })).code).toBe("dependency_cycle");
+  });
+
+  it("refuses an edit that would walk more than 5,000 ancestor edges, and stops reading there", async () => {
+    const { id, tasks } = await room();
+    const s = await offer(tasks, { title: "S" });
+    await seedFinished(id, 5100);
+    // A chain of 5,050 finished tasks, whose edges no longer count toward the limit.
+    await seedEdges(id, (n) => `'tsk_old' || (${n} + 1)`, (n) => `'tsk_old' || ${n}`, 5050);
+    expect((await set(LEAD, tasks, s.id, id, { predecessors: ["tsk_old5050"] })).code).toBe("limit_exceeded");
+    expect((await read(OWNER, id)).edges.filter((e) => e.successor === s.id)).toEqual([]);
+    const costs = (await api(OWNER, "GET", `${planOf(id)}/costs?ids=${encodeURIComponent(JSON.stringify(["tsk_old5050"]))}`)).body;
+    expect(costs.edges_before.rows).toBe(5001);
+    expect(costs.edges_before.rows_read).toBeLessThan(5001 * 6);
+    // A shorter one is fine.
+    expect((await set(LEAD, tasks, s.id, id, { predecessors: ["tsk_old10"] })).status).toBe(200);
+  });
+
+  it("keeps a narrowed viewer's visible edges however many hidden predecessors there are", async () => {
+    const { id, tasks } = await room();
+    const [first, second] = [await offer(tasks, { assignee: BOB.id, title: "First" }), await offer(tasks, { assignee: BOB.id, title: "Second" })];
+    await seedEdges(id, () => `'${second.id}'`, (n) => `'tsk_a' || ${n}`, 5100);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) VALUES ('${second.id}', '${first.id}', 'o', 1)`));
+    expect((await read(BOB, id)).edges).toEqual([{ predecessor: first.id, successor: second.id }]);
   });
 
   it("removes a canceled predecessor from a finished task, and nothing else", async () => {

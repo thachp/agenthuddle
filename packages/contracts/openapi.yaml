@@ -392,7 +392,7 @@ paths:
     put:
       operationId: setTaskPlan
       tags: [commands]
-      summary: "Replace a task's duration and predecessors, for its requester or a human admin who sees the whole room. A `duration_days` that's left out or null erases the estimate. Refused if the room is archived, and if the task is finished unless it only removes canceled predecessors. A loop gets `dependency_cycle`, and a `plan_revision` that isn't current gets `plan_conflict`. It leaves `task.version` alone, wakes nobody and is recorded as `task.plan_changed`, which only someone who sees the whole room can read. At most 50 predecessors per task and 5,000 edges across unfinished tasks"
+      summary: "Replace a task's duration and predecessors, for its requester or a human admin who sees the whole room. A `duration_days` that's left out or null erases the estimate. Refused if the room is archived, and if the task is finished unless it only removes canceled predecessors. A loop gets `dependency_cycle`, and a `plan_revision` that isn't current gets `plan_conflict`. It leaves `task.version` alone, wakes nobody and is recorded as `task.plan_changed`, which only someone who sees the whole room can read. Over 50 predecessors gets `invalid_argument`. Over 5,000 edges across unfinished tasks, which awaits the owner's confirmation, or an added predecessor with over 5,000 ancestor edges, gets `limit_exceeded`"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetTaskPlan" } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
