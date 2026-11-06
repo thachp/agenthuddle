@@ -1,8 +1,7 @@
-import { act } from "@testing-library/react";
 import { useState } from "react";
 import { hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useEarlyInput } from "./use-early-input";
 
 const seen = vi.fn();
@@ -27,6 +26,10 @@ function Form({ on = true }: { on?: boolean }) {
   );
 }
 
+// Real timing, not act's, which would hold every update until the end and hide what each step sees.
+const settled = () => new Promise((done) => setTimeout(done, 100));
+const flag = globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean };
+
 let root: Root | undefined;
 let host: HTMLElement;
 
@@ -36,17 +39,20 @@ async function hydrate(early: (control: Record<string, HTMLInputElement>) => voi
   host.innerHTML = renderToString(<Form on={on} />);
   const get = (label: string) => host.querySelector(`[aria-label="${label}"]`) as HTMLInputElement;
   early({ name: get("name"), note: get("note"), pick: get("pick"), tick: get("tick") });
-  await act(async () => {
-    root = hydrateRoot(host, <Form on={on} />);
-    await new Promise((done) => setTimeout(done, 20));
-  });
+  root = hydrateRoot(host, <Form on={on} />);
+  await settled();
   return JSON.parse(host.querySelector("form")!.dataset.state!);
 }
 
+beforeEach(() => {
+  flag.IS_REACT_ACT_ENVIRONMENT = false;
+});
+
 afterEach(() => {
-  act(() => root?.unmount());
+  root?.unmount();
   host.remove();
   seen.mockClear();
+  flag.IS_REACT_ACT_ENVIRONMENT = true;
 });
 
 describe("useEarlyInput", () => {
@@ -77,9 +83,8 @@ describe("useEarlyInput", () => {
     await hydrate(() => {});
     const name = host.querySelector('[aria-label="name"]') as HTMLInputElement;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "Restored");
-    await act(async () => {
-      window.dispatchEvent(new Event("pageshow"));
-    });
+    window.dispatchEvent(new Event("pageshow"));
+    await settled();
     expect(JSON.parse(host.querySelector("form")!.dataset.state!).name).toBe("Restored");
   });
 });

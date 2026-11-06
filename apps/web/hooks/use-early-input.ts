@@ -8,27 +8,39 @@ function setSilently(control: HTMLInputElement | HTMLTextAreaElement, value: str
 }
 
 /**
- * Hands React what a control already holds. A field filled in before the page hydrates, or restored by the browser, shows that value
- * without React hearing of it, so the form looks filled in while its state is empty. React only sees a change from what it last recorded,
- * so this records the server's value, puts back what's really there without recording it, and sends the event the form already handles.
+ * What a control holds that React hasn't heard of, as a step that hands it over, or null. A field filled in before the page hydrates, or
+ * restored by the browser, shows its value without React hearing of it, so the form looks filled in while its state is empty. React only
+ * sees a change from what it last recorded, so a step records the server's value, puts back what's really there without recording it,
+ * and sends the event the form already handles. Values are read first, because each step re-renders the form, and that resets the rest.
  */
-function replay(control: Element) {
+function handOver(control: Element): (() => void) | null {
   if (control instanceof HTMLSelectElement) {
-    const initial = [...control.options].findIndex((option) => option.defaultSelected);
-    if (control.selectedIndex !== Math.max(initial, 0)) control.dispatchEvent(new Event("change", { bubbles: true }));
-  } else if (control instanceof HTMLInputElement && (control.type === "checkbox" || control.type === "radio")) {
-    if (control.checked !== control.defaultChecked) {
-      control.checked = control.defaultChecked;
-      control.click();
-    }
-  } else if ((control instanceof HTMLInputElement && control.type !== "hidden" && control.type !== "file") || control instanceof HTMLTextAreaElement) {
-    if (control.value === control.defaultValue || control.readOnly) return;
-    const [early, start, end] = [control.value, control.selectionStart, control.selectionEnd];
-    control.value = control.defaultValue;
-    setSilently(control, early);
-    if (start !== null && document.activeElement === control) control.setSelectionRange(start, end);
-    control.dispatchEvent(new Event("input", { bubbles: true }));
+    const early = control.selectedIndex;
+    if (early === Math.max([...control.options].findIndex((option) => option.defaultSelected), 0)) return null;
+    return () => {
+      control.selectedIndex = early;
+      control.dispatchEvent(new Event("change", { bubbles: true }));
+    };
   }
+  if (control instanceof HTMLInputElement && (control.type === "checkbox" || control.type === "radio")) {
+    const early = control.checked;
+    if (early === control.defaultChecked) return null;
+    return () => {
+      control.checked = !early;
+      control.click();
+    };
+  }
+  if ((control instanceof HTMLInputElement && control.type !== "hidden" && control.type !== "file") || control instanceof HTMLTextAreaElement) {
+    const [early, start, end] = [control.value, control.selectionStart, control.selectionEnd];
+    if (early === control.defaultValue || control.readOnly) return null;
+    return () => {
+      control.value = control.defaultValue;
+      setSilently(control, early);
+      if (start !== null && document.activeElement === control) control.setSelectionRange(start, end);
+      control.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+  }
+  return null;
 }
 
 /**
@@ -38,8 +50,17 @@ function replay(control: Element) {
 export function useEarlyInput<T extends HTMLElement = HTMLFormElement>() {
   const ref = useRef<T>(null);
   useEffect(() => {
-    const run = () => ref.current?.querySelectorAll("input, textarea, select").forEach((control) => (control as HTMLInputElement).disabled || replay(control));
-    // Not during this effect: React would batch the events, and a form whose state is one object would keep only the last field.
+    const run = () => {
+      const controls = [...(ref.current?.querySelectorAll<HTMLInputElement>("input, textarea, select") ?? [])];
+      const steps = controls.flatMap((control) => (control.disabled ? [] : (handOver(control) ?? [])));
+      // One at a time, so a form whose state is one object sees the last step's result before the next.
+      const next = () => {
+        steps.shift()?.();
+        if (steps.length > 0) setTimeout(next);
+      };
+      next();
+    };
+    // Not during this effect, where React would batch the events.
     const first = setTimeout(run);
     // The browser can restore fields after this first look, and when coming back to a page.
     window.addEventListener("load", run);
