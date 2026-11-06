@@ -1,7 +1,11 @@
+"use client";
+
 import { Bot, ExternalLink, User } from "lucide-react";
+import { Children, useEffect, useRef, useState } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Badge } from "@/components/ui/badge";
+import { remarkBodyLimits } from "./limits";
 import { authoritySoundingName, chosenNameLabel, destinationHost, plainName, safeLinkUrl, truncate } from "./text";
 
 /** `viewer` means this is the person looking, whose "You" is ours and not a name anyone chose. */
@@ -11,7 +15,25 @@ export type AgentAuthor = { name: string; kind: "agent" | "person"; organization
 const ALLOWED = ["p", "em", "strong", "del", "code", "pre", "ul", "ol", "li", "blockquote", "a", "img", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "thead", "tbody", "tr", "th", "td", "input"];
 
 /** Every level is one fixed level below a screen's section headings, and no bigger than the text around it, so agent text can't pass for the page's own structure. */
-const heading: Components["h1"] = ({ children }) => <h4 className="font-semibold">{children}</h4>;
+const heading: Components["h1"] = ({ children }) => (Children.count(children) === 0 ? null : <h4 className="font-semibold">{children}</h4>);
+
+/** Wide tables scroll here and not the page. Scrolling has to work by keyboard, so this takes focus, but only when it scrolls: a tab stop per table adds up. Its name is ours. */
+function TableScroller({ children }: { children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [scrolls, setScrolls] = useState(true);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => setScrolls(element.scrollWidth > element.clientWidth));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <div ref={ref} role="group" aria-label="Table in this text. It may scroll sideways." tabIndex={scrolls ? 0 : undefined} className="max-w-full overflow-x-auto rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">
+      {children}
+    </div>
+  );
+}
 
 /** These take only their children, so nothing Markdown can set reaches them, including a cell's alignment, which arrives as `style`. */
 const COMPONENTS: Components = {
@@ -21,12 +43,11 @@ const COMPONENTS: Components = {
   h4: heading,
   h5: heading,
   h6: heading,
-  // Wide tables scroll here and not the page. Scrolling has to work by keyboard, so this takes focus, and its name is ours.
   table({ children }) {
     return (
-      <div role="group" aria-label="Table in this text. It may scroll sideways." tabIndex={0} className="max-w-full overflow-x-auto rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">
+      <TableScroller>
         <table className="border-collapse text-sm">{children}</table>
-      </div>
+      </TableScroller>
     );
   },
   th({ children }) {
@@ -39,10 +60,10 @@ const COMPONENTS: Components = {
   td({ children }) {
     return <td className="min-w-20 border px-2 py-1 align-top">{children}</td>;
   },
-  // A mark in the text and nothing more: it can't be changed, and it says nothing about a task's state, which only Podster's own controls show.
+  // The author's mark and nothing more: it can't be changed, nobody has verified it, and only Podster's own controls show a task's state.
   input({ type, checked }) {
     if (type !== "checkbox") return null;
-    return <input type="checkbox" checked={Boolean(checked)} disabled readOnly aria-label="Checklist mark in this text" className="mr-1.5 align-middle" />;
+    return <input type="checkbox" checked={Boolean(checked)} disabled readOnly aria-label="Author's mark, not verified by Podster" className="mr-1.5 align-middle" />;
   },
   a({ href, children }) {
     const url = safeLinkUrl(href);
@@ -77,7 +98,7 @@ export function AgentContent({ author, external = false, body, maxLength }: { au
     <article className="min-w-0 rounded-lg border p-3">
       <AuthorLine author={author} external={external} />
       <div className="mt-2 space-y-2 break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_.task-list-item]:list-none [&_ul]:list-disc [&_ul]:pl-5">
-        <Markdown remarkPlugins={[remarkGfm]} allowedElements={ALLOWED} unwrapDisallowed urlTransform={(url) => url} components={COMPONENTS}>
+        <Markdown remarkPlugins={[remarkGfm, remarkBodyLimits]} allowedElements={ALLOWED} unwrapDisallowed urlTransform={(url) => url} components={COMPONENTS}>
           {text}
         </Markdown>
       </div>

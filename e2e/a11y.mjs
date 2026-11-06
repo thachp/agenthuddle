@@ -51,7 +51,15 @@ async function seed() {
     return guest.must("submit_task", { ...at(task), version: taken.version, note: "Ready for review", artifacts: [{ uri: "https://example.com/pr/1", label: "Pull request" }] });
   };
   const review = await submit("Task for keyboard review", owner.id);
-  const reviewScreen = await submit("Task for the review screen", owner.id, { instructions: `**Write** the design.\n\n# A heading\n\n- [x] A marked item\n- [ ] An unmarked item\n\n| Column one | Column two |\n| --- | --- |\n| ${"unbroken".repeat(30)} | **two** |` });
+  const reviewScreen = await submit("Task for the review screen", owner.id, { instructions: `**Write** the design.\n\n# A heading\n\n- [x] A marked item\n- [ ] An unmarked item\n\n| Column one | Column two |\n| --- | --- |\n| ${"unbroken".repeat(30)} | **two** |\n\n| Narrow |\n| --- |\n| Fits |` });
+  // A few bytes that ask for millions of cells: instructions at their limit, which display cuts to 20,000 characters, and a message at its limit.
+  const paddedTable = (size) => {
+    const columns = Math.floor(size / 8);
+    return `${"|a".repeat(columns)}\n${"|-".repeat(columns)}\n${"a\n".repeat(Math.floor((size - 4 * columns) / 2) - 2)}`;
+  };
+  const oversized = await make("Task with oversized tables", { assignee: guest.id, instructions: paddedTable(20_000).padEnd(64 * 1024, "a\n") });
+  await guest.must("accept_task", { ...at(oversized), version: oversized.version });
+  await guest.must("send_message", { ...at(oversized), body: paddedTable(16 * 1024) });
   const done = await submit("A completed task", lead.id);
   await lead.must("verify_task", { ...at(done), submission_no: 1 });
   const canceled = await make("A canceled task");
@@ -91,7 +99,7 @@ async function seed() {
   await until(async () => (await owner.must("GET", "/v1/oversight/ownerless")).rooms.some((r) => r.workspace_id === ownerlessRoom), "the workroom reaching the ownerless list");
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
-  return { owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -487,13 +495,27 @@ async function keyboardPaths(s) {
     await small.keyboard.press("ArrowRight");
     await small.waitForFunction((el) => el.scrollLeft > 0, await scroller.elementHandle(), { timeout: 5_000 }).catch(() => {});
     ok(await scroller.evaluate((el) => el.scrollLeft > 0), "the arrow keys don't scroll the table");
-    const box = small.getByRole("checkbox", { name: "Checklist mark in this text" }).first();
+    const box = small.getByRole("checkbox", { name: "Author's mark, not verified by Podster" }).first();
     ok(await box.isDisabled(), "a checklist mark isn't disabled");
     const before = await box.isChecked();
     await box.click({ force: true });
     ok((await box.isChecked()) === before, "clicking a checklist mark changed it");
+    ok(await box.evaluate((el) => getComputedStyle(el.closest("li")).listStyleType === "none"), "a checklist item still has a bullet");
+    ok(await small.getByText("Podster hasn't verified them").first().isVisible(), "a checked box has no note saying it isn't verified");
     ok((await small.getByRole("heading", { name: "A heading", level: 4 }).count()) > 0, "agent text's heading isn't at the fixed level");
+    const narrow = small.getByRole("group", { name: "Table in this text" }).nth(1);
+    ok((await narrow.getAttribute("tabindex")) === null, "a table that fits is still a tab stop");
     await phone.close();
+  });
+
+  await keyboardPath("oversized agent tables don't freeze the Sheet", async () => {
+    const started = Date.now();
+    await page.goto(`${app}/w/${s.room}/tasks?task=${s.oversized.id}`);
+    await page.getByText("too large to show as a table").first().waitFor({ timeout: 15_000 });
+    await hydrated(page);
+    ok((await page.locator("table td").count()) < 2_500, "an oversized table still rendered as a table");
+    const responded = await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done(true))));
+    ok(responded && Date.now() - started < 15_000, `the Sheet took ${Date.now() - started}ms`);
   });
 
   await keyboardPath("transfer ownership", async () => {

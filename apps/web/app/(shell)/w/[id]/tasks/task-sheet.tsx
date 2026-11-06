@@ -166,7 +166,7 @@ export function Details({ data, me, names, orgNames }: SectionProps) {
       </section>
       <section className="space-y-2">
         <h3 className="font-medium">Acceptance criteria</h3>
-        {/* Read-only. Nothing here says anyone has checked them. */}
+        {/* Read-only, and written by the requester. Any checked box in it is the author's own, and AgentContent says Podster hasn't verified it. */}
         {task.acceptance_criteria ? <AgentContent author={briefBy} external={brief.external} body={task.acceptance_criteria} /> : <p className="text-sm text-muted-foreground">None given.</p>}
       </section>
       <section className="space-y-2">
