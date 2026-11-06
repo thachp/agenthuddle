@@ -19,10 +19,12 @@ export const APPLY_ANYWHERE_NODES = 1_000;
 export const APPLY_OUT_OF_VIEW_NODES = 20_000;
 /** What finished results may hold on to. Around 70 bytes a node, this is about 15 MB. */
 export const MAX_CACHED_NODES = 200_000;
-/** Laying out one skipped body taking longer than this means the rest wait. An ordinary 16 KB body takes under 10 ms. */
+/** One skipped body taking longer than this to lay out stays skipped. An ordinary 16 KB body takes under 10 ms. */
 export const LAYOUT_STEP_MS = 50;
-export const LAYOUT_TOTAL_MS = 1_000;
-export const LAYOUT_PAUSE_MS = 30_000;
+/** What can stay laid out, which is about the most tabbing back to a thread can block for. */
+export const LAYOUT_VISIBLE_BUDGET_MS = 500;
+/** What timing slow bodies can cost on a screen, a body at a time. */
+export const LAYOUT_REJECTED_BUDGET_MS = 1_000;
 export const PARSE_TIME_LIMIT_MS = 500;
 /** How long a worker gets to load and say it's ready, twice, before text stays plain. */
 export const WORKER_START_LIMIT_MS = 3_000;

@@ -82,6 +82,14 @@ async function seed() {
   const scriptThread = await make("Task with unbroken scripts", { assignee: guest.id });
   await guest.must("accept_task", { ...at(scriptThread), version: scriptThread.version });
   for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(scriptThread), body: scripts[i % scripts.length] });
+  const oneScript = async (title, body) => {
+    const task = await make(title, { assignee: guest.id });
+    await guest.must("accept_task", { ...at(task), version: task.version });
+    for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(task), body });
+    return task;
+  };
+  const arabicThread = await oneScript("Task with unbroken Arabic", byBytes("ع"));
+  const hebrewLatinThread = await oneScript("Task with alternating directions", byBytes("אa"));
   // Long bodies whose results soon use up what can be applied out of view: for keeping the reader's place, and for how far ahead they format.
   const tallThread = await make("Task with tall messages", { assignee: guest.id });
   await guest.must("accept_task", { ...at(tallThread), version: tallThread.version });
@@ -161,7 +169,7 @@ async function seed() {
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
   const opening = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Lead coordinator", responsibilities: "Plans the work and **follows up**.", is_lead: true, policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
-  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -695,9 +703,10 @@ async function keyboardPaths(s) {
       for (const entry of list.getEntries()) window.longestBlock = Math.max(window.longestBlock, entry.duration);
     }).observe({ type: "longtask", buffered: true });
   });
-  // A single body in view has to be laid out, and these take a few hundred ms each locally and twice that on CI. Without skipped layout, all of them block at once.
-  const LONGEST_BLOCK_SCRIPTS_MS = 1_500;
-  const openHeavy = async (label, context, path, tab, longest = LONGEST_BLOCK_MS) => {
+  // A slow body has to be timed or laid out once, up to about 340 ms locally. Without skipped layout, these blocked for 922 ms on the Task Sheet and 2,226 ms on oversight.
+  const LONGEST_BLOCK_SCRIPTS_MS = 800;
+  const TAB_BACK_BLOCK_MS = 1_000;
+  const openHeavy = async (label, context, path, tab, longest = LONGEST_BLOCK_MS, idleWait = 3_000) => {
     await watchBlocks(context);
     const own = await context.newPage();
     try {
@@ -731,6 +740,21 @@ async function keyboardPaths(s) {
       });
       const blocked = await own.evaluate(() => Math.round(window.longestBlock));
       ok(blocked < longest, `${label} blocked the main thread for ${blocked}ms`);
+      // Let what's idle finish, then switch away and back: whatever stayed laid out is laid out again, all at once.
+      await own.waitForTimeout(idleWait);
+      const stayed = await own.getByRole("dialog").evaluate((sheet) => {
+        const bodies = [...sheet.querySelectorAll("article > div")];
+        return `${bodies.filter((body) => body.style.contentVisibility === "visible").length} of ${bodies.length}`;
+      });
+      await own.evaluate(() => (window.longestBlock = 0));
+      await own.getByRole("dialog").getByRole("tab", { name: /^(Details)$/ }).click();
+      await own.evaluate(() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 50))));
+      await own.getByRole("dialog").getByRole("tab", { name: tab }).click();
+      await own.getByRole("dialog").locator("article").last().waitFor({ timeout: 30_000 });
+      await own.evaluate(() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 200))));
+      const tabBack = await own.evaluate(() => Math.round(window.longestBlock));
+      console.log(`     ${label}: ${stayed} stayed laid out, longest block on tabbing back ${tabBack}ms`);
+      ok(tabBack < TAB_BACK_BLOCK_MS, `${label} blocked for ${tabBack}ms on tabbing back`);
       console.log(`     ${label}: opened in ${opened}ms (longest block ${startup}ms), tab showed in ${shown}ms, read to the end in ${read}ms, longest block ${blocked}ms`);
     } finally {
       await own.close().catch(() => {});
@@ -740,6 +764,8 @@ async function keyboardPaths(s) {
   await keyboardPath("a heavy thread on oversight (50 messages)", () => openHeavy("oversight", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.heavyThread.id}`, "Thread"));
   await keyboardPath("unbroken scripts on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, unbroken scripts", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.scriptThread.id}`, /^Discussion/, LONGEST_BLOCK_SCRIPTS_MS));
   await keyboardPath("unbroken scripts on oversight (50 messages)", () => openHeavy("oversight, unbroken scripts", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.scriptThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("unbroken Arabic on oversight (50 messages)", () => openHeavy("oversight, unbroken Arabic", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.arabicThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("alternating directions on oversight (50 messages)", () => openHeavy("oversight, alternating directions", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.hebrewLatinThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
   await keyboardPath("a heavy short thread on oversight (50 messages)", () => openHeavy("oversight, short messages", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.shortThread.id}`, "Thread"));
 
   await keyboardPath("a long brief formats in a worker, under the real CSP", async () => {
