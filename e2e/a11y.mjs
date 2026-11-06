@@ -99,6 +99,7 @@ async function seed() {
   await guest.must("accept_task", { ...at(linkThread), version: linkThread.version });
   for (let i = 0; i < 6; i++) await guest.must("send_message", { ...at(linkThread), body: `[link ${i}](https://example.com/${i})\n\n${"## A heading\n\n- A bullet with some words\n- Another bullet\n\n".repeat(120)}`.slice(0, 8 * 1024) });
   const numberedBrief = await make("Task with a long numbered list", { instructions: Array.from({ length: 120 }, (_, i) => `${i + 1}. An item`).join("\n") });
+  const composeTask = await make("Task for the message box", { assignee: guest.id });
   // A long brief that has to end up formatted: this proves the worker runs, under the real CSP, from the real build.
   // Nothing limits this one but the clock: it parses for over a second, with nothing deep and little rendered.
   const slowBrief = await make("Task with a slow brief", { instructions: runOfMarks });
@@ -172,7 +173,7 @@ async function seed() {
   // Two openings and a planned line between them, so the Collaboration screens have a plan to show.
   const plannedTo = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Delivery engineer with a long title that has to wrap", responsibilities: "Builds what's planned.", capacity: 1, preset: "member", policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
   await owner.must("POST", `/v1/workspaces/${room}/collaboration/planned`, { from_role_id: opening, to_role_id: plannedTo, label: "Hands the plan to, with a label long enough that the map cuts it short", policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version });
-  return { opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -1002,6 +1003,76 @@ async function keyboardPaths(s) {
       await own.close();
       if (viewport) await context.close();
     }
+  });
+
+  await keyboardPath("the message box's preview works by keyboard, and changes nothing that's sent", async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.composeTask.id}`);
+    const sheet = own.getByRole("dialog");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).click();
+    await hydrated(own);
+    const refused = [];
+    own.on("console", (message) => {
+      if (/Content Security Policy/.test(message.text())) refused.push(message.text());
+    });
+    const sent = [];
+    own.on("request", (request) => {
+      if (request.method() === "POST" && /\/messages$/.test(new URL(request.url()).pathname)) sent.push(request.postDataJSON().body);
+    });
+    const written = "_id ~/foo C:\\Users\\me **bold** `a\\_b`\n\ndef __init__(self, *args):\n\nhttps://ex.com/~me/_x?a=*b <img src=x onerror=\"window.pwned=1\"> [x](javascript:window.pwned=2)";
+    const box = sheet.getByLabel("Post a message");
+    await box.fill(written);
+    const toggle = sheet.getByRole("button", { name: /^(Preview|Edit)$/ });
+    await tabTo(own, sheet.getByRole("button", { name: "Post message" }), "the post button");
+    await toggle.focus();
+    await own.keyboard.press("Enter");
+    const preview = sheet.getByRole("region", { name: "Preview of your message" });
+    await preview.locator("strong").first().waitFor({ timeout: 15_000 });
+    ok((await toggle.innerText()).trim() === "Edit", "the toggle doesn't say how to get back");
+    ok((await preview.getByText("Not posted yet", { exact: false }).count()) === 2, "the preview doesn't say it isn't posted, before and after the card");
+    ok(await toggle.evaluate((el) => el === document.activeElement), "focus left the toggle");
+    ok((await preview.locator("img, script, iframe, a[href^='javascript']").count()) === 0, "hostile text became elements in the preview");
+    ok((await own.evaluate(() => window.pwned)) === undefined, "hostile text ran in the preview");
+    await audit(own, "Message preview");
+    await own.keyboard.press("Enter");
+    await box.waitFor({ timeout: 5_000 });
+    ok((await box.inputValue()) === written, "closing the preview changed the text");
+    ok((await toggle.innerText()).trim() === "Preview", "the toggle didn't go back");
+    await toggle.focus();
+    await own.keyboard.press("Enter");
+    await tabTo(own, sheet.getByRole("button", { name: "Post message" }), "the post button");
+    await own.keyboard.press("Enter");
+    await sheet.getByText("Posted.").waitFor({ timeout: 15_000 });
+    ok(sent[0] === written, `previewing changed what's sent: ${JSON.stringify(sent[0])}`);
+    ok(await box.evaluate((el) => el === document.activeElement), "focus didn't return to the box");
+    await box.fill(written);
+    await sheet.getByRole("button", { name: "Post message" }).click();
+    await own.waitForFunction(() => document.querySelector("#thread-message")?.value === "", null, { timeout: 15_000 });
+    ok(sent[1] === sent[0], "the body differs with and without previewing");
+    ok(refused.length === 0, `the policy refused something: ${refused[0]}`);
+    await own.close();
+  });
+
+  await keyboardPath("the message box's preview at phone width", async () => {
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const own = await phone.newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.composeTask.id}`);
+    const sheet = own.getByRole("dialog");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).click();
+    await hydrated(own);
+    await sheet.getByLabel("Post a message").fill(`A wide one: ${"unbroken".repeat(60)}\n\n| a | b |\n| - | - |\n| ${"wide".repeat(60)} | c |`);
+    const toggle = sheet.getByRole("button", { name: /^(Preview|Edit)$/ });
+    ok(((await toggle.boundingBox())?.height ?? 0) >= 44, "the toggle is under 44px tall at 375px");
+    await toggle.click();
+    await sheet.getByRole("region", { name: "Preview of your message" }).locator("table").waitFor({ timeout: 15_000 });
+    const sizes = await sheet.evaluate((dialog) => ({ page: document.documentElement.scrollWidth - window.innerWidth, sheet: dialog.scrollWidth - dialog.clientWidth }));
+    ok(sizes.page <= 0 && sizes.sheet <= 0, `the preview scrolls sideways at 375px: ${JSON.stringify(sizes)}`);
+    // A result too large to apply out of view still formats here, because the preview is in view.
+    await toggle.click();
+    await sheet.getByLabel("Post a message").fill("- item\n".repeat(600).trim());
+    await toggle.click();
+    await sheet.getByRole("region", { name: "Preview of your message" }).locator("li").nth(599).waitFor({ state: "attached", timeout: 15_000 });
+    await phone.close();
   });
 
   await keyboardPath("long messages are in the accessibility tree, off-screen too", async () => {
