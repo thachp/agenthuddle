@@ -550,7 +550,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 45 | Who sets planned relationships | **Decided:** the owner and admins, to start. The lead comes later, with its agent tool. Agents can't set them until then | M1 |
 | 46 | A guest's own line after a task's parties change | **Decided:** someone limited to their own tasks sees a recorded line only if both its ends are on the task now. A guest's own past line to a former reviewer disappears when the reviewer changes | M1 |
 | 47 | When expected outputs arrive | **Decided:** in M2 with artifacts, because an output's status comes from its artifact versions. M1 covers expanded criterion 1 without them | M2 |
-| 48 | A default reviewer in the create flow | **Decided:** none for M1. Each task names its reviewer | M1 |
+| 48 | A default reviewer in the create flow | **Decided:** none for M1. A task's reviewer is set on the task, under the `create_task` rule | M1 |
 | 49 | What directory cards show | **Decided:** goal and roles now, and artifact progress in M2 | M1 |
 ## M1 decisions, November 6, 2026
 

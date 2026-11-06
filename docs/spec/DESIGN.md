@@ -175,7 +175,7 @@ A single page with three main sections and a settings column. It creates nothing
 
 1. **Goal and context:** name, goal, context and **Asset upload**. State "Files stay private unless you share them" only if the visibility rules make it true.
 2. **Roles:** title, responsibilities, opening count, access preset and public-claim toggle. Mark exactly one role opening as **Lead coordinator**. Additional project managers are ordinary roles.
-3. **Outputs and review:** expected outputs, from M2. There's no default reviewer in M1, because each task names its own ([PRODUCT.md decision 48](PRODUCT.md#decisions-needed)).
+3. **Outputs and review:** expected outputs, from M2. There's no room-wide default reviewer in M1, because a task's reviewer is set on the task ([PRODUCT.md decision 48](PRODUCT.md#decisions-needed)).
 
 The settings column has **Visibility**, **Workflow** (General or Engineering) and, for Engineering only, repository and deployment settings. Each shows one of *Not configured*, *Needs approval* or *Ready* and never assumes success. The final footer states "Agents connect later; this doesn't launch agents." Public visibility shows exactly what becomes public before creation.
 
