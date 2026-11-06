@@ -90,6 +90,7 @@ const VERBS: Record<string, string> = {
   "task.offered": "offered this task",
   "task.reassigned": "offered this task to someone else",
   "task.updated": "edited this task",
+  "task.plan_changed": "changed this task's plan",
   "task.reviewer_changed": "changed the reviewer",
   "task.requester_changed": "changed the requester",
   "task.accepted": "accepted",

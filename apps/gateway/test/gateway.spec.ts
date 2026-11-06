@@ -2247,6 +2247,39 @@ describe("kernel journey across two organizations", () => {
     return { personA, personB, lead, architect, room, version };
   }
 
+  it("reads and sets a task's plan over both connection methods, and sends no other field", async () => {
+    const { personA, lead, architect, room, version } = await setup();
+    const first = (await lead.tool("create_task", { workspace_id: room, title: "First", instructions: "x", idempotency_key: "plan-first" })).data;
+    const second = (await lead.tool("create_task", { workspace_id: room, title: "Second", instructions: "x", idempotency_key: "plan-second" })).data;
+    const before = (await lead.tool("get_plan", { workspace_id: room })).data;
+    expect(before.complete).toBe(true);
+    const set = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: before.plan_revision, duration_days: 3, predecessors: [first.id], idempotency_key: "plan-set" })).data;
+    expect(set.predecessors).toEqual([first.id]);
+    // A guest connected through Agent Auth reads only part of it, and can't edit.
+    const read = (await execute(architect, "get_plan", { workspace_id: room })).data;
+    expect(read.complete).toBe(false);
+    expect(read).not.toHaveProperty("plan_revision");
+    expect(JSON.stringify(read)).not.toContain(first.id);
+    const refused = await execute(architect, "set_task_plan", { workspace_id: room, task_id: first.id, plan_revision: 1, predecessors: [], idempotency_key: "plan-refused" });
+    expect(refused.code).toBe("task_not_found");
+    // Left out means not estimated.
+    const cleared = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: set.plan_revision, predecessors: [], idempotency_key: "plan-clear" })).data;
+    expect(cleared).toMatchObject({ duration_days: null, predecessors: [] });
+    // Null means the same, on both paths the schema reaches.
+    const nulled = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: cleared.plan_revision, duration_days: 4, predecessors: [], idempotency_key: "plan-four" })).data;
+    const backToBlank = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: nulled.plan_revision, duration_days: null, predecessors: [], idempotency_key: "plan-null" })).data;
+    expect(backToBlank.duration_days).toBeNull();
+    // Agent Auth takes null too, with the same effect, once this agent can edit.
+    await dash(personA, "PUT", `/v1/workspaces/${room}/members/${architect.id}/access`, { preset: "member", policy_version: await version() });
+    const own = (await execute(architect, "create_task", { workspace_id: room, title: "Theirs", instructions: "x", idempotency_key: "plan-theirs" })).data;
+    const current = (await execute(architect, "get_plan", { workspace_id: room })).data.plan_revision;
+    const estimated = (await execute(architect, "set_task_plan", { workspace_id: room, task_id: own.id, plan_revision: current, duration_days: 2, predecessors: [], idempotency_key: "plan-auth-set" })).data;
+    expect(estimated.duration_days).toBe(2);
+    const blank = (await execute(architect, "set_task_plan", { workspace_id: room, task_id: own.id, plan_revision: estimated.plan_revision, duration_days: null, predecessors: [], idempotency_key: "plan-auth-null" })).data;
+    expect(blank.duration_days).toBeNull();
+    expect((await dash(personA, "GET", `/v1/workspaces/${room}/plan`)).status).toBe(200);
+  });
+
   it("passes list_activity's order and cursor through to the API, over both connection methods", async () => {
     const { personA, lead, architect, room, version } = await setup();
     await dash(personA, "PUT", `/v1/workspaces/${room}/brief`, { goal: "Ship", policy_version: await version() });

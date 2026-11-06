@@ -58,6 +58,7 @@ fn expected(kind: PrincipalKind, role: Role, party: &str, action: A) -> Verdict 
         A::Read | A::PostMessage => true,
         A::Update | A::Assign | A::SetReviewer | A::Cancel => party == "req" || human_admin,
         A::SetRequester => human_admin,
+        A::SetPlan => (party == "req" || human_admin) && (human_admin || role == Role::Member),
         A::Accept | A::Decline | A::Release | A::Submit => party == "asg",
         A::RequestChanges | A::Verify => party == "rev",
     };
@@ -89,7 +90,7 @@ fn every_kind_role_party_and_action_matches_the_matrix() {
             }
         }
     }
-    assert_eq!(checked, 2 * 5 * 4 * 13 * 6);
+    assert_eq!(checked, 2 * 5 * 4 * 14 * 6);
 }
 
 #[test]
@@ -1054,4 +1055,93 @@ fn planned_lines_reach_everyone_in_the_room_but_only_some_learn_who_set_them() {
         "per_owner",
         None
     ));
+}
+
+#[test]
+fn a_plan_is_for_the_requester_or_a_human_admin_who_sees_the_whole_room() {
+    let t = task();
+    let plan = |c: &Caller| authorize_task(c, &t, TaskAction::SetPlan);
+    let member = |id: &str, role, scope| {
+        let mut c = caller(id, PrincipalKind::Agent, role);
+        c.scopes.tasks = scope;
+        c
+    };
+    // The requester, with the whole room in view.
+    assert_eq!(
+        plan(&member(&t.requester, Role::Member, TaskScope::All)),
+        Verdict::Allow
+    );
+    // The same requester limited to its own tasks: refusing a loop could reveal a hidden link.
+    assert_eq!(
+        plan(&member(&t.requester, Role::Guest, TaskScope::OwnCreate)),
+        Verdict::Forbidden
+    );
+    // Seeing everything and being a coordinator isn't authority over someone else's task.
+    assert_eq!(
+        plan(&member("agt_other", Role::Member, TaskScope::Coordinate)),
+        Verdict::Forbidden
+    );
+    // An assignee and a reviewer have no say, even with the whole room in view.
+    let assignee = t.assignee.clone().unwrap();
+    assert_eq!(
+        plan(&member(&assignee, Role::Member, TaskScope::All)),
+        Verdict::Forbidden
+    );
+    assert_eq!(
+        plan(&member(&t.reviewer, Role::Member, TaskScope::All)),
+        Verdict::Forbidden
+    );
+    // A human admin can, and an agent stored as an admin can't.
+    assert_eq!(
+        plan(&caller("per_admin", PrincipalKind::Person, Role::Admin)),
+        Verdict::Allow
+    );
+    assert_eq!(
+        plan(&caller("per_owner", PrincipalKind::Person, Role::Owner)),
+        Verdict::Allow
+    );
+    assert_eq!(
+        plan(&caller("agt_admin", PrincipalKind::Agent, Role::Admin)),
+        Verdict::Hidden
+    );
+    // Nobody outside the room learns the task exists.
+    assert_eq!(
+        plan(&caller("agt_out", PrincipalKind::Agent, Role::None)),
+        Verdict::NotParticipant
+    );
+}
+
+#[test]
+fn only_someone_who_sees_the_whole_room_gets_a_whole_plan() {
+    let with = |scope| {
+        let mut c = caller("agt_x", PrincipalKind::Agent, Role::Member);
+        c.scopes.tasks = scope;
+        sees_whole_plan(&c)
+    };
+    assert!(with(TaskScope::All));
+    assert!(with(TaskScope::AllCreate));
+    assert!(with(TaskScope::Coordinate));
+    assert!(!with(TaskScope::Own));
+    assert!(!with(TaskScope::OwnCreate));
+    assert!(sees_whole_plan(&caller(
+        "per_a",
+        PrincipalKind::Person,
+        Role::Admin
+    )));
+    assert!(!sees_whole_plan(&caller(
+        "agt_out",
+        PrincipalKind::Agent,
+        Role::None
+    )));
+}
+
+#[test]
+fn a_plan_edit_shows_only_to_someone_who_sees_the_whole_room() {
+    let t = task();
+    let mut party = caller(&t.reviewer, PrincipalKind::Agent, Role::Guest);
+    party.scopes.tasks = TaskScope::Own;
+    assert!(can_see_event(&party, "task.updated", "agt_x", Some(&t)));
+    assert!(!can_see_event(&party, TASK_PLAN_CHANGED, "agt_x", Some(&t)));
+    party.scopes.tasks = TaskScope::All;
+    assert!(can_see_event(&party, TASK_PLAN_CHANGED, "agt_x", Some(&t)));
 }

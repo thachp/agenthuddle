@@ -23,9 +23,9 @@ use podster_policy::{
     can_review, can_see_event, can_see_task, denied_change_name, effective_scopes,
     is_authority_refusal, may_claim_role, may_decide_review, may_recover_ownership,
     org_departure_ends, owner_authority_holds, reads_every_thread, scopes_after_claim,
-    sees_planned_relationships, sees_who_planned, sees_whole_room, task_view, ArtifactScope,
-    ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope, Role, Scopes,
-    TaskAction, TaskScope, Verdict, WorkroomAction, EVENTS_FOR_EVERYONE,
+    sees_planned_relationships, sees_who_planned, sees_whole_plan, sees_whole_room, task_view,
+    ArtifactScope, ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope,
+    Role, Scopes, TaskAction, TaskScope, Verdict, WorkroomAction, EVENTS_FOR_EVERYONE,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -72,6 +72,7 @@ const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 type Identity = Verified;
 
 mod collaboration;
+mod plan;
 mod planned;
 mod roles;
 
@@ -2161,6 +2162,10 @@ mod queries {
             let everyone = EVENTS_FOR_EVERYONE
                 .map(|kind| format!("'{kind}'"))
                 .join(", ");
+            query.push_str(&format!(
+                " AND type <> '{}'",
+                podster_policy::TASK_PLAN_CHANGED
+            ));
             query.push_str(&format!(" AND ((task_id IS NULL AND (type IN ({everyone}) OR actor_id = ?4)) OR task_id IN (SELECT id FROM task WHERE requester_id = ?4 OR assignee_id = ?4 OR reviewer_id = ?4))"));
         }
         query.push_str(if newest {
@@ -2304,7 +2309,7 @@ mod queries {
             messages.clear();
         }
         let messages: Vec<Value> = messages.iter().map(|m| message_json(m, &who.org)).collect();
-        let history = rows(sql, "SELECT seq, id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ? ORDER BY seq", vec![id.into()])?;
+        let history = rows(sql, "SELECT seq, id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ?1 AND (type <> ?2 OR ?3) ORDER BY seq", vec![id.into(), podster_policy::TASK_PLAN_CHANGED.into(), flag(sees_whole_room(&who.caller))])?;
         let marked = |row: &Value, id: &str, org: &str| -> Value {
             let mut out = row.clone();
             if let Some(map) = out.as_object_mut() {
@@ -3452,6 +3457,9 @@ impl Workspace {
                 [] => queries::get_workspace(&sql, &who),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
+                ["plan"] => plan::read(&sql, &who.caller),
+                #[cfg(feature = "failpoints")]
+                ["plan", "costs"] => plan::read_costs(&sql, &who, &url),
                 ["roles"] => roles::list_roles(&sql, &who),
                 ["card"] => roles::read_card(&sql, &who),
                 ["collaboration"] => collaboration::read_map(&sql, &who),
@@ -3588,6 +3596,17 @@ impl Workspace {
                     move |sql, who, now| {
                         handle_change_role(sql, &who.caller, &target, &body, target_member, now)
                     },
+                )
+            }
+            (Method::Put, ["tasks", task, "plan"]) => {
+                let task = (*task).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| plan::handle_set(sql, &who.caller, &task, &body, now),
                 )
             }
             (Method::Post, ["collaboration", "planned"]) => self.command(

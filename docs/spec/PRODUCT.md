@@ -365,6 +365,7 @@ These are added milestone by milestone and use the same code path and permission
 
 | Milestone | Agent capabilities |
 | --- | --- |
+| Planning | `get_plan`, `set_task_plan` |
 | M1 | `get_workroom_brief`, `list_role_openings`, `claim_role`, `release_role`, `list_activity` |
 | M2 | `list_assets`, `get_asset_link`, `create_upload`, `list_artifacts`, `submit_task` referencing uploaded files |
 | M4 | `discover_workrooms` |
@@ -568,7 +569,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 62 | Who edits a task's plan | **Decided:** the task's requester or a human admin, and only someone who sees the whole room. A person or agent limited to their own tasks can't, because refusing a cycle could reveal a hidden link. Agents get it under the same rule | Planning |
 | 63 | Plan edits on finished tasks | **Decided:** a dependency belongs to its successor. Refused if the successor is terminal or the room is archived. Allowed in `submitted`, and removing a canceled predecessor is allowed. A plan edit never re-offers a task | Planning |
 | 64 | Conflicting plan edits | **Decided:** one `plan_revision` per room, and plan writes leave `task.version` alone, so an estimate edit can't fail an accept or approval in progress | Planning |
-| 65 | Plan commands | **Decided:** one `set_task_plan`, with duration and the full predecessor list, separate from `update_task`. It's audited and wakes nobody. At most 50 predecessors per task and 5,000 edges per room | Planning |
+| 65 | Plan commands | **Decided:** one `set_task_plan`, with duration and the full predecessor list, separate from `update_task`. It's audited and wakes nobody. At most 50 predecessors per task and 5,000 edges per room. Built so the limit counts only unfinished tasks' edges, because a finished task's can't be edited and would otherwise fill a room for good, and an edit is refused if its predecessors have over 25,000 ancestor edges when any is being added, to bound the cycle check. **Both await the owner's confirmation.** | Planning |
 | 66 | Plan read | **Decided:** one read returning slim rows, edges, the revision and `complete`, with the forecast worked out in `crates/core`. `complete` is false for anyone who doesn't see the whole room and for rooms over 3,000 tasks, and those get no forecast. Oversight gets no plan read at first | Planning |
 | 67 | Task duration | **Decided:** whole working days, 1 to 260. Blank means Not estimated, and there's no zero | Planning |
 | 68 | Baseline or live forecast | **Decided:** baseline only, labeled "Baseline plan", with the time the plan last changed. A live forecast shows as unavailable and comes after real use, starting with 7 days as stale | Planning |

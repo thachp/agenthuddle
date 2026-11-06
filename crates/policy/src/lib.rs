@@ -348,10 +348,12 @@ pub enum TaskAction {
     RequestChanges,
     Verify,
     Cancel,
+    /// A task's duration and predecessors.
+    SetPlan,
 }
 
 impl TaskAction {
-    pub const ALL: [TaskAction; 13] = [
+    pub const ALL: [TaskAction; 14] = [
         TaskAction::Read,
         TaskAction::PostMessage,
         TaskAction::Update,
@@ -365,6 +367,7 @@ impl TaskAction {
         TaskAction::RequestChanges,
         TaskAction::Verify,
         TaskAction::Cancel,
+        TaskAction::SetPlan,
     ];
 }
 
@@ -396,6 +399,7 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("POST", ["tasks", _, "update"]) => "task.update",
         ("POST", ["tasks", _, "set-reviewer"]) => "task.set_reviewer",
         ("POST", ["tasks", _, "set-requester"]) => "task.set_requester",
+        ("PUT", ["tasks", _, "plan"]) => "task.set_plan",
         ("POST", ["members"]) => "member.add",
         ("POST", ["members", _, "role"]) => "member.change_role",
         ("POST", ["members", _, "clear-removal"]) => "member.clear_removal",
@@ -535,6 +539,12 @@ pub fn sees_planned_relationships(caller: &Caller) -> bool {
     caller.role != Role::None
 }
 
+/// Whether a plan read is complete for this caller. Anyone else gets only their own tasks and the edges between those, with
+/// nothing that moves with the rest of the room's plan.
+pub fn sees_whole_plan(caller: &Caller) -> bool {
+    sees_whole_room(caller)
+}
+
 /// Whether the caller sees who set a planned line. It can name someone who isn't otherwise visible to a viewer limited to
 /// their own tasks.
 pub fn sees_who_planned(caller: &Caller) -> bool {
@@ -593,6 +603,8 @@ pub fn authorize_task(caller: &Caller, task: &Task, action: TaskAction) -> Verdi
             is_requester || admin
         }
         TaskAction::SetRequester => admin,
+        // Refusing a loop could reveal a hidden link, so this needs the whole room as well as authority over the task.
+        TaskAction::SetPlan => (is_requester || admin) && sees_whole_room(caller),
         TaskAction::Accept | TaskAction::Decline | TaskAction::Release | TaskAction::Submit => {
             is_assignee
         }
@@ -675,13 +687,19 @@ pub const EVENTS_FOR_EVERYONE: [&str; 8] = [
     "role.closed",
 ];
 
-/// Whether someone can see one event in a room's activity. A task's events follow the task, as it stands now. A room's
-/// own events follow the member list, apart from the ones above and what the viewer did themselves. Denies by default.
+/// A task's event only someone who sees the whole room gets. A plan edit can be about a task they can't see, so a party to the
+/// successor would otherwise learn a hidden edge had changed.
+pub const TASK_PLAN_CHANGED: &str = "task.plan_changed";
+
+/// Whether someone can see one event in a room's activity. A task's events follow the task, as it stands now, apart from
+/// plan edits. A room's own events follow the member list, apart from the ones above and what the viewer did themselves.
+/// Denies by default.
 pub fn can_see_event(caller: &Caller, kind: &str, actor: &str, task: Option<&Task>) -> bool {
     if caller.role == Role::None {
         return false;
     }
     match task {
+        Some(_) if kind == TASK_PLAN_CHANGED => sees_whole_room(caller),
         Some(task) => can_see_task(caller, task),
         None => {
             is_human_admin(caller)

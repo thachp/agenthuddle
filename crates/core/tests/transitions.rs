@@ -1270,3 +1270,109 @@ fn a_planned_relationship_joins_two_roles_with_a_bounded_label() {
         Err(CoreError::InvalidArgument("label"))
     );
 }
+
+fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|id| (*id).to_string()).collect()
+}
+
+fn edges(list: &[(&str, &str)]) -> Vec<(String, String)> {
+    list.iter()
+        .map(|(from, to)| ((*from).to_string(), (*to).to_string()))
+        .collect()
+}
+
+#[test]
+fn a_plan_belongs_to_its_successor_while_the_task_is_unfinished() {
+    let change = |adds, duration, canceled| PlanChange {
+        adds_predecessors: adds,
+        changes_duration: duration,
+        removes_only_canceled: canceled,
+    };
+    for status in [Open, Offered, Accepted, Submitted] {
+        assert_eq!(
+            plan_change_allowed(status, change(true, true, false)),
+            Ok(())
+        );
+    }
+    for status in [Completed, Canceled] {
+        let refused = Err(CoreError::InvalidTransition);
+        assert_eq!(
+            plan_change_allowed(status, change(true, false, false)),
+            refused
+        );
+        assert_eq!(
+            plan_change_allowed(status, change(false, true, false)),
+            refused
+        );
+        assert_eq!(
+            plan_change_allowed(status, change(false, false, false)),
+            refused
+        );
+        // Removing a canceled predecessor, and nothing else, so its finish isn't withheld for good.
+        assert_eq!(
+            plan_change_allowed(status, change(false, false, true)),
+            Ok(())
+        );
+        assert_eq!(
+            plan_change_allowed(status, change(true, false, true)),
+            refused
+        );
+        assert_eq!(
+            plan_change_allowed(status, change(false, true, true)),
+            refused
+        );
+    }
+}
+
+#[test]
+fn a_duration_is_whole_days_from_1_to_260_and_blank_means_not_estimated() {
+    let duration = |days| validate_task_plan("t", days, &[]);
+    assert_eq!(duration(None), Ok(()));
+    assert_eq!(duration(Some(1)), Ok(()));
+    assert_eq!(duration(Some(260)), Ok(()));
+    for days in [0, -1, 261] {
+        assert_eq!(
+            duration(Some(days)),
+            Err(CoreError::InvalidArgument("duration_days"))
+        );
+    }
+}
+
+#[test]
+fn predecessors_refuse_itself_a_duplicate_and_too_many() {
+    let bad = Err(CoreError::InvalidArgument("predecessors"));
+    assert_eq!(validate_task_plan("t", None, &ids(&["t"])), bad);
+    assert_eq!(validate_task_plan("t", None, &ids(&["a", "a"])), bad);
+    let fifty: Vec<String> = (0..50).map(|n| format!("p{n}")).collect();
+    assert_eq!(validate_task_plan("t", None, &fifty), Ok(()));
+    let more: Vec<String> = (0..51).map(|n| format!("p{n}")).collect();
+    assert_eq!(validate_task_plan("t", None, &more), bad);
+}
+
+#[test]
+fn a_loop_is_refused_however_long_and_a_diamond_is_not_one() {
+    // a -> b -> c, so a can't come after c.
+    let chain = edges(&[("a", "b"), ("b", "c")]);
+    assert!(plan_would_cycle("a", &ids(&["c"]), &chain));
+    assert!(plan_would_cycle("a", &ids(&["b"]), &chain));
+    assert!(!plan_would_cycle("c", &ids(&["a"]), &chain));
+    let diamond = edges(&[("a", "b"), ("a", "c"), ("b", "d")]);
+    assert!(!plan_would_cycle("d", &ids(&["b", "c"]), &diamond));
+    assert!(!plan_would_cycle("x", &[], &chain));
+}
+
+#[test]
+fn a_cycle_check_ignores_the_edges_being_replaced_and_stops_on_a_stored_loop() {
+    // b's own edge from a is what's being replaced, so moving it doesn't close a loop through it.
+    assert!(!plan_would_cycle(
+        "b",
+        &ids(&["c"]),
+        &edges(&[("a", "b"), ("x", "c")])
+    ));
+    // A loop already stored, which shouldn't exist, can't make this run forever.
+    assert!(!plan_would_cycle(
+        "t",
+        &ids(&["a"]),
+        &edges(&[("a", "b"), ("b", "a")])
+    ));
+}

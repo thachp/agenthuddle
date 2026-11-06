@@ -94,6 +94,15 @@ CREATE TABLE relationship (id TEXT PRIMARY KEY, from_role_id TEXT NOT NULL, to_r
 CREATE UNIQUE INDEX relationship_line ON relationship (from_role_id, to_role_id) WHERE ended_at IS NULL;
 CREATE INDEX relationship_to ON relationship (to_role_id) WHERE ended_at IS NULL;
 CREATE INDEX relationship_shown ON relationship (created_at, id) WHERE ended_at IS NULL;
+", "
+ALTER TABLE workspace ADD COLUMN plan_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workspace ADD COLUMN plan_changed_at INTEGER;
+ALTER TABLE task ADD COLUMN duration_days INTEGER;
+CREATE TABLE task_dependency (successor_id TEXT NOT NULL, predecessor_id TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (successor_id, predecessor_id)) WITHOUT ROWID;
+CREATE INDEX task_requester ON task (requester_id);
+CREATE INDEX task_assignee ON task (assignee_id);
+CREATE INDEX task_reviewer ON task (reviewer_id);
+CREATE TABLE task_plan_change (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, actor_id TEXT NOT NULL, plan_revision INTEGER NOT NULL, old_duration_days INTEGER, new_duration_days INTEGER, added TEXT NOT NULL, removed TEXT NOT NULL, created_at INTEGER NOT NULL);
 "];
 
 pub fn int(value: &Value) -> i64 {

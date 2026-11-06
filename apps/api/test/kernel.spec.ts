@@ -83,7 +83,18 @@ const offer = async (tasks: string, extra: object = {}) => {
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 /** Puts a room back to what the last deployment left, with only the newest migration undone. */
+const undoPlanMigration = (state: any) => {
+  for (const index of ["task_requester", "task_assignee", "task_reviewer"]) state.storage.sql.exec(`DROP INDEX ${index}`);
+  state.storage.sql.exec("DROP TABLE task_plan_change");
+  state.storage.sql.exec("DROP TABLE task_dependency");
+  state.storage.sql.exec("ALTER TABLE task DROP COLUMN duration_days");
+  state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN plan_changed_at");
+  state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN plan_revision");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before planned lines. */
 const undoPlannedMigration = (state: any) => {
+  undoPlanMigration(state);
   state.storage.sql.exec("DROP TABLE relationship");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
 };
@@ -4434,7 +4445,7 @@ describe("rooms from before access grants", () => {
     const version = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number);
     const read = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body;
     expect([read.goal, read.context]).toEqual([null, null]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 5);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 6);
     const accessOf = (who: Who) => read.members.find((m: any) => m.principal_id === who.id).access;
     expect(accessOf(LEAD).preset).toBe("member");
     expect(accessOf(BOB).preset).toBe("guest");
@@ -4624,7 +4635,7 @@ describe("work roles and claims", () => {
     expect(read.status).toBe(200);
     expect(read.body.members.find((m: any) => m.principal_id === BOB.id).access.preset).toBe("public_participant");
     expect(await count(id, "access_grant")).toBe(before);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 4);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 5);
     const role = await opening(id);
     expect((await invite(id, role, BOB)).status).toBe(200);
     expect((await claim(id, role, BOB)).body.access.preset).toBe("member");
@@ -5112,7 +5123,7 @@ describe("requiring a person to review (decision 5)", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 3);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 4);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     expect((await setting(id, true)).code).toBe("workspace_archived");
   });
@@ -5609,7 +5620,7 @@ describe("planned relationships", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).planned).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 1);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 2);
     expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).status).toBe(200);
   });
 
@@ -5632,6 +5643,417 @@ describe("planned relationships", () => {
     // Removing one makes room.
     expect((await managed(OWNER, "DELETE", `${planned(id)}/rel_1`, id)).status).toBe(200);
     expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).status).toBe(200);
+  });
+});
+
+describe("task plans", () => {
+  const planOf = (id: string) => `/v1/workspaces/${id}/plan`;
+  const read = async (who: Who, id: string) => {
+    const r = await api(who, "GET", planOf(id));
+    expect(r.status).toBe(200);
+    return r.body as { complete: boolean; tasks: any[]; edges: any[]; plan_revision?: number; plan_changed_at?: number };
+  };
+  const revision = async (id: string) => (await read(OWNER, id)).plan_revision as number;
+  const set = async (who: Who, tasks: string, task: string, id: string, body: object, opts: object = {}) =>
+    api(who, "PUT", `${tasks}/${task}/plan`, { plan_revision: await revision(id), predecessors: [], ...body }, opts);
+  const count = async (id: string, table: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec(`SELECT count(*) AS n FROM ${table}`).one().n as number);
+  const asMember = async (id: string, who: Who, scope: object) => {
+    await register(who);
+    const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: "org_a", role: "member", policy_version: version })).status).toBe(200);
+    const next = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${who.id}/access`, { ...scope, policy_version: next })).status).toBe(200);
+  };
+
+  it("sets a duration and predecessors, moving the room's revision and leaving the task alone", async () => {
+    const { id, tasks } = await room();
+    const a = await offer(tasks, { title: "A" });
+    const b = await offer(tasks, { title: "B" });
+    expect(await revision(id)).toBe(0);
+    const made = await set(LEAD, tasks, b.id, id, { duration_days: 5, predecessors: [a.id] });
+    expect(made.status).toBe(200);
+    expect(made.body).toMatchObject({ task_id: b.id, duration_days: 5, predecessors: [a.id], plan_revision: 1 });
+    const plan = await read(OWNER, id);
+    expect(plan.complete).toBe(true);
+    expect(plan.plan_revision).toBe(1);
+    expect(plan.plan_changed_at).toBe(made.body.plan_changed_at);
+    expect(plan.edges).toEqual([{ predecessor: a.id, successor: b.id }]);
+    expect(plan.tasks.find((t) => t.id === b.id)).toMatchObject({ title: "B", status: "offered", assignee: BOB.id, reviewer: REVIEWER.id, duration_days: 5 });
+    expect(plan.tasks.find((t) => t.id === a.id).duration_days).toBeNull();
+    // Accepting with the version from before the edit still works, because a plan edit doesn't touch it.
+    const after = (await api(BOB, "GET", `${tasks}/${b.id}`)).body.task;
+    expect(after.version).toBe(b.version);
+    expect((await api(BOB, "POST", `${tasks}/${b.id}/accept`, { version: b.version })).status).toBe(200);
+    // Clearing goes back to not estimated, and an empty list removes them all.
+    const cleared = await set(LEAD, tasks, b.id, id, {});
+    expect(cleared.body).toMatchObject({ duration_days: null, predecessors: [], plan_revision: 2 });
+    expect((await read(OWNER, id)).edges).toEqual([]);
+  });
+
+  it("wakes nobody, re-offers nothing and writes one audit row", async () => {
+    const { id, tasks } = await room();
+    const a = await offer(tasks, { title: "A" });
+    const b = await offer(tasks, { title: "B" });
+    // Held, so anything this queued would still be here to count.
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hold_outbox (x)"));
+    const events = await count(id, "event");
+    const inboxes = async () => (await Promise.all([LEAD, BOB, REVIEWER, OWNER].map(async (who) => (await api(who, "GET", "/v1/inbox")).body.events))).flat();
+    expect((await set(LEAD, tasks, b.id, id, { duration_days: 2, predecessors: [a.id] })).status).toBe(200);
+    const queued = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.type = 'task.plan_changed'").one().n);
+    expect(queued).toBe(0);
+    await runDurableObjectAlarm(stub(id));
+    expect((await inboxes()).some((e: any) => e.type === "task.plan_changed")).toBe(false);
+    expect(await count(id, "event")).toBe(events + 1);
+    expect((await api(BOB, "GET", `${tasks}/${b.id}`)).body.task.status).toBe("offered");
+    const audit = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT * FROM task_plan_change").toArray()) as any[];
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ task_id: b.id, actor_id: LEAD.id, plan_revision: 1, old_duration_days: null, new_duration_days: 2, added: JSON.stringify([a.id]), removed: "[]" });
+    const history = (await api(LEAD, "GET", `${tasks}/${b.id}`)).body.history as any[];
+    expect(history.some((e) => e.type === "task.plan_changed")).toBe(true);
+    const seen = (await api(LEAD, "GET", `/v1/workspaces/${id}/activity?order=newest&limit=1`)).body.events;
+    expect(seen[0].type).toBe("task.plan_changed");
+  });
+
+  it("lets only the requester or a human admin who sees the whole room edit, with the refusal from Rust", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks, { assignee: BOB.id });
+    // LEAD is the requester and sees the whole room, and OWNER is a human admin.
+    expect((await set(LEAD, tasks, t.id, id, { duration_days: 1 })).status).toBe(200);
+    expect((await set(OWNER, tasks, t.id, id, { duration_days: 2 })).status).toBe(200);
+    // The assignee and the reviewer have no say.
+    expect((await set(BOB, tasks, t.id, id, { duration_days: 3 })).code).toBe("not_allowed");
+    expect((await set(REVIEWER, tasks, t.id, id, { duration_days: 3 })).code).toBe("not_allowed");
+    // Someone who can see every task, but isn't this one's requester.
+    const wide: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    await asMember(id, wide, { preset: "coordinator" });
+    expect((await set(wide, tasks, t.id, id, { duration_days: 3 })).code).toBe("not_allowed");
+    // A requester limited to their own tasks, because refusing a loop could reveal a hidden link.
+    const narrow: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    await asMember(id, narrow, { preset: "guest", scopes: { tasks: "own_create" } });
+    const own = await api(narrow, "POST", tasks, { title: "Mine", instructions: "x", reviewer: REVIEWER.id });
+    expect(own.status).toBe(200);
+    expect((await set(narrow, tasks, own.body.id, id, { duration_days: 3 })).code).toBe("not_allowed");
+    // A task it can't see, and someone outside the room.
+    expect((await set(narrow, tasks, t.id, id, { duration_days: 3 })).code).toBe("task_not_found");
+    expect((await set(OUTSIDER, tasks, t.id, id, { duration_days: 3 })).code).toBe("workspace_not_found");
+    const unchanged = await read(OWNER, id);
+    expect(unchanged.tasks.find((x) => x.id === t.id).duration_days).toBe(2);
+    expect(unchanged.plan_revision).toBe(2);
+  });
+
+  it("refuses a loop, a task from elsewhere, itself, a duplicate and a bad duration, changing nothing", async () => {
+    const { id, tasks } = await room();
+    const [a, b, c] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "B" }), await offer(tasks, { title: "C" })];
+    await set(LEAD, tasks, b.id, id, { predecessors: [a.id] });
+    await set(LEAD, tasks, c.id, id, { predecessors: [b.id] });
+    const before = await read(OWNER, id);
+    expect((await set(LEAD, tasks, a.id, id, { predecessors: [c.id] })).code).toBe("dependency_cycle");
+    expect((await set(LEAD, tasks, a.id, id, { predecessors: [a.id] })).code).toBe("invalid_argument");
+    expect((await set(LEAD, tasks, a.id, id, { predecessors: [b.id, b.id] })).code).toBe("invalid_argument");
+    expect((await set(LEAD, tasks, a.id, id, { predecessors: ["tsk_nope"] })).code).toBe("task_not_found");
+    const other = await room();
+    const elsewhere = await offer(other.tasks, { title: "Elsewhere" });
+    expect((await set(LEAD, tasks, a.id, id, { predecessors: [elsewhere.id] })).code).toBe("task_not_found");
+    for (const duration_days of [0, -1, 261, 1.5, "3"]) expect((await set(LEAD, tasks, a.id, id, { duration_days })).code).toBe("invalid_argument");
+    const many = Array.from({ length: 51 }, (_, n) => `tsk_${n}`);
+    expect((await set(LEAD, tasks, a.id, id, { predecessors: many })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "PUT", `${tasks}/${a.id}/plan`, { predecessors: [] })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "PUT", `${tasks}/${a.id}/plan`, { plan_revision: await revision(id) })).code).toBe("invalid_argument");
+    expect(await read(OWNER, id)).toEqual(before);
+  });
+
+  it("conflicts on a stale revision from any task's edit, and replays once", async () => {
+    const { id, tasks } = await room();
+    const [a, b] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "B" })];
+    const start = await revision(id);
+    expect((await api(LEAD, "PUT", `${tasks}/${a.id}/plan`, { plan_revision: start, predecessors: [], duration_days: 1 })).status).toBe(200);
+    const stale = await api(LEAD, "PUT", `${tasks}/${b.id}/plan`, { plan_revision: start, predecessors: [], duration_days: 1 });
+    expect(stale.status).toBe(409);
+    expect(stale.code).toBe("plan_conflict");
+    const key = nextKey();
+    const body = { plan_revision: start + 1, predecessors: [a.id], duration_days: 4 };
+    const first = await api(LEAD, "PUT", `${tasks}/${b.id}/plan`, body, { key });
+    const again = await api(LEAD, "PUT", `${tasks}/${b.id}/plan`, body, { key });
+    expect(again.body).toEqual(first.body);
+    expect(await revision(id)).toBe(start + 2);
+    expect(await count(id, "task_plan_change")).toBe(2);
+    // Saving what's there moves nothing, so it can't make someone else's edit conflict.
+    const same = await api(LEAD, "PUT", `${tasks}/${b.id}/plan`, { plan_revision: start + 2, predecessors: [a.id], duration_days: 4 });
+    expect(same.body.plan_revision).toBe(start + 2);
+    expect(await count(id, "task_plan_change")).toBe(2);
+  });
+
+  it("rolls back whole if the command fails", async () => {
+    const { id, tasks } = await room();
+    const [a, b] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "B" })];
+    expect((await set(LEAD, tasks, b.id, id, { duration_days: 3, predecessors: [a.id] }, { fail: true })).status).toBe(500);
+    const plan = await read(OWNER, id);
+    expect(plan.plan_revision).toBe(0);
+    expect(plan.edges).toEqual([]);
+    expect(plan.tasks.find((t) => t.id === b.id).duration_days).toBeNull();
+    expect(await count(id, "task_plan_change")).toBe(0);
+  });
+
+  it("keeps a finished task's plan as it is, and lets a successor drop a canceled predecessor", async () => {
+    const { id, tasks } = await room();
+    const [a, b] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "B" })];
+    await set(LEAD, tasks, b.id, id, { predecessors: [a.id], duration_days: 1 });
+    expect((await api(LEAD, "POST", `${tasks}/${a.id}/cancel`, { version: a.version, reason: "no" })).status).toBe(200);
+    // The edge stays until someone removes it, and a canceled task's own plan no longer changes.
+    expect((await read(OWNER, id)).edges).toEqual([{ predecessor: a.id, successor: b.id }]);
+    expect((await set(LEAD, tasks, a.id, id, { duration_days: 2 })).code).toBe("invalid_transition");
+    expect((await set(LEAD, tasks, b.id, id, { duration_days: 1, predecessors: [] })).status).toBe(200);
+    expect((await read(OWNER, id)).edges).toEqual([]);
+    // Allowed while submitted, without sending it back.
+    await api(BOB, "POST", `${tasks}/${b.id}/accept`, { version: b.version });
+    await api(BOB, "POST", `${tasks}/${b.id}/submit`, { version: b.version + 1, artifacts: [{ uri: "https://example.com/a", label: "A" }] });
+    expect((await set(LEAD, tasks, b.id, id, { duration_days: 9 })).status).toBe(200);
+    expect((await api(BOB, "GET", `${tasks}/${b.id}`)).body.task.status).toBe("submitted");
+    // An archived room takes no plan edits.
+    const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: version })).status).toBe(200);
+    expect((await set(OWNER, tasks, b.id, id, { duration_days: 8 })).code).toBe("workspace_archived");
+  });
+
+  it("shows a narrowed viewer only their own tasks and the edges between them, whatever else exists", async () => {
+    const { id, tasks } = await room();
+    const [mine, alsoMine] = [await offer(tasks, { assignee: BOB.id, title: "Mine" }), await offer(tasks, { assignee: BOB.id, title: "Also mine" })];
+    await set(LEAD, tasks, alsoMine.id, id, { predecessors: [mine.id], duration_days: 3 });
+    const before = await read(BOB, id);
+    expect(before.complete).toBe(false);
+    expect(before.tasks.map((t) => t.id).sort()).toEqual([mine.id, alsoMine.id].sort());
+    expect(before.edges).toEqual([{ predecessor: mine.id, successor: alsoMine.id }]);
+    expect(before).not.toHaveProperty("plan_revision");
+    expect(before).not.toHaveProperty("plan_changed_at");
+    // A hidden task, a hidden predecessor of a visible one, and a hidden successor of it.
+    const hidden = await offer(tasks, { assignee: CAROL.id, title: "Secret project" });
+    const later = await offer(tasks, { assignee: CAROL.id, title: "Secret follow-up" });
+    await set(LEAD, tasks, mine.id, id, { predecessors: [hidden.id], duration_days: 7 });
+    await set(LEAD, tasks, later.id, id, { predecessors: [alsoMine.id], duration_days: 40 });
+    const after = await read(BOB, id);
+    expect(JSON.stringify(after)).not.toContain(hidden.id);
+    expect(JSON.stringify(after)).not.toContain(later.id);
+    expect(JSON.stringify(after)).not.toContain("Secret");
+    expect(after.edges).toEqual(before.edges);
+    expect(after.tasks.map((t) => t.id).sort()).toEqual(before.tasks.map((t) => t.id).sort());
+    // The one thing that moved is their own task's estimate.
+    expect(after.tasks.find((t) => t.id === mine.id).duration_days).toBe(7);
+    expect((await api(OUTSIDER, "GET", planOf(id))).status).toBe(404);
+    // Whole-room viewers see all of it.
+    const whole = await read(OWNER, id);
+    expect(whole.complete).toBe(true);
+    expect(whole.edges).toHaveLength(3);
+  });
+
+  const seedFinished = (id: string, count: number, from = 0, title = "'Old'") => runInDurableObject(stub(id), (_: any, state: any) => {
+    const sql = state.storage.sql;
+    const names = sql.exec("PRAGMA table_info(task)").toArray().map((c: any) => c.name).filter((n: string) => n !== "seq");
+    const chosen = names.map((n: string) => (n === "id" ? "'tsk_old' || g.n" : n === "title" ? title : n === "status" ? "'completed'" : `t.${n}`)).join(",");
+    for (let start = from; start < from + count; start += 500) sql.exec(`WITH RECURSIVE g(n) AS (SELECT ${start} UNION ALL SELECT n + 1 FROM g WHERE n < ${Math.min(start + 499, from + count - 1)}) INSERT INTO task (${names.join(",")}) SELECT ${chosen} FROM g, (SELECT * FROM task LIMIT 1) t`);
+  });
+  const seedEdges = (id: string, successor: (n: string) => string, predecessor: (n: string) => string, count: number) => runInDurableObject(stub(id), (_: any, state: any) => {
+    for (let start = 0; start < count; start += 500) state.storage.sql.exec(`WITH RECURSIVE g(n) AS (SELECT ${start} UNION ALL SELECT n + 1 FROM g WHERE n < ${Math.min(start + 499, count - 1)}) INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) SELECT ${successor("g.n")}, ${predecessor("g.n")}, 'o', 1 FROM g`);
+  });
+
+  it("over 3,000 tasks, holds every unfinished task first, with its whole predecessor list, so an edit can't erase what it didn't show", async () => {
+    const { id, tasks } = await room();
+    const oldest = await offer(tasks, { title: "Oldest and still open" });
+    await seedFinished(id, 3500);
+    const newest = await offer(tasks, { title: "Newest" });
+    const old = "tsk_old5";
+    // An open task whose predecessor is too old to be listed.
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) VALUES ('${newest.id}', '${old}', 'o', 1)`));
+    const plan = await read(OWNER, id);
+    expect(plan.complete).toBe(false);
+    expect(plan.tasks).toHaveLength(3000);
+    expect(plan.tasks[0].id).toBe(newest.id);
+    expect(plan.tasks.some((t) => t.id === oldest.id)).toBe(true);
+    expect(plan.tasks.some((t) => t.id === old)).toBe(false);
+    expect(plan.tasks.at(-1).status).toBe("completed");
+    expect(plan.edges).toEqual([{ predecessor: old, successor: newest.id }]);
+    // Sending back what it read keeps the old edge, and adds an estimate.
+    const predecessors = plan.edges.filter((e) => e.successor === newest.id).map((e) => e.predecessor);
+    expect((await set(LEAD, tasks, newest.id, id, { predecessors, duration_days: 3 })).status).toBe(200);
+    expect((await read(OWNER, id)).edges).toEqual([{ predecessor: old, successor: newest.id }]);
+    // A finished task too old to list can't lose anything by an edit that doesn't know about it.
+    await runInDurableObject(stub(id), (_: any, state: any) => {
+      state.storage.sql.exec(`INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) VALUES ('tsk_old7', '${old}', 'o', 1)`);
+      state.storage.sql.exec("UPDATE task SET duration_days = 9 WHERE id = 'tsk_old7'");
+    });
+    expect((await set(OWNER, tasks, "tsk_old7", id, {})).code).toBe("invalid_transition");
+    const kept = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n, (SELECT duration_days FROM task WHERE id = 'tsk_old7') AS days FROM task_dependency WHERE successor_id = 'tsk_old7'").one()) as any;
+    expect(kept).toMatchObject({ n: 1, days: 9 });
+  });
+
+  it("is complete at exactly 3,000 tasks", async () => {
+    const { id, tasks } = await room();
+    await offer(tasks, { title: "One" });
+    await seedFinished(id, 2999);
+    const plan = await read(OWNER, id);
+    expect(plan.tasks).toHaveLength(3000);
+    expect(plan.complete).toBe(true);
+  });
+
+  it("reads through its indexes, stopping early however large the room's history", async () => {
+    const { id, tasks } = await room();
+    const mine = await offer(tasks, { assignee: BOB.id, title: "Mine" });
+    await seedFinished(id, 8000);
+    await seedEdges(id, (n) => `'tsk_old' || (${n} + 1)`, (n) => `'tsk_old' || ${n}`, 4000);
+    // Someone named on nearly everything.
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`UPDATE task SET reviewer_id = '${BOB.id}', assignee_id = '${BOB.id}', requester_id = '${BOB.id}'`));
+    const costs = async (who: Who, ids: string[]) => (await api(who, "GET", `${planOf(id)}/costs?ids=${encodeURIComponent(JSON.stringify(ids))}`)).body;
+    const narrow = await costs(BOB, [mine.id, "tsk_old1"]);
+    for (const index of ["task_requester", "task_assignee", "task_reviewer"]) expect(narrow.own.plan).toContain(index);
+    expect(narrow.own.rows).toBe(3001);
+    // Three indexes, each stopping at 3,001 rows, however many tasks name them. There are 8,000 here.
+    expect(narrow.own.rows_read).toBeLessThan(3 * 3 * 3001 + 100);
+    expect(narrow.edges_from.plan).toContain("PRIMARY KEY");
+    expect(narrow.edges_from.rows_read).toBeLessThan(10);
+    expect(narrow.edges_before.plan).toContain("PRIMARY KEY");
+    const whole = await costs(OWNER, []);
+    expect(whole.finished.plan).not.toContain("TEMP B-TREE");
+    expect(whole.finished.rows).toBe(3001);
+    expect(whole.finished.rows_read).toBeLessThan(3100);
+    expect(whole.edges_finished.plan).toContain("SCAN d");
+    expect(whole.edges_finished.rows_read).toBeLessThan(2 * (5001 + 100));
+    // Unfinished work is found through its status, and there's at most 1,000 of it, not through the 8,000 finished tasks.
+    expect(whole.unfinished.plan).toContain("task_status");
+    expect(whole.unfinished.rows_read).toBeLessThan(10);
+    expect(whole.edges_unfinished.plan).toContain("task_status");
+    expect(whole.edges_unfinished.rows_read).toBeLessThan(10);
+    expect(whole.edges_count.plan).toContain("task_status");
+    expect(whole.edges_count.rows_read).toBeLessThan(10);
+    // Reading what comes before one task walks only that, not the room's 4,000 edges.
+    const one = await costs(OWNER, ["tsk_old3"]);
+    expect(one.edges_before.rows).toBe(3);
+    expect(one.edges_before.rows_read).toBeLessThan(30);
+  });
+
+  it("counts only unfinished tasks' edges toward 5,000, so a room can't get stuck, and removing is always allowed", async () => {
+    const { id, tasks } = await room();
+    const [a, b, c] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "B" }), await offer(tasks, { title: "C" })];
+    await seedFinished(id, 2);
+    // 5,000 edges on finished tasks don't count.
+    await seedEdges(id, () => "'tsk_old0'", (n) => `'tsk_past' || ${n}`, 5000);
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id] })).status).toBe(200);
+    expect((await set(LEAD, tasks, b.id, id, {})).status).toBe(200);
+    // 5,000 on an unfinished task do.
+    await seedEdges(id, () => `'${c.id}'`, (n) => `'tsk_past' || ${n}`, 5000);
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id] })).code).toBe("limit_exceeded");
+    // Going down is still possible at the limit.
+    expect((await set(LEAD, tasks, c.id, id, { duration_days: 2, predecessors: Array.from({ length: 2 }, (_, n) => `tsk_past${n}`) })).status).toBe(200);
+  });
+
+  it("refuses a loop closed through a finished task", async () => {
+    const { id, tasks } = await room();
+    const [s, f] = [await offer(tasks, { title: "S" }), await offer(tasks, { title: "F" })];
+    await set(LEAD, tasks, f.id, id, { predecessors: [s.id] });
+    expect((await api(LEAD, "POST", `${tasks}/${f.id}/cancel`, { version: f.version, reason: "no" })).status).toBe(200);
+    expect((await set(LEAD, tasks, s.id, id, { predecessors: [f.id] })).code).toBe("dependency_cycle");
+  });
+
+  it("walks back past 5,000 edges so a long chain can still grow, and refuses at 25,000, having stopped reading there", async () => {
+    const { id, tasks } = await room();
+    const s = await offer(tasks, { title: "S" });
+    await seedFinished(id, 1, 37_500);
+    await seedFinished(id, 1, 24_000);
+    await seedEdges(id, (n) => `'tsk_old' || (${n} + 1)`, (n) => `'tsk_old' || ${n}`, 37_500);
+    expect((await set(LEAD, tasks, s.id, id, { predecessors: ["tsk_old37500"] })).code).toBe("limit_exceeded");
+    expect((await read(OWNER, id)).edges.filter((e) => e.successor === s.id)).toEqual([]);
+    const costs = (await api(OWNER, "GET", `${planOf(id)}/costs?ids=${encodeURIComponent(JSON.stringify(["tsk_old37500"]))}`)).body;
+    expect(costs.edges_before.rows).toBe(25_001);
+    // About 5 rows per edge. The whole chain would read about 187,500.
+    expect(costs.edges_before.rows_read).toBeLessThan(26_000 * 5);
+    // A chain well past 5,000 edges, which a room's history can reach, can still be extended.
+    expect((await set(LEAD, tasks, s.id, id, { predecessors: ["tsk_old24000"] })).status).toBe(200);
+  });
+
+  it("reads a narrowed viewer's edges in time that follows their edges, not the square of their tasks", async () => {
+    const { id } = await room();
+    await seedFinished(id, 3000);
+    await seedEdges(id, (n) => `'tsk_old' || (${n} + 1)`, (n) => `'tsk_old' || ${n}`, 2999);
+    const ids = Array.from({ length: 3000 }, (_, n) => `tsk_old${n}`);
+    const costs = (await api(BOB, "GET", `${planOf(id)}/costs?ids=${encodeURIComponent(JSON.stringify(ids))}`)).body;
+    expect(costs.edges_from.rows).toBe(2999);
+    expect(costs.edges_from.plan).toContain("PRIMARY KEY (successor_id=?)");
+    expect(costs.edges_from.plan).not.toContain("predecessor_id=?");
+    // Both columns seeking would read about 9,000,000.
+    expect(costs.edges_from.rows_read).toBeLessThan(20_000);
+  });
+
+  it("keeps a narrowed viewer's visible edges however many hidden predecessors there are", async () => {
+    const { id, tasks } = await room();
+    const [first, second] = [await offer(tasks, { assignee: BOB.id, title: "First" }), await offer(tasks, { assignee: BOB.id, title: "Second" })];
+    // These sort before any `tsk_` ID, so without the filter in the query they'd fill the limit ahead of the visible edge.
+    await seedEdges(id, () => `'${second.id}'`, (n) => `'aaa_' || ${n}`, 5100);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) VALUES ('${second.id}', '${first.id}', 'o', 1)`));
+    expect((await read(BOB, id)).edges).toEqual([{ predecessor: first.id, successor: second.id }]);
+  });
+
+  it("removes a canceled predecessor from a finished task, and nothing else", async () => {
+    const { id, tasks } = await room();
+    const [a, live, b] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "Live" }), await offer(tasks, { title: "B" })];
+    await set(LEAD, tasks, b.id, id, { predecessors: [a.id, live.id], duration_days: 2 });
+    expect((await api(LEAD, "POST", `${tasks}/${a.id}/cancel`, { version: a.version, reason: "no" })).status).toBe(200);
+    expect((await api(LEAD, "POST", `${tasks}/${b.id}/cancel`, { version: b.version, reason: "no" })).status).toBe(200);
+    // Changing the estimate, removing a live predecessor, adding one, or removing one with another change, is refused.
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id, live.id], duration_days: 3 })).code).toBe("invalid_transition");
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [a.id], duration_days: 2 })).code).toBe("invalid_transition");
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [live.id], duration_days: 3 })).code).toBe("invalid_transition");
+    expect((await read(OWNER, id)).edges).toHaveLength(2);
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [live.id], duration_days: 2 })).status).toBe(200);
+    expect((await read(OWNER, id)).edges).toEqual([{ predecessor: live.id, successor: b.id }]);
+    // Sending what's already there is no edit, so it's not refused either.
+    expect((await set(LEAD, tasks, b.id, id, { predecessors: [live.id], duration_days: 2 })).status).toBe(200);
+  });
+
+  it("shows a plan edit only to someone who sees the whole room, in history and Activity", async () => {
+    const { id, tasks } = await room();
+    const hidden = await offer(tasks, { assignee: CAROL.id, title: "Hidden" });
+    const shared = await offer(tasks, { assignee: BOB.id, title: "Shared" });
+    const history = async (who: Who) => (await api(who, "GET", `${tasks}/${shared.id}`)).body.history as any[];
+    const activity = async (who: Who, query = "") => (await api(who, "GET", `/v1/workspaces/${id}/activity?order=newest${query}`)).body.events as any[];
+    const before = { history: await history(BOB), activity: await activity(BOB) };
+    expect((await set(LEAD, tasks, shared.id, id, { predecessors: [hidden.id] })).status).toBe(200);
+    expect(await history(BOB)).toEqual(before.history);
+    expect(await activity(BOB)).toEqual(before.activity);
+    expect((await activity(BOB, `&task=${shared.id}`)).some((e) => e.type === "task.plan_changed")).toBe(false);
+    expect((await history(OWNER)).some((e) => e.type === "task.plan_changed")).toBe(true);
+    expect((await activity(OWNER)).some((e) => e.type === "task.plan_changed")).toBe(true);
+    // A page isn't short because of what was left out.
+    for (let n = 0; n < 3; n++) await set(LEAD, tasks, shared.id, id, { predecessors: [hidden.id], duration_days: n + 1 });
+    expect(await activity(BOB, "&limit=2")).toHaveLength(2);
+  });
+
+  it("replays a stored answer to someone since narrowed, and changes nothing new", async () => {
+    const { id, tasks } = await room();
+    const [a, b] = [await offer(tasks, { title: "A" }), await offer(tasks, { title: "B" })];
+    const worker: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    await asMember(id, worker, { preset: "member" });
+    const mine = await api(worker, "POST", tasks, { title: "Mine", instructions: "x", reviewer: REVIEWER.id });
+    const key = nextKey();
+    const body = { plan_revision: await revision(id), duration_days: 2, predecessors: [a.id] };
+    const first = await api(worker, "PUT", `${tasks}/${mine.body.id}/plan`, body, { key });
+    expect(first.status).toBe(200);
+    await set(LEAD, tasks, b.id, id, { duration_days: 5 });
+    const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${worker.id}/access`, { preset: "guest", scopes: { tasks: "own_create" }, policy_version: version })).status).toBe(200);
+    const after = await read(OWNER, id);
+    const replay = await api(worker, "PUT", `${tasks}/${mine.body.id}/plan`, body, { key });
+    // Only what it already sent and was told, with today's revision nowhere in it, and the plan stays as it was.
+    expect(replay.body).toEqual(first.body);
+    expect(replay.body.plan_revision).not.toBe(after.plan_revision);
+    expect(await read(OWNER, id)).toEqual(after);
+    expect((await api(worker, "PUT", `${tasks}/${mine.body.id}/plan`, { ...body, plan_revision: after.plan_revision })).code).toBe("not_allowed");
+  });
+
+  it("gives a room from before this migration an empty plan", async () => {
+    const { id, tasks } = await room();
+    const a = await offer(tasks, { title: "A" });
+    await runInDurableObject(stub(id), (_: any, state: any) => undoPlanMigration(state));
+    const plan = await read(OWNER, id);
+    expect(plan).toMatchObject({ complete: true, plan_revision: 0, plan_changed_at: null, edges: [] });
+    expect(plan.tasks.find((t) => t.id === a.id).duration_days).toBeNull();
   });
 });
 
@@ -5995,6 +6417,6 @@ describe("the collaboration list and map", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).edges).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 2);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 3);
   });
 });
