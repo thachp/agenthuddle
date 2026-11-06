@@ -320,6 +320,7 @@ GET    /v1/workspaces/{ws}
 PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
 GET    /v1/workspaces/{ws}/brief · PUT              name, goal and context, for anyone in the room; change them (owner or admin); text for reading, never instructions
 PUT    /v1/workspaces/{ws}/review-policy            whether a person must review (owner or admin)
+GET    /v1/workspaces/{ws}/collaboration · /collaboration/handoffs?from=&to=   lines and one line's handoffs, filtered per viewer
 GET    /v1/workspaces/{ws}/activity?after=&order=newest&before=&limit=&task=&actor=   history filtered per viewer, for anyone in the room
 POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access, and ownership recovery also works there (decision 41)
 POST   /v1/workspaces/{ws}/owner/transfer       owner only, to an active human admin; refused when archived
@@ -423,7 +424,7 @@ relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edg
 
 ### Activity and collaboration (M1)
 
-Activity reads the existing `event` table through a per-viewer visibility filter in the DO, built locally. It has no read state and never touches an inbox. The query itself is narrowed for a viewer limited to their own tasks, entries carry no `seq`, and the cursor is an event's random ID, so nothing counts hidden work. A task's events follow whether the viewer can see the task now. A room's own events follow whether they see the member list, apart from a fixed few and what they did themselves. **Recorded edges** are a projection maintained with each event commit, per `(from, to, kind)`, for owner and member viewers. For narrower viewers, the DO computes edges from only the tasks they can see, so aggregate counts cannot disclose hidden work. "Last active" is the last authenticated command per principal, written coarsely and not as a presence signal.
+Activity reads the existing `event` table through a per-viewer visibility filter in the DO, built locally. It has no read state and never touches an inbox. The query itself is narrowed for a viewer limited to their own tasks, entries carry no `seq`, and the cursor is an event's random ID, so nothing counts hidden work. A task's events follow whether the viewer can see the task now. A room's own events follow whether they see the member list, apart from a fixed few and what they did themselves. **Recorded edges** come from a `handoff` row written with each event commit, per offer, submission, change request and message, and counted per `(from, to, kind)` when read, built locally. Whoever is limited to their own tasks gets counts from only those tasks, and messages count only where the viewer reads the thread, so aggregate counts cannot disclose hidden work. Rooms start recording at this migration, with no backfill, because earlier events don't say who a handoff went to. "Last active" is that principal's latest recorded event, not a presence signal, and goes only to someone who sees the whole room, or to the principal itself.
 
 ### Assets and versioned artifacts (M2)
 

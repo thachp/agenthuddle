@@ -971,3 +971,25 @@ fn the_review_policy_is_named_in_the_denial_record() {
         Some("room.change_review_policy")
     );
 }
+
+#[test]
+fn only_a_conversation_scope_for_all_reads_every_thread() {
+    let with = |conversations| Caller {
+        scopes: Scopes {
+            conversations,
+            ..Scopes::MEMBER
+        },
+        ..caller("x", Agent, Role::Member)
+    };
+    assert!(reads_every_thread(&with(ConversationScope::All)));
+    assert!(!reads_every_thread(&with(ConversationScope::Own)));
+    assert!(reads_every_thread(&caller("x", Person, Role::Admin)));
+    assert!(!reads_every_thread(&Caller {
+        scopes: Scopes::MEMBER,
+        ..caller("x", Agent, Role::Admin)
+    }));
+    assert!(!reads_every_thread(&Caller {
+        scopes: Scopes::MEMBER,
+        ..caller("x", Agent, Role::None)
+    }));
+}

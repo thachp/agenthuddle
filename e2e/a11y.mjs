@@ -162,7 +162,8 @@ const screens = (s) => {
     ["Role opening Sheet", `${w}/team?role=${s.opening}`, "Close opening", "owner", true],
     ["Workroom settings", `${w}/settings`, "Billing v2"],
     ["Workroom settings, with an admin", `/w/${s.transferRoom}/settings`, "Transfer ownership"],
-    ["Collaboration", `${w}/collaboration`, "Collaboration"],
+    ["Collaboration", `${w}/collaboration`, "Who has worked with whom"],
+    ["Collaboration, map", `${w}/collaboration?view=map`, "Each number counts"],
     ["Artifacts", `${w}/artifacts`, "Artifacts"],
     ["Claim", `/claim?agent_id=${s.pending.pluginId}&code=${s.pending.userCode}`, "Confirm ownership"],
     ["MCP consent", `/oauth/consent?${s.consent}`, "Connect an agent to Podster"],
@@ -394,10 +395,12 @@ async function keyboardPaths(s) {
     await page.keyboard.press("Enter");
     await page.waitForURL(/actor=/, { timeout: 15_000 });
     ok((await participant.inputValue()) === chosen, "the filter didn't keep its choice");
-    // Clear goes through the client router, which doesn't remount a form on its own.
+    // Clear goes through the client router, which doesn't remount a form on its own, and it mustn't drop focus as it goes.
+    await hydrated(page);
     await page.getByRole("link", { name: "Clear" }).click();
     await page.waitForURL((url) => !url.search.includes("actor="), { timeout: 15_000 });
     await page.waitForFunction(() => document.querySelector('select[name="actor"]')?.value === "", null, { timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.id === "activity-heading", null, { timeout: 15_000 });
     await page.goBack();
     await page.waitForURL(/actor=/, { timeout: 15_000 });
     await page.waitForFunction((value) => document.querySelector('select[name="actor"]')?.value === value, chosen, { timeout: 15_000 });
@@ -407,6 +410,28 @@ async function keyboardPaths(s) {
     await small.getByRole("button", { name: "Filter" }).waitFor({ timeout: 15_000 });
     const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     ok(overflow <= 0, `activity scrolls sideways by ${overflow}px at 375px`);
+    await phone.close();
+  });
+
+  await keyboardPath("collaboration list, map and a line's handoffs, also at phone width", async () => {
+    await page.goto(`${app}/w/${s.room}/collaboration`);
+    await hydrated(page);
+    const line = page.locator('a[href*="line="]').first();
+    await tabTo(page, line, "a line");
+    await page.keyboard.press("Enter");
+    await page.getByRole("dialog").getByRole("link").first().waitFor({ timeout: 15_000 });
+    ok(await insideDialog(page), `opening the Sheet left focus on ${await activeText(page)}`);
+    await page.goto(`${app}/w/${s.room}/collaboration?view=map`);
+    await page.locator("svg a").first().waitFor({ timeout: 15_000 });
+    ok((await page.locator("svg a").first().getAttribute("aria-label"))?.includes(" to "), "a map line has no words");
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    for (const path of [`/w/${s.room}/collaboration`, `/w/${s.room}/collaboration?view=map`]) {
+      await small.goto(`${app}${path}`);
+      await small.getByText("Lines describe work").first().waitFor({ timeout: 15_000 });
+      const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      ok(overflow <= 0, `${path} scrolls sideways by ${overflow}px at 375px`);
+    }
     await phone.close();
   });
 
