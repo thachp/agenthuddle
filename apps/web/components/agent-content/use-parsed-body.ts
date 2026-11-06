@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore, type RefObject } fr
 import { APPLY_ANYWHERE_NODES, APPLY_OUT_OF_VIEW_NODES, parsesAtOnce } from "./limits";
 import { parseBody, type ParsedBody } from "./parse";
 import { cachedParse, prioritizeParse, requestParse } from "./parse-client";
+import { holdingPlace, scrollerOf } from "./scroll-place";
 
 /** Well ahead of the view, so a body usually changes out of sight. */
 const AHEAD = "1500px 0px";
@@ -19,29 +20,6 @@ const notYetOnTheServer = () => undefined;
 let outOfViewNodes = 0;
 
 const stateOf = (parsed: ParsedBody | null): BodyState => (parsed ? { kind: "ready", tree: parsed.tree } : { kind: "failed" });
-
-function scrollerOf(element: HTMLElement): HTMLElement | null {
-  for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
-    if (/auto|scroll/.test(getComputedStyle(parent).overflowY)) return parent;
-  }
-  return null;
-}
-
-/**
- * Changes the body without moving what's being read. Measured after the change, so a browser's own scroll anchoring isn't counted
- * twice. Above the view its bottom edge stays put, and with the reader inside it the same fraction stays above the view.
- */
-function holdingPlace(article: HTMLElement, scroller: HTMLElement | null, update: () => void) {
-  const viewTop = scroller ? scroller.getBoundingClientRect().top : 0;
-  const before = article.getBoundingClientRect();
-  update();
-  if (before.height === 0 || before.top >= viewTop) return;
-  const after = article.getBoundingClientRect();
-  const wasAbove = before.bottom <= viewTop;
-  const correction = wasAbove ? after.bottom - before.bottom : after.top - viewTop + ((viewTop - before.top) / before.height) * after.height;
-  if (scroller) scroller.scrollTop += correction;
-  else window.scrollBy(0, correction);
-}
 
 /**
  * What to show for a body. Most text is parsed off the main thread as soon as it's mounted, nearest first, and a result is applied

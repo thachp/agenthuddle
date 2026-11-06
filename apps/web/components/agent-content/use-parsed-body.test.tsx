@@ -263,7 +263,7 @@ describe("skipping layout off-screen", () => {
     const body = bodyOf(show(small));
     expect(body.style.contentVisibility).toBe("auto");
     expect(body.style.getPropertyValue("contain-intrinsic-size")).toMatch(/^auto \d+px$/);
-    expect(body).toHaveClass("p-1");
+    expect(body).toHaveClass("pl-7");
   });
 
   it("doesn't apply to short text", () => {

@@ -90,6 +90,7 @@ async function seed() {
   const linkThread = await make("Task with links in long messages", { assignee: guest.id });
   await guest.must("accept_task", { ...at(linkThread), version: linkThread.version });
   for (let i = 0; i < 6; i++) await guest.must("send_message", { ...at(linkThread), body: `[link ${i}](https://example.com/${i})\n\n${"## A heading\n\n- A bullet with some words\n- Another bullet\n\n".repeat(120)}`.slice(0, 8 * 1024) });
+  const numberedBrief = await make("Task with a long numbered list", { instructions: Array.from({ length: 120 }, (_, i) => `${i + 1}. An item`).join("\n") });
   // A long brief that has to end up formatted: this proves the worker runs, under the real CSP, from the real build.
   // Nothing limits this one but the clock: it parses for over a second, with nothing deep and little rendered.
   const slowBrief = await make("Task with a slow brief", { instructions: runOfMarks });
@@ -160,7 +161,7 @@ async function seed() {
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
   const opening = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Lead coordinator", responsibilities: "Plans the work and **follows up**.", is_lead: true, policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
-  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, tallThread, linkThread, longBrief, slowBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -694,7 +695,9 @@ async function keyboardPaths(s) {
       for (const entry of list.getEntries()) window.longestBlock = Math.max(window.longestBlock, entry.duration);
     }).observe({ type: "longtask", buffered: true });
   });
-  const openHeavy = async (label, context, path, tab) => {
+  // A single body in view has to be laid out, and these take a few hundred ms each locally and twice that on CI. Without skipped layout, all of them block at once.
+  const LONGEST_BLOCK_SCRIPTS_MS = 1_500;
+  const openHeavy = async (label, context, path, tab, longest = LONGEST_BLOCK_MS) => {
     await watchBlocks(context);
     const own = await context.newPage();
     try {
@@ -727,7 +730,7 @@ async function keyboardPaths(s) {
         return Math.round(performance.now() - started);
       });
       const blocked = await own.evaluate(() => Math.round(window.longestBlock));
-      ok(blocked < LONGEST_BLOCK_MS, `${label} blocked the main thread for ${blocked}ms`);
+      ok(blocked < longest, `${label} blocked the main thread for ${blocked}ms`);
       console.log(`     ${label}: opened in ${opened}ms (longest block ${startup}ms), tab showed in ${shown}ms, read to the end in ${read}ms, longest block ${blocked}ms`);
     } finally {
       await own.close().catch(() => {});
@@ -735,8 +738,8 @@ async function keyboardPaths(s) {
   };
   await keyboardPath("a heavy thread on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.heavyThread.id}`, /^Discussion/));
   await keyboardPath("a heavy thread on oversight (50 messages)", () => openHeavy("oversight", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.heavyThread.id}`, "Thread"));
-  await keyboardPath("unbroken scripts on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, unbroken scripts", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.scriptThread.id}`, /^Discussion/));
-  await keyboardPath("unbroken scripts on oversight (50 messages)", () => openHeavy("oversight, unbroken scripts", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.scriptThread.id}`, "Thread"));
+  await keyboardPath("unbroken scripts on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, unbroken scripts", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.scriptThread.id}`, /^Discussion/, LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("unbroken scripts on oversight (50 messages)", () => openHeavy("oversight, unbroken scripts", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.scriptThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
   await keyboardPath("a heavy short thread on oversight (50 messages)", () => openHeavy("oversight, short messages", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.shortThread.id}`, "Thread"));
 
   await keyboardPath("a long brief formats in a worker, under the real CSP", async () => {
@@ -845,7 +848,46 @@ async function keyboardPaths(s) {
     }
   });
 
-  await keyboardPath("Tab reaches every link in long messages", async () => {
+  await keyboardPath("long messages are in the accessibility tree, off-screen too", async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.linkThread.id}`);
+    const sheet = own.getByRole("dialog");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).click();
+    await sheet.locator("article a").nth(5).waitFor({ state: "attached", timeout: 15_000 });
+    const headings = await sheet.locator("article h4").count();
+    const cdp = await own.context().newCDPSession(own);
+    const exposed = async () => {
+      const { nodes } = await cdp.send("Accessibility.getFullAXTree");
+      const named = (role, pattern) => nodes.filter((node) => !node.ignored && node.role?.value === role && pattern.test(node.name?.value ?? "")).length;
+      return { links: named("link", /^link \d/), headings: named("heading", /^A heading$/) };
+    };
+    let found = await exposed();
+    for (let i = 0; i < 40 && (found.links < 6 || found.headings < headings); i++) {
+      await own.waitForTimeout(250);
+      found = await exposed();
+    }
+    console.log(`     accessibility tree: ${found.links} of 6 links, ${found.headings} of ${headings} headings`);
+    ok(found.links === 6, `the accessibility tree has ${found.links} of 6 links in long messages`);
+    ok(found.headings === headings, `the accessibility tree has ${found.headings} of ${headings} headings in long messages`);
+    await own.close();
+  });
+
+  await keyboardPath("list numbers past 99 aren't clipped", async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.numberedBrief.id}`);
+    const list = own.getByRole("dialog").locator("article ol").first();
+    await list.waitFor({ timeout: 15_000 });
+    // Skipping layout contains paint, so what matters is the room from the list's text to the edge that clips it, skipped or not.
+    const room = await list.evaluate((ol) => {
+      const body = ol.closest("article > div");
+      body.style.contentVisibility = "auto";
+      return ol.querySelector("li").getBoundingClientRect().left - body.getBoundingClientRect().left;
+    });
+    ok(room >= 44, `list numbers have only ${room}px before they're clipped, and "100." needs about 30`);
+    await own.close();
+  });
+
+    await keyboardPath("Tab reaches every link in long messages", async () => {
     const own = await contextFor(s.owner).newPage();
     await own.goto(`${app}/w/${s.room}/tasks?task=${s.linkThread.id}`);
     const sheet = own.getByRole("dialog");
