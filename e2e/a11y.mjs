@@ -479,19 +479,26 @@ async function keyboardPaths(s) {
     ok((await page.getByRole("region", { name: /scrolls sideways/ }).count()) === 0, "the map's box is a tab stop though it doesn't scroll");
     // Straight back in, before closing has reached the URL: it opens, instead of leaving a line that won't.
     await page.waitForURL((url) => !url.search.includes("line="), { timeout: 15_000 });
-    const slowServer = (route) => setTimeout(() => route.continue().catch(() => {}), 1500);
     const collaborationPage = (url) => url.pathname.endsWith("/collaboration");
     await page.keyboard.press("Enter");
     await page.getByRole("dialog").getByRole("link").first().waitFor({ timeout: 15_000 });
-    await page.route(collaborationPage, slowServer);
+    // The late close can land before or after the reopen, depending on timing, so this tries a few gaps.
+    for (const held of [1500, 0, 60, 400]) {
+      await page.route(collaborationPage, (route) => setTimeout(() => route.continue().catch(() => {}), held));
+      await page.keyboard.press("Escape");
+      await page.getByRole("dialog").waitFor({ state: "detached", timeout: 15_000 });
+      // Focus comes back just after the dialog goes. A key pressed sooner lands on the body and presses nothing.
+      await page.waitForFunction(() => document.activeElement?.closest("svg") !== null, null, { timeout: 15_000 });
+      await page.keyboard.press("Enter");
+      await page.getByRole("dialog").getByRole("link").first().waitFor({ timeout: 15_000 });
+      await page.waitForTimeout(held + 300);
+      await page.unroute(collaborationPage);
+      await page.waitForURL((url) => url.search.includes("line="), { timeout: 15_000 });
+      ok((await page.getByRole("dialog").getByRole("link").count()) > 0, `the reopened Sheet didn't stay open with a ${held} ms gap`);
+    }
     await page.keyboard.press("Escape");
     await page.getByRole("dialog").waitFor({ state: "detached", timeout: 15_000 });
-    ok(page.url().includes("line="), "closing reached the URL at once, so this doesn't test the gap");
-    await page.keyboard.press("Enter");
-    await page.getByRole("dialog").getByRole("link").first().waitFor({ timeout: 15_000 });
-    await page.unroute(collaborationPage);
-    await page.keyboard.press("Escape");
-    await page.getByRole("dialog").waitFor({ state: "detached", timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.closest("svg") !== null, null, { timeout: 15_000 });
     await page.waitForURL((url) => !url.search.includes("line="), { timeout: 15_000 });
     // The same line again, from the list below the map: it comes back there, not to the map.
     const listed = page.locator('section[aria-labelledby="collab-lines"] a[href*="line="]').first();
