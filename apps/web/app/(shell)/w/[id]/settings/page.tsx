@@ -10,6 +10,7 @@ import { loadPeopleNames } from "../tasks/load-tasks";
 import { Time } from "../activity/time";
 import { membersOf, type AuditRow } from "../team/model";
 import { BriefControls } from "./brief-controls";
+import { ReviewPolicy } from "./review-policy";
 import { RoomControls } from "./room-controls";
 import { TransferOwnership } from "./transfer-ownership";
 
@@ -54,6 +55,10 @@ export default async function Settings({ params, searchParams }: { params: Promi
 
       <Section id="settings-brief" title="Goal and context">
         <BriefControls roomId={id} goal={room.goal ?? null} context={room.context ?? null} policyVersion={room.policy_version} archived={isArchived(room)} />
+      </Section>
+
+      <Section id="settings-review" title="Review">
+        <ReviewPolicy roomId={id} requirePerson={room.require_person_review === true} policyVersion={room.policy_version} archived={isArchived(room)} />
       </Section>
 
       <Section id="settings-admins" title="Administrators">

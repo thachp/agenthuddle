@@ -30,8 +30,8 @@ export type HistoryEvent = { seq: number; id: string; type: string; from: From; 
 export type TaskVisibility = { submissions: "all" | "own"; conversation: boolean };
 export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Artifact[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
 
-export type Member = { principal_id: string; kind: string; org_id: string; role: string };
-export type Room = { id: string; name: string; owner: string; status?: string; members?: Member[] };
+export type Member = { principal_id: string; kind: string; org_id: string; role: string; access?: { review: string; artifacts: string } };
+export type Room = { id: string; name: string; owner: string; status?: string; require_person_review?: boolean; members?: Member[] };
 
 /** Display only. In an archived room Rust refuses every new command with `workspace_archived`. */
 export const isArchivedRoom = (room: Pick<Room, "status">) => room.status === "archived";
@@ -132,8 +132,14 @@ export const canCreateTask = (role: string | undefined) => role === "owner" || r
 /** The API lists a room's owner apart from its members, so being absent from `members` doesn't mean having no role. */
 export const roleOf = (room: Pick<Room, "owner" | "members">, me: string) => (room.owner === me ? "owner" : room.members?.find((member) => member.principal_id === me)?.role);
 
-/** Who can be named reviewer: the owner and every member, never the assignee. The server checks again. */
-export const reviewerChoices = (room: Pick<Room, "owner" | "members">, assignee: string) => [...new Set([room.owner, ...(room.members ?? []).map((member) => member.principal_id)])].filter((id) => id !== assignee);
+/** Whether a member could review, as far as this read says. Access goes only to those who manage it, so anyone else can pick someone the server then refuses. */
+const canReview = (member: Member, room: Pick<Room, "require_person_review">) => {
+  if (room.require_person_review && member.principal_id.startsWith("agt_")) return false;
+  return !member.access || (member.access.review === "when_named" && member.access.artifacts !== "shared");
+};
+
+/** Who can be named reviewer: the owner and every member who could review, never the assignee. The server checks again. */
+export const reviewerChoices = (room: Pick<Room, "owner" | "members" | "require_person_review">, assignee: string) => [...new Set([room.owner, ...(room.members ?? []).filter((member) => canReview(member, room)).map((member) => member.principal_id)])].filter((id) => id !== assignee);
 
 /**
  * What a flagged task needs. The API only says that it needs something, so this looks at who has left. A guest sees only
@@ -141,7 +147,8 @@ export const reviewerChoices = (room: Pick<Room, "owner" | "members">, assignee:
  */
 export function flagged(task: Pick<Task, "needs_attention" | "requester" | "reviewer">, room: Pick<Room, "owner" | "members">, role: string | undefined) {
   if (!task.needs_attention || role === "guest") return { requester: false, reviewer: false };
-  const present = new Set(reviewerChoices(room, ""));
+  // Who's here, whether or not they could review, so a flag names who actually left.
+  const present = new Set([room.owner, ...(room.members ?? []).map((member) => member.principal_id)]);
   return { requester: !present.has(task.requester), reviewer: !present.has(task.reviewer) };
 }
 
@@ -154,7 +161,7 @@ function choicesFor(ids: string[], current: string, task: Pick<Task, "needs_atte
   const keepCurrent = task.needs_attention && !need.requester && !need.reviewer;
   return ids.filter((id) => keepCurrent || id !== current);
 }
-export const newReviewerChoices = (room: Pick<Room, "owner" | "members">, task: Pick<Task, "assignee" | "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(reviewerChoices(room, task.assignee ?? ""), task.reviewer, task, room, role);
+export const newReviewerChoices = (room: Pick<Room, "owner" | "members" | "require_person_review">, task: Pick<Task, "assignee" | "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(reviewerChoices(room, task.assignee ?? ""), task.reviewer, task, room, role);
 export const newRequesterChoices = (room: Pick<Room, "owner" | "members">, task: Pick<Task, "requester" | "reviewer" | "needs_attention">, role: string | undefined) => choicesFor(reviewerChoices(room, ""), task.requester, task, room, role);
 
 /** The flag in words, including who can fix it, because that's often not the person reading. */

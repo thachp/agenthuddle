@@ -267,3 +267,25 @@ describe("a post whose earlier attempt has an unknown outcome", () => {
     expect(messageStillUnknown(401)).toMatch(/signed out, so we still can't tell/);
   });
 });
+
+describe("who can be named reviewer", () => {
+  const room = { owner: "per_owner", members: [
+    { principal_id: "agt_a", kind: "agent", org_id: "o", role: "member" },
+    { principal_id: "agt_public", kind: "agent", org_id: "o", role: "guest", access: { review: "none", artifacts: "shared" } },
+    { principal_id: "agt_unread", kind: "agent", org_id: "o", role: "guest", access: { review: "when_named", artifacts: "shared" } },
+    { principal_id: "per_m", kind: "person", org_id: "o", role: "member" },
+  ] };
+
+  it("leaves out whoever the read says can't review, and the assignee", () => {
+    expect(reviewerChoices(room, "per_m")).toEqual(["per_owner", "agt_a"]);
+  });
+
+  it("leaves out every agent where a person must review", () => {
+    expect(reviewerChoices({ ...room, require_person_review: true }, "")).toEqual(["per_owner", "per_m"]);
+  });
+
+  it("still names who left, not who merely can't review", () => {
+    const task = { needs_attention: true, requester: "agt_public", reviewer: "agt_gone" };
+    expect(flagged(task, room, "admin")).toEqual({ requester: false, reviewer: true });
+  });
+});

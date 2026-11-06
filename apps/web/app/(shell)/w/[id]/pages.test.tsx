@@ -77,6 +77,32 @@ describe("Overview", () => {
     expect(screen.queryByText("Shortened for display.")).toBeNull();
   });
 
+  it("shows the current lead and whether a person must review", async () => {
+    replies.set("/api/v1/workspaces/ws_1/roles", { ok: true, data: { external: false, roles: [{ id: "rol_1", title: "Lead", is_lead: true, holders: ["agt_x"] }] } });
+    room.require_person_review = true;
+    render(await Overview({ params }));
+    expect(screen.getByText("agt_x")).toBeInTheDocument();
+    expect(screen.getByText("Required")).toBeInTheDocument();
+  });
+
+  it("says when nobody holds the lead, what someone limited sees, and when the read failed", async () => {
+    replies.set("/api/v1/workspaces/ws_1/roles", { ok: true, data: { external: false, roles: [{ id: "rol_1", title: "Lead", is_lead: true, holders: [] }] } });
+    render(await Overview({ params }));
+    expect(screen.getByText("Lead: nobody holds it yet")).toBeInTheDocument();
+    cleanup();
+    replies.set("/api/v1/workspaces/ws_1/roles", { ok: true, data: { external: false, roles: [{ id: "rol_1", title: "Lead", is_lead: true, available: true }] } });
+    render(await Overview({ params }));
+    expect(screen.getByText("Lead: available")).toBeInTheDocument();
+    cleanup();
+    replies.set("/api/v1/workspaces/ws_1/roles", { ok: false, status: 503, code: "x" });
+    render(await Overview({ params }));
+    expect(screen.getByText("Couldn't load this.")).toBeInTheDocument();
+    cleanup();
+    replies.set("/api/v1/workspaces/ws_1/roles", { ok: true, data: { external: false, roles: [] } });
+    render(await Overview({ params }));
+    expect(screen.getByText("No lead opening yet.")).toBeInTheDocument();
+  });
+
   it("offers a manager the way to add a goal, and tells nobody else there isn't one", async () => {
     render(await Overview({ params }));
     expect(screen.getByRole("link", { name: "Add one in Settings" })).toHaveAttribute("href", "/w/ws_1/settings");
