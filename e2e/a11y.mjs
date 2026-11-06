@@ -467,6 +467,14 @@ async function keyboardPaths(s) {
     const { own } = await fillEarly(`/w/${s.room}/settings`, s.owner);
     const save = own.getByRole("button", { name: "Save goal and context" });
     ok(await save.isEnabled(), "Save stayed disabled for a goal typed early");
+    // The browser restores fields on coming back, which can land after the form has hydrated.
+    await own.goto(`${app}/agents`);
+    await own.goBack();
+    await hydrated(own);
+    await own.waitForTimeout(500);
+    const goal = await own.locator("form textarea").first().inputValue();
+    console.log(`     coming back, the browser ${goal ? "restored" : "didn't restore"} the goal`);
+    ok(!goal || (await save.isEnabled()), "a restored goal left Save disabled");
     await own.close();
   });
 
