@@ -103,6 +103,8 @@ CREATE INDEX task_requester ON task (requester_id);
 CREATE INDEX task_assignee ON task (assignee_id);
 CREATE INDEX task_reviewer ON task (reviewer_id);
 CREATE TABLE task_plan_change (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, actor_id TEXT NOT NULL, plan_revision INTEGER NOT NULL, old_duration_days INTEGER, new_duration_days INTEGER, added TEXT NOT NULL, removed TEXT NOT NULL, created_at INTEGER NOT NULL);
+", "
+ALTER TABLE event ADD COLUMN subject_id TEXT;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -382,6 +384,21 @@ pub fn record_event(
     recipients: impl IntoIterator<Item = String>,
     now: i64,
 ) -> R<()> {
+    record_event_about(sql, kind, actor, None, task_id, transition, recipients, now)
+}
+
+/// The same, naming who the event is about, as an ID, which is what lets someone limited see a notice about themselves.
+#[allow(clippy::too_many_arguments)]
+pub fn record_event_about(
+    sql: &SqlStorage,
+    kind: &str,
+    actor: &str,
+    subject: Option<&str>,
+    task_id: Option<&str>,
+    transition: &Transition,
+    recipients: impl IntoIterator<Item = String>,
+    now: i64,
+) -> R<()> {
     let event_id = format!("evt_{}", uuid::Uuid::new_v4().simple());
     let actor_org = {
         let room = rows(
@@ -400,10 +417,10 @@ pub fn record_event(
             .and_then(|m| text(&m["org_id"])),
         }
     };
-    exec(sql, "INSERT INTO event (id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, task_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![
+    exec(sql, "INSERT INTO event (id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, task_version, created_at, subject_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![
         event_id.as_str().into(), kind.into(), actor.into(), opt(&actor_org), task_id.map_or(V::Null, V::from), transition.reason.map_or(V::Null, V::from),
         transition.prior_status.map_or(V::Null, V::from), transition.new_status.map_or(V::Null, V::from),
-        transition.task_version.map_or(V::Null, |v| V::from(v as i64)), now.into(),
+        transition.task_version.map_or(V::Null, |v| V::from(v as i64)), now.into(), subject.map_or(V::Null, V::from),
     ])?;
     for recipient in recipients {
         exec(sql, "INSERT INTO outbox (event_id, recipient_principal_id, next_attempt_at) VALUES (?, ?, ?)",

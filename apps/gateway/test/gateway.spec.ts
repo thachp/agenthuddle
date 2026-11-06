@@ -2298,6 +2298,11 @@ describe("kernel journey across two organizations", () => {
     const agentAuth = (await execute(architect, "list_activity", { workspace_id: room, order: "newest", limit: 1 })).data;
     expect(agentAuth.events[0].type).toBe("workspace.brief_changed");
     expect(agentAuth.events[0].from).not.toHaveProperty("org");
+    // A notice's subject reaches an agent over both connection methods. This one is limited, so it's its own.
+    const joined = (await execute(architect, "list_activity", { workspace_id: room })).data.events.filter((e: any) => e.type === "member.added");
+    expect(joined.map((e: any) => e.subject)).toEqual([architect.id]);
+    const overMcp = (await lead.tool("list_activity", { workspace_id: room })).data.events.filter((e: any) => e.type === "member.added");
+    expect(overMcp.map((e: any) => e.subject)).toContain(lead.id);
   });
 
   it("runs offer, accept, message, submit, changes, resubmit and verify, with different credentials on each side", async () => {

@@ -111,7 +111,8 @@ try {
   const journey = await child("journey.mjs", ["--base-url", base, ...passOn], cookies);
   const probe = await child("probe-api.mjs", ["--gateway", base, "--gateway-only", "--with-posts"]);
   const selfTest = await child("probe-selftest.mjs", []);
-  code = journey || probe || selfTest;
+  const agreeSelfTest = await child("agree-selftest.mjs", []);
+  code = journey || probe || selfTest || agreeSelfTest;
   if (code !== 0) console.error(`\n--- last of the stack's log ---\n${log.join("").slice(-4000)}`);
 } catch (error) {
   console.error(error);

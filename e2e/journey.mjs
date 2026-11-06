@@ -6,6 +6,7 @@
 //
 // It exits 1 on a failure. A gap is something the product doesn't do yet: it's reported and doesn't fail the run, and
 // `--strict` makes it fail. It writes results/<host>-<time>.json, which holds IDs and outcomes, never cookies or tokens.
+import { disagreements } from "./agree.mjs";
 import { generateKeypair, signAgentJWT } from "@auth/agent";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -1107,33 +1108,16 @@ async function criteria() {
     eq(aboutTask(await writer.inbox()), ["task.offered", "task.changes_requested", "task.completed"], "what the worker was told about the task");
     eq(aboutTask(await lead.inbox()), ["task.accepted", "task.submitted", "task.completed"], "what the first lead was told about the task");
     eq(aboutTask(await partner.inbox()), ["task.reviewer_changed", "task.submitted"], "what the second lead was told about the task");
-    // The inbox has no field saying who a notice is about, so these are counted against what this run did to each agent.
-    // Another agent's notice leaking here would make a count too high, and fail.
-    const NOTICES_ABOUT_ITSELF = ["member.added", "role.invited", "role.invite_withdrawn", "role.claim_ended"];
-    const expectedNotices = new Map([
-      [lead, ["member.added", "role.claim_ended", "role.invited", "role.invited"]],
-      [spare, ["member.added", "role.invited"]],
-    ]);
-    const noticesOnly = new Set();
     for (const agent of [writer, lead, partner, spare]) {
       const inbox = (await agent.inbox()).filter((e) => e.workspace_id === room);
-      const sawRoom = (await agent.must("get_workspace", inRoom(), false)).access.tasks.startsWith("own") === false;
-      const activity = new Map((await activityOf(agent)).map((e) => [e.id, e]));
+      const limited = (await agent.must("get_workspace", inRoom(), false)).access.tasks.startsWith("own");
+      const shown = await activityOf(agent);
+      const activity = new Map(shown.map((e) => [e.id, e]));
       ok(inbox.length > 0, `${agent.label}'s inbox has nothing to compare`);
-      const excused = [];
-      for (const told of inbox) {
-        const shown = activity.get(told.event_id);
-        if (!shown && !sawRoom && NOTICES_ABOUT_ITSELF.includes(told.type) && !told.task_id && told.actor_id !== agent.id) {
-          excused.push(told.type);
-          noticesOnly.add(told.type);
-          continue;
-        }
-        ok(shown, `${agent.label}'s inbox has ${told.type} ${told.event_id}, which its Activity doesn't`);
-        eq([shown.type, shown.task_id ?? null, shown.from.id], [told.type, told.task_id ?? null, told.actor_id], `${told.type} in Activity and the inbox`);
-      }
-      eq(excused.toSorted(), expectedNotices.get(agent) ?? [], `notices only in ${agent.label}'s inbox`);
+      const problems = disagreements({ label: agent.label, agent: agent.id, limited, inbox, activity: shown });
+      ok(problems.length === 0, problems.join("; "));
       // What it's told arrives in the order Activity lists it.
-      const order = inbox.map((e) => e.event_id).filter((id) => activity.has(id));
+      const order = inbox.map((e) => e.event_id);
       eq(order, [...activity.keys()].filter((id) => order.includes(id)), `the order of ${agent.label}'s events`);
     }
     // Spare isn't party to these tasks, and it's a guest. Its own later offer has arrived, so if it were told of them they'd be here too.
@@ -1145,7 +1129,6 @@ async function criteria() {
       ok(!spareActivity.some((e) => e.task_id === id), "a guest's Activity shows a task it isn't party to");
       ok(!spareInbox.some((e) => e.task_id === id), "a guest's inbox tells of a task it isn't party to");
     }
-    if (noticesOnly.size > 0) report.gap("M1-AGREE-NOTICES", "a limited agent's inbox has notices about itself that its Activity doesn't", `${[...noticesOnly].sort().join(", ")}. The event names no subject, so the run compares each agent's count with what it did to that agent, not the subject itself`);
   });
 
   await check("M1-APART", "an agent in two rooms gets each room's goal and context only from that room, and one room's access or invitation opens nothing in the other", async () => {

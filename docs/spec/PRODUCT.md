@@ -582,6 +582,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 75 | How far a cycle check walks | **Decided:** an edit that adds a predecessor is refused if its predecessors have over 25,000 ancestor edges, which bounds the check at about 100 ms, measured locally. A chain that long can't take a new successor | Planning |
 | 76 | Whether guests see planned lines | **Decided:** yes, guests keep seeing planned lines | M1 |
 | 77 | A plan read that fits an agent | **Decided:** `get_plan` gets an unfinished-only option, built as `scope=unfinished`. The name is the implementer's choice. The default read doesn't change | Planning |
+| 78 | Notices about an agent in its own Activity | **Decided:** a limited agent's Activity shows `member.added`, `role.invited` and `role.claim_ended` when they're about that agent. The inbox keeps sending them | M1 |
 ## M2 and planning decisions, November 6, 2026
 
 - The owner accepted the open plan questions, now decisions 74 to 77, saying "accept all".
