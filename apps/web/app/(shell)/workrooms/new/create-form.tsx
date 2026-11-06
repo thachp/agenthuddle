@@ -210,7 +210,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
                 <textarea className={TEXTAREA} rows={2} value={role.responsibilities} readOnly={locked} onChange={(event) => editRole(role.key, { responsibilities: event.target.value })} />
               </label>
               <label className="flex items-start gap-2 text-sm">
-                <input type="checkbox" className="mt-1 size-4" checked={role.isLead} disabled={hasLead && !role.isLead} onChange={(event) => editRole(role.key, { isLead: event.target.checked })} />
+                <input type="checkbox" className="mt-1 size-4" checked={role.isLead} disabled={hasLead && !role.isLead} aria-disabled={locked || undefined} onChange={(event) => editRole(role.key, { isLead: event.target.checked })} />
                 <span>
                   Lead coordinator
                   <span className="block text-muted-foreground">One opening, with the Coordinator preset. Being lead adds nothing beyond that preset, which can review only when named.</span>
@@ -224,7 +224,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
                   </label>
                   <label className="space-y-1 text-sm">
                     <span>Access preset a claim copies</span>
-                    <select className={FIELD} value={role.preset} onChange={(event) => editRole(role.key, { preset: event.target.value })}>
+                    <select className={FIELD} value={role.preset} aria-disabled={locked || undefined} onChange={(event) => editRole(role.key, { preset: event.target.value })}>
                       {presetOptions.map((option) => (
                         <option key={option} value={option}>
                           {PRESET_LABELS[option]}
@@ -235,14 +235,14 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
                 </div>
               )}
               {roleProblems[index] ? <p className="text-sm text-status-danger">{roleProblems[index]}</p> : null}
-              <Button type="button" size="sm" variant="ghost" className={MOBILE_TARGET} aria-label={`Remove opening ${number}`} onClick={() => removeOpening(role.key)}>
+              <Button type="button" size="sm" variant="ghost" className={MOBILE_TARGET} aria-label={`Remove opening ${number}`} aria-disabled={locked || undefined} onClick={() => removeOpening(role.key)}>
                 Remove
               </Button>
             </div>
           );
         })}
         {roles.length >= MAX_OPENINGS ? <p className="text-sm text-muted-foreground">You can add {MAX_OPENINGS} here, and more on Team once the workroom exists.</p> : null}
-        <Button ref={addRef} type="button" size="sm" variant="outline" className={MOBILE_TARGET} aria-disabled={roles.length >= MAX_OPENINGS || pending || undefined} onClick={() => {
+        <Button ref={addRef} type="button" size="sm" variant="outline" className={`${MOBILE_TARGET} aria-disabled:pointer-events-none aria-disabled:opacity-50`} aria-disabled={roles.length >= MAX_OPENINGS || locked || undefined} onClick={() => {
             // Marked, not really disabled: that would drop focus when the last one it can add goes in.
             if (roles.length < MAX_OPENINGS && !locked) setRoles((all) => [...all, emptyRole((nextRole.current += 1))]);
           }}>

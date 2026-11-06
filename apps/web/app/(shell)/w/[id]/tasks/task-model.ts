@@ -182,7 +182,7 @@ export function flagText(task: Task, room: Pick<Room, "owner" | "members" | "sta
       ? `Someone left this workroom, so this task needs ${whom}.`
       : room.require_person_review && reviewerIsAgent
         ? "This workroom requires a person to review, so this task needs a new reviewer."
-        : "This task needs a new reviewer or requester. Its reviewer may not be able to review here any more, or someone named on it left and came back.";
+        : "This task needs a new reviewer or requester. Its reviewer may not be able to review here any more, or someone named on it left, or left and came back.";
   if (isArchivedRoom(room)) return `${opening} It can be fixed once the workroom is back.`;
   const fixable = need.requester === need.reviewer ? can.setRequester || can.setReviewer : need.requester ? can.setRequester : can.setReviewer;
   return `${opening} ${fixable ? "You can choose below." : "An owner or admin of this workroom can fix it."}`;

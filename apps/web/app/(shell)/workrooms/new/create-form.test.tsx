@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { currentUrl, setUrl } from "@/test/next-navigation";
@@ -309,6 +309,18 @@ describe("role openings when creating a workroom", () => {
     expect(screen.getByLabelText("Name")).toHaveAttribute("readonly");
     await userEvent.type(title, "changed");
     expect(title).toHaveValue("One");
+    // The controls that can't be read-only say so, and do nothing. Both matter, so press each.
+    const group = within(screen.getByRole("group", { name: "Opening 1" }));
+    const lead = group.getByRole("checkbox");
+    const preset = group.getByLabelText("Access preset a claim copies");
+    const remove = group.getByRole("button", { name: "Remove opening 1" });
+    for (const control of [lead, preset, remove]) expect(control).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(lead);
+    expect(lead).not.toBeChecked();
+    fireEvent.change(preset, { target: { value: "guest" } });
+    expect(preset).toHaveValue("member");
+    fireEvent.click(remove);
+    expect(screen.getByRole("group", { name: "Opening 1" })).toBeInTheDocument();
     release(new Response(JSON.stringify({ error: { code: "invalid_argument" } }), { status: 400 }));
     await screen.findByRole("alert");
     expect(screen.getByText(/Change its name, goal and context in its Settings/)).toBeInTheDocument();
