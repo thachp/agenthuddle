@@ -1,38 +1,27 @@
 "use client";
 
-import { useState } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { PrincipalName, TaskStatusBadge } from "./task-bits";
-import { GROUP_ORDER, nameOf, TASK_STATUS, type Names, type Task } from "./task-model";
+import { nameOf, type Names, type Task } from "./task-model";
+import { countText, groupTasks } from "./task-views";
 
 /**
  * Grouped by state. The API gives tasks no creation or update time, so rows can't show the age the design asks for, and
  * they stay newest first within a group by the order they were created.
  */
-export function TaskList({ tasks, me, names, emptyHint }: { tasks: Task[]; me: string; names: Names; emptyHint: string }) {
-  const [onlyMine, setOnlyMine] = useState(false);
-  const shown = onlyMine ? tasks.filter((task) => task.status === "submitted" && task.reviewer === me) : tasks;
+export function TaskList({ tasks, partial, me, names }: { tasks: Task[]; partial: boolean; me: string; names: Names }) {
   return (
     <div className="space-y-4">
-      {tasks.length > 0 ? (
-        <label className="flex min-h-11 w-fit items-center gap-2 text-sm sm:min-h-6">
-          <input type="checkbox" className="size-4" checked={onlyMine} onChange={(event) => setOnlyMine(event.target.checked)} />
-          Needs my review
-        </label>
-      ) : null}
-      {tasks.length === 0 ? <p className="text-muted-foreground">{emptyHint}</p> : null}
-      {tasks.length > 0 && shown.length === 0 ? <p className="text-muted-foreground">No submissions are waiting for your review in this workroom.</p> : null}
-      {GROUP_ORDER.map((status) => {
-        const rows = shown.filter((task) => task.status === status).toReversed();
-        if (rows.length === 0) return null;
+      {groupTasks(tasks).map((group) => {
+        if (group.tasks.length === 0) return null;
         return (
-          <section key={status} className="space-y-2">
+          <section key={group.key} className="space-y-2">
             <h2 className="text-sm font-medium">
-              {TASK_STATUS[status].label} <span className="font-normal text-muted-foreground">({rows.length})</span>
+              {group.label} <span className="font-normal text-muted-foreground">({countText(group.tasks.length, partial)})</span>
             </h2>
             <ul className="divide-y rounded-lg border">
-              {rows.map((task) => (
+              {group.tasks.map((task) => (
                 <TaskRow key={task.id} task={task} me={me} names={names} />
               ))}
             </ul>

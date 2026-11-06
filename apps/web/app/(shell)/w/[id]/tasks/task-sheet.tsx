@@ -22,6 +22,8 @@ export type TaskSheetProps = {
   orgNames?: Names;
   resolve: (target: string) => { workspace: string; task: string } | null;
   room?: Room;
+  /** Whether a task the viewer can read is filtered off the screen behind this Sheet. */
+  outsideFilter?: (task: string) => boolean;
 };
 
 async function read<T>(path: string, signal: AbortSignal) {
@@ -37,7 +39,7 @@ async function read<T>(path: string, signal: AbortSignal) {
   return null;
 }
 
-export function TaskSheet({ me, names, orgNames = {}, resolve, room }: TaskSheetProps) {
+export function TaskSheet({ me, names, orgNames = {}, resolve, room, outsideFilter }: TaskSheetProps) {
   return (
     <TargetSheet<LoadedTask>
       param="task"
@@ -54,14 +56,14 @@ export function TaskSheet({ me, names, orgNames = {}, resolve, room }: TaskSheet
       description={(data) => `Workroom: ${plainName(data.room.name)}`}
       version={(data) => data.task.version}
     >
-      {(api) => <TaskBody api={api} me={me} names={names} orgNames={orgNames} />}
+      {(api) => <TaskBody api={api} me={me} names={names} orgNames={orgNames} outside={outsideFilter?.(api.data.task.id) ?? false} />}
     </TargetSheet>
   );
 }
 
 const TAB_CLASS = "min-h-11 flex-1 rounded-md px-3 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-muted sm:min-h-8 sm:flex-none";
 
-function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me: string; names: Names; orgNames: Names }) {
+function TaskBody({ api, me, names, orgNames, outside }: { api: SheetApi<LoadedTask>; me: string; names: Names; orgNames: Names; outside: boolean }) {
   const { data } = api;
   const { task } = data;
   // Outlives the action controls, which start fresh for each version, so the result stays on screen.
@@ -81,6 +83,7 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
   }, [notice]);
   return (
     <div className="space-y-4">
+      {outside ? <p className="rounded-lg bg-muted p-3 text-sm">This task is outside the current filter, so it isn't shown behind this panel.</p> : null}
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
         <dt className="text-muted-foreground">Status</dt>
         <dd>

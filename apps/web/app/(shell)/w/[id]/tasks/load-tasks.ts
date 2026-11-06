@@ -19,6 +19,9 @@ export async function loadTasks(query: Query, workspace: string, filter = "", ma
   return { ok: true, data: { tasks, more: cursor !== null } };
 }
 
+/** Whether a failed read says nothing about access. A success doesn't either, for checking several reads at once. */
+export const isOutage = (result: GatewayResult<unknown>) => result.ok || result.status >= 500 || result.status === 429;
+
 type OrgRow = { id: string; name: string; personal: number };
 
 /** One read per organization, however many rows a screen has. Past this many, people there show as IDs. */
