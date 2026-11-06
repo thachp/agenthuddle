@@ -377,7 +377,7 @@ Addressing a Durable Object by ID can instantiate it, so an uninitialized `Works
 
 ## Proposed workroom extensions
 
-Everything in this section is **proposed**, except the product rules that [decisions 3, 5, 7, 20 and 42](PRODUCT.md#decisions-needed) settle: the access presets and scopes, the lead, person review, what people see and what departure does to role claims. Each subsection needs an ADR and contracts before implementation. It keeps Workspace-level authority in the `Workspace` DO, adds external effects only after a committed event, and rechecks authority before any delayed effect.
+Everything in this section is **proposed**, except the product rules that [decisions 3, 5, 7, 20, 42 and 45](PRODUCT.md#decisions-needed) settle: the access presets and scopes, the lead, person review, what people see, what departure does to role claims and the `relationship` schema for the owner and admins setting planned relationships. The lead setting them stays proposed. Each subsection needs an ADR and contracts before implementation. It keeps Workspace-level authority in the `Workspace` DO, adds external effects only after a committed event, and rechecks authority before any delayed effect.
 
 ```mermaid
 flowchart LR
@@ -414,8 +414,8 @@ The MCP consent page needs a signed-in person, so the gateway's consent route mu
 ```
 workspace += workflow: general|engineering, visibility: private|public, topic?     -- goal and context are built
 work_role += publicly_claimable
-expected_output(id, title, kind, linked_artifact_version?)
-relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edges only
+expected_output(id, title, kind, linked_artifact_version?)     -- M2 (decision 47)
+relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edges only; approved for owner and admins (decision 45)
 ```
 
 - **Atomic claims.** First, `Principal.register_room` checks the connection and participation policy, and returns the generation. That is a pre-check: tightening the policy later does not end a claim already made. Then `claim_role` runs as one DO transaction: check the generation against the fence, room visibility, `publicly_claimable`, the principal's revocation state, then `count(active) < capacity`. After `room_removed`, an agent stays out until an owner or admin clears the removal. After `owner_withdrawn` or `global_disconnect`, it needs only its owner's new consent. The default participation policy refuses only public claims; it still permits joins through an accepted invitation or an owner or admin addition. The single writer stops overfilling; the partial unique index and idempotency key stop one agent using two openings. Lowering capacity below the active count blocks further claims and removes nobody. A lead role has capacity 1, and a room has only one.
@@ -424,7 +424,7 @@ relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edg
 
 ### Activity and collaboration (M1)
 
-Activity reads the existing `event` table through a per-viewer visibility filter in the DO, built locally. It has no read state and never touches an inbox. The query itself is narrowed for a viewer limited to their own tasks, entries carry no `seq`, and the cursor is an event's random ID, so nothing counts hidden work. A task's events follow whether the viewer can see the task now. A room's own events follow whether they see the member list, apart from a fixed few and what they did themselves. **Recorded edges** come from a `handoff` row written with each event commit, per offer, submission, change request and message, and counted per `(from, to, kind)` when read, built locally. Whoever is limited to their own tasks gets counts from only those tasks, and only lines whose both ends are on the task now, including their own, so a past assignee or reviewer isn't named. Messages count only where the viewer reads the thread, so aggregate counts cannot disclose hidden work. Rooms start recording at this migration, with no backfill, because earlier events don't say who a handoff went to. "Last active" is that principal's latest recorded event, not a presence signal, and goes only to someone who sees the whole room, or to the principal itself.
+Activity reads the existing `event` table through a per-viewer visibility filter in the DO, built locally. It has no read state and never touches an inbox. The query itself is narrowed for a viewer limited to their own tasks, entries carry no `seq`, and the cursor is an event's random ID, so nothing counts hidden work. A task's events follow whether the viewer can see the task now. A room's own events follow whether they see the member list, apart from a fixed few and what they did themselves. **Recorded edges** come from a `handoff` row written with each event commit, per offer, submission, change request and message, and counted per `(from, to, kind)` when read, built locally. Whoever is limited to their own tasks gets counts from only those tasks, and only lines whose both ends are on the task now, including their own ([decision 46](PRODUCT.md#decisions-needed)), so a past assignee or reviewer isn't named. Messages count only where the viewer reads the thread, so aggregate counts cannot disclose hidden work. Rooms start recording at this migration, with no backfill, because earlier events don't say who a handoff went to. "Last active" is that principal's latest recorded event ([decision 43](PRODUCT.md#decisions-needed)), not a presence signal, and goes only to someone who sees the whole room, or to the principal itself.
 
 ### Assets and versioned artifacts (M2)
 

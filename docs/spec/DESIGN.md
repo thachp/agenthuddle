@@ -38,7 +38,7 @@ Route names are proposed; final routing depends on the host decision in [ARCHITE
 | `/attention` | Needs attention |
 | `/workrooms`, `/workrooms/explore` | Directory |
 | `/workrooms/new` | Create a workroom |
-| `/w/:id/overview` | Goal, context, input assets, expected outputs |
+| `/w/:id/overview` | Goal and context, with input assets and expected outputs from M2 |
 | `/w/:id/tasks` | Task list; `?task=:taskId` opens the task Sheet |
 | `/w/:id/team` | Role openings and participants; `?agent=:agentId` opens the access Sheet |
 | `/w/:id/collaboration` | Collaboration map and its list equivalent |
@@ -165,7 +165,7 @@ Items that need **this person** to decide, grouped by type and then newest first
 
 ### Workroom directory
 
-Two tabs: **My workrooms** and **Explore**. Cards show the goal, visibility, up to three role capacity summaries, and "*n* of *m* outputs ready". The summary always covers all roles, for example "6 of 10 roles filled · Researchers 3 of 5". Explore searches public metadata only and filters by topic and available role.
+Two tabs: **My workrooms** and **Explore**. Cards show the goal, visibility, up to three role capacity summaries and, from M2, "*n* of *m* outputs ready". The summary always covers all roles, for example "6 of 10 roles filled · Researchers 3 of 5". Explore searches public metadata only and filters by topic and available role.
 
 **View workroom** opens the public read surface defined in PRODUCT.md. A signed-in person who owns eligible agents sees **Claim with an agent**, which selects an agent and confirms the role, its responsibilities and its access preset. Agents can claim directly without this screen.
 
@@ -175,7 +175,7 @@ A single page with three main sections and a settings column. It creates nothing
 
 1. **Goal and context:** name, goal, context and **Asset upload**. State "Files stay private unless you share them" only if the visibility rules make it true.
 2. **Roles:** title, responsibilities, opening count, access preset and public-claim toggle. Mark exactly one role opening as **Lead coordinator**. Additional project managers are ordinary roles.
-3. **Outputs and review:** expected outputs and default reviewer.
+3. **Outputs and review:** expected outputs, from M2. There's no room-wide default reviewer in M1, because a task's reviewer is set on the task ([PRODUCT.md decision 48](PRODUCT.md#decisions-needed)).
 
 The settings column has **Visibility**, **Workflow** (General or Engineering) and, for Engineering only, repository and deployment settings. Each shows one of *Not configured*, *Needs approval* or *Ready* and never assumes success. The final footer states "Agents connect later; this doesn't launch agents." Public visibility shows exactly what becomes public before creation.
 
@@ -183,7 +183,7 @@ The settings column has **Visibility**, **Workflow** (General or Engineering) an
 
 Tabs, in order: **Overview, Tasks, Team, Collaboration, Activity, Artifacts, Settings**. The header shows name, visibility, the viewer's relationship such as *Owner*, *Admin* or *Your agent: Architect*, and any primary action. Hide Settings from everyone except the owner and admins.
 
-- **Overview:** goal, context, input assets, expected outputs with status, and the current lead.
+- **Overview:** goal, context and the current lead, plus input assets and expected outputs with status from M2.
 - **Tasks:** synchronized List / Board / Gantt views, preserving authorized scope, filters and the existing task Sheet. The approved November 5 direction and proposed implementation details are in [Task planning](TASK-PLANNING.md). Use canonical status columns, scoped progress and qualified forecasts; estimates and dependencies need new contracts before implementation. Rows show title, state, assignee, reviewer and age only where data exists; filters likewise require actual data. Do not use row checkboxes until a bulk action exists.
 - **Team:** role openings first, including vacant ones, then participants with organization, access preset and external marker. **Manage access** appears here for the owner and admins.
 - **Activity:** permission-filtered event history with actor, verb, object and time, filterable by task or participant. It has no read/unread behavior and never acknowledges an inbox.
@@ -225,11 +225,11 @@ A Sheet with two tabs: **MCP client** and **Connect your own agent** (subtitle *
 
 ### Collaboration
 
-A map of participants and their relationships, plus a **List** view that presents the same information. List is the default on narrow screens and for assistive technology.
+A map of participants and their relationships, plus a **List** view that presents the same information. List is the default at every width for now, with Map one click away ([PRODUCT.md decision 44](PRODUCT.md#decisions-needed)).
 
-- **Planned relationship** (dashed): an intended flow between work roles, set by the lead, owner or admins.
+- **Planned relationship** (dashed): an intended flow between work roles, set by the owner or admins. The lead may set them later, with an agent tool.
 - **Recorded activity** (solid): derived from recorded task events and thread messages, with counts of handoffs.
-- Selecting an edge opens its handoffs and messages, each linking to its task. Nodes show role, agent and **Last active**, not presence.
+- Selecting an edge opens its handoffs and messages, each linking to its task. Nodes show role, agent and **Last active**, which is the latest recorded event, not presence.
 - Only edges the viewer may see are drawn, and counts contain only visible events. Guests may see only edges involving their own tasks. Include a persistent note: "Lines describe work, not permissions."
 
 ### Activity and agent inbox
@@ -292,7 +292,7 @@ Target **WCAG 2.2 AA**, verified by automated checks and a manual keyboard and s
 - The collaboration map has an equivalent list and table, is keyboard navigable, and does not rely on line style alone.
 - Honor reduced motion: Sheet transitions shorten, and the map does not animate.
 - Timestamps show relative text with absolute time available on focus and hover.
-- Breakpoints: below 768 px the Sidebar becomes a menu, tables become stacked rows and Collaboration opens to List. Below 640 px Sheets take full width. All long IDs, URLs and names wrap or truncate with full text available.
+- Breakpoints: below 768 px the Sidebar becomes a menu, and tables become stacked rows. Below 640 px Sheets take full width. All long IDs, URLs and names wrap or truncate with full text available.
 
 ## 10. Visual foundation
 
@@ -341,7 +341,7 @@ Warnings, including merge consequences, use amber. Reserve red for failure and d
 | Merge and deploy | Approve and merge reads as one outcome | Record review, merge and deploy separately and show partial results |
 | [Activity and inbox](../mockups/activity-and-inbox.png) | Tab set omits Team, Collaboration and Settings; internal links show external-link icons; per-item Read and Unread conflict with the inbox cursor | Use the standard tab set; external icon only for external links; show unread by cursor position |
 | Activity and inbox | "Role invitation" is not a kernel concept | Invitations can target a role opening, per PRODUCT.md |
-| [Collaboration map](../mockups/collaboration-map.png) | Online and Idle imply knowledge Podster lacks | Last active derived from authenticated calls |
+| [Collaboration map](../mockups/collaboration-map.png) | Online and Idle imply knowledge Podster lacks | Last active derived from the latest recorded event |
 | Collaboration map | Tab set omits Team and Settings; "Handoff" and its reply states are undefined; hand-written labels on recorded edges; no alternative to the graph | Standard tab set; handoffs defined in PRODUCT.md show task state and link to the thread, and Awaiting reply and Answered are removed because no data supports them; recorded edges use event kind or task title; add List view |
 | [Manage access](../mockups/manage-access.png) | Workroom dropdown inside the Sheet creates AC-21 risk; opened from Agents page | Fixed target; launch from the Team tab |
 | Manage access | "Owner only" and "Personal account" | "Owner and admins only"; personal accounts are personal organizations |
