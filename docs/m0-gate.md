@@ -2,7 +2,7 @@
 
 What proves each M0 requirement, and how far that proof has got. [M1's criteria on staging](#m1-criteria-on-staging) have their own section. The requirements come from [PRODUCT.md](spec/PRODUCT.md#product-direction-and-delivery-scope) and [ACCESS-CONTROL.md](spec/ACCESS-CONTROL.md#proposed-acceptance-and-denial-tests).
 
-**M0 accepted by the owner, and the journey has run on a deployment only with test people, not two real people.** The owner made this call on 2026-11-05, saying "i don't need to because it looks good", after finding the steps below unclear to run. That left no kernel criterion or acceptance test passed on a deployment at the time. On 2026-11-06, with the owner's approval, [the journey ran on staging with test people](#journey-on-staging-with-test-people), so the statuses below say what that run reached. It doesn't replace the two-person run. The right description is "built, and the journey passed on staging with test people", not "M0 met". The run should be raised again before any production deploy or public launch.
+**M0 accepted by the owner, and the journey has run on a deployment only with test people, not two real people.** The owner made this call on 2026-11-05, saying "i don't need to because it looks good", after finding the steps below unclear to run. That left no kernel criterion or acceptance test passed on a deployment at the time. On 2026-11-06, with the owner's approval, [the journey ran on staging with test people](#journey-on-staging-with-test-people), so the statuses below say what its first run reached. It doesn't replace the two-person run. The right description is "built, and the journey passed on staging with test people", not "M0 met". The run should be raised again before any production deploy or public launch.
 
 Staging has also had three checks by hand, and none counts as a criterion passing: the [smoke test](#one-person-smoke-test-on-staging), [wake](#wake) and the [ownership check](#two-person-ownership-check-on-staging).
 
@@ -12,7 +12,7 @@ A status is one of these, and an item only moves when the run has actually happe
 - **Local only:** a test passes under Miniflare or `wrangler dev`.
 - **Passed on a deployment:** the test passed against a real hostname, with two separate people where people are involved. If those were [test people](#with-test-people), the status says so.
 
-Last updated from the run at `abe92ef`, on 2026-11-06 UTC. `journey` means [e2e/journey.mjs](../e2e/journey.mjs), and the ID after it is the check's ID in its output. "Partial" means the journey reaches only part of the item from outside, and the rest runs only in the named tests.
+Last updated from the run at `5ae3dad`, on 2026-11-06 UTC. `journey` means [e2e/journey.mjs](../e2e/journey.mjs), and the ID after it is the check's ID in its output. "Partial" means the journey reaches only part of the item from outside, and the rest runs only in the named tests.
 
 ## Kernel success criteria
 
@@ -63,9 +63,38 @@ The November 4 staging run doesn't count here. Its driver was never committed, o
 | AC-32 | journey `OVERSIGHT` is partial; apps/api "an organization's oversight of its own agent" | Passed on a deployment, with test people, 2026-11-06 at `abe92ef`, for an invited organization's admin reading only its own agent's tasks with no room role. The cases in the next column stay local only | A plain member, a removed admin and a whole-organization revocation run only in apps/api tests |
 | AC-33 | journey `AC-33` is partial; apps/api "transferring and recovering a room's ownership"; gateway "doesn't give a room's owner their room back when they rejoin, until recovery names them" | Passed on a deployment, with test people, 2026-11-06 at `abe92ef`, for transfer and handing back, a departed owner refused even after rejoining, and recovery by an organization admin who's in the room, with its audit. The cases in the next column stay local only | An admin outside the room whose owner left and no admin remains, an archived room, a retry and a partial failure run only in apps/api tests. Part of AC-33 ran by hand on staging: see [the ownership check](#two-person-ownership-check-on-staging) |
 
+### What's left to call M1 met
+
+M1 isn't called met here, and that's the owner's to say. What would be left, as things stand:
+
+**For M1's criteria:**
+
+1. **The screens on a deployment.** Drive the create screen, Overview, Team, Activity and the cards in a browser on staging, including roles set while creating. [The checklist](#the-checklist) covers most of this, by hand, and an owner's ruling would decide whether that counts.
+2. **An existing room's migration.** Show `event.subject_id` applied to a room that existed before it.
+3. **The owner's ruling on what's enough:** whether test people count for M1, since a pass by [this page's definition](#m0-gate) says so when they were used, and whether the smaller gaps in the table above matter, such as a claim holder on Agent Auth.
+
+**Owed before production, whether or not M1 is called met:**
+
+- A second real person, and the two-person kernel journey.
+- A real sign-in on the application host.
+- Decision 23 and gap 8, which need an OAuth sign-up.
+- Safari, Firefox and a real screen reader. Browser checks so far ran locally in Chromium only.
+
 ## Journey on staging, with test people
 
-On 2026-11-06, with the owner's approval, `e2e/journey.mjs` ran against `https://gateway-staging.podster.dev`, using [test people](#with-test-people). **43 passed, 0 failed, 0 gaps.**
+**The latest run:** on 2026-11-06, with [#94](https://github.com/thachp/podster/pull/94) deployed, the journey passed against `https://gateway-staging.podster.dev` with test people. **49 passed, 0 failed, 0 gaps.**
+
+- **What ran:** `main` at `5ae3dad`. The API was deployment `8398ba24` and the gateway `cc42bbb8`, both confirmed with `wrangler deployments list` just before the run.
+- **Results file:** `"kind": "deployment"`, `"people": "test_signup"`, `"persons_distinct": true`. It's gitignored, so it isn't in this repo.
+- **Added since the run below:** `M1-CREATE`, `M1-COUNT`, `M1-CLAIM`, `M1-LEAD`, `M1-AGREE` and `M1-APART`, all passed. The [M1 table](#m1-criteria-on-staging) has what they cover.
+- **The checks from the run below passed again.** The tables on this page keep the date of their first pass, at `abe92ef`, and this run didn't change what they cover. `D23` is still not a pass of decision 23 or gap 8, for the reason below.
+- **An earlier run the same day,** at `abe92ef` with the journey from `1ccd2b0`, had 49 passed, 0 failed and 1 gap, `M1-AGREE-NOTICES`. This run supersedes it, because #94 closed that gap.
+- **Afterwards:** `E2E_SIGNUP_SECRET` was deleted and confirmed gone.
+- **What these runs left behind:** each one's rooms, agents, test people and events stay on staging, as below.
+
+**The first run,** below, is the one the kernel and acceptance tables record.
+
+Earlier on 2026-11-06, with the owner's approval, `e2e/journey.mjs` ran against `https://gateway-staging.podster.dev`, using [test people](#with-test-people). **43 passed, 0 failed, 0 gaps.**
 
 - **What ran:** `main` at `abe92ef`. The API was deployment `b17bce83` and the gateway `901136d5`, both confirmed with `wrangler deployments list` just before the run.
 - **Results file:** `"kind": "deployment"`, `"people": "test_signup"`, `"persons_distinct": true`. It holds IDs and outcomes only, and it's gitignored, so it isn't in this repo.
@@ -81,8 +110,9 @@ On 2026-11-06, with the owner's approval, `e2e/journey.mjs` ran against `https:/
 - The two-person kernel journey, with two real people and their own sign-ins.
 - A real sign-in on the application host: GitHub's callback, the cookie crossing the web Worker, and the probes at the end of [ADR 0001](adr/0001-application-host-and-session-cookie.md#what-staging-needs).
 - Everything else listed under [With test people](#with-test-people), which stays open.
+- Safari, Firefox and a real screen reader.
 
-This run drives APIs and agents, not screens, so it says nothing about the web app on staging.
+These runs drive APIs and agents, not screens, so they say nothing about the web app on staging.
 
 ## One-person smoke test on staging
 
@@ -113,14 +143,14 @@ On 2026-11-05, with `main` at `84c7c0c` deployed, the project's owner ran part o
 
 ## M1 criteria on staging
 
-M1 is [expanded criteria 1, 3, 4 and 5 for private rooms](spec/PRODUCT.md#expanded-workroom-acceptance-criteria), without input assets and expected outputs ([decision 47](spec/PRODUCT.md#decisions-needed)). The [journey ran on staging with test people](#journey-on-staging-with-test-people) on 2026-11-06 at `abe92ef`, and its M1 checks passed, but **they prove only part of each criterion, so none is marked passed.** The by-hand checklist below hasn't been run. Whether that's enough for M1 is the owner's call.
+M1 is [expanded criteria 1, 3, 4 and 5 for private rooms](spec/PRODUCT.md#expanded-workroom-acceptance-criteria), without input assets and expected outputs ([decision 47](spec/PRODUCT.md#decisions-needed)). The [journey passed on staging with test people](#journey-on-staging-with-test-people) on 2026-11-06 at `5ae3dad`, including checks written for these criteria. **That covers the API and agents, not the screens, so no criterion is marked fully passed.** The by-hand checklist below hasn't been run. [What's left to call M1 met](#whats-left-to-call-m1-met) is at the end of this section.
 
-| Criterion | On a deployment, with test people, 2026-11-06 at `abe92ef` | Not shown by that run | Local proof |
+| Criterion | On a deployment, with test people, 2026-11-06 at `5ae3dad` | Still open | Local proof |
 | --- | --- | --- | --- |
-| 1. Create a room with goal, context and roles, launching nothing | **Part passed.** `M1-BRIEF` creates a room through the API with a goal and context, and an agent reads them. `M1-ROLES` adds a lead opening afterward | The create screen. Roles set while creating, and an opening with a count above 1. That no agent is started or told, or that a room stays out of `list_workspaces` until an agent is added | `create-form.test.tsx` |
-| 3. A claim grants only its scope, and a task still needs accepting | **Part passed.** `M1-ROLES`: a claim with no invite is refused, and a claim copies the opening's preset and takes nothing on a repeat. `M1-ACCESS`: what an agent sees follows its access. `AC-03`: no access tool is exposed. `AC-17`: approval gives no merge or deploy | That a claim holder can't review or act as an admin, tried by the holder. That a task it's offered still waits for its acceptance: `C3` shows accepting in the kernel flow, not after a claim | apps/api role tests |
-| 4. A lead coordinates through one task history, and duplicates don't compete | **Part passed.** `C1` to `C5` show one task history across MCP and Agent Auth, for an agent that isn't holding a lead opening. `C8` shows a retry creates nothing new. `M1-ROLES`: a lead creates a task, and it stays put when the lead is replaced | A lead holding the opening coordinating work and review through to approval, or doing that across both connection methods. A2A is M3 | apps/api's idempotency tests |
-| 5. Activity and inbox agree, and rooms stay apart | **Part passed.** `C2`: an inbox event carries only IDs. `AC-30+`: a guest's Activity shows the room's own events and not another task's. `AC-05` and `AC-26`: another room's data isn't disclosed to people. `AC-09`: nor to an uninvited agent. `D21`: a person's inbox | Any comparison of Activity with an inbox for the same events. That one room can't expose another's goal, context or credentials to an agent in both | apps/api |
+| 1. Create a room with goal, context and roles, launching nothing | **Passed through the API.** `M1-CREATE`: a room has its goal and context, and openings with a count of 1 and 2 are added. No agent is added or told, no agent lists or reads it, and adding one agent adds only that one. Its card's counts match. `M1-BRIEF`: an agent reads the goal and context and gains nothing from them. `M1-COUNT`: a count of 2 takes two holders and refuses a third | **The screens:** the create screen, Overview, Team and the cards haven't been driven in a browser on a deployment. **Roles set while creating:** `M1-CREATE` adds openings after the room exists, as two kinds of request in the screen's order, so doing it from the create form is shown locally only | `create-form.test.tsx` |
+| 3. A claim grants only its scope, and a task still needs accepting | **Passed through the API, for agents on MCP.** `M1-CLAIM`: holders of a Coordinator and a Member opening can't approve or send back work they aren't reviewing, have no access tool, and have the member role, not an admin's. A task offered after a claim stays offered, can't be submitted early, and needs accepting. `M1-ROLES`: a claim needs an invite and copies the preset. `M1-ACCESS`: what an agent sees follows its access | **A holder on Agent Auth:** the refusals ran over MCP only. **Other presets:** only those two were held. **Merge and deploy:** shown by no such tool existing, since neither is built. Public claims are M4 | apps/api role tests |
+| 4. A lead coordinates through one task history, and duplicates don't compete | **Passed through the API, for MCP and Agent Auth.** `M1-LEAD`: a lead holding the opening creates a task and sends it back over MCP. The opening then moves to an agent on Agent Auth, who approves it. All parties read the same history and task. The former lead loses its access. The same request sent twice makes one task | **The reviewer's move:** the owner, not a lead, changes the reviewer partway, because that's a requester's or admin's power. **Duplicates:** shown as the same request sent twice, not a transport delivering it twice. A2A is M3 | apps/api's idempotency tests |
+| 5. Activity and inbox agree, and rooms stay apart | **Passed through the API, for the four agents in the run.** `M1-AGREE`: every inbox event is in that agent's Activity, in the same order, and each notice is about that agent. Everything a limited agent sees about itself was told to it, unless it did it. A guest sees no task it isn't party to, in either. `M1-APART`: an agent in two rooms gets each room's goal and context only from that room, no read shows an invitation token, and one room's access or invitation opens nothing in the other | **A person's** Activity against their inbox isn't compared. **The Activity screen** hasn't been driven on a deployment. **An existing room:** the journey makes new rooms, so the `event.subject_id` migration ran on those, and hasn't been shown on a room that existed before it. Old events stay hidden from limited agents, and a backfill wasn't done | apps/api, including an upgrade test |
 
 **By hand isn't the same as passed.** The steps below are a check by hand, like the other three on this page. Finishing them shows the product working for the people who ran them, and doesn't by itself make a criterion **Passed on a deployment**. That status means the test itself passed against a real hostname, with two separate people, so it needs [the journey on staging](#running-it-on-staging), or the owner ruling that a by-hand run counts. Record a by-hand run here with its date, commit and who ran it, and leave the statuses above alone unless one of those has happened.
 
