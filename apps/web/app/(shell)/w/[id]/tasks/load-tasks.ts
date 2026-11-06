@@ -3,11 +3,11 @@ import type { Names, Task } from "./task-model";
 
 type Query = <T>(path: string) => Promise<GatewayResult<T>>;
 
-/** Pages are 50 tasks. Past this many a person's rate limit matters more, and the screen says it stopped. */
-const MAX_PAGES = 4;
-
-/** Every task the viewer may see, as far as `maxPages`. A failure on any page fails the read, rather than looking like a shorter list. */
-export async function loadTasks(query: Query, workspace: string, filter = "", maxPages = MAX_PAGES): Promise<GatewayResult<{ tasks: Task[]; more: boolean }>> {
+/**
+ * The tasks the viewer may see, as far as `maxPages` of 50. The Tasks page reads one and loads the rest as the person
+ * reaches them, from `cursor`. A failure on any page fails the read, rather than looking like a shorter list.
+ */
+export async function loadTasks(query: Query, workspace: string, filter = "", maxPages = 1): Promise<GatewayResult<{ tasks: Task[]; more: boolean; cursor: number | null }>> {
   const tasks: Task[] = [];
   let cursor: number | null = 0;
   for (let page = 0; page < maxPages && cursor !== null; page += 1) {
@@ -16,7 +16,7 @@ export async function loadTasks(query: Query, workspace: string, filter = "", ma
     tasks.push(...result.data.tasks);
     cursor = result.data.next_cursor;
   }
-  return { ok: true, data: { tasks, more: cursor !== null } };
+  return { ok: true, data: { tasks, more: cursor !== null, cursor } };
 }
 
 /** Whether a failed read says nothing about access. A success doesn't either, for checking several reads at once. */

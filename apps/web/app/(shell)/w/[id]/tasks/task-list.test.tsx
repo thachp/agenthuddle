@@ -31,7 +31,7 @@ beforeEach(() => {
   });
 });
 
-const show = (role = "member", tasks: Task[] = []) => render(<TasksScreen room={room(role)} tasks={tasks} more={false} me="per_me" names={{ agt_a: "Architect" }} />);
+const show = (role = "member", tasks: Task[] = []) => render(<TasksScreen room={room(role)} tasks={tasks} cursor={null} me="per_me" names={{ agt_a: "Architect" }} />);
 
 describe("the list", () => {
   it("groups by state, using one label per state, with assignee and reviewer", () => {
@@ -64,14 +64,15 @@ describe("the list", () => {
   });
 
   it("says it stopped, rather than looking complete", () => {
-    render(<TasksScreen room={room("member")} tasks={[task("a", "open")]} more me="per_me" names={{}} />);
+    render(<TasksScreen room={room("member")} tasks={[task("a", "open")]} cursor={50} me="per_me" names={{}} />);
     expect(screen.getByText(/There are more/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
   });
 
   it("an empty list suggests creating only to someone who can", () => {
     show("member");
     expect(screen.getByText(/Create one/)).toBeInTheDocument();
-    render(<TasksScreen room={room("guest")} tasks={[]} more={false} me="per_me" names={{}} />);
+    render(<TasksScreen room={room("guest")} tasks={[]} cursor={null} me="per_me" names={{}} />);
     expect(screen.getByText(/No tasks you can see/)).toBeInTheDocument();
   });
 });
@@ -85,7 +86,7 @@ describe("creating (decision 22)", () => {
   it("the room's owner can, and can review their own, though the API lists them apart from members", async () => {
     const user = userEvent.setup();
     const ownerRoom: Room = { id: "ws_1", name: "Billing", owner: "per_me", members: [{ principal_id: "agt_a", kind: "agent", org_id: "org_b", role: "member" }] };
-    render(<TasksScreen room={ownerRoom} tasks={[]} more={false} me="per_me" names={{}} />);
+    render(<TasksScreen room={ownerRoom} tasks={[]} cursor={null} me="per_me" names={{}} />);
     await user.click(screen.getByRole("button", { name: "New task" }));
     expect(screen.getByLabelText("Reviewer")).toHaveValue("per_me");
     expect(within(screen.getByLabelText("Reviewer")).getByRole("option", { name: "You" })).toBeInTheDocument();

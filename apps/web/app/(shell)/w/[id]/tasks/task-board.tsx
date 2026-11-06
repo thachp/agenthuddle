@@ -1,10 +1,11 @@
 "use client";
 
+import { memo } from "react";
 import { cn } from "cn";
 import { plainName } from "@/components/agent-content/text";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { PrincipalName, TaskStatusBadge } from "./task-bits";
-import { nameOf, type Names, type Task, type TaskStatus } from "./task-model";
+import { nameOf, type Names, type TaskStatus, type TaskSummary } from "./task-model";
 import { BOARD_COLUMNS, countText, groupTasks } from "./task-views";
 
 /**
@@ -12,8 +13,8 @@ import { BOARD_COLUMNS, countText, groupTasks } from "./task-views";
  * every lifecycle action stays in the task Sheet, where the server decides it. Columns stack on a narrow screen, so the
  * page never has to scroll sideways.
  */
-export function TaskBoard({ tasks, partial, showCanceled, selected, me, names }: { tasks: Task[]; partial: boolean; showCanceled: boolean; selected: string | null; me: string; names: Names }) {
-  const columns = groupTasks(tasks, showCanceled ? [...BOARD_COLUMNS, "canceled"] : BOARD_COLUMNS);
+export function TaskBoard({ tasks, partial, paged = false, showCanceled, selected, me, names }: { tasks: TaskSummary[]; partial: boolean; paged?: boolean; showCanceled: boolean; selected: string | null; me: string; names: Names }) {
+  const columns = groupTasks(tasks, showCanceled ? [...BOARD_COLUMNS, "canceled"] : BOARD_COLUMNS, paged);
   return (
     <div className="@container">
       <div className={cn("grid items-start gap-3 @xl:grid-cols-2", columns.length > 5 ? "@4xl:grid-cols-3" : "@4xl:grid-cols-5")}>
@@ -45,7 +46,7 @@ export function TaskBoard({ tasks, partial, showCanceled, selected, me, names }:
  */
 const ABOVE_LINK = "relative z-10 w-fit max-w-full min-w-0";
 
-function TaskCard({ task, selected, me, names }: { task: Task; selected: boolean; me: string; names: Names }) {
+const TaskCard = memo(function TaskCard({ task, selected, me, names }: { task: TaskSummary; selected: boolean; me: string; names: Names }) {
   return (
     <li className={cn("relative isolate space-y-1 rounded-lg border bg-card p-3 text-card-foreground hover:border-ring", selected && "border-ring")}>
       <p className={cn(ABOVE_LINK, "truncate text-xs text-muted-foreground")} title={task.id}>
@@ -72,4 +73,4 @@ function TaskCard({ task, selected, me, names }: { task: Task; selected: boolean
       </dl>
     </li>
   );
-}
+});

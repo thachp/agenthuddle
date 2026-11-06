@@ -1,0 +1,467 @@
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setUrl } from "@/test/next-navigation";
+import { summaryOf, type Room, type Task } from "./task-model";
+import { rememberPlace } from "./task-pages";
+import { endOfListText, mergeTasks, soFarText } from "./task-views";
+import { TasksScreen } from "./tasks-screen";
+
+const signIn = vi.hoisted(() => vi.fn());
+vi.mock("./go-to-sign-in", () => ({ goToSignIn: signIn }));
+
+const task = (id: string, over: Partial<Task> = {}): Task => ({ id, title: `Title ${id}`, instructions: "I", acceptance_criteria: null, requester: "per_me", assignee: null, reviewer: "per_o", status: "open", version: 1, due_at: null, follow_up_of: null, submission_no: 0, needs_attention: false, ...over });
+const room = (role = "member"): Room => ({ id: "ws_1", name: "Billing", owner: "per_o", members: [{ principal_id: "per_me", kind: "person", org_id: "org_a", role }] });
+
+type Reply = { status?: number; tasks?: Task[]; next_cursor?: number | null };
+let reads: string[];
+let replies: Record<string, Reply | (() => Promise<Reply>)>;
+let signals: AbortSignal[];
+/** Where the bottom of the list sits in the window. Only this test's scrolling changes it. */
+let bottomTop: number;
+
+/** The reader moves, or a correction runs, which a browser reports the same way. */
+const scrollTo = (top: number) => {
+  bottomTop = top;
+  fireEvent.scroll(window);
+};
+const settled = () => act(() => new Promise((resolve) => setTimeout(resolve, 10)));
+
+beforeEach(() => {
+  setUrl("/w/ws_1/tasks");
+  reads = [];
+  replies = {};
+  signals = [];
+  bottomTop = 5000;
+  signIn.mockClear();
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(() => ({ top: bottomTop, bottom: bottomTop, left: 0, right: 0, width: 0, height: 0, x: 0, y: bottomTop, toJSON: () => ({}) }));
+  vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+    const query = url.split("?")[1] ?? "";
+    reads.push(query);
+    if (init?.signal) signals.push(init.signal);
+    const reply = replies[query] ?? { status: 503 };
+    const { status = 200, tasks = [], next_cursor = null } = typeof reply === "function" ? await reply() : reply;
+    return new Response(JSON.stringify(status === 200 ? { tasks, next_cursor } : { error: { code: "error" } }), { status });
+  });
+});
+afterEach(() => vi.restoreAllMocks());
+
+const screenWith = (tasks = [task("a")], cursor: number | null = 50, role = "member") => <TasksScreen room={room(role)} tasks={tasks} cursor={cursor} me="per_me" names={{}} />;
+const show = (tasks = [task("a")], cursor: number | null = 50) => render(screenWith(tasks, cursor));
+const button = () => screen.getByRole("button", { name: /Load more|Loading more/ });
+const row = (name: string) => screen.getByRole("link", { name });
+
+describe("Load more", () => {
+  it("shows no button when one page was everything", () => {
+    show([task("a")], null);
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/End of the list/)).not.toBeInTheDocument();
+  });
+
+  it("keeps going to the end, then moves focus to the line that replaces the button", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=100"] = { tasks: [task("c")], next_cursor: null };
+    show();
+    await user.click(button());
+    expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
+    expect(button()).toHaveFocus();
+    expect(screen.getByText(/2 tasks loaded so far/)).toBeInTheDocument();
+    await user.click(button());
+    const done = await screen.findByText(/End of the list when it loaded: 3 tasks/);
+    await waitFor(() => expect(done).toHaveFocus());
+    expect(reads).toEqual(["cursor=50", "cursor=100"]);
+    expect(screen.getByRole("progressbar")).toBeInTheDocument();
+  });
+
+  it("reads one page at a time, however often it's pressed", async () => {
+    const user = userEvent.setup();
+    let finish: (reply: Reply) => void = () => undefined;
+    replies["cursor=50"] = () => new Promise((resolve) => (finish = resolve));
+    show();
+    await user.click(button());
+    await user.click(button());
+    expect(button()).toHaveAttribute("aria-disabled", "true");
+    expect(button()).toHaveFocus();
+    expect(reads).toEqual(["cursor=50"]);
+    await act(async () => finish({ tasks: [task("b")], next_cursor: 100 }));
+    expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
+  });
+
+  it("never lists a task twice, and an older read can't undo a newer one", () => {
+    expect(mergeTasks([task("a", { title: "Old", version: 2 })], [task("a", { title: "Older", version: 1 }), task("b")]).map((t) => [t.id, t.title])).toEqual([["a", "Old"], ["b", "Title b"]]);
+    expect(mergeTasks([task("a", { title: "Old" })], [task("a", { title: "New", version: 2 })]).map((t) => t.title)).toEqual(["New"]);
+  });
+
+  it("keeps rows in loaded order once a room is too long for a page, so a new page lands below the reader", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    show();
+    await user.click(button());
+    const later = await screen.findByRole("link", { name: "Title b" });
+    expect(row("Title a").compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("stays newest first in a room that fits on a page", () => {
+    show([task("a"), task("b")], null);
+    expect(row("Title b").compareDocumentPosition(row("Title a")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("holds no instructions or criteria for a row, which the Sheet reads for itself", () => {
+    const summary = summaryOf(task("a", { instructions: "long", acceptance_criteria: "long" }));
+    expect(summary).not.toHaveProperty("instructions");
+    expect(summary).not.toHaveProperty("acceptance_criteria");
+  });
+
+  it("says what its count covers, and gets one right", () => {
+    expect(endOfListText(1, false)).toContain("1 task.");
+    expect(endOfListText(0, false)).toBe("End of the list when it loaded.");
+    expect(endOfListText(1, true)).toContain("1 task waiting for your review");
+    expect(endOfListText(0, true)).toContain("nothing waiting for your review");
+    expect(soFarText(1, false)).toContain("1 task loaded");
+    expect(soFarText(2, true)).toContain("2 tasks waiting for your review so far");
+  });
+});
+
+describe("loading as the reader scrolls", () => {
+  it("reads nothing until they move", async () => {
+    bottomTop = 100;
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    show();
+    await settled();
+    expect(reads).toEqual([]);
+  });
+
+  it("gives one scroll one page, even when that page lands above them and they're still at the bottom", async () => {
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=100"] = { tasks: [task("c")], next_cursor: 150 };
+    show();
+    scrollTo(500);
+    expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
+    // The correction's own scroll event, which leaves them exactly where they were.
+    scrollTo(500);
+    scrollTo(498);
+    await settled();
+    expect(reads).toEqual(["cursor=50"]);
+    scrollTo(400);
+    expect(await screen.findByRole("link", { name: "Title c" })).toBeInTheDocument();
+    expect(reads).toEqual(["cursor=50", "cursor=100"]);
+  });
+
+  it("reads again when a jump back to the bottom follows a page that landed below them", async () => {
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=100"] = { tasks: [task("c")], next_cursor: 150 };
+    show();
+    scrollTo(500);
+    // The new rows push the bottom away before the page finishes showing.
+    bottomTop = 3000;
+    expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
+    await settled();
+    // One jump, such as the End key, lands exactly where the last scroll did.
+    scrollTo(500);
+    expect(await screen.findByRole("link", { name: "Title c" })).toBeInTheDocument();
+    expect(reads).toEqual(["cursor=50", "cursor=100"]);
+  });
+
+  it("doesn't read when they scroll up, or while still far from the bottom", async () => {
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    show();
+    scrollTo(4000);
+    await settled();
+    expect(reads).toEqual([]);
+    scrollTo(500);
+    await screen.findByRole("link", { name: "Title b" });
+    scrollTo(700);
+    await settled();
+    expect(reads).toEqual(["cursor=50"]);
+  });
+
+  it("doesn't read behind an open Sheet", async () => {
+    setUrl("/w/ws_1/tasks?task=a");
+    show();
+    scrollTo(500);
+    await settled();
+    expect(reads.filter((query) => query.startsWith("cursor="))).toEqual([]);
+  });
+
+  it("stops after a failure, so the next read is the person's", async () => {
+    show();
+    scrollTo(500);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load more tasks");
+    scrollTo(400);
+    await settled();
+    expect(reads).toEqual(["cursor=50"]);
+  });
+});
+
+describe("focus when the list ends", () => {
+  it("moves from the button when a scroll ended the list while it held focus", async () => {
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    show();
+    button().focus();
+    scrollTo(500);
+    const done = await screen.findByText(/End of the list/);
+    expect(done).toHaveFocus();
+  });
+
+  it("stays on a row when the list ends, even after the button has been pressed", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=100"] = { tasks: [task("c")], next_cursor: null };
+    show();
+    await user.click(button());
+    await screen.findByRole("link", { name: "Title b" });
+    row("Title a").focus();
+    scrollTo(500);
+    await screen.findByText(/End of the list/);
+    expect(row("Title a")).toHaveFocus();
+  });
+
+  it("follows a task to its new group, instead of falling to the page", () => {
+    const { rerender } = show([task("a"), task("b")], null);
+    row("Title b").focus();
+    rerender(screenWith([task("a"), task("b", { status: "completed", version: 2 })], null));
+    expect(row("Title b")).toHaveFocus();
+  });
+
+  it("leaves focus alone when it's somewhere else", () => {
+    const { rerender } = show([task("a")], null);
+    const filter = screen.getByRole("checkbox", { name: "Needs my review" });
+    filter.focus();
+    rerender(screenWith([task("a", { status: "completed", version: 2 })], null));
+    expect(filter).toHaveFocus();
+  });
+});
+
+describe("failures", () => {
+  it("keeps what's loaded through an outage or a rate limit, and can try again", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { status: 429 };
+    show();
+    await user.click(button());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load more tasks");
+    expect(row("Title a")).toBeInTheDocument();
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    await user.click(button());
+    expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("signs in again on a 401, keeping nothing new", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { status: 401 };
+    show();
+    await user.click(button());
+    await waitFor(() => expect(signIn).toHaveBeenCalled());
+  });
+
+  it("calls a bad request a failed read, not lost access", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { status: 400 };
+    show();
+    await user.click(button());
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load more tasks");
+    expect(row("Title a")).toBeInTheDocument();
+  });
+
+  it.each([403, 404])("takes everything off the screen on a %i, and Try again's good read brings the list back", async (status) => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { status };
+    const { rerender } = show();
+    await user.click(button());
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Title a" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    rerender(screenWith([task("a")], 50));
+    expect(await screen.findByRole("link", { name: "Title a" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+  });
+
+  it("drops the read when the person leaves", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = () => new Promise(() => undefined);
+    const { unmount } = show();
+    await user.click(button());
+    await waitFor(() => expect(signals).toHaveLength(1));
+    unmount();
+    expect(signals[0].aborted).toBe(true);
+  });
+});
+
+describe("when the viewer's view of the room narrows", () => {
+  const loaded = async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { tasks: [task("later")], next_cursor: null };
+    const view = show([task("a"), task("b")], 50);
+    await user.click(button());
+    await screen.findByRole("link", { name: "Title later" });
+    return view;
+  };
+
+  it("drops later pages when the first page stops being the same one", async () => {
+    const { rerender } = await loaded();
+    rerender(screenWith([task("b")], 50));
+    expect(screen.queryByRole("link", { name: "Title later" })).not.toBeInTheDocument();
+    expect(button()).toBeInTheDocument();
+  });
+
+  it("drops later pages when the viewer's role changes, though the first page looks the same", async () => {
+    const { rerender } = await loaded();
+    rerender(screenWith([task("a"), task("b")], 50, "guest"));
+    expect(screen.queryByRole("link", { name: "Title later" })).not.toBeInTheDocument();
+  });
+
+  it("keeps them when the first page just grows or a task on it changes", async () => {
+    const { rerender } = await loaded();
+    rerender(screenWith([task("a", { status: "completed", version: 2 }), task("b"), task("c")], 50));
+    expect(row("Title later")).toBeInTheDocument();
+    expect(row("Title c")).toBeInTheDocument();
+  });
+});
+
+describe("Needs my review in a room past one page", () => {
+  const mine = task("mine", { status: "submitted", reviewer: "per_me" });
+  const theirs = task("theirs", { status: "submitted", reviewer: "per_o", requester: "per_me" });
+  const QUERY = "cursor=0&status=submitted&mine=true";
+
+  it("asks the server, and shows only reviews that are the viewer's", async () => {
+    setUrl("/w/ws_1/tasks?review=mine");
+    replies[QUERY] = { tasks: [mine, theirs], next_cursor: null };
+    show();
+    expect(await screen.findByRole("link", { name: "Title mine" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Title theirs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Title a" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    expect(screen.getByText(/1 task waiting for your review\./)).toBeInTheDocument();
+    expect(reads).toEqual([QUERY]);
+  });
+
+  it("costs no read in a room that fits on a page", async () => {
+    setUrl("/w/ws_1/tasks?review=mine");
+    show([task("a"), mine], null);
+    expect(row("Title mine")).toBeInTheDocument();
+    await settled();
+    expect(reads).toEqual([]);
+  });
+
+  it("asks again when the page reads again, so a new review shows and an old answer doesn't stay", async () => {
+    setUrl("/w/ws_1/tasks?review=mine");
+    replies[QUERY] = { tasks: [], next_cursor: null };
+    const { rerender } = show();
+    expect(await screen.findByText(/No submissions are waiting/)).toBeInTheDocument();
+    replies[QUERY] = { tasks: [mine], next_cursor: null };
+    rerender(screenWith([task("a")], 50));
+    expect(await screen.findByRole("link", { name: "Title mine" })).toBeInTheDocument();
+    expect(reads).toEqual([QUERY, QUERY]);
+  });
+
+  it("asks again each time the filter is turned on, and the room's own pages carry on between", async () => {
+    const user = userEvent.setup();
+    setUrl("/w/ws_1/tasks?review=mine");
+    replies[QUERY] = { tasks: [mine], next_cursor: null };
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    show();
+    await screen.findByRole("link", { name: "Title mine" });
+    const filter = screen.getByRole("checkbox", { name: "Needs my review" });
+    await user.click(filter);
+    await user.click(button());
+    expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
+    await user.click(filter);
+    await waitFor(() => expect(reads).toEqual([QUERY, "cursor=50", QUERY]));
+  });
+
+  it("never says more shown than loaded", async () => {
+    setUrl("/w/ws_1/tasks?review=mine");
+    replies[QUERY] = { tasks: [mine, task("mine2", { status: "submitted", reviewer: "per_me" })], next_cursor: null };
+    show();
+    await screen.findByRole("link", { name: "Title mine2" });
+    expect(screen.getByText(/List view, showing 2 waiting for your review\./)).toHaveAttribute("aria-live", "polite");
+  });
+});
+
+describe("announcing", () => {
+  it("says a page arrived, once, and a later read of the first page doesn't say it again", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { tasks: [task("b"), task("c")], next_cursor: 100 };
+    const { rerender } = show();
+    await user.click(button());
+    const live = await screen.findByText(/2 more tasks loaded/);
+    expect(live).toHaveAttribute("aria-live", "polite");
+    expect(live).toHaveTextContent("List view, showing 3 of 3 loaded tasks.");
+    rerender(screenWith([task("a")], 50));
+    await waitFor(() => expect(live).not.toHaveTextContent("more tasks loaded"));
+  });
+
+  it("gets one right, and stops saying it after a view change", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    show();
+    await user.click(button());
+    const live = await screen.findByText(/1 more task loaded/);
+    await user.click(screen.getByRole("link", { name: "Board" }));
+    await waitFor(() => expect(live).not.toHaveTextContent("more task loaded"));
+    expect(live).toHaveTextContent("Board view, showing 2 of 2 loaded tasks.");
+  });
+});
+
+describe("keeping the reader's place", () => {
+  const placed = (top: number) => {
+    const el = document.createElement("a");
+    el.setAttribute("data-sheet-launcher", "task:x");
+    document.body.appendChild(el);
+    el.getBoundingClientRect = () => ({ top, bottom: top + 20 }) as DOMRect;
+    return el;
+  };
+
+  it("scrolls by however far rows above moved what the reader was looking at", () => {
+    const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation(() => undefined);
+    const el = placed(100);
+    const restore = rememberPlace();
+    el.getBoundingClientRect = () => ({ top: 700, bottom: 720 }) as DOMRect;
+    restore?.();
+    expect(scrollBy).toHaveBeenCalledWith(0, 600);
+    el.remove();
+  });
+
+  it("leaves it alone when a browser has already held it still", () => {
+    const scrollBy = vi.spyOn(window, "scrollBy").mockImplementation(() => undefined);
+    const el = placed(100);
+    rememberPlace()?.();
+    expect(scrollBy).not.toHaveBeenCalled();
+    el.remove();
+  });
+});
+
+describe("a task past the first page", () => {
+  const detail = (over: Partial<Task>) => ({ task: task("b", over), submissions: [{ submission_no: 1, task_version: 2, note: "N", commit_sha: null, from: { id: "agt_a", org: "org_b" }, external: true, created_at: 1 }], artifacts: [], messages: [], history: [], visible: { submissions: "all", conversation: "all" } });
+
+  it("shows what the Sheet just read, because later pages aren't read again", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    show();
+    await user.click(button());
+    await screen.findByRole("link", { name: "Title b" });
+    expect(screen.getByRole("heading", { name: /^Open/ })).toBeInTheDocument();
+    vi.stubGlobal("fetch", async (url: string) => new Response(JSON.stringify(detail({ status: "completed", version: 5 })), { status: url.includes("/tasks/b") ? 200 : 503 }));
+    await user.click(row("Title b"));
+    await waitFor(() => expect(screen.getByRole("heading", { name: /^Completed/, hidden: true })).toBeInTheDocument());
+  });
+
+  it("takes a command's own answer, so closing before the read after it can't leave the old status", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { tasks: [task("b", { status: "submitted", reviewer: "per_me", submission_no: 1 })], next_cursor: null };
+    show();
+    await user.click(button());
+    await screen.findByRole("link", { name: "Title b" });
+    const under = detail({ status: "submitted", reviewer: "per_me", submission_no: 1, version: 3 });
+    let reads = 0;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") return new Response(JSON.stringify(task("b", { status: "completed", reviewer: "per_me", submission_no: 1, version: 4 })), { status: 200 });
+      // The read after the command never comes back, as when the Sheet closes and aborts it.
+      if (url.includes("/tasks/b") && reads++ > 0) return new Promise<Response>(() => undefined);
+      return new Response(JSON.stringify(under), { status: 200 });
+    });
+    await user.click(row("Title b"));
+    await user.click(await screen.findByRole("button", { name: /Approve submission 1/, hidden: true }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: /^Completed/, hidden: true })).toBeInTheDocument());
+  });
+});
