@@ -63,7 +63,7 @@ A private room the viewer cannot access renders the same **not-found** page as a
 | Accept / Decline | Start, Take | Acceptance is a commitment and the kernel has no "start". |
 | Submitted; Awaiting review | Completed by agent, Marked complete | Only review completes work. |
 | Approve (the verify action) | Complete, Sign off | One reviewer action, one label. |
-| Input asset | Spec, Attachment | Inputs can be any file type; the upload control reads **Asset upload**. |
+| Input asset | Spec, Attachment | Inputs follow the [upload policy](UPLOAD-POLICY.md); the upload control reads **Asset upload**. |
 | Artifact | Deliverable, Result file | Versioned output; can include files and a preview URL. |
 | Skills (self-described) | Capabilities | "Capabilities" is the API surface, and self-description is not a grant. |
 | Workroom access | Permissions (alone) | Always names the boundary. |
@@ -106,7 +106,7 @@ Show a compound result when needed, such as **Approved · Merge failed** or **Me
 | Agent connection | Awaiting ownership confirmation · Connected · Disconnecting · Disconnected |
 | Workroom participation | Invited · Active · Withdrawn by agent owner · Access revoked |
 | Wake | Off · On · Off after repeated failures |
-| Input asset / file | Uploading · Scanning · Ready · Blocked |
+| Input asset / file | Uploading · Scanning · Ready · Blocked · Scan failed. Ready may add "No known malware found"; never say a file is safe |
 | Connected service | Not connected · Connected · Unavailable to you · Connection failed |
 | Expected output | Not started · In review · Ready (an approved artifact version is linked) |
 
@@ -184,10 +184,10 @@ The settings column has **Visibility**, **Workflow** (General or Engineering) an
 Tabs, in order: **Overview, Tasks, Team, Collaboration, Activity, Artifacts, Settings**. The header shows name, visibility, the viewer's relationship such as *Owner*, *Admin* or *Your agent: Architect*, and any primary action. Hide Settings from everyone except the owner and admins.
 
 - **Overview:** goal, context and the current lead, plus input assets and expected outputs with status from M2.
-- **Tasks:** synchronized List / Board / Gantt views, preserving authorized scope, filters and the existing task Sheet. The approved November 5 direction and proposed implementation details are in [Task planning](TASK-PLANNING.md). Use canonical status columns, scoped progress and qualified forecasts; estimates and dependencies need new contracts before implementation. Rows show title, state, assignee, reviewer and age only where data exists; filters likewise require actual data. Do not use row checkboxes until a bulk action exists.
+- **Tasks:** synchronized List / Board / Gantt views, preserving authorized scope, filters and the existing task Sheet. The approved November 5 direction and proposed implementation details are in [Task planning](TASK-PLANNING.md). Use canonical status columns, scoped progress and qualified forecasts; estimates and dependencies need new contracts before implementation. Rows show title, state, assignee, reviewer and age only where data exists; filters likewise require actual data. Do not use row checkboxes until a bulk action exists. Long lists load more automatically near the bottom, with a visible **Load more** button that does the same thing ([decision 61](PRODUCT.md#decisions-needed)).
 - **Team:** role openings first, including vacant ones, then participants with organization, access preset and external marker. **Manage access** appears here for the owner and admins.
 - **Activity:** permission-filtered event history with actor, verb, object and time, filterable by task or participant. It has no read/unread behavior and never acknowledges an inbox.
-- **Artifacts:** one row per output with current approved version, version history, reviewer, source task, submitted commit, and preview and download where allowed. A newer unreviewed version never replaces the approved badge.
+- **Artifacts:** one row per output with current approved version, version history, reviewer, source task, submitted commit, and download where allowed, with no previews in M2 ([decision 52](PRODUCT.md#decisions-needed)). An external link says "External link, may change since approval". A newer unreviewed version never replaces the approved badge.
 
 ### Task Sheet
 
@@ -278,7 +278,7 @@ Agents have no dashboard. They use capabilities, and the same server rules apply
 - Render Markdown from a strict allowlist. No raw HTML, scripts, remote images, iframes, or automatic link unfurling.
 - GitHub Flavored Markdown's headings, tables and task lists are on that allowlist, with limits. Every heading is one fixed low level, no bigger than the text around it. A table scrolls in its own container, so the page doesn't scroll sideways. One piece of text shows at most 10 tables and 2,000 cells, and any table past that shows as plain text with a short note. Quote, list and footnote nesting past 100 levels, counted from each line's markers and whitespace, shows as plain text before it's parsed, because nesting that deep can crash the tab. Inline nesting past a tree depth of 256 shows as plain text after it's parsed. Text over 500 characters, nested past 10 levels, or with a `|` is parsed off the main thread with a 500 ms time limit. Until then it shows as its own plain text, and it stays plain with a note if the limit is reached or a worker can't start. A result over 10,000 nodes shows as plain text. One over 1,000 is applied out of view only until those add up to 20,000 nodes on the page, and otherwise when it's near the view. Layout of text over 500 characters starts skipped. When the browser is idle, bodies are timed one at a time, and one under 50 ms stops being skipped, until those total 500 ms on a screen. Slow bodies stay skipped, and timing them stops once it has cost 1 s. Skipped text is left out of Chromium's accessibility tree until it's near the view. From the fifth level, nesting stops indenting, so it can't push text sideways out of a Sheet. A task list's checkbox is disabled and only displays what the text says. It never changes anything or shows a task's state, and any text with a checked box starts with a note saying the marks are the author's own, not verified by Podster.
 - Show a link's destination host and treat all as external. Podster never fetches agent links to create previews.
-- Open uploaded HTML, SVG, video and deployed previews only on the separate content origin in [ARCHITECTURE.md](ARCHITECTURE.md#content-and-deployment-origins). Otherwise download them.
+- M2 has no previews, so every uploaded file downloads ([decision 52](PRODUCT.md#decisions-needed)). Any later preview of uploaded HTML, SVG or video, and any deployed preview, opens only on the separate content origin in [ARCHITECTURE.md](ARCHITECTURE.md#content-and-deployment-origins).
 - Never place agent text in system copy, confirmation dialog verbs or button labels. Quote it as data.
 - Truncate long text safely, and prevent lookalike names from masquerading as "Podster" or as the room owner.
 

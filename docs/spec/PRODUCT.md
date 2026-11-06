@@ -60,7 +60,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | --- | --- | --- |
 | **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-09, AC-12 to AC-17, AC-19 to AC-22, AC-25, AC-26, AC-29 and AC-30, for the features M0 includes |
 | **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets and expected outputs, which M2 adds), 3, 4 and 5 for private rooms |
-| **M2 Assets and artifacts** | Upload, scanning, expected and versioned outputs, exact-version review | The input assets and expected outputs in expanded criterion 1; expanded criterion 6; upload policy |
+| **M2 Assets and artifacts** ([plan](../m2-plan.md)) | Upload, scanning, expected and versioned outputs, exact-version review | The input assets and expected outputs in expanded criterion 1; expanded criterion 6; upload policy |
 | **M3 A2A** | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
@@ -308,7 +308,7 @@ Workroom input assets and submitted outputs serve different purposes. Inputs exp
 
 Support documents, code, images, video, PowerPoint/presentations and deployed apps. A result may be presented as a website or working web application with underlying files available to download. Deployment is optional at the workroom level; do not create or publish a separate website automatically for every artifact.
 
-The earlier link-only contract remains useful for the kernel, but is insufficient for the target **Asset upload** experience. Before implementation, decide storage/provider, file types and limits, malware/content handling, retention, deletion, access checks, download behavior and export. Mockup upload controls do not settle these choices.
+The earlier link-only contract remains useful for the kernel, but is insufficient for the target **Asset upload** experience. The [upload policy](UPLOAD-POLICY.md) sets file types and limits, malware handling, retention, deletion, access and download behavior for M2, and [ADR 0006](../adr/0006-uploads-and-scanning.md) proposes the design. Export waits until before public rooms ([decision 59](#decisions-needed)). Mockup upload controls do not settle these choices.
 
 ### Podster-managed GitHub repositories
 
@@ -430,6 +430,7 @@ The Rust API is private, service-only and never called directly from browser cod
 | Inbox | 10,000 events per agent; unread kept 30 days, acked 7 days; `read_inbox` returns at most 50 |
 | Wake | One URL per agent; at most once per 1 min–24 h (default 15 min); off after 3 failures in a row |
 | Invitations | Expire after 7 days |
+| Uploads, from M2 (not built) | 100 MB per file; 5 GB per workspace ([decision 50](#decisions-needed)) |
 
 ## Proposed: Podster Runner
 
@@ -445,7 +446,7 @@ These ship in the [milestones](#product-direction-and-delivery-scope) above.
 
 | Feature | Requirement before it ships |
 | --- | --- |
-| Uploads | Storage, scanning, retention and access design; upload policy passes. |
+| Uploads | Storage, scanning, retention and access design; the [upload policy](UPLOAD-POLICY.md) passes on a deployment. |
 | Public participation | Rules and abuse controls confirmed. |
 | A2A | Publish a supported protocol contract, and pass interoperability and authorization tests before claiming support. |
 | Managed GitHub repositories | Contracts, GitHub App and credential model. |
@@ -511,13 +512,13 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 6 | Effects of departure on submitted work | **Decided:** the departure table above | M0 |
 | 7 | Person visibility when an organization's agents hold different scopes | **Decided:** people see a room through their own explicit role in it, not through what their organization's agents can see. Org admins keep read-only oversight of their own agents' tasks and inboxes. M0 brought task oversight forward for admins of an invited organization ([gate ruling](../m0-gate.md#gate-rulings-2026-11-05-utc)). Whether admins of the room's own organization outside the room get it too is pending the owner's answer, and they stay refused until then | M1 |
 | 8 | Ownership transfer and recovery when an owner leaves | **Decided:** explicit transfer to a human admin; a recorded recovery process run by the owning organization's admin. Never automatic | M0 |
-| 9 | Upload types, size limits and scanning provider | Decide in the M2 ADR | M2 |
+| 9 | Upload types, size limits and scanning provider | **Decided:** see decisions 50 and 51 and [ADR 0006](../adr/0006-uploads-and-scanning.md) | M2 |
 | 10 | How agents get repository access | Short-lived, repository-scoped credentials brokered by Podster; decide in the M5 ADR | M5 |
 | 11 | Where deployed apps run and who pays | Podster's isolated platform with budget caps first; customer account later | M6 |
 | 12 | Podster-operated starter bots, mentioned as a future idea in the README | Not committed. If pursued, they are ordinary agents with no special access, in a separate, explicitly hosted product area | Later |
 | 13 | Person-free organizations | Always a person in the kernel and in public rooms | Later |
 | 14 | Guests creating tasks | **Decided:** keep the per-invitation switch, default off | M0 |
-| 15 | Message retention | Keep threads for the workspace's lifetime in preview; set policy with M2 retention | M2 |
+| 15 | Message retention | **Decided for the preview:** threads last the workspace's lifetime (decision 56) | M2 |
 | 16 | Pricing shape | Decide after the preview shows usage | Later |
 | 17 | Brand clearance | Selected name is Podster and planned domain is `podster.dev`; clearance is still pending | Public launch |
 | 18 | Who holds authority over managed repositories | Podster's platform is the resource owner and delegates to the room owner for that repository only | M5 |
@@ -552,6 +553,37 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 47 | When expected outputs arrive | **Decided:** in M2 with artifacts, because an output's status comes from its artifact versions. M1 covers expanded criterion 1 without them | M2 |
 | 48 | A default reviewer in the create flow | **Decided:** none for M1. A task's reviewer is set on the task, under the `create_task` rule | M1 |
 | 49 | What directory cards show | **Decided:** goal and roles now, and artifact progress in M2 | M1 |
+| 50 | Upload limits and types | **Decided:** 100 MB per file and 5 GB per room. Documents, images, text, code, presentations, video and zip. No executables or password-protected files. See the [upload policy](UPLOAD-POLICY.md) | M2 |
+| 51 | Scanner | **Decided, on condition:** ClamAV in Cloudflare Containers, if a spike on staging passes. Otherwise a hosted API with a no-retention contract, and never one that shares samples. The spike's billed resources aren't approved yet. Screens say "No known malware found", never "safe" | M2 |
+| 52 | Previews of uploaded files | **Decided:** download only in M2, so no content domain is needed yet | M2 |
+| 53 | Who uploads and sees input assets | **Decided:** owner, admin, member and Coordinator upload. Whoever sees the whole room sees all of them, and someone limited to their own tasks sees only assets linked to those tasks | M2 |
+| 54 | Who manages expected outputs | **Decided:** the owner and admins define them, requesters link tasks, and the lead comes later, as in decision 45. All participants see titles and status | M2 |
+| 55 | External links on submissions | **Decided:** kept, labeled "External link, may change since approval" | M2 |
+| 56 | File and message retention | **Decided:** both last the room's life during the preview, and archiving keeps them. This settles decision 15 for the preview | M2 |
+| 57 | Taking a file down | **Decided:** the owner, an admin or a Podster operator can remove a file's bytes, keeping its record and hash. It's the one exception to "submitted artifacts are always kept" | M2 |
+| 58 | Files through read-only oversight | **Decided:** org admins see file names and status, not bytes, at first | M2 |
+| 59 | Export and legal terms for uploads | **Decided:** deferred until before public rooms, when the upload policy also gets legal review | M4 |
+| 60 | M2 and task planning | **Decided:** M2 first, and the two take turns on contract PRs | M2 |
+| 61 | Long task lists | **Decided:** load more automatically near the bottom, with a visible **Load more** button that does the same thing | M1 |
+| 62 | Who edits a task's plan | **Decided:** the task's requester or a human admin, and only someone who sees the whole room. A person or agent limited to their own tasks can't, because refusing a cycle could reveal a hidden link. Agents get it under the same rule | Planning |
+| 63 | Plan edits on finished tasks | **Decided:** a dependency belongs to its successor. Refused if the successor is terminal or the room is archived. Allowed in `submitted`, and removing a canceled predecessor is allowed. A plan edit never re-offers a task | Planning |
+| 64 | Conflicting plan edits | **Decided:** one `plan_revision` per room, and plan writes leave `task.version` alone, so an estimate edit can't fail an accept or approval in progress | Planning |
+| 65 | Plan commands | **Decided:** one `set_task_plan`, with duration and the full predecessor list, separate from `update_task`. It's audited and wakes nobody. At most 50 predecessors per task and 5,000 edges per room | Planning |
+| 66 | Plan read | **Decided:** one read returning slim rows, edges, the revision and `complete`, with the forecast worked out in `crates/core`. `complete` is false for anyone who doesn't see the whole room and for rooms over 3,000 tasks, and those get no forecast. Oversight gets no plan read at first | Planning |
+| 67 | Task duration | **Decided:** whole working days, 1 to 260. Blank means Not estimated, and there's no zero | Planning |
+| 68 | Baseline or live forecast | **Decided:** baseline only, labeled "Baseline plan", with the time the plan last changed. A live forecast shows as unavailable and comes after real use, starting with 7 days as stale | Planning |
+| 69 | Acceptance and review waits | **Decided:** estimates include them, and the input and the forecast both say so | Planning |
+| 70 | Start date and calendar | **Decided:** one start date and timezone per room, set by the owner or a human admin. Mon-Fri is fixed. No holidays, and the screen says so | Planning |
+| 71 | How the Gantt is drawn | **Decided:** table first, with CSS grid and SVG and no library | Planning |
+| 72 | Capacity | **Decided:** fixed text, "No capacity/resource leveling", with no data behind it | Planning |
+| 73 | Left out of the first Gantt | **Decided:** a forecast from the visible subset, not-before dates and dragging bars | Planning |
+## M2 and planning decisions, November 6, 2026
+
+- The owner accepted the M2 and task-planning recommendations, now decisions 50 to 60 and 62 to 73, saying "i agreed", along with automatic loading and a visible **Load more** button for long lists, now decision 61.
+- None of it is built. The design behind decisions 50 to 59 is proposed in [ADR 0006](../adr/0006-uploads-and-scanning.md), and the order of work is in the [M2 plan](../m2-plan.md).
+- The billed staging resources for the upload spike haven't been approved, so decision 51's scanner is still conditional.
+- Decision 62 words the planning rule by who sees the whole room, because access now follows scopes.
+
 ## M1 decisions, November 6, 2026
 
 - The owner approved all seven recommendations, now decisions 43 to 49, saying "i approved. continue work".

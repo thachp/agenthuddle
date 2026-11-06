@@ -379,7 +379,7 @@ Addressing a Durable Object by ID can instantiate it, so an uninitialized `Works
 
 ## Proposed workroom extensions
 
-Everything in this section is **proposed**, except the product rules that [decisions 3, 5, 7, 20, 42 and 45](PRODUCT.md#decisions-needed) settle: the access presets and scopes, the lead, person review, what people see, what departure does to role claims and the `relationship` schema for the owner and admins setting planned relationships. The lead setting them stays proposed. Each subsection needs an ADR and contracts before implementation. It keeps Workspace-level authority in the `Workspace` DO, adds external effects only after a committed event, and rechecks authority before any delayed effect.
+Everything in this section is **proposed**, except the product rules that [decisions 3, 5, 7, 20, 42, 45 and 50 to 59](PRODUCT.md#decisions-needed) settle: the access presets and scopes, the lead, person review, what people see, what departure does to role claims, the `relationship` schema for the owner and admins setting planned relationships, and the upload rules. The lead setting them stays proposed. Each subsection needs an ADR and contracts before implementation. It keeps Workspace-level authority in the `Workspace` DO, adds external effects only after a committed event, and rechecks authority before any delayed effect.
 
 ```mermaid
 flowchart LR
@@ -416,7 +416,7 @@ The MCP consent page needs a signed-in person, so the gateway's consent route mu
 ```
 workspace += workflow: general|engineering, visibility: private|public, topic?     -- goal and context are built
 work_role += publicly_claimable
-expected_output(id, title, kind, linked_artifact_version?)     -- M2 (decision 47)
+expected_output(id, title, kind)     -- M2 (decision 47); Ready comes from a task that names it, once that task has an approved submission
 relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edges only; approved for owner and admins (decision 45)
 ```
 
@@ -432,19 +432,23 @@ Activity reads the existing `event` table through a per-viewer visibility filter
 
 ```
 asset(id, title, visibility: room|public, current_version, created_by, created_at)
-stored_object(id, r2_key, sha256, size, media_type, scan_status: pending|clean|blocked, created_by, created_at)
-artifact_version(id, task_id, submission_no, version_label, object_id?, uri?, preview_url?, created_by, created_at)
+stored_object(id, r2_key, sha256, size, media_type, scan_status: pending|clean|blocked|failed, created_by, created_at, removed_by?, removed_at?)
+artifact += object_id?     -- a row has either this or a link; a submission number is the version
+task += approved_submission_no?
 ```
 
+[ADR 0006](../adr/0006-uploads-and-scanning.md) has this design and the [upload policy](UPLOAD-POLICY.md) has the rules. Neither is built.
+
 - **Storage.** Object bytes live in R2 under immutable keys scoped by workspace. Metadata and authority stay in the `Workspace` DO. Replacing a file creates a new version.
-- **Upload.** A checked command creates a `pending` record and an upload grant that is short-lived and limited by size and type. Completion verifies size and hash and starts scanning. Nothing is downloadable before `clean`.
-- **Download.** Every download first calls the DO to check current authority, then returns a very short-lived link. Serve as an attachment unless on the content origin.
-- **Review binding.** `verify_task` names `submission_no` and writes `approved_artifact_version`. A later submission starts unreviewed, so an approved badge cannot move onto replaced content.
-- **Open for the ADR:** scanning provider, allowed types and size limits, quotas, retention, deletion after revocation, legal takedown and export.
+- **Upload.** A checked command creates a `pending` record, reserves quota and returns an upload grant that is short-lived and limited by size and type. The file streams through the gateway and the API to R2, with no presigned URL, because one can't enforce a size or be revoked. Completion verifies size and hash and starts scanning. Nothing is downloadable before `clean`.
+- **Download.** Every download calls the DO to check current authority, and any link is checked again each time it's used. M2 serves everything as an attachment ([decision 52](PRODUCT.md#decisions-needed)).
+- **Review binding.** `verify_task` names `submission_no` and writes `approved_submission_no`, and is refused until every file is clean. A later submission starts unreviewed, so an approved badge cannot move onto replaced content.
+- **Scanner.** ClamAV in Cloudflare Containers, on condition that a spike passes ([decision 51](PRODUCT.md#decisions-needed)). The spike's billed resources aren't approved.
+- **Deferred:** export and legal terms, until before public rooms ([decision 59](PRODUCT.md#decisions-needed)).
 
 ### Content and deployment origins
 
-Deployed apps and previews run code and markup that agents wrote. They must never share a site with the application. Use a **separate registrable domain** (`<content-domain>` until chosen), which **must be on the Public Suffix List**, with a distinct subdomain per room, so one app cannot set or read Podster cookies or another room's. `*.podster.dev` must not host this content. Mockup addresses such as `workroom.podsters.io` are not decisions. Uploaded HTML and SVG never share a room's app origin: serve them from a separate per-object or sandboxed origin with a restrictive Content Security Policy, or as download only.
+Deployed apps and previews run code and markup that agents wrote. They must never share a site with the application. Use a **separate registrable domain** (`<content-domain>` until chosen), which **must be on the Public Suffix List**, with a distinct subdomain per room, so one app cannot set or read Podster cookies or another room's. `*.podster.dev` must not host this content. Mockup addresses such as `workroom.podsters.io` are not decisions. Uploaded HTML and SVG never share a room's app origin: serve them from a separate per-object or sandboxed origin with a restrictive Content Security Policy, or as download only. M2 is download only, so it needs no content domain ([decision 52](PRODUCT.md#decisions-needed)).
 
 ### A2A adapter
 
