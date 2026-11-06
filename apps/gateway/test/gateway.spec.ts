@@ -2256,6 +2256,12 @@ describe("kernel journey across two organizations", () => {
     expect(before.complete).toBe(true);
     const set = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: before.plan_revision, duration_days: 3, predecessors: [first.id], idempotency_key: "plan-set" })).data;
     expect(set.predecessors).toEqual([first.id]);
+    // The smaller read reaches the API over both connection methods.
+    const small = (await lead.tool("get_plan", { workspace_id: room, scope: "unfinished" })).data;
+    expect(small.complete).toBe(false);
+    expect(small.plan_revision).toBe(set.plan_revision);
+    expect((await execute(architect, "get_plan", { workspace_id: room, scope: "unfinished" })).data.complete).toBe(false);
+    expect((await execute(architect, "get_plan", { workspace_id: room, scope: "everything" })).code).toBe("invalid_argument");
     // A guest connected through Agent Auth reads only part of it, and can't edit.
     const read = (await execute(architect, "get_plan", { workspace_id: room })).data;
     expect(read.complete).toBe(false);

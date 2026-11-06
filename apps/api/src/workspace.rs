@@ -3467,7 +3467,7 @@ impl Workspace {
                 [] => queries::get_workspace(&sql, &who),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
-                ["plan"] => plan::read(&sql, &who.caller),
+                ["plan"] => plan::read(&sql, &who.caller, &url),
                 #[cfg(feature = "failpoints")]
                 ["plan", "costs"] => plan::read_costs(&sql, &who, &url),
                 ["roles"] => roles::list_roles(&sql, &who),
