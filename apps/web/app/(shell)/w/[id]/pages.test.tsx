@@ -1,16 +1,20 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatewayResult } from "@/lib/gateway/result";
 import { NotFoundSignal, setUrl } from "@/test/next-navigation";
 
 /** These pages are server components, so each is called and its result rendered. The gateway is the only thing replaced. */
 const replies = new Map<string, GatewayResult<unknown>>();
+const queries = vi.hoisted(() => [] as string[]);
 let identity: GatewayResult<unknown>;
 let room: Record<string, unknown>;
 let organizations: GatewayResult<unknown>;
 
 vi.mock("@/lib/gateway/server", () => ({
-  gatewayQuery: async (path: string) => replies.get(path.split("?")[0]) ?? { ok: false, status: 404, code: "not_found" },
+  gatewayQuery: async (path: string) => {
+    queries.push(path);
+    return replies.get(path.split("?")[0]) ?? { ok: false, status: 404, code: "not_found" };
+  },
   getIdentity: async () => identity,
   getOrganizations: async () => organizations,
 }));
@@ -31,6 +35,7 @@ const guestRow = { principal_id: "per_me", kind: "person", org_id: "org_a", role
 beforeEach(() => {
   setUrl("/w/ws_1/overview");
   replies.clear();
+  queries.length = 0;
   identity = ME;
   organizations = { ok: true, data: { organizations: [{ id: "org_a", name: "Org A", personal: 0, role: "member" }, { id: "org_p", name: "Mine", personal: 1, role: "admin" }] } };
   room = { id: "ws_1", name: "Launch room", owner: "per_owner", status: "active", policy_version: 3, members: [] };
@@ -128,64 +133,126 @@ describe("Overview", () => {
 });
 
 describe("Activity", () => {
-  const event = (seq: number, actor_id: string, type: string, task_id: string | null = null) => ({ seq, id: `evt_${seq}`, type, actor_id, actor_org: "org_a", task_id, created_at: 0 });
+  const path = "/api/v1/workspaces/ws_1/activity";
+  const event = (n: number, actor: string, type: string, task_id: string | null = null, extra: object = {}) => ({ id: `evt_${n}`, type, from: { id: actor, org: "org_a" }, external: false, task_id, task_title: null, reason: null, created_at: 0, ...extra });
+  const page = (events: unknown[], next_before: string | null = null) => ({ ok: true as const, data: { events, next_before } });
+  const seen = () => queries.filter((query) => query.startsWith(path));
 
-  it("names people, agents and tasks it can, keeps IDs for the rest, and reads once per organization", async () => {
-    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "per_me", "workspace.created"), event(2, "agt_1", "task.accepted", "tsk_1"), event(3, "per_sam", "task.message", "tsk_1"), event(4, "agt_other", "task.declined", "tsk_gone")] } });
+  it("names people, agents and tasks it can, and keeps IDs for the rest", async () => {
+    replies.set(path, page([event(1, "per_me", "workspace.created"), event(2, "agt_1", "task.accepted", "tsk_1", { task_title: "Design the API" }), event(3, "per_sam", "task.message", "tsk_1", { task_title: "Design the API" }), event(4, "agt_other", "task.declined", "tsk_gone")]));
     replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_1", name: "Builder" }] } });
     replies.set("/api/orgs/org_a/members", { ok: true, data: { members: [{ person_id: "per_sam", name: "Sam" }] } });
-    replies.set("/api/v1/workspaces/ws_1/tasks", { ok: true, data: { tasks: [{ id: "tsk_1", title: "Design the API" }], next_cursor: null } });
     render(await Activity({ params, searchParams }));
-    for (const text of ["You", "Builder", "Sam", "agt_other", "tsk_gone"]) expect(screen.getByText(text)).toBeInTheDocument();
-    expect(screen.queryByText("per_me")).toBeNull();
-    expect(screen.queryByText("tsk_1")).toBeNull();
-    const links = screen.getAllByRole("link", { name: "Design the API" });
+    const list = within(screen.getByRole("list"));
+    for (const text of ["You", "Builder", "Sam", "agt_other", "tsk_gone"]) expect(list.getByText(text)).toBeInTheDocument();
+    expect(list.queryByText("per_me")).toBeNull();
+    const links = list.getAllByRole("link", { name: "Design the API" });
     expect(links[0]).toHaveAttribute("title", "tsk_1");
     expect(links[0]).toHaveAttribute("href", "/w/ws_1/tasks?task=tsk_1");
-    expect(screen.getAllByText("Org A").length).toBe(4);
   });
 
-  it("says who's an agent, so one named like a person can't pass for them, and labels names that sound like authority", async () => {
-    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "agt_sam", "task.message"), event(2, "per_sam", "task.message"), event(3, "agt_boss", "task.message"), event(4, "per_you", "task.message"), event(5, "per_me", "task.message")] } });
+  it("reads newest first from the viewer's own list, not the admin one, and no one gets a refusal", async () => {
+    room.policy_version = null;
+    replies.set(path, page([event(1, "per_me", "task.accepted", "tsk_1")]));
+    replies.set("/api/v1/workspaces/ws_1/events", failed(403, "not_allowed"));
+    render(await Activity({ params, searchParams }));
+    expect(seen()[0]).toBe(`${path}?order=newest`);
+    expect(screen.queryByText(/open to the owner and admins/)).toBeNull();
+    expect(screen.getByText(/changes nothing in anyone's inbox/)).toBeInTheDocument();
+  });
+
+  it("says who's an agent, and labels names that sound like authority", async () => {
+    replies.set(path, page([event(1, "agt_sam", "task.message"), event(2, "per_sam", "task.message"), event(3, "agt_boss", "task.message")]));
     replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_sam", name: "Sam" }, { id: "agt_boss", name: "Podster Admin" }] } });
-    replies.set("/api/orgs/org_a/members", { ok: true, data: { members: [{ person_id: "per_sam", name: "Sam" }, { person_id: "per_you", name: "You" }] } });
+    replies.set("/api/orgs/org_a/members", { ok: true, data: { members: [{ person_id: "per_sam", name: "Sam" }] } });
     render(await Activity({ params, searchParams }));
-    const row = (id: string) => screen.getByTitle(id);
-    expect(row("agt_sam")).toHaveTextContent("Agent");
-    expect(row("per_sam")).toHaveTextContent("Person");
-    expect(row("per_sam")).not.toHaveTextContent("Name chosen");
-    expect(row("agt_boss")).toHaveTextContent("Name chosen by this agent");
-    expect(row("per_you")).toHaveTextContent("Name chosen by this person");
-    expect(row("per_me")).not.toHaveTextContent("Name chosen");
+    expect(screen.getByTitle("agt_sam")).toHaveTextContent("Agent");
+    expect(screen.getByTitle("per_sam")).toHaveTextContent("Person");
+    expect(screen.getByTitle("agt_boss")).toHaveTextContent("Name chosen by this agent");
   });
 
-  it("reads no tasks when no event on the page has one", async () => {
-    let read = false;
-    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "per_me", "workspace.created")] } });
-    replies.set("/api/v1/workspaces/ws_1/tasks", { get ok() { read = true; return true; }, data: { tasks: [], next_cursor: null } } as never);
+  it("shows a reason as agent content, marked external, and an actor with no organization", async () => {
+    replies.set(path, page([event(1, "agt_1", "task.declined", "tsk_1", { reason: "**No** <img src=x>", external: true, from: { id: "agt_1" } })]));
+    const { container } = render(await Activity({ params, searchParams }));
+    expect(screen.getByText("No").tagName).toBe("STRONG");
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getAllByText("External").length).toBeGreaterThan(0);
+  });
+
+  it("pages back by the event's own ID, keeping filters, and offers the way back", async () => {
+    replies.set(path, page([event(9, "per_me", "task.message", "tsk_1")], "evt_9"));
+    render(await Activity({ params, searchParams: Promise.resolve({ task: "tsk_1", actor: "agt_1", before: "evt_20" }) }));
+    expect(seen()[0]).toContain("before=evt_20");
+    expect(seen()[0]).toContain("task=tsk_1");
+    expect(seen()[0]).toContain("actor=agt_1");
+    const older = screen.getByRole("link", { name: "Older events" }).getAttribute("href") ?? "";
+    expect(older).toContain("before=evt_9");
+    expect(older).toContain("task=tsk_1");
+    expect(screen.getByRole("link", { name: "Back to the newest" }).getAttribute("href")).toBe("/w/ws_1/activity?task=tsk_1&actor=agt_1");
+    expect(screen.getByRole("link", { name: "Clear" })).toHaveAttribute("href", "/w/ws_1/activity");
+  });
+
+  it("offers filters from what the viewer can see, by a form that works with a keyboard", async () => {
+    room.members = [{ principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member" }];
+    replies.set(path, page([]));
+    replies.set("/api/v1/workspaces/ws_1/tasks", { ok: true, data: { tasks: [{ id: "tsk_1", title: "Design the API" }], next_cursor: null } });
     render(await Activity({ params, searchParams }));
-    expect(read).toBe(false);
+    expect(within(screen.getByLabelText("Participant")).getByRole("option", { name: "agt_1" })).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Task")).getByRole("option", { name: "Design the API" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Filter" })).toBeInTheDocument();
+  });
+
+  it("labels an agent's chosen name in the Participant filter", async () => {
+    room.members = [{ principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member" }];
+    replies.set(path, page([]));
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_1", name: "Podster Admin" }] } });
+    render(await Activity({ params, searchParams }));
+    expect(within(screen.getByLabelText("Participant")).getByRole("option", { name: /Podster Admin \(name chosen by this agent\)/ })).toBeInTheDocument();
+  });
+
+  it("resets the filter controls when the filters change without a remount", async () => {
+    replies.set(path, page([]));
+    const { rerender } = render(await Activity({ params, searchParams: Promise.resolve({ actor: "per_owner" }) }));
+    expect(screen.getByLabelText("Participant")).toHaveValue("per_owner");
+    rerender(await Activity({ params, searchParams: Promise.resolve({}) }));
+    expect(screen.getByLabelText("Participant")).toHaveValue("");
+  });
+
+  it("never sends a URL's odd values to the API", async () => {
+    replies.set(path, page([]));
+    render(await Activity({ params, searchParams: Promise.resolve({ task: "x y&admin=1", before: ["a", "b"] }) }));
+    expect(seen()[0]).toBe(`${path}?order=newest`);
+  });
+
+  it.each([
+    [{}, "Nothing has happened here yet."],
+    [{ task: "tsk_1" }, /Nothing here matches/],
+    [{ before: "evt_1" }, "Nothing before this point."],
+  ])("says what an empty page means for %j", async (query, text) => {
+    replies.set(path, page([]));
+    render(await Activity({ params, searchParams: Promise.resolve(query) }));
+    expect(screen.getByText(text)).toBeInTheDocument();
   });
 
   it("still shows the events, by ID, when names can't be read", async () => {
     organizations = failed(503);
-    replies.set("/api/v1/workspaces/ws_1/events", { ok: true, data: { events: [event(1, "agt_1", "task.accepted", "tsk_1")] } });
+    replies.set(path, page([event(1, "agt_1", "task.accepted", "tsk_1")]));
     render(await Activity({ params, searchParams }));
-    expect(screen.getByText("agt_1")).toBeInTheDocument();
+    expect(within(screen.getByRole("list")).getByText("agt_1")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "tsk_1" })).toBeInTheDocument();
   });
 
-  it("explains the limit to someone the API refuses", async () => {
-    replies.set("/api/v1/workspaces/ws_1/events", failed(403, "not_allowed"));
-    render(await Activity({ params, searchParams }));
-    expect(screen.getByText(/open to the owner and admins/)).toBeInTheDocument();
+  it("says a stale cursor isn't available, and offers the newest", async () => {
+    replies.set(path, failed(400, "invalid_argument"));
+    render(await Activity({ params, searchParams: Promise.resolve({ before: "evt_gone", task: "tsk_1" }) }));
+    expect(screen.getByText(/That page isn't available/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Back to the newest" })).toHaveAttribute("href", "/w/ws_1/activity?task=tsk_1");
   });
 
-  it.each([401, 429, 503])("shows a %i as a failed read, not as the limit", async (status) => {
-    replies.set("/api/v1/workspaces/ws_1/events", failed(status));
+  it.each([401, 429, 503])("shows a %i as a failed read", async (status) => {
+    replies.set(path, failed(status));
     render(await Activity({ params, searchParams }));
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
-    expect(screen.queryByText(/open to the owner and admins/)).not.toBeInTheDocument();
   });
 });
 
