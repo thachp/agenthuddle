@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GatewayResult } from "@/lib/gateway/result";
-import { loadNames, MAX_NAMED_ORGS, orgNamesOf } from "./load-tasks";
+import { isOutage, loadNames, MAX_NAMED_ORGS, orgNamesOf } from "./load-tasks";
 
 const org = (id: string, personal = 0) => ({ id, name: id.toUpperCase(), personal });
 
@@ -26,4 +26,16 @@ describe("loadNames", () => {
   });
 
   it("names only the viewer's organizations", () => expect(orgNamesOf([org("org_a")])).toEqual({ org_a: "ORG_A" }));
+});
+
+describe("isOutage", () => {
+  it("is what says nothing about access: a success, a server failure or a rate limit", () => {
+    expect(isOutage({ ok: true, data: null })).toBe(true);
+    expect(isOutage({ ok: false, status: 503, code: "x" })).toBe(true);
+    expect(isOutage({ ok: false, status: 429, code: "x" })).toBe(true);
+  });
+
+  it.each([401, 403, 404])("a %i may mean access is gone", (status) => {
+    expect(isOutage({ ok: false, status, code: "x" })).toBe(false);
+  });
 });
