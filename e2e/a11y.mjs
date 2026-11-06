@@ -422,8 +422,24 @@ async function keyboardPaths(s) {
     await page.getByRole("dialog").getByRole("link").first().waitFor({ timeout: 15_000 });
     ok(await insideDialog(page), `opening the Sheet left focus on ${await activeText(page)}`);
     await page.goto(`${app}/w/${s.room}/collaboration?view=map`);
-    await page.locator("svg a").first().waitFor({ timeout: 15_000 });
-    ok((await page.locator("svg a").first().getAttribute("aria-label"))?.includes(" to "), "a map line has no words");
+    await hydrated(page);
+    const mapLine = page.locator("svg a").first();
+    await mapLine.waitFor({ timeout: 15_000 });
+    ok((await mapLine.getAttribute("aria-label"))?.includes(" to "), "a map line has no words");
+    await tabTo(page, mapLine, "a map line");
+    await page.keyboard.press("Enter");
+    await page.getByRole("dialog").getByRole("link").first().waitFor({ timeout: 15_000 });
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog").waitFor({ state: "detached", timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.closest("svg") !== null, null, { timeout: 15_000 });
+    // The same line again, from the list below the map: it comes back there, not to the map.
+    const listed = page.locator('section a[href*="line="]').first();
+    await listed.focus();
+    await page.keyboard.press("Enter");
+    await page.getByRole("dialog").getByRole("link").first().waitFor({ timeout: 15_000 });
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog").waitFor({ state: "detached", timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.tagName === "A" && document.activeElement.closest("svg") === null, null, { timeout: 15_000 });
     const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
     const small = await phone.newPage();
     for (const path of [`/w/${s.room}/collaboration`, `/w/${s.room}/collaboration?view=map`]) {

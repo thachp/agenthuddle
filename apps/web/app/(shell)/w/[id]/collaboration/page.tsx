@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { AuthorLine } from "@/components/agent-content/agent-content";
-import { plainName } from "@/components/agent-content/text";
+import { plainName, truncate } from "@/components/agent-content/text";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
@@ -24,24 +24,24 @@ export default async function Collaboration({ params, searchParams }: { params: 
   const nodes = read.ok ? read.data.nodes : [];
   const base = `/w/${id}/collaboration`;
   const now = Date.now();
-  const sheetNames = Object.fromEntries(nodes.map((node) => [node.id, nameOf(node.id, me, names)]));
+  const sheetNames = Object.fromEntries(nodes.map((node) => [node.id, textNameOf(node.id, me, names)]));
   return (
     <section className="max-w-3xl space-y-4">
       <h1 className="text-2xl font-semibold">Collaboration</h1>
-      <p className="text-sm text-muted-foreground">{NOTE} Counts include only what you may see. Podster can't tell whether an agent is online, only when it last did something here.</p>
+      <p className="text-sm text-muted-foreground">{NOTE} Counts include only what you may see, from when Podster began recording handoffs, so older work may not appear. Podster can't tell whether an agent is online, only when it last did something here.</p>
       {!read.ok ? <ReadFailure /> : null}
       {read.ok ? (
         <>
           {/* A plain link each way, so it works with a keyboard and needs nothing but the URL. */}
           <nav aria-label="Collaboration view" className="flex gap-4 text-sm">
-            <Link href={base} prefetch={false} aria-current={showMap ? undefined : "page"} className={showMap ? "text-primary underline" : "font-medium"}>
+            <Link href={base} prefetch={false} aria-current={showMap ? undefined : "page"} className={`inline-flex min-h-6 items-center ${showMap ? "text-primary underline" : "font-medium"}`}>
               List
             </Link>
-            <Link href={`${base}?view=map`} prefetch={false} aria-current={showMap ? "page" : undefined} className={showMap ? "font-medium" : "text-primary underline"}>
+            <Link href={`${base}?view=map`} prefetch={false} aria-current={showMap ? "page" : undefined} className={`inline-flex min-h-6 items-center ${showMap ? "font-medium" : "text-primary underline"}`}>
               Map
             </Link>
           </nav>
-          {lines.length === 0 ? <p className="text-muted-foreground">No handoffs to show yet. Offers, submissions, change requests and messages appear here once they happen on tasks you can see.</p> : null}
+          {lines.length === 0 ? <p className="text-muted-foreground">No handoffs to show. Offers, submissions, change requests and messages appear here once they happen on tasks you can see. Recording began recently, so earlier work in this room won't appear.</p> : null}
           {showMap && lines.length > 0 ? <CollaborationMap nodes={nodes} lines={lines} me={me} names={names} /> : null}
           {lines.length > 0 ? (
             <section aria-labelledby="collab-lines" className="space-y-2">
@@ -72,6 +72,7 @@ export default async function Collaboration({ params, searchParams }: { params: 
                 {nodes.map((node) => (
                   <li key={node.id} className="space-y-1 p-3 text-sm">
                     <AuthorLine author={{ name: nameOf(node.id, me, names), kind: kindOf(node.id), viewer: node.id === me }} />
+                    {node.gone ? <p className="text-muted-foreground">No longer in this workroom</p> : null}
                     {node.role_title ? <p className="break-words">{plainName(node.role_title)}</p> : null}
                     {node.last_active ? (
                       <p className="text-muted-foreground">
@@ -95,7 +96,9 @@ function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: L
   const placed = positions(nodes.map((node) => node.id));
   return (
     <figure className="space-y-1">
-      <svg viewBox={`0 0 ${MAP_SIZE} ${MAP_SIZE}`} role="group" aria-label="Map of who has worked with whom. The list below says the same." className="h-auto w-full rounded-lg border">
+      {/* It scrolls in its own box on a phone, so labels stay readable and the page itself doesn't scroll sideways. */}
+      <div tabIndex={0} role="region" aria-label="Collaboration map, which scrolls" className="overflow-x-auto rounded-lg border">
+      <svg viewBox={`0 0 ${MAP_SIZE} ${MAP_SIZE}`} role="group" aria-label="Map of who has worked with whom. The list below says the same." className="h-auto w-full min-w-[560px]">
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" className="fill-muted-foreground" />
@@ -108,8 +111,10 @@ function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: L
           const bend = { x: (from.x + to.x) / 2 + (to.y - from.y) * 0.08, y: (from.y + to.y) / 2 - (to.x - from.x) * 0.08 };
           return (
             <SheetLink key={lineTarget(line)} param="line" target={lineTarget(line)} aria-label={`${textNameOf(line.from, me, names)} to ${textNameOf(line.to, me, names)}: ${line.total} in all, ${lineSummary(line)}`}>
+              {/* A wide, invisible line to press, because the one you see is thin. */}
+              <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" stroke="transparent" strokeWidth={24} />
               <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" strokeWidth={2} markerEnd="url(#arrow)" className="stroke-muted-foreground hover:stroke-primary" />
-              <text x={bend.x} y={bend.y} textAnchor="middle" className="fill-foreground text-sm">
+              <text x={bend.x} y={bend.y} textAnchor="middle" fontSize={16} className="fill-foreground">
                 {line.total}
               </text>
             </SheetLink>
@@ -121,13 +126,14 @@ function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: L
           return (
             <g key={node.id}>
               <circle cx={at.x} cy={at.y} r={6} className="fill-primary" />
-              <text x={at.x} y={at.y - 12} textAnchor="middle" className="fill-foreground text-xs">
-                {plainName(nameOf(node.id, me, names)).slice(0, 24)}
+              <text x={at.x} y={at.y - 12} textAnchor="middle" fontSize={14} className="fill-foreground">
+                {truncate(textNameOf(node.id, me, names), 24).text}
               </text>
             </g>
           );
         })}
       </svg>
+      </div>
       <figcaption className="text-sm text-muted-foreground">{NOTE} Each number counts the handoffs on that line.</figcaption>
     </figure>
   );

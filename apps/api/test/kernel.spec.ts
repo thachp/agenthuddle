@@ -85,6 +85,7 @@ const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromNam
 /** Puts a room back to what the last deployment left, with only the newest migration undone. */
 const undoHandoffMigration = (state: any) => {
   state.storage.sql.exec("DROP TABLE handoff");
+  state.storage.sql.exec("DROP INDEX event_actor");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
 };
 /** Puts a room back to before person review. */
@@ -5425,7 +5426,114 @@ describe("the collaboration list and map", () => {
     expect(edge(wide, LEAD, BOB, "message").count).toBe(1);
   });
 
-  it("shows whole-room viewers everyone, with role and last active, and no one else's organization's secrets", async () => {
+  it("shows a guest no line naming someone no longer on its task", async () => {
+    const { id, tasks } = await room();
+    // An old assignee.
+    const t = await offer(tasks, { assignee: CAROL.id, title: "Moved" });
+    expect((await api(LEAD, "POST", `${tasks}/${t.id}/assign`, { version: t.version, assignee: BOB.id })).status).toBe(200);
+    let bob = await read(BOB, id);
+    expect(edge(bob, LEAD, BOB, "offer").count).toBe(1);
+    expect(edge(bob, LEAD, CAROL, "offer")).toBeUndefined();
+    expect(bob.nodes.map((n) => n.id)).not.toContain(CAROL.id);
+    expect((await api(BOB, "GET", `${map(id)}/handoffs?from=${LEAD.id}&to=${CAROL.id}`)).body.handoffs).toEqual([]);
+    // An old reviewer, whose submission line went with them.
+    const s = await offer(tasks, { title: "Reviewed" });
+    await submit(tasks, s);
+    const now = (await api(OWNER, "GET", `${tasks}/${s.id}`)).body.task;
+    expect((await api(OWNER, "POST", `${tasks}/${s.id}/set-reviewer`, { version: now.version, reviewer: LEAD.id })).status).toBe(200);
+    bob = await read(BOB, id);
+    expect(edge(bob, BOB, REVIEWER, "submission")).toBeUndefined();
+    expect(bob.nodes.map((n) => n.id)).not.toContain(REVIEWER.id);
+    // Someone who has seen the whole room still does.
+    expect(edge(await read(OWNER, id), LEAD, CAROL, "offer").count).toBe(1);
+    expect(edge(await read(LEAD, id), BOB, REVIEWER, "submission").count).toBe(1);
+  });
+
+  it("drops a guest's lines when the task is no longer theirs", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks, { assignee: BOB.id });
+    expect((await read(BOB, id)).edges.length).toBeGreaterThan(0);
+    expect((await api(LEAD, "POST", `${tasks}/${t.id}/assign`, { version: t.version, assignee: CAROL.id })).status).toBe(200);
+    expect((await read(BOB, id)).edges).toEqual([]);
+    expect((await read(BOB, id)).nodes.map((n) => n.id)).toEqual([BOB.id]);
+  });
+
+  it("records to nobody who has left, and marks who has gone only for those who see the member list", async () => {
+    const { id, tasks } = await room();
+    const leaving: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: leaving.id, kind: "agent", org_id: "org_a", role: "member" })).status).toBe(200);
+    // A reviewer named, then removed, before the submission that would have gone to them.
+    const task = await offer(tasks, { reviewer: leaving.id, assignee: LEAD.id, title: "Self" });
+    expect(task.id).toBeTruthy();
+    await api(LEAD, "POST", `${tasks}/${task.id}/accept`, { version: task.version });
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${leaving.id}`, {})).status).toBe(200);
+    expect((await api(LEAD, "POST", `${tasks}/${task.id}/submit`, { version: task.version + 1 + 1, artifacts: [{ uri: "https://example.com/a", label: "A" }] })).status).toBe(200);
+    const body = await read(OWNER, id);
+    expect(edge(body, LEAD, leaving, "submission")).toBeUndefined();
+    // Someone with a line who has since left is marked, and someone here isn't.
+    await offer(tasks, { assignee: CAROL.id });
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${CAROL.id}`, {})).status).toBe(200);
+    const after = await read(OWNER, id);
+    expect(after.nodes.find((n) => n.id === CAROL.id).gone).toBe(true);
+    expect(after.nodes.find((n) => n.id === LEAD.id).gone).toBeUndefined();
+    expect((await read(BOB, id)).nodes.every((n) => n.gone === undefined)).toBe(true);
+  });
+
+  it("treats an owner who left as the room read does", async () => {
+    const owner: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
+    const id = (await api(owner, "POST", "/v1/workspaces", { name: "Owner leaves" })).body.id as string;
+    const version = async () => (await api(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const helper: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
+    expect((await api(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: helper.id, kind: "person", org_id: "org_a", role: "admin", policy_version: await version() })).status).toBe(200);
+    const plain: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    await register(plain);
+    expect((await api(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: plain.id, kind: "agent", org_id: "org_a", role: "member", policy_version: await version() })).status).toBe(200);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE workspace SET owner_left_at = 1"));
+    const asMember = await read(plain, id);
+    expect(asMember.nodes.find((n) => n.id === owner.id)?.gone).toBeUndefined();
+    expect(asMember.nodes.map((n) => n.id)).toContain(owner.id);
+    expect((await read(helper, id)).nodes.find((n) => n.id === owner.id).gone).toBe(true);
+  });
+
+  it("counts a message from someone not named on the task, to all three who are", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    const other: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: other.id, kind: "agent", org_id: "org_a", role: "member" })).status).toBe(200);
+    expect((await api(other, "POST", `${tasks}/${t.id}/messages`, { body: "hi" })).status).toBe(200);
+    const body = await read(OWNER, id);
+    for (const to of [LEAD, BOB, REVIEWER]) expect(edge(body, other, to, "message").count).toBe(1);
+    // A guest named on the task doesn't learn of the line from someone it can't otherwise see.
+    expect(edge(await read(BOB, id), other, BOB, "message")).toBeUndefined();
+  });
+
+  it("records one handoff for a retry, and none for a command or message that fails", async () => {
+    const { id, tasks } = await room();
+    const key = nextKey();
+    const body = { title: "Once", instructions: "x", assignee: BOB.id, reviewer: REVIEWER.id };
+    const first = await api(LEAD, "POST", tasks, body, { key });
+    expect((await api(LEAD, "POST", tasks, body, { key })).body.id).toBe(first.body.id);
+    expect(edge(await read(OWNER, id), LEAD, BOB, "offer").count).toBe(1);
+    const messageKey = nextKey();
+    await api(LEAD, "POST", `${tasks}/${first.body.id}/messages`, { body: "once" }, { key: messageKey });
+    await api(LEAD, "POST", `${tasks}/${first.body.id}/messages`, { body: "once" }, { key: messageKey });
+    expect(edge(await read(OWNER, id), LEAD, BOB, "message").count).toBe(1);
+    const handoffs = await count(id, "handoff");
+    expect((await api(LEAD, "POST", `${tasks}/${first.body.id}/messages`, { body: "lost" }, { fail: true })).status).toBe(500);
+    await api(BOB, "POST", `${tasks}/${first.body.id}/accept`, { version: first.body.version });
+    expect((await api(BOB, "POST", `${tasks}/${first.body.id}/submit`, { version: first.body.version + 1, artifacts: [{ uri: "https://example.com/a", label: "A" }] }, { fail: true })).status).toBe(500);
+    expect(await count(id, "handoff")).toBe(handoffs);
+  });
+
+  it("reads through its indexes, so a view doesn't scan the room's history once per person", async () => {
+    const { id } = await room();
+    const plan = (query: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec(`EXPLAIN QUERY PLAN ${query}`).toArray().map((row: any) => row.detail).join(" | ") as string);
+    expect(await plan("SELECT j.value, (SELECT max(created_at) FROM event WHERE actor_id = j.value) FROM json_each('[\"x\"]') j")).toContain("COVERING INDEX event_actor");
+    expect(await plan("SELECT from_id, to_id, kind, count(*) AS n, max(created_at) AS last_at FROM handoff GROUP BY from_id, to_id, kind")).toContain("COVERING INDEX handoff_edge");
+    expect(await plan("SELECT kind FROM handoff WHERE handoff.task_id IN (SELECT id FROM task WHERE requester_id = 'x' OR assignee_id = 'x' OR reviewer_id = 'x') GROUP BY from_id, to_id, kind")).toContain("handoff_task");
+  });
+
+  it("shows whole-room viewers everyone, with role and last active", async () => {
     const { id, tasks } = await room();
     await offer(tasks);
     const v = async () => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
@@ -5436,7 +5544,9 @@ describe("the collaboration list and map", () => {
     expect(body.nodes.map((n) => n.id)).toEqual(expect.arrayContaining([OWNER.id, ADMIN.id, LEAD.id, REVIEWER.id, BOB.id, CAROL.id]));
     expect(body.nodes.find((n) => n.id === BOB.id).role_title).toBe("Engineer");
     expect(body.nodes.find((n) => n.id === LEAD.id).last_active).toBeGreaterThan(0);
+    // Only what the view is for: no talk of presence, and no one's organization.
     expect(JSON.stringify(body)).not.toContain("online");
+    expect(JSON.stringify(body)).not.toContain("org_");
     // A guest sees its own place, and not who else holds what.
     const guest = await read(CAROL, id);
     expect(guest.nodes.find((n) => n.id === BOB.id)).toBeUndefined();

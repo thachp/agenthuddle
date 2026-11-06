@@ -83,20 +83,24 @@ function failureKind(status: number, code: string, earlierUnknown: boolean) {
 }
 
 const launcherKey = (param: string, target: string) => `${param}:${target}`;
+let lastLauncher: HTMLElement | null = null;
 
 /**
  * Opens a Sheet from a list. It's a real link, so it can be opened in a new tab and shared, and it marks itself so focus
  * can find it again on close, even after a re-render or a reload.
  */
-export function SheetLink({ param, target, ...props }: { param: string; target: string } & Omit<ComponentProps<typeof Link>, "href">) {
+export function SheetLink({ param, target, onClick, ...props }: { param: string; target: string } & Omit<ComponentProps<typeof Link>, "href">) {
   if (useContext(InsideSheet)) throw new Error("A Sheet can't open another Sheet. Close it, then open the other.");
   const pathname = usePathname();
   const search = useSearchParams();
-  return <Link {...props} href={hrefWith(pathname, new URLSearchParams(search.toString()), param, target)} scroll={false} prefetch={false} data-sheet-launcher={launcherKey(param, target)} />;
+  return <Link {...props} onClick={(event) => { lastLauncher = event.currentTarget; onClick?.(event); }} href={hrefWith(pathname, new URLSearchParams(search.toString()), param, target)} scroll={false} prefetch={false} data-sheet-launcher={launcherKey(param, target)} />;
 }
 
 function focusLauncher(param: string, target: string) {
-  const launcher = document.querySelector<HTMLElement>(`[data-sheet-launcher="${CSS.escape(launcherKey(param, target))}"]`);
+  // A screen can offer the same target twice, as a list and a map do, so the one pressed comes first.
+  const key = launcherKey(param, target);
+  const pressed = lastLauncher?.isConnected && lastLauncher.getAttribute("data-sheet-launcher") === key ? lastLauncher : null;
+  const launcher = pressed ?? document.querySelector<HTMLElement>(`[data-sheet-launcher="${CSS.escape(key)}"]`);
   (launcher ?? document.getElementById("main-content"))?.focus();
 }
 

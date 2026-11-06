@@ -85,8 +85,9 @@ ALTER TABLE invitation ADD COLUMN work_role_id TEXT;
 ALTER TABLE workspace ADD COLUMN require_person_review INTEGER NOT NULL DEFAULT 0;
 ", "
 CREATE TABLE handoff (seq INTEGER PRIMARY KEY AUTOINCREMENT, from_id TEXT NOT NULL, to_id TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT NOT NULL, created_at INTEGER NOT NULL);
-CREATE INDEX handoff_edge ON handoff (from_id, to_id);
+CREATE INDEX handoff_edge ON handoff (from_id, to_id, kind, created_at);
 CREATE INDEX handoff_task ON handoff (task_id);
+CREATE INDEX event_actor ON event (actor_id, created_at);
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -419,8 +420,11 @@ pub fn record_decision(
     now: i64,
 ) -> R<()> {
     for draft in &decision.events {
+        // Only to someone still here, as with a message: work can't be handed to someone who has left.
         if let Some((kind, to)) = handoff_of(draft.kind, actor, &decision.task) {
-            record_handoff(sql, actor, to, kind, &decision.task.id, now)?;
+            if participant(sql, to)?.is_some() {
+                record_handoff(sql, actor, to, kind, &decision.task.id, now)?;
+            }
         }
         let mut recipients: Vec<String> = draft.recipients.iter().cloned().collect();
         if draft.kind == EventKind::TaskNeedsAttention {

@@ -13,6 +13,7 @@ vi.mock("@/lib/gateway/server", () => ({
 vi.mock("@/lib/workroom", () => ({ loadWorkroom: async () => ({ id: "ws_1" }) }));
 
 const { default: Collaboration } = await import("./page");
+const { textNameOf } = await import("../tasks/task-model");
 
 const params = Promise.resolve({ id: "ws_1" });
 const path = "/api/v1/workspaces/ws_1/collaboration";
@@ -67,10 +68,40 @@ describe("Collaboration", () => {
     expect(screen.getByText(/Each number counts/)).toBeInTheDocument();
   });
 
+  it("labels a chosen name in an open line's Sheet too", async () => {
+    setUrl("/w/ws_1/collaboration?line=agt_a~agt_b");
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ truncated: false, handoffs: [{ kind: "offer", task_id: "tsk_1", task_title: "T", created_at: 0 }] }), { status: 200 }));
+    await show({ line: "agt_a~agt_b" });
+    const sheet = await screen.findByRole("dialog");
+    expect((await within(sheet).findByRole("heading")).textContent).toBe(`${textNameOf("agt_a", "per_me", { agt_a: "Podster Admin" })} to agt_b`);
+    expect(within(sheet).getByRole("heading").textContent).toMatch(/Podster Admin.+ to agt_b/);
+    vi.unstubAllGlobals();
+  });
+
+  it("marks someone gone, and only as far as the read says", async () => {
+    replies.set(path, { ok: true, data: { edges: [], nodes: [{ id: "agt_a", gone: true }, { id: "agt_b" }] } });
+    await show();
+    expect(screen.getAllByText("No longer in this workroom")).toHaveLength(1);
+  });
+
+  it("labels a chosen name in the map, cut without splitting a character", async () => {
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_a", name: "😀".repeat(40) }, { id: "agt_b", name: "Podster Admin" }] } });
+    const { container } = await show({ view: "map" });
+    const labels = [...container.querySelectorAll("svg g text")].map((el) => el.textContent ?? "");
+    expect(labels.some((label) => label.includes("Podster Admin"))).toBe(true);
+    expect(labels.every((label) => !/[\uD800-\uDBFF]$/.test(label))).toBe(true);
+  });
+
+  it("makes each link big enough, and scrolls the map in its own box", async () => {
+    await show({ view: "map" });
+    expect(screen.getByRole("link", { name: "List" }).className).toContain("min-h-6");
+    expect(screen.getByRole("region", { name: /Collaboration map/ })).toHaveAttribute("tabindex", "0");
+  });
+
   it("says what empty means, without a map to draw", async () => {
     replies.set(path, { ok: true, data: { edges: [], nodes: [{ id: "per_me" }] } });
     await show({ view: "map" });
-    expect(screen.getByText(/No handoffs to show yet/)).toBeInTheDocument();
+    expect(screen.getByText(/Recording began recently/)).toBeInTheDocument();
     expect(screen.queryByRole("group", { name: /Map of who/ })).toBeNull();
   });
 

@@ -1,21 +1,29 @@
 //! Who has worked with whom. Reads only, from handoffs recorded with each event, narrowed in the query itself so that no
 //! count includes anything the viewer can't see. Lines describe work, and nothing reads them as permission.
 use super::*;
+use std::collections::{BTreeSet, HashMap};
 
 const HANDOFFS_LISTED: i64 = 50;
 
-/// The part of a query that limits handoffs to this viewer, and the bindings it needs after any others.
+/// The part of a query that limits handoffs to this viewer, with the caller's ID as `?1`.
+///
+/// Someone limited to their own tasks also sees a line only if both its ends are on that task now, or are them. Otherwise an
+/// old offer or reviewer would name a participant they have no other way to learn of.
 fn visible_handoffs(caller: &Caller) -> (&'static str, Vec<V>) {
-    const OWN_TASK: &str = "task_id IN (SELECT id FROM task WHERE requester_id = ?1 OR assignee_id = ?1 OR reviewer_id = ?1)";
+    // The `IN` starts from the handoffs of this viewer's own tasks, so the read doesn't walk the room's whole history.
+    const OWN_NOW: &str = "handoff.task_id IN (SELECT id FROM task WHERE requester_id = ?1 OR assignee_id = ?1 OR reviewer_id = ?1)
+        AND EXISTS (SELECT 1 FROM task t WHERE t.id = handoff.task_id
+            AND handoff.from_id IN (?1, t.requester_id, t.assignee_id, t.reviewer_id)
+            AND handoff.to_id IN (?1, t.requester_id, t.assignee_id, t.reviewer_id))";
     let id = caller.id.as_str();
     if !sees_whole_room(caller) {
-        return (OWN_TASK, vec![id.into()]);
+        return (OWN_NOW, vec![id.into()]);
     }
     if reads_every_thread(caller) {
         return ("?1 IS NOT NULL", vec![id.into()]);
     }
     (
-        "(kind <> 'message' OR task_id IN (SELECT id FROM task WHERE requester_id = ?1 OR assignee_id = ?1 OR reviewer_id = ?1))",
+        "(handoff.kind <> 'message' OR handoff.task_id IN (SELECT id FROM task WHERE requester_id = ?1 OR assignee_id = ?1 OR reviewer_id = ?1))",
         vec![id.into()],
     )
 }
@@ -29,53 +37,81 @@ pub(super) fn read_map(sql: &SqlStorage, who: &Participant) -> R<Value> {
         bindings,
     )?;
     let whole_room = sees_whole_room(caller);
-    let mut ids: Vec<String> = vec![caller.id.clone()];
+    let mut ids = BTreeSet::from([caller.id.clone()]);
     for edge in &edges {
         ids.extend(text(&edge["from_id"]));
         ids.extend(text(&edge["to_id"]));
     }
+    let mut titles: HashMap<String, String> = HashMap::new();
+    let mut last_active: HashMap<String, i64> = HashMap::new();
+    let mut current = BTreeSet::new();
     if whole_room {
-        ids.extend(
-            rows(
-                sql,
-                "SELECT principal_id FROM member WHERE revoked_at IS NULL",
-                vec![],
-            )?
-            .iter()
-            .filter_map(|member| text(&member["principal_id"])),
-        );
-        ids.extend(
-            rows(
-                sql,
-                "SELECT owner_person_id FROM workspace WHERE owner_left_at IS NULL",
-                vec![],
-            )?
-            .iter()
-            .filter_map(|room| text(&room["owner_person_id"])),
-        );
-    }
-    ids.sort();
-    ids.dedup();
-    let mut nodes = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let mut node = json!({ "id": id });
-        // What someone holds and when they last acted follow the member list, apart from a viewer's own.
-        if whole_room || *id == caller.id {
-            let held = rows(sql, "SELECT w.title FROM role_claim c JOIN work_role w ON w.id = c.role_id WHERE c.principal_id = ? AND c.status = 'active'", vec![id.as_str().into()])?;
-            if let Some(title) = held.first().and_then(|row| text(&row["title"])) {
-                node["role_title"] = json!(title);
-            }
-            let last = rows(
-                sql,
-                "SELECT max(created_at) AS at FROM event WHERE actor_id = ?",
-                vec![id.as_str().into()],
-            )?;
-            if let Some(at) = last.first().and_then(|row| row["at"].as_i64()) {
-                node["last_active"] = json!(at);
+        let room = rows(
+            sql,
+            "SELECT owner_person_id, owner_left_at FROM workspace",
+            vec![],
+        )?;
+        let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
+        // As in the room read: an owner stays its owner to everyone, and only those who manage access hear that they left.
+        let owner = text(&room["owner_person_id"]).unwrap_or_default();
+        let manages = authorize_workroom(caller, WorkroomAction::ManageAccess) == Verdict::Allow;
+        if !manages || room["owner_left_at"].is_null() {
+            current.insert(owner.clone());
+        }
+        ids.insert(owner);
+        for member in rows(
+            sql,
+            "SELECT principal_id FROM member WHERE revoked_at IS NULL",
+            vec![],
+        )? {
+            current.extend(text(&member["principal_id"]));
+        }
+        ids.extend(current.iter().cloned());
+        for row in rows(sql, "SELECT c.principal_id, w.title FROM role_claim c JOIN work_role w ON w.id = c.role_id WHERE c.status = 'active'", vec![])? {
+            if let (Some(id), Some(title)) = (text(&row["principal_id"]), text(&row["title"])) {
+                titles.insert(id, title);
             }
         }
-        nodes.push(node);
+    } else {
+        let id = caller.id.as_str();
+        for row in rows(sql, "SELECT w.title FROM role_claim c JOIN work_role w ON w.id = c.role_id WHERE c.principal_id = ? AND c.status = 'active'", vec![id.into()])? {
+            if let Some(title) = text(&row["title"]) {
+                titles.insert(caller.id.clone(), title);
+            }
+        }
     }
+    // One seek per person shown. A `GROUP BY actor_id` would read every event the room has ever had, on each view.
+    let dated: Vec<&String> = if whole_room {
+        ids.iter().collect()
+    } else {
+        vec![&caller.id]
+    };
+    for row in rows(
+        sql,
+        "SELECT j.value AS id, (SELECT max(created_at) FROM event WHERE actor_id = j.value) AS at FROM json_each(?) j",
+        vec![json!(dated).to_string().as_str().into()],
+    )? {
+        if let (Some(id), Some(at)) = (text(&row["id"]), row["at"].as_i64()) {
+            last_active.insert(id, at);
+        }
+    }
+    let nodes: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            let mut node = json!({ "id": id });
+            if let Some(title) = titles.get(id) {
+                node["role_title"] = json!(title);
+            }
+            if let Some(at) = last_active.get(id) {
+                node["last_active"] = json!(at);
+            }
+            // Only someone who sees the member list can tell who's missing from it.
+            if whole_room && !current.contains(id) {
+                node["gone"] = json!(true);
+            }
+            node
+        })
+        .collect();
     let edges: Vec<Value> = edges
         .iter()
         .map(|edge| json!({ "from": edge["from_id"], "to": edge["to_id"], "kind": edge["kind"], "count": int(&edge["n"]), "last_at": edge["last_at"] }))
@@ -93,7 +129,7 @@ pub(super) fn read_edge(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Val
     bindings.push((HANDOFFS_LISTED + 1).into());
     let found = rows(
         sql,
-        &format!("SELECT h.kind, h.task_id, h.created_at, t.title AS task_title FROM (SELECT * FROM handoff WHERE {limit}) h JOIN task t ON t.id = h.task_id WHERE h.from_id = ?2 AND h.to_id = ?3 ORDER BY h.seq DESC LIMIT ?4"),
+        &format!("SELECT handoff.kind, handoff.task_id, handoff.created_at, title.title AS task_title FROM handoff JOIN task title ON title.id = handoff.task_id WHERE handoff.from_id = ?2 AND handoff.to_id = ?3 AND {limit} ORDER BY handoff.seq DESC LIMIT ?4"),
         bindings,
     )?;
     let truncated = found.len() as i64 > HANDOFFS_LISTED;

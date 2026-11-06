@@ -1,6 +1,6 @@
 /** What the room says about who has worked with whom, as far as this viewer may see. Lines describe work, not permissions. */
 export type Edge = { from: string; to: string; kind: string; count: number; last_at: number };
-export type Node = { id: string; role_title?: string; last_active?: number };
+export type Node = { id: string; role_title?: string; last_active?: number; gone?: boolean };
 export type CollaborationRead = { edges: Edge[]; nodes: Node[] };
 export type Handoff = { kind: string; task_id: string; task_title: string; created_at: number };
 
