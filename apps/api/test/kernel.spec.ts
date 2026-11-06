@@ -5900,12 +5900,13 @@ describe("task plans", () => {
     await seedFinished(id, 8000);
     await seedEdges(id, (n) => `'tsk_old' || (${n} + 1)`, (n) => `'tsk_old' || ${n}`, 4000);
     // Someone named on nearly everything.
-    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`UPDATE task SET reviewer_id = '${BOB.id}', assignee_id = '${BOB.id}'`));
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec(`UPDATE task SET reviewer_id = '${BOB.id}', assignee_id = '${BOB.id}', requester_id = '${BOB.id}'`));
     const costs = async (who: Who, ids: string[]) => (await api(who, "GET", `${planOf(id)}/costs?ids=${encodeURIComponent(JSON.stringify(ids))}`)).body;
     const narrow = await costs(BOB, [mine.id, "tsk_old1"]);
     for (const index of ["task_requester", "task_assignee", "task_reviewer"]) expect(narrow.own.plan).toContain(index);
     expect(narrow.own.rows).toBe(3001);
-    expect(narrow.own.rows_read).toBeLessThan(4 * 3001 * 2);
+    // Three indexes, each stopping at 3,001 rows, however many tasks name them. There are 8,000 here.
+    expect(narrow.own.rows_read).toBeLessThan(3 * 3 * 3001 + 100);
     expect(narrow.edges_from.plan).toContain("PRIMARY KEY");
     expect(narrow.edges_from.rows_read).toBeLessThan(10);
     expect(narrow.edges_before.plan).toContain("PRIMARY KEY");

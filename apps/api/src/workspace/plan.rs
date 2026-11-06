@@ -188,8 +188,8 @@ pub(super) fn handle_set(
     Ok(answer(next, json!(now)))
 }
 
-const EDGES_BEFORE: &str = "WITH RECURSIVE before(id) AS (SELECT value FROM json_each(?1) UNION SELECT d.predecessor_id FROM before JOIN task_dependency d ON d.successor_id = before.id)
-    SELECT d.predecessor_id, d.successor_id FROM before JOIN task_dependency d ON d.successor_id = before.id";
+const EDGES_BEFORE: &str = "WITH RECURSIVE before(id) AS (SELECT value FROM json_each(?1) UNION SELECT d.predecessor_id FROM before CROSS JOIN task_dependency d ON d.successor_id = before.id)
+    SELECT d.predecessor_id, d.successor_id FROM before CROSS JOIN task_dependency d ON d.successor_id = before.id";
 
 fn edges_of(statuses: &str, columns: &str) -> String {
     format!("SELECT {columns} FROM task t JOIN task_dependency d ON d.successor_id = t.id WHERE t.status IN {statuses}")
