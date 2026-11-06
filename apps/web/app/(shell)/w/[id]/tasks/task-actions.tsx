@@ -261,7 +261,7 @@ function ChangePerson({ api, me, names, onNotice, which, choices, current, depar
   const key = useIntentKey(`${which}:${data.task.version}:${person}`);
   const id = `change-${which}`;
 
-  if (choices.length === 0) return <p className="text-sm text-muted-foreground">Nobody else in this workroom can be the {which}.</p>;
+  if (choices.length === 0) return <p className="text-sm text-muted-foreground">Nobody else in this workroom can be the {which}.{which === "reviewer" && data.room.require_person_review ? " It requires a person to review, so add one on Team." : ""}</p>;
 
   const change = async () => {
     if (!person) return;
