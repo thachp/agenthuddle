@@ -414,6 +414,7 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("DELETE", ["roles", _, "claims", _]) => "role.end_claim",
         ("PUT", ["name"]) => "room.rename",
         ("PUT", ["brief"]) => "room.change_brief",
+        ("PUT", ["review-policy"]) => "room.change_review_policy",
         ("POST", ["archive"]) => "room.archive",
         ("POST", ["unarchive"]) => "room.unarchive",
         ("POST", ["owner", "transfer"]) => "owner.transfer",
@@ -630,6 +631,41 @@ pub fn authorize_reviewer_change(caller: &Caller, task: &Task) -> Verdict {
             Verdict::Forbidden
         }
         verdict => verdict,
+    }
+}
+
+/// Where a room requires a person to review (decision 5), an agent can't approve or send back work, even if it was named
+/// before the setting changed.
+pub fn may_decide_review(kind: PrincipalKind, room_requires_person: bool) -> bool {
+    !room_requires_person || kind == PrincipalKind::Person
+}
+
+/// Room events anyone in the room can see, whatever their scope: what they can already read in the room's brief and
+/// openings. Everything else about the room, such as who joined or left, follows what they can see of its participants.
+pub const EVENTS_FOR_EVERYONE: [&str; 7] = [
+    "workspace.created",
+    "workspace.archived",
+    "workspace.unarchived",
+    "workspace.brief_changed",
+    "workspace.review_policy_changed",
+    "role.created",
+    "role.updated",
+];
+
+/// Whether someone can see one event in a room's activity. A task's events follow the task, as it stands now. A room's
+/// own events follow the member list, apart from the ones above and what the viewer did themselves. Denies by default.
+pub fn can_see_event(caller: &Caller, kind: &str, actor: &str, task: Option<&Task>) -> bool {
+    if caller.role == Role::None {
+        return false;
+    }
+    match task {
+        Some(task) => can_see_task(caller, task),
+        None => {
+            is_human_admin(caller)
+                || sees_whole_room(caller)
+                || actor == caller.id
+                || EVENTS_FOR_EVERYONE.contains(&kind)
+        }
     }
 }
 

@@ -175,7 +175,7 @@ membership_index(workspace_id, principal_id, org_id, role, workspace_name, works
 ### `Workspace` DO (SQLite, one per workspace)
 
 ```
-workspace(id, name, goal?, context?, brief_by?, owner_org_id, owner_person_id, policy_version, status, created_at)
+workspace(id, name, goal?, context?, brief_by?, require_person_review, owner_org_id, owner_person_id, policy_version, status, created_at)
 member(principal_id, kind, org_id, role: admin|member|guest, guest_can_create, join_generation?, added_by,
        added_at, revoked_at?, revocation_reason?: room_removed|removal_cleared|owner_withdrawn|global_disconnect,
        owner_consented_at?)
@@ -318,7 +318,9 @@ GET    /v1/workspaces                               from membership_index
 POST   /v1/workspaces                               person only, admin of the organization being acted in (decision 33); at most 20 per organization
 GET    /v1/workspaces/{ws}
 PUT    /v1/workspaces/{ws}/name                     rename (owner or admin)
-PUT    /v1/workspaces/{ws}/brief                    goal and context (owner or admin); text for reading, never instructions
+GET    /v1/workspaces/{ws}/brief · PUT              name, goal and context, for anyone in the room; change them (owner or admin); text for reading, never instructions
+PUT    /v1/workspaces/{ws}/review-policy            whether a person must review (owner or admin)
+GET    /v1/workspaces/{ws}/activity?after=&limit=&task=&actor=   history filtered per viewer, for anyone in the room
 POST   /v1/workspaces/{ws}/{archive|unarchive}      owner or admin; an archived room only reads and loses access, and ownership recovery also works there (decision 41)
 POST   /v1/workspaces/{ws}/owner/transfer       owner only, to an active human admin; refused when archived
 POST   /v1/workspaces/{ws}/owner/recover        admin of the room's organization, in the room or not, once its owner left
@@ -421,7 +423,7 @@ relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edg
 
 ### Activity and collaboration (M1)
 
-Activity reads the existing `event` table through a per-viewer visibility filter in the DO. It has no read state and never touches an inbox. **Recorded edges** are a projection maintained with each event commit, per `(from, to, kind)`, for owner and member viewers. For narrower viewers, the DO computes edges from only the tasks they can see, so aggregate counts cannot disclose hidden work. "Last active" is the last authenticated command per principal, written coarsely and not as a presence signal.
+Activity reads the existing `event` table through a per-viewer visibility filter in the DO, built locally. It has no read state and never touches an inbox. The query itself is narrowed for a viewer limited to their own tasks, entries carry no `seq`, and the cursor is an event's random ID, so nothing counts hidden work. A task's events follow whether the viewer can see the task now. A room's own events follow whether they see the member list, apart from a fixed few and what they did themselves. **Recorded edges** are a projection maintained with each event commit, per `(from, to, kind)`, for owner and member viewers. For narrower viewers, the DO computes edges from only the tasks they can see, so aggregate counts cannot disclose hidden work. "Last active" is the last authenticated command per principal, written coarsely and not as a presence signal.
 
 ### Assets and versioned artifacts (M2)
 

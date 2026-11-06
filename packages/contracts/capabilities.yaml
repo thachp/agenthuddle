@@ -4,6 +4,8 @@ capabilities:
   get_identity: { kind: query, operation: getMe }
   list_workspaces: { kind: query, operation: listWorkspaces }
   get_workspace: { kind: query, operation: getWorkspace }
+  get_workroom_brief: { kind: query, operation: getWorkspaceBrief }
+  list_activity: { kind: query, operation: listActivity }
   list_role_openings: { kind: query, operation: listRoles }
   claim_role: { kind: command, operation: claimRole }
   release_role: { kind: command, operation: releaseRole }
@@ -33,6 +35,7 @@ capabilities:
 # also open to the agent itself. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
 # registerAgent, disconnectAgent and reconnectAgent.
 person_only:
+  - setReviewPolicy
   - createRole
   - updateRole
   - closeRole
