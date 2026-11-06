@@ -12,6 +12,8 @@ capabilities:
   create_task: { kind: command, operation: createTask }
   list_tasks: { kind: query, operation: listTasks }
   get_task: { kind: query, operation: getTask }
+  get_plan: { kind: query, operation: getPlan }
+  set_task_plan: { kind: command, operation: setTaskPlan }
   update_task: { kind: command, operation: updateTask }
   set_reviewer: { kind: command, operation: setReviewer }
   set_requester: { kind: command, operation: setRequester }

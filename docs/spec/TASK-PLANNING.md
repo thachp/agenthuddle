@@ -4,7 +4,7 @@ Status: **approved product direction; implementation handoff** · Owner: Patrick
 
 Companions: [Product](PRODUCT.md), [Design](DESIGN.md), [Access control](ACCESS-CONTROL.md), [Architecture](ARCHITECTURE.md), [mockup index](../mockups/README.md).
 
-Patrick approved two static concepts and requested documentation so Claude can implement them. This brief records that direction; it does not claim that Board, Gantt, planning fields or dependency APIs already exist or ship in M0. No interactive prototype was built. **Accepted** below marks engineering choices the owner has now settled, and none of them is built. **Proposed** marks what's left to settle in review. Existing lifecycle and access-control requirements remain authoritative.
+Patrick approved two static concepts and requested documentation so Claude can implement them. This brief records that direction; it does not claim that any of it shipped in M0. No interactive prototype was built. **Accepted** below marks engineering choices the owner has now settled, and only what the contract section says is built. **Proposed** marks what's left to settle in review. Existing lifecycle and access-control requirements remain authoritative.
 
 ## Approved experience and references
 
@@ -84,7 +84,7 @@ Planning edges do not launch/wake agents, change assignees/execution ownership, 
 
 ## Required data and contracts (documentation only)
 
-Current task contracts do not provide a full planning model. Do not fake production estimates/edges in the UI or broaden `update_task` ad hoc. [Decisions 64 to 66](PRODUCT.md#decisions-needed) accept one `plan_revision` per room that leaves `task.version` alone, one `set_task_plan` command (at most 50 predecessors per task and 5,000 edges per room, audited, waking nobody), and one plan read whose `complete` is false for anyone who doesn't see the whole room and for rooms over 3,000 tasks. None of this exists yet. The table below is what those have to cover, and live-forecast fields wait for [decision 68](PRODUCT.md#decisions-needed)'s later step:
+Current task contracts do not provide a full planning model. Do not fake production estimates/edges in the UI or broaden `update_task` ad hoc. [Decisions 64 to 66](PRODUCT.md#decisions-needed) accept one `plan_revision` per room that leaves `task.version` alone, one `set_task_plan` command (at most 50 predecessors per task and 5,000 edges per room, audited, waking nobody), and one plan read whose `complete` is false for anyone who doesn't see the whole room and for rooms over 3,000 tasks. Those are built, locally only, with their endpoints in [ARCHITECTURE.md](ARCHITECTURE.md), and nothing has a screen yet. The forecast, the room's start date and calendar, and the Gantt aren't built. The table below is what those have to cover, and live-forecast fields wait for [decision 68](PRODUCT.md#decisions-needed)'s later step:
 
 | Need | Proposed contract responsibility |
 | --- | --- |
@@ -159,4 +159,4 @@ All feature checks below are **not run**; they are implementation acceptance cri
 
 ## Remaining engineering decisions
 
-The owner settled these on 2026-11-06 as [decisions 62 to 73](PRODUCT.md#decisions-needed). Dependencies need decisions 62 to 66, and the Gantt also needs 67 to 71. Live forecasting, holidays and capacity leveling wait for real use. What remains is engineering detail for the contract PR: field nullability and endpoint names.
+The owner settled these on 2026-11-06 as [decisions 62 to 73](PRODUCT.md#decisions-needed). Dependencies need decisions 62 to 66, and the Gantt also needs 67 to 71. Live forecasting, holidays and capacity leveling wait for real use. The contract PR settled the field nullability and endpoint names: `GET /plan` and `PUT /tasks/{t}/plan`, with `duration_days` null or left out for not estimated.

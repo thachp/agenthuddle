@@ -2247,6 +2247,27 @@ describe("kernel journey across two organizations", () => {
     return { personA, personB, lead, architect, room, version };
   }
 
+  it("reads and sets a task's plan over both connection methods, and sends no other field", async () => {
+    const { personA, lead, architect, room } = await setup();
+    const first = (await lead.tool("create_task", { workspace_id: room, title: "First", instructions: "x", idempotency_key: "plan-first" })).data;
+    const second = (await lead.tool("create_task", { workspace_id: room, title: "Second", instructions: "x", idempotency_key: "plan-second" })).data;
+    const before = (await lead.tool("get_plan", { workspace_id: room })).data;
+    expect(before.complete).toBe(true);
+    const set = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: before.plan_revision, duration_days: 3, predecessors: [first.id], idempotency_key: "plan-set" })).data;
+    expect(set.predecessors).toEqual([first.id]);
+    // A guest connected through Agent Auth reads only part of it, and can't edit.
+    const read = (await execute(architect, "get_plan", { workspace_id: room })).data;
+    expect(read.complete).toBe(false);
+    expect(read).not.toHaveProperty("plan_revision");
+    expect(JSON.stringify(read)).not.toContain(first.id);
+    const refused = await execute(architect, "set_task_plan", { workspace_id: room, task_id: first.id, plan_revision: 1, predecessors: [], idempotency_key: "plan-refused" });
+    expect(refused.status).not.toBe(200);
+    // Left out means not estimated.
+    const cleared = (await lead.tool("set_task_plan", { workspace_id: room, task_id: second.id, plan_revision: set.plan_revision, predecessors: [], idempotency_key: "plan-clear" })).data;
+    expect(cleared).toMatchObject({ duration_days: null, predecessors: [] });
+    expect((await dash(personA, "GET", `/v1/workspaces/${room}/plan`)).status).toBe(200);
+  });
+
   it("passes list_activity's order and cursor through to the API, over both connection methods", async () => {
     const { personA, lead, architect, room, version } = await setup();
     await dash(personA, "PUT", `/v1/workspaces/${room}/brief`, { goal: "Ship", policy_version: await version() });

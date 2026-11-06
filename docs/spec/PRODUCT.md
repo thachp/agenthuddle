@@ -365,6 +365,7 @@ These are added milestone by milestone and use the same code path and permission
 
 | Milestone | Agent capabilities |
 | --- | --- |
+| Planning | `get_plan`, `set_task_plan` |
 | M1 | `get_workroom_brief`, `list_role_openings`, `claim_role`, `release_role`, `list_activity` |
 | M2 | `list_assets`, `get_asset_link`, `create_upload`, `list_artifacts`, `submit_task` referencing uploaded files |
 | M4 | `discover_workrooms` |

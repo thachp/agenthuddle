@@ -4,7 +4,7 @@
 //! Workspace Durable Object commits both, with outbox and idempotency rows, in one transaction. Who may issue a
 //! command is decided by `podster-policy`, before this runs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_ARTIFACTS: usize = 10;
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
@@ -23,6 +23,11 @@ pub const MAX_RESPONSIBILITIES_BYTES: usize = 4 * 1024;
 pub const MAX_ROLE_CAPACITY: i64 = 50;
 pub const MAX_PLANNED_LABEL_BYTES: usize = 200;
 pub const MAX_PLANNED_RELATIONSHIPS: i64 = 100;
+pub const MAX_TASK_DURATION_DAYS: i64 = 260;
+pub const MAX_PREDECESSORS_PER_TASK: usize = 50;
+pub const MAX_PLAN_EDGES: i64 = 5_000;
+/// Over this many tasks, a plan read says it isn't complete, and there's no forecast from it.
+pub const MAX_PLAN_TASKS: i64 = 3_000;
 
 pub type PrincipalId = String;
 
@@ -351,6 +356,59 @@ pub fn validate_planned_relationship(
         return Err(CoreError::InvalidArgument("to_role_id"));
     }
     require_text(label, "label", MAX_PLANNED_LABEL_BYTES)
+}
+
+/// A task's plan: a duration in whole working days, where none means Not estimated and there's no zero, and the tasks that
+/// come first. A plan belongs to its successor, so a finished task's plan no longer changes, though it can be `Submitted`.
+pub fn validate_task_plan(
+    successor: &str,
+    status: TaskStatus,
+    duration_days: Option<i64>,
+    predecessors: &[String],
+) -> Result<(), CoreError> {
+    if status.is_terminal() {
+        return Err(CoreError::InvalidTransition);
+    }
+    if duration_days.is_some_and(|days| !(1..=MAX_TASK_DURATION_DAYS).contains(&days)) {
+        return Err(CoreError::InvalidArgument("duration_days"));
+    }
+    if predecessors.len() > MAX_PREDECESSORS_PER_TASK {
+        return Err(CoreError::InvalidArgument("predecessors"));
+    }
+    let unique: BTreeSet<&str> = predecessors.iter().map(String::as_str).collect();
+    if unique.len() != predecessors.len() || unique.contains(successor) {
+        return Err(CoreError::InvalidArgument("predecessors"));
+    }
+    Ok(())
+}
+
+/// Whether giving `successor` these predecessors would close a loop. `edges` are the room's other edges, as
+/// `(predecessor, successor)`, and any it holds for `successor` itself are ignored, because those are being replaced.
+pub fn plan_would_cycle(
+    successor: &str,
+    predecessors: &[String],
+    edges: &[(String, String)],
+) -> bool {
+    let mut before: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (predecessor, task) in edges {
+        if task != successor {
+            before
+                .entry(task.as_str())
+                .or_default()
+                .push(predecessor.as_str());
+        }
+    }
+    let mut seen = BTreeSet::new();
+    let mut waiting: Vec<&str> = predecessors.iter().map(String::as_str).collect();
+    while let Some(task) = waiting.pop() {
+        if task == successor {
+            return true;
+        }
+        if seen.insert(task) {
+            waiting.extend(before.get(task).into_iter().flatten().copied());
+        }
+    }
+    false
 }
 
 /// What a room knows about someone asking to fill an opening.

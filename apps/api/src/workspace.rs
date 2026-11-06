@@ -23,9 +23,9 @@ use podster_policy::{
     can_review, can_see_event, can_see_task, denied_change_name, effective_scopes,
     is_authority_refusal, may_claim_role, may_decide_review, may_recover_ownership,
     org_departure_ends, owner_authority_holds, reads_every_thread, scopes_after_claim,
-    sees_planned_relationships, sees_who_planned, sees_whole_room, task_view, ArtifactScope,
-    ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope, Role, Scopes,
-    TaskAction, TaskScope, Verdict, WorkroomAction, EVENTS_FOR_EVERYONE,
+    sees_planned_relationships, sees_who_planned, sees_whole_plan, sees_whole_room, task_view,
+    ArtifactScope, ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope,
+    Role, Scopes, TaskAction, TaskScope, Verdict, WorkroomAction, EVENTS_FOR_EVERYONE,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -72,6 +72,7 @@ const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 type Identity = Verified;
 
 mod collaboration;
+mod plan;
 mod planned;
 mod roles;
 
@@ -3452,6 +3453,7 @@ impl Workspace {
                 [] => queries::get_workspace(&sql, &who),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
+                ["plan"] => plan::read(&sql, &who.caller),
                 ["roles"] => roles::list_roles(&sql, &who),
                 ["card"] => roles::read_card(&sql, &who),
                 ["collaboration"] => collaboration::read_map(&sql, &who),
@@ -3588,6 +3590,17 @@ impl Workspace {
                     move |sql, who, now| {
                         handle_change_role(sql, &who.caller, &target, &body, target_member, now)
                     },
+                )
+            }
+            (Method::Put, ["tasks", task, "plan"]) => {
+                let task = (*task).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| plan::handle_set(sql, &who.caller, &task, &body, now),
                 )
             }
             (Method::Post, ["collaboration", "planned"]) => self.command(

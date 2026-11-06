@@ -23,6 +23,7 @@ const EVENT_VERBS: Record<string, string> = {
   "task.offered": "offered a task",
   "task.reassigned": "reassigned a task",
   "task.updated": "updated a task",
+  "task.plan_changed": "changed a task's plan",
   "task.reviewer_changed": "changed a task's reviewer",
   "task.requester_changed": "changed a task's requester",
   "task.accepted": "accepted a task",

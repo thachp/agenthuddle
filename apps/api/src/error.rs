@@ -40,6 +40,12 @@ impl ApiError {
     pub fn lead_exists() -> ApiError {
         ApiError::api(409, "lead_exists")
     }
+    pub fn plan_conflict() -> ApiError {
+        ApiError::api(409, "plan_conflict")
+    }
+    pub fn dependency_cycle() -> ApiError {
+        ApiError::api(409, "dependency_cycle")
+    }
     pub fn relationship_exists() -> ApiError {
         ApiError::api(409, "relationship_exists")
     }

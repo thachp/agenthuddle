@@ -384,6 +384,18 @@ paths:
   /v1/workspaces/{ws}/tasks/{t}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
     get: { operationId: getTask, tags: [queries], summary: "One task with submissions, artifacts, recent messages and history. `visible` says what the caller's access leaves out: when `submissions` is `own`, `submissions` and `artifacts` hold only what the caller submitted, and when `conversation` is false, `messages` is empty and each history `reason` is null. Those values then don't mean none exist", responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}/plan:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get: { operationId: getPlan, tags: [queries], summary: "One read of the room's plan: `tasks` with `id`, `title`, `status`, `assignee`, `reviewer` and `duration_days`, where null means not estimated, plus `edges` of `predecessor` and `successor`, and `complete`. Someone who sees the whole room also gets `plan_revision` and `plan_changed_at`. Someone limited to their own tasks gets only those and the edges between them, with `complete` false and no revision or time. `complete` is also false over 3,000 tasks, when the read holds the first 3,000. Don't work out a finish from an incomplete plan", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}/tasks/{t}/plan:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    put:
+      operationId: setTaskPlan
+      tags: [commands]
+      summary: "Replace a task's duration and predecessors, for its requester or a human admin who sees the whole room. Refused if the task is finished or the room archived, and on a loop, with `dependency_cycle`. A `plan_revision` that isn't current gets `plan_conflict`. It leaves `task.version` alone, wakes nobody and is recorded as `task.plan_changed`. At most 50 predecessors per task and 5,000 edges per room"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetTaskPlan" } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}/update:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
     post:
@@ -578,6 +590,14 @@ components:
         reviewer: { type: string }
         due_at: { type: integer }
         follow_up_of: { type: string }
+    SetTaskPlan:
+      type: object
+      additionalProperties: false
+      required: [plan_revision, predecessors]
+      properties:
+        plan_revision: { type: integer }
+        duration_days: { type: [integer, "null"], minimum: 1, maximum: 260 }
+        predecessors: { type: array, maxItems: 50, uniqueItems: true, items: { type: string } }
     UpdateTask:
       type: object
       additionalProperties: false
@@ -614,5 +634,5 @@ components:
           properties:
             code:
               type: string
-              enum: [relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
             message: { type: string }
