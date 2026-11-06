@@ -108,6 +108,27 @@ describe("Manage access, for the room's owner or admin", () => {
     expect(sent[0]?.body).toEqual({ policy_version: 7, scopes: { tasks: "all_create", artifacts: "all", conversations: "own", review: "when_named" } });
   });
 
+  it("says when a save widens access or changes the role, and not when it narrows within one", async () => {
+    room = json(200, { ...(room.body as object), members: [agentRow(AGENT, "org_a", "guest")] });
+    show(owner);
+    const preset = await screen.findByLabelText("Preset");
+    await userEvent.selectOptions(preset, "member");
+    expect(screen.getByText(/widens what the agent can do/)).toBeInTheDocument();
+    expect(screen.getByText(/also changes its role to Member/)).toBeInTheDocument();
+    await userEvent.selectOptions(preset, "public_participant");
+    expect(screen.queryByText(/widens what the agent can do/)).toBeNull();
+    expect(screen.queryByText(/also changes its role/)).toBeNull();
+    expect(screen.getByText(/Open tasks naming it as reviewer/)).toBeInTheDocument();
+  });
+
+  it("calls a guest invited with create rights what it is, not Custom", async () => {
+    const access = { preset: null, tasks: "own_create", artifacts: "own", conversations: "own", review: "when_named" };
+    room = json(200, { ...(room.body as object), members: [{ ...agentRow(AGENT, "org_a", "guest"), guest_can_create: true, access }] });
+    show(owner);
+    expect(await screen.findByText("Guest, can create tasks")).toBeInTheDocument();
+    expect(screen.getByText("Guest, who can also create tasks.")).toBeInTheDocument();
+  });
+
   it("refuses to offer review without reading, before anything is sent", async () => {
     show(owner);
     await userEvent.selectOptions(await screen.findByLabelText("Artifacts"), "shared");
@@ -124,8 +145,12 @@ describe("Manage access, for the room's owner or admin", () => {
     const fetchReal = globalThis.fetch;
     vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => (url.endsWith("/roles") ? new Response(JSON.stringify({ external: false, roles: [{ id: "rol_1", title: "Lead", holders: [AGENT] }] }), { status: 200 }) : fetchReal(url, init)));
     show(owner);
-    await userEvent.selectOptions(await screen.findByLabelText("Preset"), "guest");
     expect(await screen.findByText(/It holds the opening “Lead”/)).toBeInTheDocument();
+    expect(screen.getByText(/even with nothing changed/)).toBeInTheDocument();
+    // Lockable at the values it has, without changing anything first.
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]?.body).toEqual({ policy_version: 7, preset: "member" });
   });
 
   it("AC-20: a stale form keeps the person's choice and offers the latest, and doesn't overwrite", async () => {

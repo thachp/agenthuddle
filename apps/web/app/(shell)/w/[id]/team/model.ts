@@ -46,11 +46,38 @@ export const memberScopes = (member: Pick<Member, "role" | "guest_can_create" | 
 
 export const matchingPreset = (scopes: Scopes) => presetOptions.find((preset) => JSON.stringify(PRESET_SCOPES[preset]) === JSON.stringify(scopesOf(scopes))) ?? null;
 
-/** What to call someone's access. An agent's real scopes when the read has them, so a narrowed agent never reads as Member. */
+/** A guest whose invitation or role let it create tasks, which nobody adjusted. */
+const isCreatingGuest = (scopes: Scopes) => scopes.tasks === "own_create" && scopes.artifacts === "own" && scopes.conversations === "own" && scopes.review === "when_named";
+
+/**
+ * What to call someone's access. An agent's real scopes when the read has them, which goes only to the agent itself and those
+ * who manage access. Anyone else gets no read of it, and a kernel role could overstate it, so they see a neutral word.
+ */
 export function accessLabel(member: Pick<Member, "kind" | "role" | "access">) {
-  if (member.kind !== "agent" || !member.access) return roleLabel(member.role);
-  return member.access.preset ? (PRESET_LABELS[member.access.preset] ?? member.access.preset) : "Custom access";
+  if (member.kind !== "agent") return roleLabel(member.role);
+  if (!member.access) return "Participant";
+  if (member.access.preset) return PRESET_LABELS[member.access.preset] ?? member.access.preset;
+  return isCreatingGuest(member.access) ? "Guest, can create tasks" : "Custom access";
 }
+
+const ARTIFACT_REACH: Record<string, number> = { shared: 0, own: 1, all: 2 };
+
+/** Whether saving these would let the agent do anything it can't now. Tasks count by what they see and by creating. */
+export function widensAccess(from: Scopes, to: Scopes) {
+  const sees = (scopes: Scopes) => scopes.tasks !== "own" && scopes.tasks !== "own_create";
+  const creates = (scopes: Scopes) => scopes.tasks !== "own" && scopes.tasks !== "all";
+  return (
+    (sees(to) && !sees(from)) ||
+    (creates(to) && !creates(from)) ||
+    (to.tasks === "coordinate" && from.tasks !== "coordinate") ||
+    (ARTIFACT_REACH[to.artifacts] ?? 0) > (ARTIFACT_REACH[from.artifacts] ?? 0) ||
+    (to.conversations === "all" && from.conversations !== "all") ||
+    (to.review === "when_named" && from.review !== "when_named")
+  );
+}
+
+/** The kernel role a preset sets, as `crates/policy` has it. */
+export const PRESET_ROLES: Record<string, string> = { public_participant: "guest", guest: "guest", member: "member", coordinator: "member" };
 
 export type RoleOpening = {
   id: string;
@@ -94,14 +121,14 @@ export type Viewer = { id: string; orgs: string[]; adminOrgs: string[] };
 
 export type AuditRow = { id: string; actor_id: string; actor_kind: string; action: string; target_id: string; outcome: string; prior_json: string | null; new_json: string | null; policy_version: number; created_at: number };
 
-export type PendingInvitation = { id: string; role: string; invitedOrg: string | null; createdBy: string; createdAt: number; expiresAt: number };
+export type PendingInvitation = { id: string; role: string; invitedOrg: string | null; createdBy: string; createdAt: number; expiresAt: number; workRole: string | null };
 
 export const membersOf = (room: Pick<Workroom, "members">) => (room.members ?? []) as Member[];
 
 /** A row of the invitation list. Pending only, and it never holds a token. */
-export type InvitationRow = { id: string; invited_org_id: string | null; role: string; created_by: string; created_at: number; expires_at: number };
+export type InvitationRow = { id: string; invited_org_id: string | null; work_role_id?: string | null; role: string; created_by: string; created_at: number; expires_at: number };
 
-export const toPending = (row: InvitationRow): PendingInvitation => ({ id: row.id, role: row.role, invitedOrg: row.invited_org_id, createdBy: row.created_by, createdAt: row.created_at, expiresAt: row.expires_at });
+export const toPending = (row: InvitationRow): PendingInvitation => ({ id: row.id, role: row.role, invitedOrg: row.invited_org_id, createdBy: row.created_by, createdAt: row.created_at, expiresAt: row.expires_at, workRole: row.work_role_id ?? null });
 
 /** Only the room's own organization can be added directly. Anyone else needs an invitation, and the server refuses them here. */
 export const addableAgents = (agents: { id: string; name: string; org_id: string; revoked_at: number | null }[], roomOrg: string) => agents.filter((agent) => agent.org_id === roomOrg && agent.revoked_at === null).map(({ id, name, org_id }) => ({ id, name, org_id }));

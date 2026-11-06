@@ -76,7 +76,8 @@ describe("Team's role openings", () => {
     expect(within(row("agt_x")).getByText("Public participant")).toBeInTheDocument();
     expect(within(row("Spare Agent")).getByText("Custom access")).toBeInTheDocument();
     expect(accessLabel({ kind: "person", role: "member" })).toBe("Member");
-    expect(accessLabel({ kind: "agent", role: "guest" })).toBe("Guest");
+    // Someone who isn't sent an agent's access gets a neutral word, not a role that could overstate it.
+    expect(accessLabel({ kind: "agent", role: "member" })).toBe("Participant");
   });
 
   it("shows someone limited to their own tasks only what's available, and no way to manage", () => {
@@ -151,6 +152,29 @@ describe("Team's role openings", () => {
     await user.click(screen.getByRole("button", { name: /Create invitation/ }));
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]?.body).toMatchObject({ work_role_id: "rol_eng" });
+    await waitFor(() => expect(screen.getByLabelText(/Role opening \(optional\)/)).toHaveValue(""));
+  });
+
+  it("says what a link naming an opening gives, more strongly with no organization named", async () => {
+    const user = userEvent.setup();
+    render(<TeamScreen {...props} />);
+    const select = screen.getByLabelText(/Role opening \(optional\)/);
+    expect(within(select).getByRole("option", { name: "Lead (Coordinator, lead)" })).toBeInTheDocument();
+    await user.selectOptions(select, "rol_lead");
+    expect(screen.getByRole("note")).toHaveTextContent(/copies the Coordinator preset/);
+    expect(screen.getByRole("note")).toHaveTextContent(/any organization holding it/);
+    await user.type(screen.getByLabelText(/Only this organization ID/), "org_b");
+    expect(screen.getByRole("note")).not.toHaveTextContent(/any organization holding it/);
+  });
+
+  it("shows the opening a pending link names", () => {
+    render(<TeamScreen {...props} invitations={{ pending: [{ id: "ivt_1", role: "guest", invitedOrg: null, createdBy: "per_owner", createdAt: 0, expiresAt: 1, workRole: "rol_lead" }], complete: true }} />);
+    expect(screen.getByText(/Opening: Lead \(Coordinator\)/)).toBeInTheDocument();
+  });
+
+  it("words the author of an opening's text as who created it", () => {
+    render(<TeamScreen {...props} />);
+    expect(within(openingNamed("Lead")).getByText("Created by You")).toBeInTheDocument();
   });
 });
 
@@ -190,6 +214,48 @@ describe("Managing an opening", () => {
     await user.click(within(confirm).getByRole("button", { name: "End claim" }));
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({ method: "DELETE", url: `/api/v1/workspaces/${ROOM}/roles/rol_lead/claims/agt_1` });
+  });
+
+  it("keeps typed text through an invite, moves focus to a visible result after ending a claim, and reuses a key only for the same intent", async () => {
+    const user = userEvent.setup();
+    const keys: (string | null)[] = [];
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      if (init.method && init.method !== "GET") keys.push(new Headers(init.headers).get("idempotency-key"));
+      return real(url, init);
+    });
+    const sheet = await open("rol_lead");
+    const title = await within(sheet).findByLabelText("Title");
+    await user.type(title, " typed");
+    await user.selectOptions(within(sheet).getByLabelText("Invite an agent in this workroom"), "agt_x");
+    await user.click(within(sheet).getByRole("button", { name: "Invite" }));
+    expect(await within(sheet).findByText(/Invited agt_x/)).toBeInTheDocument();
+    expect(within(sheet).getByLabelText("Title")).toHaveValue("Lead typed");
+    await user.click(within(sheet).getByRole("button", { name: "End claim" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "End claim" }));
+    const notice = await within(sheet).findByText(/Claim ended for Code Agent/);
+    await waitFor(() => expect(notice).toHaveFocus());
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys.every(Boolean)).toBe(true);
+  });
+
+  it("sends the same key again after an unknown outcome", async () => {
+    const user = userEvent.setup();
+    const keys: (string | null)[] = [];
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      if (init.method && init.method !== "GET") {
+        keys.push(new Headers(init.headers).get("idempotency-key"));
+        return new Response(JSON.stringify({ error: { code: "bad_gateway" } }), { status: 502 });
+      }
+      return real(url, init);
+    });
+    const sheet = await open("rol_eng");
+    await user.click(await within(sheet).findByRole("button", { name: "Withdraw invite to agt_x" }));
+    await waitFor(() => expect(keys).toHaveLength(1));
+    await user.click(await within(sheet).findByRole("button", { name: "Withdraw invite to agt_x" }));
+    await waitFor(() => expect(keys).toHaveLength(2));
+    expect(keys[1]).toBe(keys[0]);
   });
 
   it("won't close or move the lead mark while someone holds it", async () => {

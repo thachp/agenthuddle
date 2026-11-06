@@ -2653,7 +2653,7 @@ impl Workspace {
         // The opening a link names, so whoever decides can see what it would mean. A closed one is no longer on offer.
         let work_role = rows(
             &sql,
-            "SELECT id, title, responsibilities, capacity, preset, is_lead FROM work_role WHERE id = ? AND closed_at IS NULL",
+            "SELECT id, title, responsibilities, capacity, preset, is_lead, created_by FROM work_role WHERE id = ? AND closed_at IS NULL",
             vec![invitation["work_role_id"].as_str().unwrap_or_default().into()],
         )?
         .into_iter()

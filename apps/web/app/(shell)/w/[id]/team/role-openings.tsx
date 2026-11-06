@@ -70,7 +70,7 @@ export function RoleOpenings({ base, room, read, canManage, archived, send, labe
                     <span className="text-sm text-muted-foreground">{fillOf(role)}</span>
                   </div>
                 </div>
-                <AgentContent author={{ name: label(role.created_by), kind: kindOf(role.created_by) }} external={read?.external === true} body={role.responsibilities} />
+                <AgentContent author={{ name: `Created by ${label(role.created_by)}`, kind: kindOf(role.created_by) }} external={read?.external === true} body={role.responsibilities} />
                 {role.mine === "claimed" ? <p className="text-sm">You hold this opening.</p> : null}
                 {role.mine === "invited" ? <p className="text-sm">You're invited to this opening.</p> : null}
                 {role.holders && role.holders.length > 0 ? (
@@ -138,7 +138,7 @@ function AddOpening({ base, room, hasLead, send }: { base: string; room: string;
         <input type="checkbox" className="mt-1 size-4" checked={isLead} disabled={hasLead} onChange={(event) => setIsLead(event.target.checked)} />
         <span>
           This is the lead coordinator
-          <span className="block text-muted-foreground">{hasLead ? "This workroom already has a lead opening." : "One opening, with the Coordinator preset. Being lead adds no admin, review or deploy rights."}</span>
+          <span className="block text-muted-foreground">{hasLead ? "This workroom already has a lead opening." : "One opening, with the Coordinator preset. Being lead adds nothing beyond that preset, which can review only when named."}</span>
         </span>
       </label>
       {isLead ? null : (
@@ -197,7 +197,7 @@ export function RoleSheet({ roomId, roomName, label }: { roomId: string; roomNam
       description={() => `Workroom: ${plainName(roomName)}`}
       version={({ policyVersion }) => policyVersion}
     >
-      {(api) => <RoleBody key={`${api.data.role.id}-${api.data.role.version}-${api.data.policyVersion}`} api={api} base={base} label={label} />}
+      {(api) => <RoleBody key={`${api.data.role.id}-${api.data.role.version}`} api={api} base={base} label={label} />}
     </TargetSheet>
   );
 }
@@ -212,6 +212,27 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
   const [isLead, setIsLead] = useState(role.is_lead);
   const [invitee, setInvitee] = useState("");
   const statusRef = useRef<HTMLParagraphElement>(null);
+  const [done, setDone] = useState("");
+  // One key per intent, so sending the same thing again after an unknown outcome gets the stored answer.
+  const keys = useRef(new Map<string, string>());
+  const keyFor = (intent: string) => {
+    const known = keys.current.get(intent);
+    if (known) return known;
+    const fresh = crypto.randomUUID();
+    keys.current.set(intent, fresh);
+    return fresh;
+  };
+  /** Runs one command, says what it did, and retires its key once it's known to have worked. */
+  const act = async (intent: string, send: (key: string, version: number | null) => ReturnType<typeof clientCommand>, success: string) => {
+    setDone("");
+    const key = keyFor(intent);
+    const result = await run(({ version }) => send(key, version), explainRoleRefusal);
+    if (result?.ok) {
+      keys.current.delete(intent);
+      setDone(success);
+    }
+    return result;
+  };
   const path = `${base}/roles/${encodeURIComponent(role.id)}`;
   const holders = role.holders ?? [];
   const invited = role.invited ?? [];
@@ -220,25 +241,26 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
   const termsChanged = preset !== role.preset || isLead !== role.is_lead;
   const edit = (apply: () => void) => {
     apply();
+    keys.current.delete("save");
     setDirty(true);
   };
 
   const save = () =>
-    run(
-      ({ version }) =>
-        clientCommand(path, { policy_version: version, title: title.trim(), responsibilities: responsibilities.trim(), ...(isLead === role.is_lead ? {} : { is_lead: isLead }), ...(isLead ? {} : { capacity: Number(capacity), preset }) }, { method: "PUT" }),
-      explainRoleRefusal,
+    act(
+      "save",
+      (idempotencyKey, version) => clientCommand(path, { policy_version: version, title: title.trim(), responsibilities: responsibilities.trim(), ...(isLead === role.is_lead ? {} : { is_lead: isLead }), ...(isLead ? {} : { capacity: Number(capacity), preset }) }, { method: "PUT", idempotencyKey }),
+      "Saved. Everyone in this workroom sees the opening's new details.",
     );
   const invite = async () => {
-    const result = await run(({ version }) => clientCommand(`${path}/invites`, { policy_version: version, principal_id: invitee }), explainRoleRefusal);
+    const result = await act(`invite:${invitee}`, (idempotencyKey, version) => clientCommand(`${path}/invites`, { policy_version: version, principal_id: invitee }, { idempotencyKey }), `Invited ${label(invitee)}. It claims the opening itself.`);
     if (result?.ok) setInvitee("");
   };
 
   return (
     <div className="space-y-5">
       {/* Focus lands here when a result removes the control that asked. */}
-      <p ref={statusRef} tabIndex={-1} className="text-sm text-muted-foreground outline-none empty:hidden">
-        {archived ? "This workroom is archived, so its openings can't change." : ""}
+      <p ref={statusRef} tabIndex={-1} role="status" className="rounded-sm text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        {done || (archived ? "This workroom is archived, so its openings can't change." : "")}
       </p>
 
       <section aria-labelledby="role-holders" className="space-y-2">
@@ -265,7 +287,7 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
                   confirm="End claim"
                   focusAfter={statusRef}
                   action={async () => {
-                    await run(({ version }) => clientCommand(`${path}/claims/${encodeURIComponent(holder)}`, { policy_version: version }, { method: "DELETE" }), explainRoleRefusal);
+                    await act(`end:${holder}`, (idempotencyKey, version) => clientCommand(`${path}/claims/${encodeURIComponent(holder)}`, { policy_version: version }, { method: "DELETE", idempotencyKey }), `Claim ended for ${label(holder)}. Its open tasks haven't moved.`);
                   }}
                 />
               )}
@@ -292,7 +314,7 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
                   className={MOBILE_TARGET}
                   disabled={saving}
                   aria-label={`Withdraw invite to ${label(agent)}`}
-                  onClick={() => void run(({ version }) => clientCommand(`${path}/invites/${encodeURIComponent(agent)}`, { policy_version: version }, { method: "DELETE" }), explainRoleRefusal)}
+                  onClick={() => void act(`withdraw:${agent}`, (idempotencyKey, version) => clientCommand(`${path}/invites/${encodeURIComponent(agent)}`, { policy_version: version }, { method: "DELETE", idempotencyKey }), `Invite to ${label(agent)} withdrawn.`)}
                 >
                   Withdraw
                 </Button>
@@ -385,7 +407,8 @@ function RoleBody({ api, base, label }: { api: SheetApi<Loaded>; base: string; l
               confirm="Close opening"
               focusAfter={statusRef}
               action={async () => {
-                await run(({ version }) => clientCommand(path, { policy_version: version }, { method: "DELETE" }), explainRoleRefusal);
+                const result = await act("close", (idempotencyKey, version) => clientCommand(path, { policy_version: version }, { method: "DELETE", idempotencyKey }), "Opening closed.");
+                if (result?.ok) close();
               }}
             />
           )}

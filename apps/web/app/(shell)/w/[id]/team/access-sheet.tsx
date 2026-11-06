@@ -10,7 +10,7 @@ import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import type { Workroom } from "@/lib/workroom";
 import { ConfirmAction } from "./confirm-action";
 import { FIELD, MOBILE_TARGET } from "./field";
-import { accessLabel, isExternal, matchingPreset, memberScopes, membersOf, PRESET_LABELS, PRESET_SCOPES, PRESET_SUMMARIES, presetOptions, roleLabel, SCOPE_CHOICES, type Member, type RoleRead, type Scopes, type Viewer } from "./model";
+import { accessLabel, isExternal, matchingPreset, memberScopes, membersOf, PRESET_LABELS, PRESET_ROLES, PRESET_SCOPES, PRESET_SUMMARIES, presetOptions, roleLabel, SCOPE_CHOICES, widensAccess, type Member, type RoleRead, type Scopes, type Viewer } from "./model";
 
 type Connection = { id: string; status: string; generation: number };
 type Ended = "revoked" | "withdrawn" | "disconnected";
@@ -86,6 +86,9 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
   const preset = matchingPreset(scopes);
   // Reviewing work you can't read isn't a review, and the server refuses that pair.
   const reviewsUnread = scopes.artifacts === "shared" && scopes.review === "when_named";
+  const widens = widensAccess(saved, scopes);
+  const newRole = preset ? PRESET_ROLES[preset] : undefined;
+  const changesRole = newRole !== undefined && newRole !== member.role;
   const stopsReviewing = saved.review === "when_named" && saved.artifacts !== "shared" && (scopes.review === "none" || scopes.artifacts === "shared");
   const statusRef = useRef<HTMLParagraphElement>(null);
   const room = plainName(roomName);
@@ -135,8 +138,12 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
             <>
               <dt className="text-muted-foreground">Role</dt>
               <dd>{roleLabel(member.role)}</dd>
-              <dt className="text-muted-foreground">Access</dt>
-              <dd>{accessLabel(member)}</dd>
+              {member.access ? (
+                <>
+                  <dt className="text-muted-foreground">Access</dt>
+                  <dd>{accessLabel(member)}</dd>
+                </>
+              ) : null}
             </>
           )}
           {connection ? (
@@ -173,7 +180,7 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
                   {preset ? null : <option value="custom">Custom</option>}
                 </select>
               </label>
-              <p className="text-sm text-muted-foreground">{preset ? PRESET_SUMMARIES[preset] : "Adjusted from the presets below. No admin, merge or deploy rights come with any of these."}</p>
+              <p className="text-sm text-muted-foreground">{preset ? PRESET_SUMMARIES[preset] : scopes.tasks === "own_create" && scopes.artifacts === "own" && scopes.conversations === "own" && scopes.review === "when_named" ? "Guest, who can also create tasks." : "Adjusted from the presets below. No admin, merge or deploy rights come with any of these."}</p>
               <div className="grid gap-3 sm:grid-cols-2">
                 {SCOPE_CHOICES.map((scope) => (
                   <label key={scope.name} className="block space-y-1 text-sm">
@@ -198,9 +205,15 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
                   It can't review any more. Open tasks naming it as reviewer move to their requester if the requester can review, and otherwise are flagged for an owner or admin.
                 </p>
               ) : null}
-              {dirty && data.holdsOpening ? (
+              {dirty && widens ? (
                 <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm">
-                  It holds the opening “{data.holdsOpening}”. What you save here counts as the room's decision: when the claim ends, it keeps the narrower of this and what it had before claiming.
+                  This widens what the agent can do. It takes effect on its next request.
+                </p>
+              ) : null}
+              {dirty && changesRole ? <p role="note" className="rounded-lg bg-muted p-3 text-sm">This also changes its role to {roleLabel(newRole)}.</p> : null}
+              {data.holdsOpening ? (
+                <p role="note" className="rounded-lg bg-muted p-3 text-sm">
+                  It holds the opening “{data.holdsOpening}”. If nobody sets its access while it holds that, releasing goes back to what it had before claiming. Saving here, even with nothing changed, counts as the room's decision, and then it keeps the narrower of this and what it had.
                 </p>
               ) : null}
               {dirty ? <p className="text-sm text-muted-foreground">Saving withdraws any role invites this agent has.</p> : null}
@@ -275,7 +288,8 @@ function AccessBody({ api, roomId, roomName, viewer, label, orgName, onEnded }: 
               <Button
                 type="button"
                 className={MOBILE_TARGET}
-                disabled={!dirty || saving || reviewsUnread}
+                // Someone holding an opening can be locked at the values it has, which a release then can't undo.
+                disabled={(!dirty && !data.holdsOpening) || saving || reviewsUnread}
                 onClick={() => void save()}
               >
                 {saving ? "Saving…" : "Save changes"}

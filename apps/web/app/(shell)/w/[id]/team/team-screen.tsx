@@ -14,7 +14,7 @@ import { CommandNotice, useCommands, type Send } from "./commands";
 import { ConfirmAction } from "./confirm-action";
 import { AccessSheet } from "./access-sheet";
 import { FIELD, MOBILE_TARGET } from "./field";
-import { accessLabel, isExternal, roleLabel, type Member, type PendingInvitation, type RoleRead, type Viewer } from "./model";
+import { accessLabel, isExternal, PRESET_LABELS, PRESET_SUMMARIES, roleLabel, type Member, type PendingInvitation, type RoleRead, type Viewer } from "./model";
 import { RoleOpenings, RoleSheet } from "./role-openings";
 
 export type AgentOption = { id: string; name: string; org_id: string };
@@ -269,6 +269,11 @@ function Invitations({ openings, base, room, archived, invitations, orgLabel, la
   const [invitedOrg, setInvitedOrg] = useState("");
   const [guestCanCreate, setGuestCanCreate] = useState(false);
   const [opening, setOpening] = useState("");
+  const named = openings.find((option) => option.id === opening);
+  const openingName = (id: string) => {
+    const found = openings.find((option) => option.id === id);
+    return found ? `${plainName(found.title)} (${PRESET_LABELS[found.preset] ?? found.preset})` : id;
+  };
   const [pending, setPending] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -296,6 +301,8 @@ function Invitations({ openings, base, room, archived, invitations, orgLabel, la
     const success = (created: Created) => (created.token ? "Invitation created. Copy its link now: it's shown only once." : null);
     await send<Created>(`${base}/invitations`, body, success, {
       onOk: (created) => {
+        // The next link starts with no opening named, so nothing is offered by leftover choice.
+        setOpening("");
         if (created.token) setLink(`${window.location.origin}/invitations/${created.token}`);
         else setLostLink(created.id);
       },
@@ -380,12 +387,18 @@ function Invitations({ openings, base, room, archived, invitations, orgLabel, la
               <option value="">None</option>
               {openings.map((option) => (
                 <option key={option.id} value={option.id}>
-                  {plainName(option.title)}
+                  {plainName(option.title)} ({PRESET_LABELS[option.preset] ?? option.preset}{option.is_lead ? ", lead" : ""})
                 </option>
               ))}
             </select>
             <span className="block text-muted-foreground">An agent joining for the first time through this link is invited to it, and claims it itself.</span>
           </label>
+        ) : null}
+        {named ? (
+          <p role="note" className={`rounded-lg p-3 text-sm ${invitedOrg.trim() ? "bg-muted" : "bg-status-amber-surface"}`}>
+            A claim copies the {PRESET_LABELS[named.preset] ?? named.preset} preset. {PRESET_SUMMARIES[named.preset]}{" "}
+            {invitedOrg.trim() ? "" : "This link names no organization, so an admin of any organization holding it can bring in an agent that can claim this."}
+          </p>
         ) : null}
         <p className="text-sm text-muted-foreground">Without an organization ID, an admin of any organization holding the link can accept it. It expires after 7 days.</p>
         <Button type="submit" size="sm" className={MOBILE_TARGET} disabled={pending}>
@@ -408,7 +421,7 @@ function Invitations({ openings, base, room, archived, invitations, orgLabel, la
                     <Badge variant="outline">{archived ? "Paused" : "Pending"}</Badge>
                   </p>
                   <p className="break-words text-muted-foreground">
-                    {roleLabel(invitation.role)} · {invitation.invitedOrg ? `Only ${plainName(orgLabel(invitation.invitedOrg))}` : "Any organization"} · Created by {label(invitation.createdBy)} · Expires {new Date(invitation.expiresAt).toUTCString()}
+                    {roleLabel(invitation.role)} · {invitation.workRole ? `Opening: ${openingName(invitation.workRole)} · ` : ""}{invitation.invitedOrg ? `Only ${plainName(orgLabel(invitation.invitedOrg))}` : "Any organization"} · Created by {label(invitation.createdBy)} · Expires {new Date(invitation.expiresAt).toUTCString()}
                   </p>
                 </div>
                 <ConfirmAction

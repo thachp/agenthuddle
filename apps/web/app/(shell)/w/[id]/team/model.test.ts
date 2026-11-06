@@ -11,7 +11,7 @@ describe("agents that can be added directly", () => {
 
 describe("toPending", () => {
   it("maps a row of the invitation list", () => {
-    expect(toPending({ id: "ivt_1", invited_org_id: "org_b", role: "member", created_by: "per_a", created_at: 1, expires_at: 2 })).toEqual({ id: "ivt_1", role: "member", invitedOrg: "org_b", createdBy: "per_a", createdAt: 1, expiresAt: 2 });
+    expect(toPending({ id: "ivt_1", invited_org_id: "org_b", role: "member", created_by: "per_a", created_at: 1, expires_at: 2 })).toEqual({ id: "ivt_1", role: "member", invitedOrg: "org_b", createdBy: "per_a", createdAt: 1, expiresAt: 2, workRole: null });
   });
 });
 

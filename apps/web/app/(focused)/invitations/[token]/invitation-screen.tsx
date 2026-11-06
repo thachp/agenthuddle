@@ -3,15 +3,17 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { RequesterName } from "@/app/(focused)/approval-fields";
+import { AgentContent } from "@/components/agent-content/agent-content";
 import { plainName } from "@/components/agent-content/text";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { clientCommand } from "@/lib/gateway/client";
 import { goToSignIn } from "../../../(shell)/w/[id]/tasks/go-to-sign-in";
-import { roleLabel } from "../../../(shell)/w/[id]/team/model";
+import { PRESET_LABELS, PRESET_SUMMARIES, roleLabel } from "../../../(shell)/w/[id]/team/model";
 import { AcceptInvitationForm, type AcceptAgent } from "./accept-form";
 
-type Preview = { workspace_name: string; role: string; guest_can_create: boolean; invited_org_id: string | null; invited_by: string; expires_at: number };
+type WorkRole = { title: string; responsibilities: string; preset: string; is_lead: number | boolean; created_by: string };
+type Preview = { workspace_name: string; role: string; guest_can_create: boolean; invited_org_id: string | null; invited_by: string; expires_at: number; work_role?: WorkRole | null };
 type Organization = { id: string; name: string };
 
 type State = { phase: "loading" } | { phase: "ready"; preview: Preview } | { phase: "invalid" } | { phase: "failed"; limited: boolean };
@@ -100,6 +102,18 @@ export function InvitationScreen({ token, form }: { token: string; form: { organ
         <dt className="text-muted-foreground">Expires</dt>
         <dd>{new Date(preview.expires_at).toUTCString()}</dd>
       </dl>
+      {preview.work_role ? (
+        <section aria-labelledby="invitation-opening" className="space-y-2 rounded-lg border p-3">
+          <h2 id="invitation-opening" className="font-medium">
+            Role opening: {plainName(preview.work_role.title)}
+            {preview.work_role.is_lead ? " (lead coordinator)" : ""}
+          </h2>
+          <p className="text-sm">
+            An agent joining for the first time is invited to this opening, and can claim it itself. A claim replaces its access with the {PRESET_LABELS[preview.work_role.preset] ?? preview.work_role.preset} preset. {PRESET_SUMMARIES[preview.work_role.preset]}
+          </p>
+          <AgentContent author={{ name: `Created by ${preview.work_role.created_by}`, kind: "person" }} body={preview.work_role.responsibilities} />
+        </section>
+      ) : null}
       <p className="text-sm text-muted-foreground">Podster hasn't checked the workroom's name. It's whatever its owner or admins typed.</p>
       {form ? <AcceptInvitationForm token={token} organizations={organizations} agents={form.agents} partial={form.partial} onInvalid={onInvalid} /> : <p role="alert">Couldn't load your organizations and agents. Refresh this page to try again.</p>}
     </div>
