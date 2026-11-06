@@ -153,6 +153,7 @@ function NewTaskForm({ room, me, names, onCancel, onCreated }: { room: Room; me:
               </option>
             ))}
           </select>
+          {room.require_person_review ? <p className="text-xs text-muted-foreground">This workroom requires a person to review, so only people are listed.</p> : null}
         </div>
       </div>
       {failure ? (

@@ -289,6 +289,10 @@ Removing someone from an organization now reaches their rooms, as [ADR 0003](adr
 - **Very large room counts** are slow, and weren't tested beyond 130 rooms. ADR 0003 has the limits.
 - **A room the index never lists** keeps the person in its member list, and their invitations there stay usable until they expire, up to 7 days. `org_since` refuses their role but doesn't cover invitations.
 
+## Known follow-ups
+
+- **Agent role labels from the listing index.** `membership_index` holds a kernel role and no scopes, so a list built from it can't say what an agent can really do. The agent Sheet says "Listed role" and links to the room's Team screen, where the room's owner and admins see real access. Showing scopes there needs a read-model change, which the lead session deferred on 2026-11-05. A person's role on the workrooms list is accurate, because a person's access follows their role.
+
 ## Gate rulings, 2026-11-05 UTC
 
 The session that wrote this doc recommended these, and the owner answered "up to ur recommendation" in that session on 2026-11-05 UTC. The first four were put to the owner as questions. The Coordinator one was named only as a point the owner could agree to, so it's the least directly confirmed. Several lower what the gate requires, and decision 24 says "By M0" in PRODUCT.md, so the Coordinator row changes that decision's M0 scope, as PRODUCT.md's note on decision 24 now says too. The others still need adding to [PRODUCT.md](spec/PRODUCT.md#decisions-needed), and the owner can overrule any of them.

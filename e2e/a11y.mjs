@@ -451,6 +451,60 @@ async function keyboardPaths(s) {
     await phone.close();
   });
 
+  // With a real API, because a stand-in whose version doesn't move can't see this: staging found it.
+  await keyboardPath("keep a draft through an opening's own commands", async () => {
+    const opening = (await s.owner.must("POST", `/v1/workspaces/${s.room}/roles`, { title: "Draft check", responsibilities: "Before", capacity: 2, preset: "guest", policy_version: (await s.owner.must("GET", `/v1/workspaces/${s.room}`)).policy_version })).id;
+    await page.goto(`${app}/w/${s.room}/team?role=${opening}`);
+    await hydrated(page);
+    const sheet = page.getByRole("dialog");
+    const responsibilities = sheet.getByLabel("Responsibilities");
+    await responsibilities.waitFor({ timeout: 15_000 });
+    await responsibilities.fill("Before, and after");
+    await sheet.getByLabel("Invite an agent in this workroom").selectOption(s.lead.id);
+    await sheet.getByRole("button", { name: "Invite", exact: true }).click();
+    const withdraw = sheet.getByRole("button", { name: /^Withdraw invite to/ });
+    await withdraw.waitFor({ timeout: 15_000 });
+    const afterInvite = await responsibilities.inputValue();
+    ok(afterInvite === "Before, and after", `the draft didn't survive the invite: ${afterInvite}`);
+    await withdraw.click();
+    await sheet.getByText(/withdrawn/).waitFor({ timeout: 15_000 });
+    const afterWithdraw = await responsibilities.inputValue();
+    ok(afterWithdraw === "Before, and after", `the draft didn't survive the withdrawal: ${afterWithdraw}`);
+    const save = sheet.getByRole("button", { name: "Save changes" });
+    await save.click();
+    await sheet.getByText(/^Saved\./).waitFor({ timeout: 15_000 });
+    const conflict = await sheet.getByText(/changed while you were editing/).count();
+    ok(conflict === 0, "a draft conflicted with this Sheet's own commands");
+    const after = (await s.owner.must("GET", `/v1/workspaces/${s.room}/roles`)).roles.find((role) => role.id === opening);
+    ok(after.responsibilities === "Before, and after", `the draft wasn't saved: ${after.responsibilities}`);
+    ok(after.invited.length === 0, "the invite wasn't withdrawn");
+    await s.owner.must("DELETE", `/v1/workspaces/${s.room}/roles/${opening}`, { policy_version: (await s.owner.must("GET", `/v1/workspaces/${s.room}`)).policy_version });
+  });
+
+  await keyboardPath("add an opening while creating a workroom, also at phone width", async () => {
+    await page.goto(`${app}/workrooms/new`);
+    await hydrated(page);
+    const add = page.getByRole("button", { name: "Add an opening" });
+    await tabTo(page, add, "Add an opening");
+    await page.keyboard.press("Enter");
+    const group = page.getByRole("group", { name: "Opening 1" });
+    await group.waitFor({ timeout: 15_000 });
+    await tabTo(page, group.getByLabel("Title"), "the opening's title");
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    await small.goto(`${app}/workrooms/new`);
+    await hydrated(small);
+    await small.getByRole("button", { name: "Add an opening" }).click();
+    await small.getByRole("group", { name: "Opening 1" }).waitFor({ timeout: 15_000 });
+    const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    ok(overflow <= 0, `the create form scrolls sideways by ${overflow}px at 375px`);
+    await small.goto(`${app}/w/${s.room}/settings`);
+    await small.getByRole("button", { name: "Save review setting" }).waitFor({ timeout: 15_000 });
+    const settings = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    ok(settings <= 0, `settings scrolls sideways by ${settings}px at 375px`);
+    await phone.close();
+  });
+
   await keyboardPath("review a task", async () => {
     await page.goto(`${app}/w/${s.room}/tasks`);
     await hydrated(page);
