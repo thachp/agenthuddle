@@ -1,18 +1,16 @@
 "use client";
 
 import { Bot, ExternalLink, User } from "lucide-react";
-import { Component, startTransition, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import Markdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { toJsxRuntime, type Components } from "hast-util-to-jsx-runtime";
+import { Component, memo, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, jsx, jsxs } from "react/jsx-runtime";
 import { Badge } from "@/components/ui/badge";
-import { CANT_FORMAT_NOTE, FORMAT_AT_ONCE_CHARS, NOTE_CLASS, PLAIN_TEXT_CLASS, remarkBodyLimits, tooCostlyToParse } from "./limits";
+import { CANT_FORMAT_NOTE, NOTE_CLASS, PLAIN_TEXT_CLASS } from "./limits";
+import { useParsedBody, type BodyState } from "./use-parsed-body";
 import { authoritySoundingName, chosenNameLabel, destinationHost, plainName, safeLinkUrl, truncate } from "./text";
 
 /** `viewer` means this is the person looking, whose "You" is ours and not a name anyone chose. */
 export type AgentAuthor = { name: string; kind: "agent" | "person"; organization?: string; viewer?: boolean };
-
-/** Everything else, raw HTML included, shows as the plain text it is. */
-const ALLOWED = ["p", "em", "strong", "del", "code", "pre", "ul", "ol", "li", "blockquote", "a", "img", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "thead", "tbody", "tr", "th", "td", "input"];
 
 /** Every level is one fixed level below a screen's section headings, and no bigger than the text around it, so agent text can't pass for the page's own structure. */
 const heading: Components["h1"] = ({ children }) => <h4 className="font-semibold">{children}</h4>;
@@ -36,7 +34,7 @@ function TableScroller({ children }: { children: React.ReactNode }) {
 }
 
 /** These take only their children, so nothing Markdown can set reaches them, including a cell's alignment, which arrives as `style`. */
-const COMPONENTS: Components = {
+const COMPONENTS: Partial<Components> = {
   h1: heading,
   h2: heading,
   h3: heading,
@@ -88,21 +86,6 @@ const COMPONENTS: Components = {
   },
 };
 
-/** True from the start for what's cheap, and otherwise from when the element nears the view. A transition, so input can get in between one body and the next. */
-function useNearView(element: React.RefObject<HTMLElement | null>, cheap: boolean) {
-  const [seen, setSeen] = useState(false);
-  useEffect(() => {
-    if (cheap || seen) return;
-    if (!element.current || typeof IntersectionObserver === "undefined") return setSeen(true);
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) startTransition(() => setSeen(true));
-    }, { rootMargin: "200px" });
-    observer.observe(element.current);
-    return () => observer.disconnect();
-  }, [element, cheap, seen]);
-  return cheap || seen;
-}
-
 function PlainText({ text }: { text: string }) {
   return (
     <>
@@ -123,6 +106,21 @@ class RenderBoundary extends Component<{ text: string; children: ReactNode }, { 
   }
 }
 
+/** A tree only ever changes with its text, so re-rendering never builds this again. Allowed elements only: parse.ts removed the rest. */
+const Formatted = memo(function Formatted({ tree }: { tree: Extract<BodyState, { kind: "ready" }>["tree"] }) {
+  return toJsxRuntime(tree, { Fragment, jsx, jsxs, components: COMPONENTS, ignoreInvalidStyle: true, passKeys: true, passNode: false });
+});
+
+function Body({ text, state }: { text: string; state: BodyState }) {
+  if (state.kind === "pending") return <p className={PLAIN_TEXT_CLASS}>{text}</p>;
+  if (state.kind === "failed") return <PlainText text={text} />;
+  return (
+    <RenderBoundary key={text} text={text}>
+      <Formatted tree={state.tree} />
+    </RenderBoundary>
+  );
+}
+
 /**
  * Text an agent wrote. It's attributed, can't load anything and can't become markup, and it never carries instructions
  * for Podster, or looks like Podster's own guidance.
@@ -130,26 +128,14 @@ class RenderBoundary extends Component<{ text: string; children: ReactNode }, { 
 export function AgentContent({ author, external = false, body, maxLength }: { author: AgentAuthor; external?: boolean; body: string; maxLength?: number }) {
   const { text, truncated } = truncate(body, maxLength);
   const article = useRef<HTMLElement>(null);
-  const near = useNearView(article, text.length <= FORMAT_AT_ONCE_CHARS);
-  // A task's Sheet re-renders while it's open, and parsing every message again each time adds up in a long thread.
-  const content = useMemo(() => {
-    // Until it's near the view a long body is its own text, which costs nothing however many there are, and a hidden tab is never near.
-    if (!near) return <p className={PLAIN_TEXT_CLASS}>{text}</p>;
-    if (tooCostlyToParse(text)) return <PlainText text={text} />;
-    return (
-      <RenderBoundary key={text} text={text}>
-        <Markdown remarkPlugins={[remarkGfm, remarkBodyLimits]} allowedElements={ALLOWED} unwrapDisallowed urlTransform={(url) => url} components={COMPONENTS}>
-          {text}
-        </Markdown>
-      </RenderBoundary>
-    );
-  }, [text, near]);
+  const state = useParsedBody(text, article);
   return (
     <article ref={article} className="min-w-0 rounded-lg border p-3">
       <AuthorLine author={author} external={external} />
-      {/* From the fifth level, nesting stops indenting. 100 levels of it would otherwise push the text 1,000 px out of a Sheet at phone width. */}
-      <div className="mt-2 space-y-2 break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_.task-list-item]:list-none [&_ul]:list-disc [&_ul]:pl-5 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:list-inside [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:border-l-0 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:pl-0">
-        {content}
+      {/* From the fifth level, nesting stops indenting, or 100 levels push text 1,000 px out of a Sheet at phone width. Without kerning,
+          a long run of `*` or `_` lays out in 1 ms instead of 350 ms: kerning pairs make the shaper redo the run for every line. */}
+      <div className="mt-2 space-y-2 [font-kerning:none] break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_.task-list-item]:list-none [&_ul]:list-disc [&_ul]:pl-5 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:border-l-0 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)]:pl-0 [&_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_:is(ul,ol,blockquote)_blockquote]:shadow-[inset_2px_0_0_var(--border)]">
+        <Body text={text} state={state} />
       </div>
       {truncated ? <p className="mt-2 text-xs text-muted-foreground">Shortened for display.</p> : null}
     </article>

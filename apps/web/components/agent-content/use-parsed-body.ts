@@ -1,0 +1,91 @@
+import { flushSync } from "react-dom";
+import { useEffect, useMemo, useState, type RefObject } from "react";
+import { APPLY_ANYWHERE_NODES, parsesAtOnce } from "./limits";
+import { parseBody, type ParsedBody } from "./parse";
+import { cachedParse, prioritizeParse, requestParse } from "./parse-client";
+
+/** Well ahead of the view, so a body usually changes out of sight. */
+const AHEAD = "1500px 0px";
+
+/** `pending` shows as its own text. `failed` shows the same with a note. */
+export type BodyState = { kind: "pending" } | { kind: "failed" } | { kind: "ready"; tree: ParsedBody["tree"] };
+
+const PENDING: BodyState = { kind: "pending" };
+
+const stateOf = (parsed: ParsedBody | null): BodyState => (parsed ? { kind: "ready", tree: parsed.tree } : { kind: "failed" });
+
+function scrollerOf(element: HTMLElement): HTMLElement | null {
+  for (let parent = element.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+    if (/auto|scroll/.test(getComputedStyle(parent).overflowY)) return parent;
+  }
+  return null;
+}
+
+/**
+ * Changes the body without moving what's being read. Measured after the change, so a browser's own scroll anchoring isn't counted
+ * twice. Above the view its bottom edge stays put, and with the reader inside it the same fraction stays above the view.
+ */
+function holdingPlace(article: HTMLElement, scroller: HTMLElement | null, update: () => void) {
+  const viewTop = scroller ? scroller.getBoundingClientRect().top : 0;
+  const before = article.getBoundingClientRect();
+  update();
+  if (before.height === 0 || before.top >= viewTop) return;
+  const after = article.getBoundingClientRect();
+  const wasAbove = before.bottom <= viewTop;
+  const correction = wasAbove ? after.bottom - before.bottom : after.top - viewTop + ((viewTop - before.top) / before.height) * after.height;
+  if (scroller) scroller.scrollTop += correction;
+  else window.scrollBy(0, correction);
+}
+
+/**
+ * What to show for a body. Most text is parsed off the main thread as soon as it's mounted, nearest first, and a result is applied
+ * once it's small enough not to matter or near the view, so applying can't add up across a long thread.
+ */
+export function useParsedBody(text: string, article: RefObject<HTMLElement | null>): BodyState {
+  const atOnce = useMemo(() => (parsesAtOnce(text) ? stateOf(parseBody(text)) : null), [text]);
+  const [applied, setApplied] = useState<{ text: string; state: BodyState } | null>(null);
+
+  useEffect(() => {
+    const element = article.current;
+    if (atOnce || !element) return;
+    const scroller = scrollerOf(element);
+    let [isNear, result, done]: [boolean, ParsedBody | null | undefined, boolean] = [false, undefined, false];
+    const applyIfDue = () => {
+      if (done || result === undefined) return;
+      if (result && !isNear && result.nodes > APPLY_ANYWHERE_NODES) return;
+      done = true;
+      observer?.disconnect();
+      const state = stateOf(result);
+      holdingPlace(element, scroller, () => flushSync(() => setApplied({ text, state })));
+    };
+    const observer =
+      typeof IntersectionObserver === "undefined"
+        ? null
+        : new IntersectionObserver(
+            (entries) => {
+              if (!entries.some((entry) => entry.isIntersecting)) return;
+              isNear = true;
+              prioritizeParse(text);
+              applyIfDue();
+            },
+            { root: scroller, rootMargin: AHEAD },
+          );
+    observer?.observe(element);
+    const stop = requestParse(text, (parsed) => {
+      result = parsed;
+      applyIfDue();
+    });
+    return () => {
+      done = true;
+      observer?.disconnect();
+      stop();
+    };
+  }, [text, atOnce, article]);
+
+  if (atOnce) return atOnce;
+  if (applied?.text === text) return applied.state;
+  // Seen before, such as a Sheet opened again. Only what's cheap to apply, so this can't block either.
+  const cached = cachedParse(text);
+  if (cached === null || (cached && cached.nodes <= APPLY_ANYWHERE_NODES)) return stateOf(cached);
+  return PENDING;
+}

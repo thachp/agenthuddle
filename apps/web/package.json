@@ -12,13 +12,16 @@
   "dependencies": {
     "class-variance-authority": "^0.7.1",
     "cn": "0.5.2",
+    "hast-util-to-jsx-runtime": "2.3.7",
     "lucide-react": "^1.69.0",
     "radix-ui": "^1.8.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "react-markdown": "10.1.0",
     "react-server-dom-webpack": "19.3.1",
     "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "remark-rehype": "11.1.2",
+    "unified": "11.0.5",
     "vinext": "1.4.3"
   },
   "devDependencies": {
@@ -28,6 +31,7 @@
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.3",
     "@testing-library/user-event": "14.6.8",
+    "@types/hast": "3.0.4",
     "@types/node": "26.6.6",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",

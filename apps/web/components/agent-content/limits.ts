@@ -1,21 +1,24 @@
 /**
- * What one piece of agent text may cost the person reading it. A whole screen's cost is bounded by these limits together with
- * AgentContent parsing long bodies only when they near the view.
+ * What one piece of agent text may cost the person reading it. Parsing runs off the main thread with a time limit (parse-client.ts),
+ * so these are about what's left: what parsing may produce, and what the main thread has to apply.
  *
- * - Quote and list nesting is checked before parsing, because the parser itself overflows the stack or takes seconds, and because
- *   a tree that deep can crash the renderer, which no error boundary can catch.
+ * - Quote and list nesting is checked before parsing, because a tree that deep can crash the renderer, which nothing can catch.
  * - Table size is checked after parsing and before conversion, because GFM pads every row to the header's width during
  *   conversion, so a few bytes can ask for millions of cells.
  */
 export const MAX_NESTING = 100;
-/** Inline nesting like `*_*_` is cheap to parse and only shows in the tree. A list level is two nodes, so MAX_NESTING fits inside this. */
+/** Inline nesting like `*a _b ` only shows in the tree. A list level is two nodes, so MAX_NESTING fits inside this. */
 export const MAX_TREE_DEPTH = 256;
-/** The parser's emphasis and link matching is quadratic in these. 16 KB of them took about 2 s, and 1,000 takes about 50 ms. */
-export const MAX_INLINE_MARKS = 1_000;
-/** Bodies longer than this are parsed only when they near the view, so a screen's cost follows what's on it. Parsing this much takes about 20 ms at worst. */
-export const FORMAT_AT_ONCE_CHARS = 2_000;
 export const MAX_TABLES_PER_BODY = 10;
 export const MAX_TABLE_CELLS_PER_BODY = 2_000;
+/** The most a result can make the main thread create at once. */
+export const MAX_RENDERED_NODES = 10_000;
+/** A result this small is applied as soon as it's ready, even out of view or in a hidden tab, so its links can be reached with Tab. */
+export const APPLY_ANYWHERE_NODES = 1_000;
+export const PARSE_TIME_LIMIT_MS = 500;
+/** Text this short and this shallow is parsed where it's rendered, on the server too, so ordinary messages don't flash. */
+export const PARSE_AT_ONCE_CHARS = 500;
+export const PARSE_AT_ONCE_NESTING = 10;
 
 export const TABLE_TOO_LARGE_NOTE = "This table is too large to show as a table, so here's its plain text.";
 export const CANT_FORMAT_NOTE = "This text can't be formatted, so here's its plain text.";
@@ -27,13 +30,13 @@ export const PLAIN_TEXT_CLASS = "whitespace-pre-wrap";
 const CONTAINER = />|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$)|\[\^[^\]\s]+\]:/y;
 
 /**
- * Counts the containers each line could open: markers in any mix, plus whitespace anywhere before or between them, since a list
- * level takes at least two columns however it's reached. It may overcount, and is meant never to undercount.
+ * How many containers a line could open, stopping once past `limit`: markers in any mix, plus whitespace anywhere before or between
+ * them, since a list level takes at least two columns however it's reached. It may overcount, and is meant never to undercount.
  */
-export function nestedTooDeep(text: string) {
+function nestedPast(text: string, limit: number) {
   for (const line of text.split(/\r\n|\n|\r/)) {
     let [at, depth] = [0, 0];
-    while (depth <= MAX_NESTING) {
+    while (depth <= limit) {
       let width = 0;
       for (; line[at] === " " || line[at] === "\t"; at += 1) width += line[at] === "\t" ? 4 : 1;
       depth += width >> 1;
@@ -42,22 +45,14 @@ export function nestedTooDeep(text: string) {
       at = CONTAINER.lastIndex;
       depth += 1;
     }
-    if (depth > MAX_NESTING) return true;
+    if (depth > limit) return true;
   }
   return false;
 }
 
-// An underscore inside a word can't open or close emphasis, so snake_case costs nothing and doesn't count.
-const INLINE_MARK = /[*~]+|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])|\]/g;
+export const nestedTooDeep = (text: string) => nestedPast(text, MAX_NESTING);
 
-export function tooManyInlineMarks(text: string) {
-  let count = 0;
-  for (const _ of text.matchAll(INLINE_MARK)) if (++count > MAX_INLINE_MARKS) return true;
-  return false;
-}
-
-/** Whether parsing this could cost the viewer more than a formatted body is worth. Runs in a few milliseconds on anything we'd display. */
-export const tooCostlyToParse = (text: string) => nestedTooDeep(text) || tooManyInlineMarks(text);
+export const parsesAtOnce = (text: string) => text.length <= PARSE_AT_ONCE_CHARS && !nestedPast(text, PARSE_AT_ONCE_NESTING);
 
 type MdNode = {
   type: string;

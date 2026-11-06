@@ -2,7 +2,7 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentContent, AuthorLine } from "./agent-content";
-import { AUTHOR_MARKS_NOTE, CANT_FORMAT_NOTE, FORMAT_AT_ONCE_CHARS, MAX_INLINE_MARKS, MAX_NESTING, MAX_TABLE_CELLS_PER_BODY, MAX_TABLES_PER_BODY, nestedTooDeep, PLAIN_TEXT_CLASS, TABLE_TOO_LARGE_NOTE, tooManyInlineMarks } from "./limits";
+import { AUTHOR_MARKS_NOTE, CANT_FORMAT_NOTE, MAX_NESTING, MAX_RENDERED_NODES, MAX_TABLE_CELLS_PER_BODY, MAX_TABLES_PER_BODY, nestedTooDeep, PLAIN_TEXT_CLASS, TABLE_TOO_LARGE_NOTE } from "./limits";
 import { authoritySoundingName, plainName, safeLinkUrl, truncate } from "./text";
 
 const author = { name: "Code Agent", kind: "agent" as const, organization: "Acme" };
@@ -389,113 +389,13 @@ Not a task: [x] here`);
     });
   });
 
-  describe("inline marks", () => {
+  describe("rendered size", () => {
     it("formats up to the limit, and shows plain text past it", () => {
-      expect(show("*a* ".repeat(MAX_INLINE_MARKS / 2)).querySelector("em")).not.toBeNull();
-      const container = show(`${"*a* ".repeat(MAX_INLINE_MARKS / 2)} *`);
-      expect(container.querySelector("em")).toBeNull();
+      const items = (count: number) => "- a\n".repeat(count);
+      expect(show(items(1000)).querySelectorAll("li")).toHaveLength(1000);
+      const container = show(items(Math.ceil(MAX_RENDERED_NODES / 2) + 1));
+      expect(container.querySelector("li")).toBeNull();
       expect(container).toHaveTextContent(CANT_FORMAT_NOTE);
-    });
-
-    it.each([
-      ["emphasis", "*a ".repeat(1001)],
-      ["underscores at word edges", "_a ".repeat(1001)],
-      ["strikethrough", "~a ".repeat(1001)],
-      ["closing brackets", "]".repeat(1001)],
-    ])("counts %s", (_, body) => expect(tooManyInlineMarks(body)).toBe(true));
-
-    it("doesn't count snake_case or a long run", () => {
-      expect(tooManyInlineMarks("foo_bar ".repeat(2000))).toBe(false);
-      expect(tooManyInlineMarks("*".repeat(16_000))).toBe(false);
-    });
-
-    it.each([
-      ["nested emphasis", `${"*a _b ".repeat(1300)}x${" b_ a*".repeat(1300)}`],
-      ["closing brackets", "]".repeat(MESSAGE_LIMIT)],
-    ])("falls back without parsing %s", (_, body) => {
-      const started = performance.now();
-      const container = show(body);
-      expect(performance.now() - started).toBeLessThan(100);
-      expect(container).toHaveTextContent(CANT_FORMAT_NOTE);
-    });
-  });
-
-  describe("long text", () => {
-    afterEach(() => vi.unstubAllGlobals());
-
-    /** Whatever's asked about stays out of view until `reveal`. */
-    const watchView = () => {
-      const seen: { callback: IntersectionObserverCallback; element?: Element }[] = [];
-      vi.stubGlobal(
-        "IntersectionObserver",
-        class {
-          entry: (typeof seen)[number];
-          constructor(callback: IntersectionObserverCallback) {
-            this.entry = { callback };
-            seen.push(this.entry);
-          }
-          observe(element: Element) {
-            this.entry.element = element;
-          }
-          disconnect() {}
-        },
-      );
-      return (index: number) => act(() => seen[index].callback([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
-    };
-    const long = "**bold** [link](https://example.com) ".repeat(60);
-    const formatted = (container: Element) => container.querySelector("strong") !== null;
-
-    it("formats short text at once", () => {
-      watchView();
-      expect(formatted(show(`**bold** ${"x".repeat(FORMAT_AT_ONCE_CHARS - 9)}`))).toBe(true);
-    });
-
-    it("stays its own inert text until it nears the view, then formats", () => {
-      const reveal = watchView();
-      const container = show(long);
-      expect(formatted(container)).toBe(false);
-      expect(container.querySelector("a")).toBeNull();
-      expect(container).toHaveTextContent("**bold** [link](https://example.com)");
-      expect(screen.getByText("Code Agent")).toBeInTheDocument();
-      reveal(0);
-      expect(formatted(container)).toBe(true);
-      expect(container.querySelector("a")).toHaveAttribute("href", "https://example.com/");
-    });
-
-    it("only formats the bodies that near the view", () => {
-      const reveal = watchView();
-      const { container } = render(
-        <>
-          <AgentContent author={author} body={long} />
-          <AgentContent author={author} body={long} />
-        </>,
-      );
-      reveal(1);
-      const [first, second] = container.querySelectorAll("article");
-      expect(formatted(first)).toBe(false);
-      expect(formatted(second)).toBe(true);
-    });
-
-    it("formats without waiting where nothing can tell it about the view", () => {
-      expect(formatted(show(long))).toBe(true);
-    });
-
-    it.each([
-      ["nested emphasis", `${"*a _b ".repeat(1300)}x${" b_ a*".repeat(1300)}`],
-      ["setext headings", "a\n=\n".repeat(4000)],
-      ["closing brackets", "]".repeat(MESSAGE_LIMIT)],
-    ])("costs almost nothing to open 50 bodies of %s at the message limit", (_, body) => {
-      watchView();
-      const started = performance.now();
-      render(
-        <>
-          {Array.from({ length: 50 }, (_, index) => (
-            <AgentContent key={index} author={author} body={body} />
-          ))}
-        </>,
-      );
-      // Parsing these took about 1.7 s, 1 s and 2.4 s each, so this catches any of them being parsed.
-      expect(performance.now() - started).toBeLessThan(800);
     });
   });
 
