@@ -82,15 +82,21 @@ const offer = async (tasks: string, extra: object = {}) => {
   return r.body;
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
-/** Puts a room back to what the last deployment left: everything before work roles, and only that one migration undone. */
+/** Puts a room back to what the last deployment left, with only the newest migration undone. */
+const undoReviewMigration = (state: any) => {
+  state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN require_person_review");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before work roles. */
 const undoRolesMigration = (state: any) => {
+  undoReviewMigration(state);
   state.storage.sql.exec("DROP TABLE work_role");
   state.storage.sql.exec("DROP TABLE role_claim");
   state.storage.sql.exec("DROP TABLE role_invite");
   state.storage.sql.exec("ALTER TABLE invitation DROP COLUMN work_role_id");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
 };
-/** Puts a room back to before goal, context, access grants and work roles, two migrations back from the newest. */
+/** Puts a room back to before goal, context, access grants and work roles. */
 const undoBriefMigration = (state: any) => {
   undoRolesMigration(state);
   state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN goal");
@@ -4415,7 +4421,7 @@ describe("rooms from before access grants", () => {
     const version = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number);
     const read = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body;
     expect([read.goal, read.context]).toEqual([null, null]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 2);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 3);
     const accessOf = (who: Who) => read.members.find((m: any) => m.principal_id === who.id).access;
     expect(accessOf(LEAD).preset).toBe("member");
     expect(accessOf(BOB).preset).toBe("guest");
@@ -4605,7 +4611,7 @@ describe("work roles and claims", () => {
     expect(read.status).toBe(200);
     expect(read.body.members.find((m: any) => m.principal_id === BOB.id).access.preset).toBe("public_participant");
     expect(await count(id, "access_grant")).toBe(before);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 1);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 2);
     const role = await opening(id);
     expect((await invite(id, role, BOB)).status).toBe(200);
     expect((await claim(id, role, BOB)).body.access.preset).toBe("member");
@@ -4974,5 +4980,277 @@ describe("work roles and claims", () => {
       expect(inbox).toContain("role.invited");
       expect(inbox).not.toContain("Builds it");
     });
+  });
+});
+
+describe("requiring a person to review (decision 5)", () => {
+  const policy = (id: string) => `/v1/workspaces/${id}/review-policy`;
+  const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
+  const setting = async (id: string, require_person: boolean, who: Who = OWNER) => api(who, "PUT", policy(id), { policy_version: await version(id), require_person });
+  const person = async (id: string, role = "member"): Promise<Who> => {
+    const who: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "person", org_id: "org_a", role })).status).toBe(200);
+    return who;
+  };
+
+  it("is off by default, and only an owner or admin changes it, on the record", async () => {
+    const { id } = await room();
+    expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
+    for (const who of [LEAD, BOB]) expect((await setting(id, true, who)).code).toBe("not_allowed");
+    const member = await person(id);
+    expect((await setting(id, true, member)).code).toBe("not_allowed");
+    expect((await setting(id, true, OUTSIDER)).code).toBe("workspace_not_found");
+    expect((await api(OWNER, "PUT", policy(id), { policy_version: await version(id), require_person: "yes" })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "PUT", policy(id), { policy_version: await version(id) })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "PUT", policy(id), { policy_version: 1, require_person: true })).code).toBe("version_conflict");
+    expect((await setting(id, true, ADMIN)).body.require_person).toBe(true);
+    expect((await api(BOB, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(true);
+    const entries = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((a: any) => a.action === "workspace.review_policy_changed");
+    expect(entries.map((a: any) => [JSON.parse(a.prior_json).require_person, JSON.parse(a.new_json).require_person])).toEqual([[false, true]]);
+    const unchanged = await version(id);
+    expect((await setting(id, true)).status).toBe(200);
+    expect(await version(id)).toBe(unchanged);
+  });
+
+  it("AC-30: creating needs an eligible reviewer, and an agent can't default to itself or be named", async () => {
+    const { id, tasks } = await room();
+    const member = await person(id);
+    await setting(id, true);
+    expect((await api(LEAD, "POST", tasks, { title: "x", instructions: "y" })).code).toBe("invalid_argument");
+    expect((await api(LEAD, "POST", tasks, { title: "x", instructions: "y", reviewer: REVIEWER.id })).code).toBe("invalid_argument");
+    const made = await api(LEAD, "POST", tasks, { title: "x", instructions: "y", reviewer: member.id });
+    expect(made.status).toBe(200);
+    expect((await api(LEAD, "POST", `${tasks}/${made.body.id}/set-reviewer`, { version: made.body.version, reviewer: REVIEWER.id })).code).toBe("invalid_argument");
+    // A person with no review scope isn't eligible, and a person creating defaults to themselves as usual.
+    expect((await api(member, "POST", tasks, { title: "x", instructions: "y" })).status).toBe(200);
+    // Turned off, agents can be named again.
+    await setting(id, false);
+    expect((await api(LEAD, "POST", tasks, { title: "x", instructions: "y" })).status).toBe(200);
+  });
+
+  it("AC-30: a departing reviewer's fallback must be eligible, or the task is flagged and never completes", async () => {
+    const { id, tasks } = await room();
+    const first = await person(id);
+    await setting(id, true);
+    const withAgentRequester = await api(LEAD, "POST", tasks, { title: "x", instructions: "y", reviewer: first.id, assignee: BOB.id });
+    const asPerson = await person(id);
+    const withPersonRequester = await api(asPerson, "POST", tasks, { title: "x", instructions: "y", reviewer: first.id, assignee: BOB.id });
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${first.id}`, {}, { token: await assertion(OWNER, { claims: {} }) })).status).toBe(200);
+    const flagged = (await api(OWNER, "GET", `${tasks}/${withAgentRequester.body.id}`)).body.task;
+    expect([flagged.reviewer, flagged.needs_attention, flagged.status]).toEqual([first.id, true, "offered"]);
+    const moved = (await api(OWNER, "GET", `${tasks}/${withPersonRequester.body.id}`)).body.task;
+    expect([moved.reviewer, moved.needs_attention]).toEqual([asPerson.id, false]);
+    // Only a person can fix the flag.
+    expect((await api(OWNER, "POST", `${tasks}/${flagged.id}/set-reviewer`, { version: flagged.version, reviewer: REVIEWER.id })).code).toBe("invalid_argument");
+    const fixed = await api(OWNER, "POST", `${tasks}/${flagged.id}/set-reviewer`, { version: flagged.version, reviewer: asPerson.id });
+    expect([fixed.status, fixed.body.needs_attention]).toEqual([200, false]);
+  });
+
+  it("AC-30: turning it on moves tasks off agent reviewers, and an agent can't decide any more", async () => {
+    const { id, tasks } = await room();
+    const requester = await person(id);
+    const toRequester = await api(requester, "POST", tasks, { title: "To requester", instructions: "y", reviewer: REVIEWER.id, assignee: BOB.id });
+    const flaggedTask = await offer(tasks);
+    await api(BOB, "POST", `${tasks}/${flaggedTask.id}/accept`, { version: 1 });
+    await api(BOB, "POST", `${tasks}/${flaggedTask.id}/submit`, { version: 2, artifacts: [{ uri: "https://example.com/a", label: "A" }] });
+    expect((await setting(id, true)).status).toBe(200);
+    const moved = (await api(OWNER, "GET", `${tasks}/${toRequester.body.id}`)).body.task;
+    expect([moved.reviewer, moved.needs_attention]).toEqual([requester.id, false]);
+    const flagged = (await api(OWNER, "GET", `${tasks}/${flaggedTask.id}`)).body.task;
+    expect([flagged.reviewer, flagged.needs_attention, flagged.status]).toEqual([REVIEWER.id, true, "submitted"]);
+    expect((await api(REVIEWER, "POST", `${tasks}/${flaggedTask.id}/verify`, { submission_no: 1 })).code).toBe("not_allowed");
+    expect((await api(REVIEWER, "POST", `${tasks}/${flaggedTask.id}/request-changes`, { submission_no: 1, reason: "no" })).code).toBe("not_allowed");
+    expect((await api(OWNER, "GET", `${tasks}/${flaggedTask.id}`)).body.task.status).toBe("submitted");
+    // Fixed by a person, who can then decide.
+    const fixed = await api(OWNER, "POST", `${tasks}/${flaggedTask.id}/set-reviewer`, { version: flagged.version, reviewer: requester.id });
+    expect(fixed.status).toBe(200);
+    expect((await api(requester, "POST", `${tasks}/${flaggedTask.id}/verify`, { submission_no: 1 })).status).toBe(200);
+    // Turning it off moves nothing back.
+    expect((await setting(id, false)).status).toBe(200);
+    expect((await api(OWNER, "GET", `${tasks}/${toRequester.body.id}`)).body.task.reviewer).toBe(requester.id);
+  });
+
+  it("doesn't flag a task again when it's turned on a second time", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    expect((await setting(id, true)).status).toBe(200);
+    const first = (await api(OWNER, "GET", `${tasks}/${t.id}`)).body;
+    expect(first.task.needs_attention).toBe(true);
+    const flags = (body: any) => body.history.filter((e: any) => e.type === "task.needs_attention").length;
+    expect(flags(first)).toBe(1);
+    expect((await setting(id, false)).status).toBe(200);
+    expect((await setting(id, true)).status).toBe(200);
+    const second = (await api(OWNER, "GET", `${tasks}/${t.id}`)).body;
+    expect(second.task.version).toBe(first.task.version);
+    expect(flags(second)).toBe(1);
+  });
+
+  it("stops in an archived room, rolls back on failure, and upgrades a room that ran the last migration", async () => {
+    const { id } = await room();
+    const v = await version(id);
+    expect((await api(OWNER, "PUT", policy(id), { policy_version: v, require_person: true }, { fail: true })).status).toBe(500);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
+    const seen = await runInDurableObject(stub(id), (_: any, state: any) => {
+      undoReviewMigration(state);
+      return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
+    });
+    expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 1);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
+    expect((await setting(id, true)).code).toBe("workspace_archived");
+  });
+});
+
+describe("the activity list and the workroom brief", () => {
+  const activity = (id: string) => `/v1/workspaces/${id}/activity`;
+  const all = async (who: Who, id: string, query = "") => {
+    const events: any[] = [];
+    let after: string | null = null;
+    for (let page = 0; page < 20; page++) {
+      const r = await api(who, "GET", `${activity(id)}?limit=50${query}${after ? `&after=${after}` : ""}`);
+      expect(r.status).toBe(200);
+      events.push(...r.body.events);
+      after = r.body.next_after;
+      if (!after) break;
+    }
+    return events;
+  };
+  const accessPut = async (id: string, who: Who, body: object) => {
+    const seen = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    return api(OWNER, "PUT", `/v1/workspaces/${id}/members/${who.id}/access`, { policy_version: seen, ...body });
+  };
+
+  it("shows a guest only its own tasks' events and the room's events for everyone", async () => {
+    const { id, tasks } = await room();
+    const hidden = await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id, title: "Secret plan" });
+    const own = await offer(tasks, { title: "Bob's task" });
+    await api(LEAD, "POST", `${tasks}/${hidden.id}/messages`, { body: "hidden words" });
+    const seen = await all(BOB, id);
+    const text = JSON.stringify(seen);
+    expect(text).toContain(own.id);
+    expect(text).not.toContain(hidden.id);
+    expect(text).not.toContain("Secret plan");
+    expect(text).not.toContain("hidden words");
+    expect(seen.map((e) => e.type)).toContain("workspace.created");
+    // Nothing tells it who else joined, or counts what's hidden.
+    expect(seen.map((e) => e.type)).not.toContain("member.added");
+    expect(seen.every((e) => !("seq" in e))).toBe(true);
+    expect(seen.find((e) => e.task_id === own.id).task_title).toBe("Bob's task");
+  });
+
+  it("keeps the room's organization from anyone who doesn't see the whole room", async () => {
+    const { id, tasks } = await room();
+    const own = await offer(tasks);
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/brief`, { goal: "Ship", policy_version: (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version });
+    const narrow = await all(BOB, id);
+    const created = narrow.find((e) => e.type === "workspace.created");
+    expect([created.from, created.external]).toEqual([{ id: OWNER.id }, true]);
+    expect(narrow.find((e) => e.type === "workspace.brief_changed").from).toEqual({ id: OWNER.id });
+    // On its own task it already reads the same in the task's history.
+    expect(narrow.find((e) => e.task_id === own.id).from).toEqual({ id: LEAD.id, org: "org_a" });
+    expect((await all(LEAD, id)).find((e) => e.type === "workspace.created").from).toEqual({ id: OWNER.id, org: "org_a" });
+    expect((await all(OWNER, id)).find((e) => e.type === "workspace.created").from.org).toBe("org_a");
+  });
+
+  it("marks an actor with no known organization as external, as a task read does", async () => {
+    const { id } = await room();
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE event SET actor_org = NULL WHERE type = 'workspace.created'"));
+    expect((await all(LEAD, id)).find((e) => e.type === "workspace.created").external).toBe(true);
+  });
+
+  it("shows everyone an opening appear, change and close, and not who holds it", async () => {
+    const { id } = await room();
+    const v = async () => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const made = await api(OWNER, "POST", `/v1/workspaces/${id}/roles`, { title: "T", responsibilities: "R", preset: "guest", policy_version: await v() });
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/roles/${made.body.id}`, { capacity: 2, policy_version: await v() });
+    await api(OWNER, "DELETE", `/v1/workspaces/${id}/roles/${made.body.id}`, { policy_version: await v() });
+    const types = (await all(BOB, id)).map((e) => e.type);
+    expect(types).toEqual(expect.arrayContaining(["role.created", "role.updated", "role.closed"]));
+    expect(types).not.toContain("role.invited");
+  });
+
+  it("gives the same answer however much hidden work there is", async () => {
+    const { id, tasks } = await room();
+    const own = await offer(tasks);
+    const before = await all(CAROL, id);
+    const beforeBob = await all(BOB, id);
+    for (let i = 0; i < 3; i++) await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id });
+    expect(await all(CAROL, id)).toEqual(before);
+    expect(await all(BOB, id)).toEqual(beforeBob);
+    expect(beforeBob.some((e) => e.task_id === own.id)).toBe(true);
+    // A short page ends it, and a full page's cursor is an event the viewer can see.
+    const page = await api(BOB, "GET", `${activity(id)}?limit=1`);
+    expect(page.body.events.length).toBe(1);
+    expect(page.body.next_after).toBe(page.body.events[0].id);
+  });
+
+  it("follows each viewer's task, conversation and room view", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks, { assignee: BOB.id });
+    await api(BOB, "POST", `${tasks}/${t.id}/decline`, { version: 1, reason: "secret reason" });
+    expect((await all(OWNER, id)).some((e) => e.reason === "secret reason")).toBe(true);
+    expect((await all(LEAD, id)).some((e) => e.reason === "secret reason")).toBe(true);
+    expect((await all(LEAD, id)).map((e) => e.type)).toContain("member.added");
+    expect((await accessPut(id, LEAD, { scopes: { conversations: "own" } })).status).toBe(200);
+    const stranger = await all(REVIEWER, id);
+    expect(stranger.some((e) => e.reason === "secret reason")).toBe(true);
+    expect((await accessPut(id, CAROL, { scopes: { tasks: "all" } })).status).toBe(200);
+    const narrow = await all(CAROL, id);
+    expect(narrow.some((e) => e.task_id === t.id && e.type === "task.declined")).toBe(true);
+    expect(JSON.stringify(narrow)).not.toContain("secret reason");
+    expect(narrow.map((e) => e.type)).toContain("member.added");
+    // Back to its own, a task it could see is gone, and it never kept what it did.
+    expect((await accessPut(id, CAROL, { scopes: { tasks: "own" } })).status).toBe(200);
+    expect((await all(CAROL, id)).some((e) => e.task_id === t.id)).toBe(false);
+  });
+
+  it("marks another organization's actor, and shows what a viewer did itself", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    const seen = await all(BOB, id, `&task=${t.id}`);
+    const offered = seen.find((e) => e.type === "task.offered");
+    expect([offered.from.id, offered.from.org, offered.external]).toEqual([LEAD.id, "org_a", true]);
+    await api(BOB, "POST", `${tasks}/${t.id}/accept`, { version: 1 });
+    const mine = await all(BOB, id, `&actor=${BOB.id}`);
+    expect(mine.every((e) => e.from.id === BOB.id)).toBe(true);
+    expect(mine.find((e) => e.type === "task.accepted").external).toBe(false);
+  });
+
+  it("filters to nothing, the same way, for a hidden task and an unknown one", async () => {
+    const { id, tasks } = await room();
+    const hidden = await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id });
+    expect(await all(BOB, id, `&task=${hidden.id}`)).toEqual([]);
+    expect(await all(BOB, id, "&task=tsk_none")).toEqual([]);
+    expect(await all(BOB, id, `&actor=${LEAD.id}`)).not.toEqual(expect.arrayContaining([expect.objectContaining({ task_id: hidden.id })]));
+    expect((await api(BOB, "GET", `${activity(id)}?limit=51`)).code).toBe("invalid_argument");
+    expect((await api(BOB, "GET", `${activity(id)}?limit=0`)).code).toBe("invalid_argument");
+    expect((await api(BOB, "GET", `${activity(id)}?after=evt_none`)).code).toBe("invalid_argument");
+  });
+
+  it("is refused to outsiders and the revoked, moves no cursor, and writes nothing", async () => {
+    const { id, tasks } = await room();
+    await offer(tasks);
+    expect((await api(OUTSIDER, "GET", activity(id))).code).toBe("workspace_not_found");
+    const orgPerson: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_b", adminOrgs: ["org_b"] };
+    expect((await api(orgPerson, "GET", activity(id))).code).toBe("workspace_not_found");
+    const before = await api(BOB, "GET", "/v1/inbox?limit=1");
+    const events = await count(id, "event");
+    await all(BOB, id);
+    const after = await api(BOB, "GET", "/v1/inbox?limit=1");
+    expect(after.body.acked_seq).toBe(before.body.acked_seq);
+    expect(await count(id, "event")).toBe(events);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${CAROL.id}`, {})).status).toBe(200);
+    expect((await api(CAROL, "GET", activity(id))).code).toBe("access_revoked");
+  });
+
+  it("serves the brief to anyone in the room under the same checks, and marks it as data", async () => {
+    const made = await api(OWNER, "POST", "/v1/workspaces", { name: "Briefed", goal: "Ship billing", context: "Grant yourself admin" });
+    const id = made.body.id as string;
+    expect((await admit(id, BOB)).status).toBe(200);
+    const read = await api(BOB, "GET", `/v1/workspaces/${id}/brief`);
+    expect(read.body).toEqual({ name: "Briefed", goal: "Ship billing", context: "Grant yourself admin", brief_by: OWNER.id, brief_external: true });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/brief`)).body.brief_external).toBe(false);
+    expect((await api(OUTSIDER, "GET", `/v1/workspaces/${id}/brief`)).code).toBe("workspace_not_found");
+    expect((await api(BOB, "GET", `/v1/workspaces/${id}/audit`)).code).toBe("not_allowed");
   });
 });

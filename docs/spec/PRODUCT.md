@@ -149,7 +149,7 @@ Openings, invited claims and the lead are built, locally only, for agents. In a 
 
 Human feedback can revise a task. Version checks must prevent stale submissions or approvals from silently applying to changed requirements.
 
-Changing instructions or acceptance criteria after acceptance returns the task to `offered`, so the assignee re-accepts the changed commitment. Changes to other fields do not. Requiring a person as reviewer is a per-room setting that an owner or admin controls. It is off by default in private rooms, and on for public rooms when M4 arrives ([decision 5](#decisions-needed)).
+Changing instructions or acceptance criteria after acceptance returns the task to `offered`, so the assignee re-accepts the changed commitment. Changes to other fields do not. Requiring a person as reviewer is a per-room setting that an owner or admin controls. It is off by default in private rooms, and on for public rooms when M4 arrives ([decision 5](#decisions-needed)). Built locally, without its screen. Where it's on, an agent can't be named reviewer or approve or send back work. Turning it on moves open tasks off agent reviewers by the reviewer half of the [departure rules](#when-a-participant-leaves), and turning it off moves nothing. That handling of tasks already open is the safest reading, for the owner to confirm.
 
 ### Collaboration view
 

@@ -20,11 +20,11 @@ use podster_core::{
 };
 use podster_policy::{
     authorize_requester_change, authorize_reviewer_change, authorize_task, authorize_workroom,
-    can_review, can_see_task, denied_change_name, effective_scopes, is_authority_refusal,
-    may_claim_role, may_recover_ownership, org_departure_ends, owner_authority_holds,
-    scopes_after_claim, sees_whole_room, task_view, ArtifactScope, ArtifactView, Caller,
-    ConversationScope, Preset, PrincipalKind, ReviewScope, Role, Scopes, TaskAction, TaskScope,
-    Verdict, WorkroomAction,
+    can_review, can_see_event, can_see_task, denied_change_name, effective_scopes,
+    is_authority_refusal, may_claim_role, may_decide_review, may_recover_ownership,
+    org_departure_ends, owner_authority_holds, scopes_after_claim, sees_whole_room, task_view,
+    ArtifactScope, ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope,
+    Role, Scopes, TaskAction, TaskScope, Verdict, WorkroomAction, EVENTS_FOR_EVERYONE,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -65,6 +65,7 @@ const MAX_OPEN_TASKS: i64 = 1000;
 const MAX_NAME_BYTES: usize = 200;
 const MAX_KEY_BYTES: usize = 255;
 const MAX_ACCEPT_AGENTS: usize = 20;
+const ACTIVITY_PAGE: i64 = 50;
 const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 type Identity = Verified;
@@ -82,6 +83,15 @@ fn parse_kind(kind: &str) -> PrincipalKind {
         PrincipalKind::Person
     } else {
         PrincipalKind::Agent
+    }
+}
+
+/// An agent's ID says it's an agent, as `handle_add_member` requires.
+fn parse_kind_of(principal: &str) -> PrincipalKind {
+    if principal.starts_with(AGENT_ID_PREFIX) {
+        PrincipalKind::Agent
+    } else {
+        PrincipalKind::Person
     }
 }
 
@@ -256,14 +266,14 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
     })
 }
 
-/// Whether someone could be named reviewer now. The per-room person setting (decision 5) isn't built, so nothing requires one yet.
+/// Whether someone could be named reviewer now, under the room's person setting (decision 5).
 fn eligible_reviewer(sql: &SqlStorage, id: &str) -> R<bool> {
     Ok(match participant(sql, id)? {
         Some((kind, role)) => can_review(
             parse_kind(&kind),
             parse_role(&role),
             store::granted_scopes(sql, id)?,
-            false,
+            store::requires_person_review(sql)?,
         ),
         None => false,
     })
@@ -462,6 +472,11 @@ fn handle_task_command(
         authorize_task(caller, &task, action)
     };
     ApiError::from_verdict(verdict)?;
+    if matches!(action, TaskAction::RequestChanges | TaskAction::Verify)
+        && !may_decide_review(caller.kind, store::requires_person_review(sql)?)
+    {
+        return Err(ApiError::not_allowed());
+    }
 
     let command = parse_command(verb, body)?;
     match &command {
@@ -1323,6 +1338,66 @@ fn handle_set_brief(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -
     Ok(json!({ "goal": room["goal"], "context": room["context"] }))
 }
 
+/// Sets whether this room requires a person to review (decision 5). Turning it on moves open tasks off agent reviewers by
+/// the reviewer half of the departure rules, so an agent named earlier can't be left named where it can't decide. Turning
+/// it off moves nothing.
+fn handle_set_review_policy(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))?;
+    require_policy_version(sql, body)?;
+    let require_person = body
+        .get("require_person")
+        .and_then(Value::as_bool)
+        .ok_or_else(ApiError::invalid_argument)?;
+    let prior = store::requires_person_review(sql)?;
+    if prior != require_person {
+        exec(
+            sql,
+            "UPDATE workspace SET require_person_review = ?",
+            vec![flag(require_person)],
+        )?;
+        audit(
+            sql,
+            caller,
+            "workspace.review_policy_changed",
+            "workspace",
+            Some(json!({ "require_person": prior }).to_string()),
+            Some(json!({ "require_person": require_person }).to_string()),
+            now,
+        )?;
+        let mut everyone = room_people(sql)?;
+        everyone.retain(|principal| *principal != caller.id);
+        record_event(
+            sql,
+            "workspace.review_policy_changed",
+            &caller.id,
+            None,
+            &Transition::NONE,
+            everyone,
+            now,
+        )?;
+        if require_person {
+            let open = rows(
+                sql,
+                "SELECT * FROM task WHERE status NOT IN ('completed', 'canceled')",
+                vec![],
+            )?;
+            for row in &open {
+                let task = store::task_from_row(row)?;
+                // Already flagged means someone has been told, so turning it on again changes nothing for them.
+                if parse_kind_of(&task.reviewer) == PrincipalKind::Agent && !task.needs_reviewer {
+                    let requester_ok = eligible_reviewer(sql, &task.requester)?;
+                    if let Some(decision) = apply_review_ended(&task, &task.reviewer, requester_ok)
+                    {
+                        save_task(sql, &decision.task, now)?;
+                        record_decision(sql, &decision, task.status, &caller.id, now)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(json!({ "require_person": require_person }))
+}
+
 /// Tests hold delivery by creating this table, so they can look at what a command queued.
 fn outbox_held(sql: &SqlStorage) -> R<bool> {
     #[cfg(feature = "failpoints")]
@@ -1980,7 +2055,7 @@ mod queries {
         let caller = &who.caller;
         let room = rows(
             sql,
-            "SELECT id, name, goal, context, brief_by, owner_person_id, owner_org_id, owner_left_at, status, policy_version FROM workspace",
+            "SELECT id, name, goal, context, brief_by, require_person_review, owner_person_id, owner_org_id, owner_left_at, status, policy_version FROM workspace",
             vec![],
         )?;
         let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
@@ -2008,6 +2083,7 @@ mod queries {
         let mut answer = json!({
             "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"],
             // Written by the room's owner or admins, and for reading only. `brief_external` marks it as another organization's.
+            "require_person_review": int(&room["require_person_review"]) != 0,
             "goal": room["goal"], "context": room["context"], "brief_by": room["brief_by"], "brief_external": room["owner_org_id"].as_str() != Some(who.org.as_str()),
             "access": access_json(caller.kind, caller.role, caller.scopes),
             "policy_version": manages.then(|| room["policy_version"].clone()), "members": listed,
@@ -2019,6 +2095,101 @@ mod queries {
             answer["removed"] = json!(rows(sql, "SELECT principal_id, kind, org_id, revoked_at, revocation_reason FROM member WHERE revoked_at IS NOT NULL ORDER BY revoked_at DESC LIMIT ?", vec![REMOVED_LISTED.into()])?);
         }
         Ok(answer)
+    }
+
+    /// What agents and people read to orient themselves, under the same check as the room read. It's text to read, never
+    /// instructions, and `brief_external` marks it as another organization's.
+    pub fn get_brief(sql: &SqlStorage, who: &Participant) -> R<Value> {
+        let room = rows(
+            sql,
+            "SELECT name, goal, context, brief_by, owner_org_id FROM workspace",
+            vec![],
+        )?;
+        let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
+        Ok(json!({
+            "name": room["name"], "goal": room["goal"], "context": room["context"], "brief_by": room["brief_by"],
+            "brief_external": room["owner_org_id"].as_str() != Some(who.org.as_str()),
+        }))
+    }
+
+    /// A room's history, filtered for this viewer. It reads only, has no read state and never touches an inbox. The query
+    /// itself is narrowed, so a page never comes back short because of what's hidden, and the cursor is an event's own
+    /// random ID, so nothing here counts what the viewer can't see. Policy then re-checks each row.
+    pub fn list_activity(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
+        let caller = &who.caller;
+        let limit = query_int(url, "limit")?.unwrap_or(ACTIVITY_PAGE);
+        if !(1..=ACTIVITY_PAGE).contains(&limit) {
+            return Err(ApiError::invalid_argument());
+        }
+        let after = match query_str(url, "after") {
+            None => 0,
+            Some(id) => rows(
+                sql,
+                "SELECT seq FROM event WHERE id = ?",
+                vec![id.as_str().into()],
+            )?
+            .first()
+            .map(|row| int(&row["seq"]))
+            .ok_or_else(ApiError::invalid_argument)?,
+        };
+        let task_filter = query_str(url, "task");
+        let actor_filter = query_str(url, "actor");
+        let id = caller.id.as_str();
+        // Someone who sees the whole room gets every task's and room's events. Otherwise, their own tasks, the room's
+        // events for everyone, and what they did themselves.
+        let mut query = "SELECT seq, id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, created_at FROM event WHERE seq > ?1 AND (?2 IS NULL OR task_id = ?2) AND (?3 IS NULL OR actor_id = ?3)".to_string();
+        let whole_room = sees_whole_room(caller);
+        if !whole_room {
+            let everyone = EVENTS_FOR_EVERYONE
+                .map(|kind| format!("'{kind}'"))
+                .join(", ");
+            query.push_str(&format!(" AND ((task_id IS NULL AND (type IN ({everyone}) OR actor_id = ?4)) OR task_id IN (SELECT id FROM task WHERE requester_id = ?4 OR assignee_id = ?4 OR reviewer_id = ?4))"));
+        }
+        query.push_str(if whole_room {
+            " ORDER BY seq LIMIT ?4"
+        } else {
+            " ORDER BY seq LIMIT ?5"
+        });
+        let mut bindings = vec![after.into(), opt(&task_filter), opt(&actor_filter)];
+        if !whole_room {
+            bindings.push(id.into());
+        }
+        bindings.push(limit.into());
+        let found = rows(sql, &query, bindings)?;
+        let mut events = Vec::with_capacity(found.len());
+        let mut last = None;
+        for row in &found {
+            let kind = row["type"].as_str().unwrap_or_default();
+            let actor = row["actor_id"].as_str().unwrap_or_default();
+            let task = match row["task_id"].as_str() {
+                Some(task_id) => load_task(sql, task_id)?,
+                None => None,
+            };
+            last = row["id"].as_str().map(str::to_string);
+            if !can_see_event(caller, kind, actor, task.as_ref()) {
+                continue;
+            }
+            // A reason is something someone wrote, so it follows the thread's scope, as in a task read.
+            let reason = match &task {
+                Some(task) if !task_view(caller, task).conversation => Value::Null,
+                _ => row["reason"].clone(),
+            };
+            // Which organization holds the room is for those who see all of it, as in the room read. On a task, the
+            // viewer already reads the same in its history.
+            let from = if whole_room || task.is_some() {
+                json!({ "id": actor, "org": row["actor_org"] })
+            } else {
+                json!({ "id": actor })
+            };
+            events.push(json!({
+                "id": row["id"], "type": kind, "from": from,
+                "external": row["actor_org"].as_str() != Some(who.org.as_str()),
+                "task_id": row["task_id"], "task_title": task.as_ref().map(|t| t.title.clone()),
+                "reason": reason, "prior_status": row["prior_status"], "new_status": row["new_status"], "created_at": row["created_at"],
+            }));
+        }
+        let next = (found.len() as i64 == limit).then_some(last).flatten();
+        Ok(json!({ "events": events, "next_after": next }))
     }
 
     /// Changes that were refused for lack of authority, newest first, for those who may read the audit log.
@@ -3253,6 +3424,8 @@ impl Workspace {
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
                 ["roles"] => roles::list_roles(&sql, &who),
+                ["brief"] => queries::get_brief(&sql, &who),
+                ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
@@ -3477,6 +3650,14 @@ impl Workspace {
                 stops_when_archived,
                 test_fail,
                 move |sql, who, now| handle_change_access(sql, &who.caller, &target, &body, now),
+            ),
+            (Method::Put, ["review-policy"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| handle_set_review_policy(sql, &who.caller, &body, now),
             ),
             (Method::Put, ["brief"]) => self.command(
                 &identity,

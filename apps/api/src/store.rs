@@ -81,6 +81,8 @@ CREATE INDEX role_claim_role ON role_claim (role_id, status);
 CREATE TABLE role_invite (role_id TEXT NOT NULL, principal_id TEXT NOT NULL, invited_by TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (role_id, principal_id));
 CREATE INDEX role_invite_principal ON role_invite (principal_id);
 ALTER TABLE invitation ADD COLUMN work_role_id TEXT;
+", "
+ALTER TABLE workspace ADD COLUMN require_person_review INTEGER NOT NULL DEFAULT 0;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -223,6 +225,15 @@ pub fn scopes_from(row: &Value, prefix: &str) -> R<Scopes> {
             .and_then(ReviewScope::from_name)
             .ok_or_else(bad)?,
     })
+}
+
+/// Whether this room requires a person to review (decision 5).
+pub fn requires_person_review(sql: &SqlStorage) -> R<bool> {
+    Ok(
+        rows(sql, "SELECT require_person_review FROM workspace", vec![])?
+            .first()
+            .is_some_and(|room| int(&room["require_person_review"]) != 0),
+    )
 }
 
 /// How many times someone's grant has been written, so a change can be noticed even if it ends on the same values.

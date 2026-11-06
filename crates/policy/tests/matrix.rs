@@ -889,3 +889,85 @@ fn the_narrower_of_two_grants_never_exceeds_either() {
     assert_eq!(Scopes::COORDINATOR.narrower(Scopes::GUEST), Scopes::GUEST);
     assert_eq!(Scopes::COORDINATOR.narrower(Scopes::MEMBER), Scopes::MEMBER);
 }
+
+#[test]
+fn a_room_requiring_a_person_refuses_agents_at_naming_and_at_the_decision() {
+    assert!(!can_review(Agent, Role::Member, Scopes::MEMBER, true));
+    assert!(can_review(Person, Role::Guest, Scopes::GUEST, true));
+    assert!(can_review(
+        Person,
+        Role::Admin,
+        Scopes::PUBLIC_PARTICIPANT,
+        true
+    ));
+    assert!(!can_review(
+        Person,
+        Role::Guest,
+        Scopes::PUBLIC_PARTICIPANT,
+        true
+    ));
+    assert!(may_decide_review(Agent, false));
+    assert!(may_decide_review(Person, false));
+    assert!(!may_decide_review(Agent, true));
+    assert!(may_decide_review(Person, true));
+}
+
+#[test]
+fn activity_follows_the_task_and_the_member_list() {
+    let with = |id: &str, kind, role, scopes| Caller {
+        scopes,
+        ..caller(id, kind, role)
+    };
+    let guest = with("stranger", Agent, Role::Guest, Scopes::GUEST);
+    let party = with("asg", Agent, Role::Guest, Scopes::GUEST);
+    let member = with("stranger", Agent, Role::Member, Scopes::MEMBER);
+    let admin = with("stranger", Person, Role::Admin, Scopes::PUBLIC_PARTICIPANT);
+    let outsider = with("asg", Agent, Role::None, Scopes::MEMBER);
+    let hidden = task();
+    assert!(!can_see_event(&guest, "task.offered", "req", Some(&hidden)));
+    // Having done something on a task doesn't keep it visible once it's no longer theirs.
+    assert!(!can_see_event(
+        &guest,
+        "task.accepted",
+        "stranger",
+        Some(&hidden)
+    ));
+    assert!(can_see_event(&party, "task.offered", "req", Some(&hidden)));
+    assert!(can_see_event(&member, "task.offered", "req", Some(&hidden)));
+    assert!(can_see_event(&admin, "task.offered", "req", Some(&hidden)));
+    assert!(!can_see_event(
+        &outsider,
+        "task.offered",
+        "req",
+        Some(&hidden)
+    ));
+    for kind in EVENTS_FOR_EVERYONE {
+        assert!(can_see_event(&guest, kind, "owner", None), "{kind}");
+        assert!(!can_see_event(&outsider, kind, "owner", None), "{kind}");
+    }
+    for kind in [
+        "member.added",
+        "member.revoked",
+        "member.role_changed",
+        "member.access_changed",
+        "role.invited",
+        "role.claimed",
+        "role.claim_ended",
+        "owner.transferred",
+        "something.new",
+    ] {
+        assert!(!can_see_event(&guest, kind, "owner", None), "{kind}");
+        assert!(can_see_event(&member, kind, "owner", None), "{kind}");
+        assert!(can_see_event(&admin, kind, "owner", None), "{kind}");
+        assert!(!can_see_event(&outsider, kind, "owner", None), "{kind}");
+    }
+    assert!(can_see_event(&guest, "role.claimed", "stranger", None));
+}
+
+#[test]
+fn the_review_policy_is_named_in_the_denial_record() {
+    assert_eq!(
+        denied_change_name("PUT", &["review-policy"]),
+        Some("room.change_review_policy")
+    );
+}
