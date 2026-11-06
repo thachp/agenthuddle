@@ -10,12 +10,14 @@ mod wake;
 mod workspace;
 
 use error::ApiError;
+use futures_util::future::join_all;
 use podster_assertion::{verify, KeySet, Kind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::*;
 
 pub const CALLER_HEADER: &str = "x-podster-caller";
+const CARDS_PER_PAGE: u32 = 20;
 pub const INTERNAL_INIT_PATH: &str = "/internal/init";
 pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
 pub const INTERNAL_PREVIEW_PATH: &str = "/internal/invitation-preview";
@@ -104,6 +106,75 @@ async fn list_workspaces(env: &Env, caller: &Caller) -> std::result::Result<Resp
         .map(|row| json!({ "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "role": row["role"], "status": row["workspace_status"] }))
         .collect();
     Ok(Response::from_json(&json!({ "workspaces": current }))?)
+}
+
+/// A page of the directory. The listing says which rooms to ask about, and each room decides what this person sees of it,
+/// so the read model authorizes nothing. A page is capped, because each row wakes a room.
+async fn list_workspace_cards(
+    env: &Env,
+    caller: &Caller,
+    url: &Url,
+) -> std::result::Result<Response, ApiError> {
+    let offset = match url.query_pairs().find(|(key, _)| key == "offset") {
+        Some((_, value)) => value
+            .parse::<u32>()
+            .map_err(|_| ApiError::invalid_argument())?,
+        None => 0,
+    };
+    let found = env
+        .d1("DB")?
+        .prepare("SELECT workspace_id, workspace_name, role, org_id, workspace_status FROM membership_index WHERE principal_id = ? AND removed = 0 AND owner_left_at IS NULL ORDER BY workspace_name, workspace_id LIMIT ? OFFSET ?")
+        .bind(&[caller.id.as_str().into(), (CARDS_PER_PAGE + 1).into(), offset.into()])?
+        .all()
+        .await?
+        .results::<Value>()?;
+    let more = found.len() > CARDS_PER_PAGE as usize;
+    let cards = found
+        .iter()
+        .take(CARDS_PER_PAGE as usize)
+        .filter(|row| {
+            row["org_id"]
+                .as_str()
+                .is_some_and(|org| org == caller.org || caller.orgs.iter().any(|o| o == org))
+        })
+        .map(|row| workspace_card(env, caller, row));
+    let cards: Vec<Value> = join_all(cards).await.into_iter().flatten().collect();
+    let mut body = json!({ "workspaces": cards });
+    if more {
+        body["next_offset"] = json!(offset + CARDS_PER_PAGE);
+    }
+    Ok(Response::from_json(&body)?)
+}
+
+/// `None` if the room says this person isn't in it, because the listing can lag. If the room can't answer, the row stays
+/// with no card, since the listing is all that's known.
+async fn workspace_card(env: &Env, caller: &Caller, row: &Value) -> Option<Value> {
+    let workspace = row["workspace_id"].as_str()?;
+    let mut listed = json!({ "workspace_id": workspace, "workspace_name": row["workspace_name"], "role": row["role"], "status": row["workspace_status"], "card": null });
+    let read = async {
+        let mut caller = caller.clone();
+        caller.workspace_id = workspace.to_string();
+        let stub = env
+            .durable_object("WORKSPACE")?
+            .id_from_name(workspace)?
+            .get_stub()?;
+        let path = format!("/v1/workspaces/{workspace}/card");
+        forward(stub, &path, "", caller_header(&caller)?, Method::Get, None).await
+    };
+    let mut response: Response = match read.await {
+        Ok(response) => response,
+        Err(_) => return Some(listed),
+    };
+    match response.status_code() {
+        200 => {
+            if let Ok(card) = response.json::<Value>().await {
+                listed["card"] = card;
+            }
+            Some(listed)
+        }
+        403 | 404 => None,
+        _ => Some(listed),
+    }
 }
 
 /// Rooms the agents of the organizations this person administers are in. It only shows them, and each read of a task
@@ -256,6 +327,9 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         }
         ["v1", "workspaces"] if method == Method::Get => {
             return list_workspaces(&env, &caller).await
+        }
+        ["v1", "workspaces", "cards"] if method == Method::Get => {
+            return list_workspace_cards(&env, &caller, &url).await
         }
         ["v1", "oversight", "rooms"] if method == Method::Get => {
             if is_agent {

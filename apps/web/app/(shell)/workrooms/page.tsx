@@ -4,12 +4,16 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { roleLabel } from "../w/[id]/team/model";
+import { plainName } from "@/components/agent-content/text";
+import { roleSummary, type WorkroomCard } from "./cards";
 import { AdminsOnly, createAccess } from "./new/access";
 
-type Listed = { workspace_id: string; workspace_name: string; role: string; status?: string };
+type Listed = { workspace_id: string; workspace_name: string; role: string; status?: string; card: WorkroomCard | null };
 
-export default async function MyWorkrooms() {
-  const [rooms, identity, organizations] = await Promise.all([gatewayQuery<{ workspaces: Listed[] }>("/api/v1/workspaces"), getIdentity(), getOrganizations()]);
+export default async function MyWorkrooms({ searchParams }: { searchParams?: Promise<{ offset?: string }> } = {}) {
+  const offset = (await searchParams)?.offset;
+  const read = `/api/v1/workspaces/cards${offset ? `?${new URLSearchParams({ offset })}` : ""}`;
+  const [rooms, identity, organizations] = await Promise.all([gatewayQuery<{ workspaces: Listed[]; next_offset?: number }>(read), getIdentity(), getOrganizations()]);
   const access = createAccess(identity, organizations);
   return (
     <section className="max-w-3xl space-y-4">
@@ -29,17 +33,39 @@ export default async function MyWorkrooms() {
       {rooms.ok && rooms.data.workspaces.length > 0 ? (
         <ul className="divide-y rounded-lg border">
           {rooms.data.workspaces.map((room) => (
-            <li key={room.workspace_id} className="flex flex-wrap items-center justify-between gap-2 p-3">
-              <Link href={`/w/${room.workspace_id}/overview`} prefetch={false} className="min-w-0 break-words font-medium text-primary underline">
-                {room.workspace_name}
-              </Link>
-              <span className="flex flex-wrap gap-2">
-                {room.status === "archived" ? <Badge variant="outline">Archived</Badge> : null}
-                <Badge variant="secondary">{roleLabel(room.role)}</Badge>
-              </span>
+            <li key={room.workspace_id} className="space-y-1 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Link href={`/w/${room.workspace_id}/overview`} prefetch={false} className="min-w-0 break-words font-medium text-primary underline">
+                  {room.workspace_name}
+                </Link>
+                <span className="flex flex-wrap gap-2">
+                  {room.card?.external ? <Badge variant="outline">External</Badge> : null}
+                  {room.status === "archived" ? <Badge variant="outline">Archived</Badge> : null}
+                  <Badge variant="secondary">{roleLabel(room.role)}</Badge>
+                </span>
+              </div>
+              {room.card ? (
+                <>
+                  {room.card.goal ? (
+                    <p className="break-words text-sm">
+                      <span className="text-muted-foreground">Goal: </span>
+                      {plainName(room.card.goal)}
+                      {room.card.goal_cut ? "…" : ""}
+                    </p>
+                  ) : null}
+                  <p className="break-words text-sm text-muted-foreground">{roleSummary(room.card.roles)}</p>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">Couldn't load this workroom's goal and roles.</p>
+              )}
             </li>
           ))}
         </ul>
+      ) : null}
+      {rooms.ok && rooms.data.next_offset ? (
+        <Link href={`/workrooms?offset=${rooms.data.next_offset}`} prefetch={false} className="inline-flex min-h-6 items-center text-sm text-primary underline">
+          More workrooms
+        </Link>
       ) : null}
       {rooms.ok ? <p className="text-sm text-muted-foreground">A new workroom can take a moment to appear here.</p> : null}
     </section>

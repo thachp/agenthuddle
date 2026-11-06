@@ -5354,6 +5354,83 @@ describe("the activity list and the workroom brief", () => {
   });
 });
 
+describe("directory cards", () => {
+  const card = (id: string) => `/v1/workspaces/${id}/card`;
+  const cards = async (who: Who, query = "") => {
+    const r = await api(who, "GET", `/v1/workspaces/cards${query}`);
+    expect(r.status).toBe(200);
+    return r.body as { workspaces: any[]; next_offset?: number };
+  };
+  const managed = async (method: string, path: string, body: object, id: string) => api(OWNER, method, path, { policy_version: (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version, ...body });
+  const opening = async (id: string, title: string, capacity: number) => (await managed("POST", `/v1/workspaces/${id}/roles`, { title, responsibilities: "x", capacity, preset: "member" }, id)).body.id as string;
+
+  it("gives counts to someone who sees the whole room, and only what's open to someone narrowed", async () => {
+    const { id } = await room();
+    const lead = await opening(id, "Lead", 1);
+    await opening(id, "Writer", 3);
+    await opening(id, "Editor", 2);
+    const closed = await opening(id, "Gone", 9);
+    expect((await managed("DELETE", `/v1/workspaces/${id}/roles/${closed}`, {}, id)).status).toBe(200);
+    const taker: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+    await register(taker);
+    expect((await managed("POST", `/v1/workspaces/${id}/members`, { principal_id: taker.id, kind: "agent", org_id: "org_a", role: "member" }, id)).status).toBe(200);
+    expect((await managed("POST", `/v1/workspaces/${id}/roles/${lead}/invites`, { principal_id: taker.id }, id)).status).toBe(200);
+    expect((await api(taker, "POST", `/v1/workspaces/${id}/roles/${lead}/claim`, {})).status).toBe(200);
+    const whole = (await api(OWNER, "GET", card(id))).body;
+    expect(whole.roles).toEqual({
+      count: 3, with_openings: 2, filled: 1, capacity: 6,
+      listed: [{ title: "Lead", filled: 1, capacity: 1 }, { title: "Writer", filled: 0, capacity: 3 }, { title: "Editor", filled: 0, capacity: 2 }],
+    });
+    const narrow = (await api(BOB, "GET", card(id))).body;
+    expect(narrow.roles).toEqual({
+      count: 3, with_openings: 2,
+      listed: [{ title: "Lead", available: false }, { title: "Writer", available: true }, { title: "Editor", available: true }],
+    });
+    // No more than its role read says.
+    const read = (await api(BOB, "GET", `/v1/workspaces/${id}/roles`)).body.roles;
+    expect(read.every((role: any) => role.filled === undefined)).toBe(true);
+    expect((await api(OUTSIDER, "GET", card(id))).status).toBe(404);
+    // An ended claim no longer fills anything.
+    expect((await api(taker, "POST", `/v1/workspaces/${id}/roles/${lead}/release`, {})).status).toBe(200);
+    expect((await api(OWNER, "GET", card(id))).body.roles.filled).toBe(0);
+  });
+
+  it("cuts a long goal on a whole character and says so", async () => {
+    const { id } = await room();
+    expect((await api(OWNER, "GET", card(id))).body.goal).toBeNull();
+    const version = async () => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/brief`, { goal: "😀".repeat(201), policy_version: await version() })).status).toBe(200);
+    const long = (await api(OWNER, "GET", card(id))).body;
+    expect(long.goal).toBe("😀".repeat(200));
+    expect(long.goal_cut).toBe(true);
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/brief`, { goal: "😀".repeat(200), policy_version: await version() })).status).toBe(200);
+    expect((await api(OWNER, "GET", card(id))).body.goal_cut).toBe(false);
+  });
+
+  it("lets the room decide: a stale listing shows nothing, and a room that can't answer keeps its row", async () => {
+    const { id } = await room();
+    await runDurableObjectAlarm(stub(id));
+    const row = async (who: Who) => (await cards(who)).workspaces.find((w) => w.workspace_id === id);
+    expect((await row(OWNER)).card.roles.count).toBe(0);
+    expect((await row(OWNER)).workspace_name).toBe("Billing v2");
+    // The listing says yes, and the room says no.
+    await BINDINGS.DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'member', 'Billing v2', 0, 1000000)").bind(id, OUTSIDER.id, OUTSIDER.org).run();
+    expect(await row(OUTSIDER)).toBeUndefined();
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("ALTER TABLE work_role RENAME TO work_role_away"));
+    expect((await row(OWNER)).card).toBeNull();
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("ALTER TABLE work_role_away RENAME TO work_role"));
+  });
+
+  it("wakes at most a page of rooms, and pages through the rest", async () => {
+    const who: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"] };
+    for (let n = 0; n < 45; n++) await BINDINGS.DB.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, 'org_a', 'member', ?, 0, 1)").bind(`ws_page_${n}`, who.id, `Room ${n}`).run();
+    expect((await cards(who)).next_offset).toBe(20);
+    expect((await cards(who, "?offset=20")).next_offset).toBe(40);
+    expect((await cards(who, "?offset=40")).next_offset).toBeUndefined();
+    expect((await api(who, "GET", "/v1/workspaces/cards?offset=nope")).status).toBe(400);
+  });
+});
+
 describe("the collaboration list and map", () => {
   const map = (id: string) => `/v1/workspaces/${id}/collaboration`;
   const read = async (who: Who, id: string) => {
