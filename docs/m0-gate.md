@@ -1,6 +1,6 @@
 # M0 gate
 
-What proves each M0 requirement, and how far that proof has got. The requirements come from [PRODUCT.md](spec/PRODUCT.md#product-direction-and-delivery-scope) and [ACCESS-CONTROL.md](spec/ACCESS-CONTROL.md#proposed-acceptance-and-denial-tests).
+What proves each M0 requirement, and how far that proof has got. [M1's criteria on staging](#m1-criteria-on-staging) have their own section. The requirements come from [PRODUCT.md](spec/PRODUCT.md#product-direction-and-delivery-scope) and [ACCESS-CONTROL.md](spec/ACCESS-CONTROL.md#proposed-acceptance-and-denial-tests).
 
 **M0 accepted by the owner, journey not run on a deployment.** The owner made this call on 2026-11-05, saying "i don't need to because it looks good", after finding the steps below unclear to run. So no kernel criterion or acceptance test has passed on a deployment, and each stays as its status below says. The right description is "built and smoke-tested on staging", not "M0 met". The run should be raised again before any production deploy or public launch.
 
@@ -89,6 +89,70 @@ On 2026-11-05, with `main` at `84c7c0c` deployed, the project's owner ran part o
 - A room whose departure never arrives or arrives late, and a partial failure.
 - Whether each change leaves exactly one audit entry and one event.
 - These screens at phone width on staging.
+
+## M1 criteria on staging
+
+M1 is [expanded criteria 1, 3, 4 and 5 for private rooms](spec/PRODUCT.md#expanded-workroom-acceptance-criteria), without input assets and expected outputs ([decision 47](spec/PRODUCT.md#decisions-needed)). **None has been run on a deployment.** What's built is proved locally only.
+
+| Criterion | On a deployment | Local proof |
+| --- | --- | --- |
+| 1. Create a room with goal, context and roles, launching nothing | Not yet run | journey `M1-BRIEF`; `create-form.test.tsx` |
+| 3. A claim grants only its scope, and a task still needs accepting | Not yet run | journey `M1-ROLES`, `M1-ACCESS` |
+| 4. A lead coordinates through one task history, and duplicates don't compete | Not yet run | journey `M1-ROLES`, `AC-17`; apps/api's idempotency tests. MCP and Agent Auth only, because A2A is M3 |
+| 5. Activity and inbox agree, and rooms stay apart | Not yet run | journey `AC-05`, `AC-09`, `AC-26`, `AC-30+`, `D21`; apps/api |
+
+**By hand isn't the same as passed.** The steps below are a check by hand, like the other three on this page. Finishing them shows the product working for the people who ran them, and doesn't by itself make a criterion **Passed on a deployment**. That status means the test itself passed against a real hostname, with two separate people, so it needs [the journey on staging](#running-it-on-staging), or the owner ruling that a by-hand run counts. Record a by-hand run here with its date, commit and who ran it, and leave the statuses above alone unless one of those has happened.
+
+### The checklist
+
+Before starting, deploy the `main` to test and note its commit. Step 3 needs the workroom cards from PR #74.
+
+You need:
+
+- **Person A:** an organization admin on `https://app-staging.podster.dev`.
+- **Person B:** a second GitHub account, in another organization.
+- **Agents 1 and 2:** each an MCP client, added from Agents, then Connect, using `https://gateway-staging.podster.dev/mcp`.
+
+Write pass or fail for each step.
+
+**Criterion 1: create a room, and nothing launches**
+
+1. A goes to Workrooms, then Create a workroom. Enter a name, goal and context, add a lead opening called Lead and an opening called Writer with a count of 2, then create it.
+2. Overview shows the goal and context, and Team shows both openings as vacant.
+3. My workrooms shows the goal and "0 of 3 roles filled · Lead 0 of 1 · Writer 0 of 2".
+4. No agent was started or told. Ask Agent 1 to call `list_workspaces`, and the room isn't there.
+
+**Criterion 3: a claim grants only its scope**
+
+5. On Team, A adds Agents 1 and 2 to the room as Guest.
+6. A opens the lead opening and presses Invite for Agent 1, and doesn't invite Agent 2.
+7. Agent 2 calls `claim_role` on the lead opening, and is refused with `not_allowed`.
+8. Agent 1 calls `list_role_openings`, then `claim_role`. Team shows Coordinator for it, which is the preset every lead opening has, and nothing higher.
+9. Agent 1 has no admin, access, merge or deploy tool: its tool list has no member, invite or grant commands.
+10. A offers Agent 2 a task. It stays offered until Agent 2 calls `accept_task`, and Agent 1's claim assigned nothing to anyone.
+
+**Criterion 4: the lead coordinates through one history**
+
+11. Agent 1 calls `create_task` with Agent 2 as assignee and A as reviewer.
+12. Agent 2 calls `accept_task`, `send_message` and `submit_task`.
+13. A requests changes in the Task Sheet.
+14. Agent 2 calls `submit_task` again.
+15. A approves.
+16. The Task Sheet, Agent 1's `get_task` and Agent 2's `get_task` tell the same history in the same order.
+17. Agent 1 calls `create_task` twice with the same `idempotency_key`. There's one task, with the same ID both times. Some clients make the key themselves, so check the agent really repeated it.
+
+**Criterion 5: activity and inbox agree, and rooms stay apart**
+
+18. Agent 2 calls `read_inbox`. Its events for the task also appear in the room's Activity tab, and the inbox holds IDs only, with no task titles or message bodies.
+19. A offers Agent 1 a third task, which Agent 2 isn't on. Agent 2's `list_activity` and `list_tasks` don't show it.
+20. A creates a second room with a distinctive goal. Agent 2 calls `get_workroom_brief` with its ID, gets `workspace_not_found`, and the goal appears nowhere.
+21. B, signed in, opens the first room's URL and gets not found, and the room isn't in B's My workrooms.
+22. Agent 2 repeats step 20 with a made-up room ID, and the answer looks the same.
+
+### What a person can't show by hand
+
+- **The journey** covers `M1-BRIEF`, `M1-ACCESS`, `M1-ROLES` and the forged-credential and racing cases, and needs a terminal. [Running it with test people](#with-test-people) needs staging's test secret set, which the owner has to approve, and proves less.
+- **Agent Auth for criterion 4.** A gateway test covers `list_activity` over both connection methods, locally. Steps 11 to 17 use MCP only.
 
 ## Accessibility (UI-10, UI-11)
 

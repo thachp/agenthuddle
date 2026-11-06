@@ -2,7 +2,7 @@
 
 Status: **Accepted** by the owner · Date: 2026-11-05
 
-The code that makes this possible is in the PR that added this ADR, and does nothing until `APP_URL` is set. Nothing is deployed.
+The code that makes this possible is in the PR that added this ADR, and does nothing until `APP_URL` is set. Staging has it set: on 2026-11-06, `gateway-staging.podster.dev/sign-in` redirected to `app-staging.podster.dev/sign-in`, which answered 200. Production isn't deployed.
 
 ## Context
 
@@ -58,7 +58,7 @@ The code does nothing until `APP_URL` is set on the gateway.
 
 ## What staging needs
 
-Nobody has created or changed any of this.
+This is in place on staging, through PR [#34](https://github.com/thachp/podster/pull/34). This ADR has no record of the probes below being run.
 
 | Thing | Value | Note |
 | --- | --- | --- |
