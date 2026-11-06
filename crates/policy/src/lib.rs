@@ -585,12 +585,18 @@ pub fn authorize_task(caller: &Caller, task: &Task, action: TaskAction) -> Verdi
 }
 
 /// Who can change a task's requester: an owner or admin, or someone with the Coordinator's scope taking over for itself a
-/// task whose requester left. The same scope gives no other way to move a task from someone still here.
-pub fn authorize_requester_change(caller: &Caller, task: &Task, requester: &str) -> Verdict {
+/// task whose requester left. The flag can outlast someone coming back, so `requester_is_here` says who's in the room now.
+pub fn authorize_requester_change(
+    caller: &Caller,
+    task: &Task,
+    requester: &str,
+    requester_is_here: bool,
+) -> Verdict {
     match authorize_task(caller, task, TaskAction::SetRequester) {
         Verdict::Forbidden
             if caller.effective_scopes().tasks == TaskScope::Coordinate
                 && task.needs_requester
+                && !requester_is_here
                 && requester == caller.id =>
         {
             Verdict::Allow
@@ -604,10 +610,11 @@ pub fn may_claim_role(kind: PrincipalKind) -> bool {
     kind == PrincipalKind::Agent
 }
 
-/// What someone keeps when a claim ends: what they had if nothing changed their grant meanwhile, and otherwise the
-/// narrower of the two, so ending a claim never widens anyone.
-pub fn scopes_after_claim(prior: Scopes, copied: Scopes, current: Scopes) -> Scopes {
-    if current == copied {
+/// What someone keeps when a claim ends: what they had if nobody touched their grant meanwhile, and otherwise the narrower
+/// of the two. `untouched` must come from the grant's version, not its values, because a room can lock someone at the same
+/// values they already hold. Ending a claim never undoes a room's decision.
+pub fn scopes_after_claim(prior: Scopes, current: Scopes, untouched: bool) -> Scopes {
+    if untouched {
         prior
     } else {
         prior.narrower(current)

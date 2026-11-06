@@ -40,7 +40,7 @@ The November 4 staging run doesn't count here. Its driver was never committed, o
 | --- | --- | --- | --- |
 | AC-01 | journey `AC-01`; apps/api "only people create rooms, and the creator owns it whatever the body says" | Local only | |
 | AC-02 | journey `AC-02`, `AC-02+`; apps/api "only the owner appoints admins, and agents can't be admins"; gateway `organizations.spec.ts` | Local only | An admin appointing a real third person runs only in gateway tests, because a journey run has two people |
-| AC-03 | journey `AC-03` is partial; apps/api "members, guests and agents can't use any access command" | Local only | |
+| AC-03 | journey `AC-03` is partial; apps/api "members, guests and agents can't use any access command", "refuses a claim without an invite", "lets only an owner or admin create and change openings" | Local only | The journey's tool-name check exempts `list_role_openings`, `claim_role` and `release_role` by exact name. Filling an opening is an agent's own act and needs an owner's or admin's invite, and `M1-ROLES` tests it |
 | AC-04 | journey `AC-04`, `M1-ACCESS`; apps/api "uses one key per route, moves the policy version, and pages the whole audit log", "lets an owner or admin apply a preset and adjust scopes, with an audit of before and after" | Local only | The journey runs this as the owner. An admin changing a scope is only in apps/api tests |
 | AC-05 | journey `AC-05`; apps/api "keeps rooms apart" | Local only | Assets and provider IDs arrive in M2 and M5 |
 | AC-06 | journey `AC-06`; apps/api "the agent's own organization withdraws it without room authority, and nobody else can" | Local only | |

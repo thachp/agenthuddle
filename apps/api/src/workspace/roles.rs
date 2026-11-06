@@ -216,6 +216,10 @@ pub(super) fn handle_update_role(
         )
     };
     validate_role(&title, &responsibilities, capacity).map_err(|e| ApiError::from_core(&e))?;
+    // What an agent agreed to look at isn't what they'd now get, so anything already offered goes with the old terms.
+    if role["preset"].as_str() != Some(preset.name()) || is_lead != was_lead {
+        withdraw_offers_of_role(sql, id)?;
+    }
     // Lowering capacity below the holders blocks further claims and removes nobody. Holders keep what they copied.
     exec(sql, "UPDATE work_role SET title = ?, responsibilities = ?, capacity = ?, preset = ?, is_lead = ?, version = version + 1 WHERE id = ?", vec![
         title.as_str().into(), responsibilities.as_str().into(), capacity.into(), preset.name().into(), flag(is_lead), id.into(),
@@ -268,11 +272,7 @@ pub(super) fn handle_close_role(
         "UPDATE work_role SET closed_at = ? WHERE id = ?",
         vec![now.into(), id.into()],
     )?;
-    exec(
-        sql,
-        "DELETE FROM role_invite WHERE role_id = ?",
-        vec![id.into()],
-    )?;
+    withdraw_offers_of_role(sql, id)?;
     audit(sql, caller, "role.closed", id, None, None, now)?;
     let mut everyone = room_people(sql)?;
     everyone.retain(|principal| *principal != caller.id);
@@ -310,7 +310,7 @@ pub(super) fn handle_invite_to_role(
     if found.first().and_then(|m| m["kind"].as_str()) != Some("agent") {
         return Err(ApiError::invalid_argument());
     }
-    add_invite(sql, caller, id, &principal, now)?;
+    add_invite(sql, caller, &caller.id, id, &principal, now)?;
     Ok(json!({ "role_id": id, "principal_id": principal }))
 }
 
@@ -318,12 +318,13 @@ pub(super) fn handle_invite_to_role(
 pub(super) fn add_invite(
     sql: &SqlStorage,
     actor: &Caller,
+    invited_by: &str,
     role: &str,
     principal: &str,
     now: i64,
 ) -> R<()> {
     exec(sql, "INSERT OR REPLACE INTO role_invite (role_id, principal_id, invited_by, created_at) VALUES (?, ?, ?, ?)", vec![
-        role.into(), principal.into(), actor.id.as_str().into(), now.into(),
+        role.into(), principal.into(), invited_by.into(), now.into(),
     ])?;
     audit(
         sql,
@@ -380,6 +381,27 @@ pub(super) fn handle_withdraw_role_invite(
     Ok(json!({ "role_id": id, "principal_id": principal, "withdrawn": true }))
 }
 
+/// Whether whoever made an invite can still make one. Someone who has since lost that authority no longer speaks for the
+/// room, so what they offered is gone.
+fn inviter_still_manages(sql: &SqlStorage, invited_by: &str) -> R<bool> {
+    Ok(participant(sql, invited_by)?
+        .is_some_and(|(kind, role)| kind == "person" && (role == "owner" || role == "admin")))
+}
+
+/// An opening's offer changed, so what was offered isn't what's on offer now. This covers named agents and pending links.
+fn withdraw_offers_of_role(sql: &SqlStorage, role: &str) -> R<()> {
+    exec(
+        sql,
+        "DELETE FROM role_invite WHERE role_id = ?",
+        vec![role.into()],
+    )?;
+    exec(
+        sql,
+        "UPDATE invitation SET work_role_id = NULL WHERE work_role_id = ? AND status = 'pending'",
+        vec![role.into()],
+    )
+}
+
 /// A room changed this agent's access, so an invite made before that can't later undo the change.
 pub(super) fn withdraw_role_invites(sql: &SqlStorage, principal: &str) -> R<()> {
     exec(
@@ -406,12 +428,15 @@ pub(super) fn handle_claim_role(sql: &SqlStorage, caller: &Caller, id: &str, now
         vec![caller.id.as_str().into()],
     )?;
     let holds_this = held.first().and_then(|c| c["role_id"].as_str()) == Some(id);
-    let invited = !rows(
+    let invite = rows(
         sql,
-        "SELECT role_id FROM role_invite WHERE role_id = ? AND principal_id = ?",
+        "SELECT invited_by FROM role_invite WHERE role_id = ? AND principal_id = ?",
         vec![id.into(), caller.id.as_str().into()],
-    )?
-    .is_empty();
+    )?;
+    let invited = match invite.first().and_then(|row| row["invited_by"].as_str()) {
+        Some(invited_by) => inviter_still_manages(sql, invited_by)?,
+        None => false,
+    };
     let outcome = decide_claim(&ClaimState {
         holds_this,
         holds_another: !holds_this && !held.is_empty(),
@@ -446,16 +471,7 @@ pub(super) fn handle_claim_role(sql: &SqlStorage, caller: &Caller, id: &str, now
     let org = text(&member["org_id"]).unwrap_or_default();
     let prior = store::granted_scopes(sql, &caller.id)?;
     let next = preset.scopes();
-    exec(sql, "INSERT INTO role_claim (id, role_id, principal_id, status, claimed_at, copied_preset, prior_role, prior_tasks, prior_artifacts, prior_conversations, prior_review)
-      VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)", vec![
-        format!("clm_{}", uuid::Uuid::new_v4().simple()).into(), id.into(), caller.id.as_str().into(), now.into(), preset.name().into(), prior_role.as_str().into(),
-        prior.tasks.name().into(), prior.artifacts.name().into(), prior.conversations.name().into(), prior.review.name().into(),
-    ])?;
-    exec(
-        sql,
-        "DELETE FROM role_invite WHERE role_id = ? AND principal_id = ?",
-        vec![id.into(), caller.id.as_str().into()],
-    )?;
+    // Write the grant first, so the claim records the version anything later is compared with.
     set_access(
         sql,
         &caller.id,
@@ -465,6 +481,17 @@ pub(super) fn handle_claim_role(sql: &SqlStorage, caller: &Caller, id: &str, now
         next,
         &caller.id,
         now,
+    )?;
+    let grant_version = store::grant_version(sql, &caller.id)?;
+    exec(sql, "INSERT INTO role_claim (id, role_id, principal_id, status, claimed_at, copied_preset, grant_version, prior_role, prior_tasks, prior_artifacts, prior_conversations, prior_review)
+      VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)", vec![
+        format!("clm_{}", uuid::Uuid::new_v4().simple()).into(), id.into(), caller.id.as_str().into(), now.into(), preset.name().into(), grant_version.into(), prior_role.as_str().into(),
+        prior.tasks.name().into(), prior.artifacts.name().into(), prior.conversations.name().into(), prior.review.name().into(),
+    ])?;
+    exec(
+        sql,
+        "DELETE FROM role_invite WHERE role_id = ? AND principal_id = ?",
+        vec![id.into(), caller.id.as_str().into()],
     )?;
     let parsed = parse_role(preset.role_name());
     audit(
@@ -522,9 +549,8 @@ fn set_access(
     Ok(())
 }
 
-/// Ends someone's active claim, if they have one, and works out what they keep. If nothing changed their grant while they
-/// held the opening, they go back to what they had. If something did, they keep the narrower, so ending a claim never
-/// widens anyone. `departing` is for someone leaving the room, whose tasks the departure rules are about to handle.
+/// Ends someone's active claim, if they have one, and works out what they keep. If nobody touched their grant while they
+/// held the opening, they go back to what they had. If someone did, they keep the narrower, so a room's decision stands. `departing` is for someone leaving the room, whose tasks the departure rules are about to handle.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn end_claim(
     sql: &SqlStorage,
@@ -559,15 +585,12 @@ pub(super) fn end_claim(
     let current_role = text(&member["role"]).unwrap_or_default();
     let org = text(&member["org_id"]).unwrap_or_default();
     let current = store::granted_scopes(sql, principal)?;
-    let copied = claim["copied_preset"]
-        .as_str()
-        .and_then(Preset::from_name)
-        .ok_or_else(|| ApiError::internal("bad claim"))?;
     let prior = store::scopes_from(claim, "prior_")?;
     let prior_role = text(&claim["prior_role"]).unwrap_or_default();
-    let next = scopes_after_claim(prior, copied.scopes(), current);
-    // Someone changed the role while the claim was held, so it stays theirs to have changed.
-    let role = if current_role == copied.role_name() && next == prior {
+    // The version, not the values: a room can lock someone at exactly what they already hold.
+    let untouched = store::grant_version(sql, principal)? == int(&claim["grant_version"]);
+    let next = scopes_after_claim(prior, current, untouched);
+    let role = if untouched {
         prior_role
     } else {
         current_role.clone()
@@ -684,7 +707,7 @@ pub(super) fn handle_end_claim(
     if held.is_empty() {
         return Err(ApiError::invalid_argument());
     }
-    end_claim(
+    let scopes = end_claim(
         sql,
         caller,
         kind_name(caller),
@@ -693,12 +716,27 @@ pub(super) fn handle_end_claim(
         "ended_by_room",
         false,
         now,
+    )?
+    .unwrap_or(Scopes::PUBLIC_PARTICIPANT);
+    // Ending this isn't an opening to claim another straight away. What the room offered before no longer stands.
+    withdraw_role_invites(sql, principal)?;
+    let found = rows(
+        sql,
+        "SELECT kind, role FROM member WHERE principal_id = ?",
+        vec![principal.into()],
     )?;
-    Ok(json!({ "role_id": id, "principal_id": principal, "status": "revoked" }))
+    let member = found.first().ok_or_else(ApiError::invalid_argument)?;
+    let kind = member["kind"]
+        .as_str()
+        .map_or(PrincipalKind::Agent, parse_kind);
+    let role = member["role"].as_str().map_or(Role::None, parse_role);
+    Ok(
+        json!({ "role_id": id, "principal_id": principal, "status": "revoked", "access": access_json(kind, role, scopes) }),
+    )
 }
 
-/// The room's openings, for anyone in it. Who holds them follows the same limit as the member list, so someone limited to
-/// their own tasks sees counts and their own place, not who else is here.
+/// The room's openings, for anyone in it. Who holds them, and how many do, follow the same limit as the member list, so
+/// someone limited to their own tasks sees only whether one's available and their own place.
 pub(super) fn list_roles(sql: &SqlStorage, who: &Participant) -> R<Value> {
     let caller = &who.caller;
     let found = rows(
@@ -720,14 +758,16 @@ pub(super) fn list_roles(sql: &SqlStorage, who: &Participant) -> R<Value> {
         .iter()
         .filter_map(|claim| text(&claim["principal_id"]))
         .collect();
-        let invites: Vec<String> = rows(
+        let mut invites = Vec::new();
+        for invite in rows(
             sql,
-            "SELECT principal_id FROM role_invite WHERE role_id = ? ORDER BY created_at",
+            "SELECT principal_id, invited_by FROM role_invite WHERE role_id = ? ORDER BY created_at",
             vec![id.into()],
-        )?
-        .iter()
-        .filter_map(|invite| text(&invite["principal_id"]))
-        .collect();
+        )? {
+            if inviter_still_manages(sql, invite["invited_by"].as_str().unwrap_or_default())? {
+                invites.extend(text(&invite["principal_id"]));
+            }
+        }
         let mut entry = role_json(row, holders.len() as i64);
         entry["mine"] = if holders.contains(&caller.id) {
             json!("claimed")
@@ -738,6 +778,13 @@ pub(super) fn list_roles(sql: &SqlStorage, who: &Participant) -> R<Value> {
         };
         if whole_room {
             entry["holders"] = json!(holders);
+        } else if let Some(fields) = entry.as_object_mut() {
+            // Counts follow what they can see, so someone limited to their own tasks learns only if one's available.
+            fields.remove("filled");
+            fields.insert(
+                "available".into(),
+                json!((holders.len() as i64) < int(&row["capacity"])),
+            );
         }
         if manages {
             entry["invited"] = json!(invites);

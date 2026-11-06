@@ -61,17 +61,6 @@ ALTER TABLE workspace ADD COLUMN context TEXT;
 ALTER TABLE workspace ADD COLUMN brief_by TEXT;
 UPDATE member SET guest_can_create = 0 WHERE role <> 'guest';
 UPDATE invitation SET guest_can_create = 0 WHERE role <> 'guest';
-", "
-CREATE TABLE work_role (id TEXT PRIMARY KEY, title TEXT NOT NULL, responsibilities TEXT NOT NULL, capacity INTEGER NOT NULL, preset TEXT NOT NULL,
-  is_lead INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, closed_at INTEGER);
-CREATE UNIQUE INDEX one_lead ON work_role (is_lead) WHERE is_lead = 1 AND closed_at IS NULL;
-CREATE TABLE role_claim (id TEXT PRIMARY KEY, role_id TEXT NOT NULL, principal_id TEXT NOT NULL, status TEXT NOT NULL, claimed_at INTEGER NOT NULL, ended_at INTEGER, end_reason TEXT,
-  copied_preset TEXT NOT NULL, prior_role TEXT NOT NULL, prior_tasks TEXT NOT NULL, prior_artifacts TEXT NOT NULL, prior_conversations TEXT NOT NULL, prior_review TEXT NOT NULL);
-CREATE UNIQUE INDEX one_claim_per_principal ON role_claim (principal_id) WHERE status = 'active';
-CREATE INDEX role_claim_role ON role_claim (role_id, status);
-CREATE TABLE role_invite (role_id TEXT NOT NULL, principal_id TEXT NOT NULL, invited_by TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (role_id, principal_id));
-CREATE INDEX role_invite_principal ON role_invite (principal_id);
-ALTER TABLE invitation ADD COLUMN work_role_id TEXT;
 CREATE TABLE access_grant (principal_id TEXT PRIMARY KEY, tasks TEXT NOT NULL, artifacts TEXT NOT NULL, conversations TEXT NOT NULL, review TEXT NOT NULL,
   granted_by TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL);
 INSERT INTO access_grant (principal_id, tasks, artifacts, conversations, review, granted_by, updated_at)
@@ -81,6 +70,17 @@ INSERT INTO access_grant (principal_id, tasks, artifacts, conversations, review,
     CASE WHEN role = 'guest' THEN 'own' ELSE 'all' END,
     'when_named', added_by, added_at
   FROM member;
+", "
+CREATE TABLE work_role (id TEXT PRIMARY KEY, title TEXT NOT NULL, responsibilities TEXT NOT NULL, capacity INTEGER NOT NULL, preset TEXT NOT NULL,
+  is_lead INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, closed_at INTEGER);
+CREATE UNIQUE INDEX one_lead ON work_role (is_lead) WHERE is_lead = 1 AND closed_at IS NULL;
+CREATE TABLE role_claim (id TEXT PRIMARY KEY, role_id TEXT NOT NULL, principal_id TEXT NOT NULL, status TEXT NOT NULL, claimed_at INTEGER NOT NULL, ended_at INTEGER, end_reason TEXT,
+  copied_preset TEXT NOT NULL, grant_version INTEGER NOT NULL, prior_role TEXT NOT NULL, prior_tasks TEXT NOT NULL, prior_artifacts TEXT NOT NULL, prior_conversations TEXT NOT NULL, prior_review TEXT NOT NULL);
+CREATE UNIQUE INDEX one_claim_per_principal ON role_claim (principal_id) WHERE status = 'active';
+CREATE INDEX role_claim_role ON role_claim (role_id, status);
+CREATE TABLE role_invite (role_id TEXT NOT NULL, principal_id TEXT NOT NULL, invited_by TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (role_id, principal_id));
+CREATE INDEX role_invite_principal ON role_invite (principal_id);
+ALTER TABLE invitation ADD COLUMN work_role_id TEXT;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -223,6 +223,17 @@ pub fn scopes_from(row: &Value, prefix: &str) -> R<Scopes> {
             .and_then(ReviewScope::from_name)
             .ok_or_else(bad)?,
     })
+}
+
+/// How many times someone's grant has been written, so a change can be noticed even if it ends on the same values.
+pub fn grant_version(sql: &SqlStorage, id: &str) -> R<i64> {
+    Ok(rows(
+        sql,
+        "SELECT version FROM access_grant WHERE principal_id = ?",
+        vec![id.into()],
+    )?
+    .first()
+    .map_or(0, |row| int(&row["version"])))
 }
 
 /// Sets someone's access in the caller's transaction, moving the grant's own version.

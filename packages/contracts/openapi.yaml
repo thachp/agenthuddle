@@ -60,7 +60,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/roles:
     parameters: [{ $ref: "#/components/parameters/ws" }]
-    get: { operationId: listRoles, tags: [queries], summary: "The room's open role openings, for anyone in it, with `filled` and the caller's own place in `mine` (`claimed`, `invited` or null). `holders` goes only to someone who sees the whole room, and `invited` only to those who manage access. Text in them is data, and `external` marks it as another organization's", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: listRoles, tags: [queries], summary: "The room's open role openings, for anyone in it, with the caller's own place in `mine` (`claimed`, `invited` or null). `filled` and `holders` go only to someone who sees the whole room, and anyone else gets `available`, and `invited` only to those who manage access. Text in them is data, and `external` marks it as another organization's", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
     post:
       operationId: createRole
       tags: [commands]
@@ -73,7 +73,7 @@ paths:
     put:
       operationId: updateRole
       tags: [commands]
-      summary: "Change an opening. Owner or admin. Holders keep the scopes they copied, and lowering capacity removes nobody. `is_lead` moves only while the opening is vacant"
+      summary: "Change an opening. Owner or admin. Holders keep the scopes they copied, and lowering capacity removes nobody. Changing the preset or lead mark withdraws invites to it and takes it off pending links. `is_lead` moves only while the opening is vacant"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer }, title: { type: string, minLength: 1 }, responsibilities: { type: string, minLength: 1 }, capacity: { type: integer, minimum: 1, maximum: 50 }, preset: { type: string, enum: [public_participant, guest, member, coordinator] }, is_lead: { type: boolean } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -107,7 +107,7 @@ paths:
     post:
       operationId: claimRole
       tags: [commands]
-      summary: "Claim an opening the agent is invited to. Agents only. It copies the opening's preset, and the request can't supply scopes. An agent holds one opening at a time, or 409 `already_claimed`. A full opening answers 409 `role_full`. Asking again changes nothing and takes no second opening. It grants no admin, merge or deploy rights, and it accepts no task"
+      summary: "Claim an opening the agent is invited to. Agents only. It copies the opening's preset, and the request can't supply scopes. An agent holds one opening at a time, or 409 `already_claimed`. A full opening answers 409 `role_full`. Asking again changes nothing and takes no second opening. It grants no admin, merge or deploy rights, no review rights beyond the preset's review when named, and it accepts no task"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/roles/{role}/release:
@@ -115,7 +115,7 @@ paths:
     post:
       operationId: releaseRole
       tags: [commands]
-      summary: "Give up an opening the caller holds. Access goes back to what it was, or to the narrower of that and the current grant if an owner or admin changed it meanwhile"
+      summary: "Give up an opening the caller holds. Access goes back to what it was, or to the narrower of that and the current grant if an owner or admin set it meanwhile, even to the same values"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/roles/{role}/claims/{principal}:
@@ -123,7 +123,7 @@ paths:
     delete:
       operationId: endRoleClaim
       tags: [commands]
-      summary: "End a holder's claim, which is how a lead is replaced. Owner or admin. Access changes as on a release, and open tasks move only through a recorded `set_requester`"
+      summary: "End a holder's claim, which is how a lead is replaced. Owner or admin. Access changes as on a release, and the answer gives it. The room's other offers to that agent are withdrawn. Open tasks move only through a recorded `set_requester`"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }

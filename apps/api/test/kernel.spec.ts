@@ -82,13 +82,17 @@ const offer = async (tasks: string, extra: object = {}) => {
   return r.body;
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
-/** Puts a room back to before goal, context, access grants and work roles, two migrations back from the newest. */
-const undoBriefMigration = (state: any) => {
+/** Puts a room back to what the last deployment left: everything before work roles, and only that one migration undone. */
+const undoRolesMigration = (state: any) => {
   state.storage.sql.exec("DROP TABLE work_role");
   state.storage.sql.exec("DROP TABLE role_claim");
   state.storage.sql.exec("DROP TABLE role_invite");
   state.storage.sql.exec("ALTER TABLE invitation DROP COLUMN work_role_id");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before goal, context, access grants and work roles, two migrations back from the newest. */
+const undoBriefMigration = (state: any) => {
+  undoRolesMigration(state);
   state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN goal");
   state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN context");
   state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN brief_by");
@@ -4488,9 +4492,13 @@ describe("work roles and claims", () => {
     expect((await listed(id, role)).holders).toEqual([member.id]);
     expect((await listed(id, role, LEAD)).holders).toEqual([member.id]);
     expect((await listed(id, role, LEAD)).invited).toBeUndefined();
+    expect((await listed(id, role, LEAD)).filled).toBe(1);
     const guest = await listed(id, role, BOB);
-    expect([guest.title, guest.capacity, guest.filled, guest.mine]).toEqual(["Engineer", 1, 1, null]);
+    expect([guest.title, guest.capacity, guest.available, guest.mine]).toEqual(["Engineer", 1, false, null]);
     expect(guest.holders).toBeUndefined();
+    expect(guest.filled).toBeUndefined();
+    const wide = await opening(id, { title: "Wide", capacity: 3 });
+    expect((await listed(id, wide, BOB)).available).toBe(true);
     expect((await listed(id, role, member)).mine).toBe("claimed");
     expect((await api(BOB, "GET", roles(id))).body.external).toBe(true);
     expect((await api(LEAD, "GET", roles(id))).body.external).toBe(false);
@@ -4583,6 +4591,125 @@ describe("work roles and claims", () => {
     expect((await accessOf(id, member)).role).toBe("guest");
     expect((await release(id, narrow, member)).body.access.preset).toBe("member");
     expect((await accessOf(id, member)).role).toBe("member");
+  });
+
+  it("upgrades a room that ran the last migration, keeping grants and everyone's access", async () => {
+    const { id } = await room();
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${BOB.id}/access`, { preset: "public_participant", policy_version: await version(id) })).status).toBe(200);
+    const before = await count(id, "access_grant");
+    const seen = await runInDurableObject(stub(id), (_: any, state: any) => {
+      undoRolesMigration(state);
+      return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
+    });
+    const read = await api(OWNER, "GET", `/v1/workspaces/${id}`);
+    expect(read.status).toBe(200);
+    expect(read.body.members.find((m: any) => m.principal_id === BOB.id).access.preset).toBe("public_participant");
+    expect(await count(id, "access_grant")).toBe(before);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 1);
+    const role = await opening(id);
+    expect((await invite(id, role, BOB)).status).toBe(200);
+    expect((await claim(id, role, BOB)).body.access.preset).toBe("member");
+  });
+
+  it("keeps a room's decision on release, even when it locks a holder at the values it already has", async () => {
+    const { id } = await room();
+    const role = await opening(id, { preset: "guest" });
+    const lockedSame = await join(id, "member");
+    await invite(id, role, lockedSame);
+    await claim(id, role, lockedSame);
+    const before = await version(id);
+    expect((await managed(OWNER, "PUT", `/v1/workspaces/${id}/members/${lockedSame.id}/access`, id, { preset: "guest" })).status).toBe(200);
+    expect(await version(id)).toBe(before + 1);
+    expect((await release(id, role, lockedSame)).body.access.preset).toBe("guest");
+    expect((await accessOf(id, lockedSame)).role).toBe("guest");
+    // Moved away and back ends in the same place, and still counts.
+    const moved = await join(id, "member");
+    await invite(id, role, moved);
+    await claim(id, role, moved);
+    await managed(OWNER, "PUT", `/v1/workspaces/${id}/members/${moved.id}/access`, id, { preset: "public_participant" });
+    await managed(OWNER, "PUT", `/v1/workspaces/${id}/members/${moved.id}/access`, id, { preset: "guest" });
+    expect((await release(id, role, moved)).body.access.preset).toBe("guest");
+    // The role route counts too.
+    const roleMoved = await join(id, "member");
+    await invite(id, role, roleMoved);
+    await claim(id, role, roleMoved);
+    await api(OWNER, "POST", `/v1/workspaces/${id}/members/${roleMoved.id}/role`, { role: "member" });
+    await api(OWNER, "POST", `/v1/workspaces/${id}/members/${roleMoved.id}/role`, { role: "guest" });
+    expect((await release(id, role, roleMoved)).body.access.preset).toBe("guest");
+    // Ending the claim follows the same rule, and says what the agent is left with.
+    const ended = await join(id, "member");
+    await invite(id, role, ended);
+    await claim(id, role, ended);
+    await managed(OWNER, "PUT", `/v1/workspaces/${id}/members/${ended.id}/access`, id, { preset: "guest" });
+    expect((await managed(OWNER, "DELETE", `${roles(id)}/${role}/claims/${ended.id}`, id)).body.access.preset).toBe("guest");
+    // With nothing touched, ending it restores what it had, and says so.
+    const plain = await join(id, "member");
+    await invite(id, role, plain);
+    await claim(id, role, plain);
+    expect((await managed(OWNER, "DELETE", `${roles(id)}/${role}/claims/${plain.id}`, id)).body.access.preset).toBe("member");
+  });
+
+  it("withdraws offers when an opening's terms change, a claim is ended, or the inviter loses authority", async () => {
+    const { id } = await room();
+    const role = await opening(id, { preset: "guest" });
+    const agent = await join(id);
+    await invite(id, role, agent);
+    // A title or capacity change leaves the offer alone, and a preset change doesn't.
+    expect((await managed(OWNER, "PUT", `${roles(id)}/${role}`, id, { title: "Renamed", capacity: 2 })).status).toBe(200);
+    expect((await listed(id, role, agent)).mine).toBe("invited");
+    const link = await managed(OWNER, "POST", `/v1/workspaces/${id}/invitations`, id, { role: "guest", invited_org_id: "org_b", work_role_id: role });
+    expect((await managed(OWNER, "PUT", `${roles(id)}/${role}`, id, { preset: "coordinator" })).status).toBe(200);
+    expect((await listed(id, role, agent)).mine).toBeNull();
+    expect((await claim(id, role, agent)).code).toBe("not_allowed");
+    const joiner = fresh("org_b");
+    await register(joiner);
+    const shown = await api(orgAdmin("org_b"), "POST", "/v1/invitations/preview", { token: link.body.token });
+    expect(shown.body.work_role).toBeNull();
+    expect((await api(orgAdmin("org_b"), "POST", "/v1/invitations/accept", { token: link.body.token, org_id: "org_b", agents: [joiner.id] })).status).toBe(200);
+    expect((await claim(id, role, joiner)).code).toBe("not_allowed");
+    // The lead mark too.
+    const marked = await opening(id, { title: "Becomes lead", preset: "coordinator" });
+    await invite(id, marked, agent);
+    expect((await managed(OWNER, "PUT", `${roles(id)}/${marked}`, id, { is_lead: true, capacity: 1 })).status).toBe(200);
+    expect((await claim(id, marked, agent)).code).toBe("not_allowed");
+    // An ended claim takes the room's other offers with it. A release leaves them, because that's the agent's own act.
+    const [first, second] = [await opening(id, { title: "First" }), await opening(id, { title: "Second" })];
+    await invite(id, first, agent);
+    await invite(id, second, agent);
+    expect((await claim(id, first, agent)).status).toBe(200);
+    expect((await managed(OWNER, "DELETE", `${roles(id)}/${first}/claims/${agent.id}`, id)).status).toBe(200);
+    expect((await claim(id, second, agent)).code).toBe("not_allowed");
+    // An admin who's since been removed no longer speaks for the room.
+    const admin: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: admin.id, kind: "person", org_id: "org_a", role: "admin" })).status).toBe(200);
+    await invite(id, second, agent, admin);
+    expect((await listed(id, second, agent)).mine).toBe("invited");
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${admin.id}/role`, { role: "member" })).status).toBe(200);
+    expect((await listed(id, second, agent)).mine).toBeNull();
+    expect((await claim(id, second, agent)).code).toBe("not_allowed");
+    expect((await listed(id, second)).invited).toEqual([]);
+    await invite(id, second, agent);
+    expect((await claim(id, second, agent)).status).toBe(200);
+  });
+
+  it("refuses closing, withdrawing an invite and ending a claim for anyone who doesn't manage access", async () => {
+    const { id } = await room();
+    const role = await opening(id);
+    const holder = await join(id);
+    const other = await opening(id, { title: "Other" });
+    await invite(id, role, holder);
+    await invite(id, other, BOB);
+    await claim(id, role, holder);
+    const person: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: person.id, kind: "person", org_id: "org_a", role: "member" })).status).toBe(200);
+    for (const who of [LEAD, BOB, holder, person]) {
+      expect((await managed(who, "DELETE", `${roles(id)}/${other}`, id)).code).toBe("not_allowed");
+      expect((await managed(who, "DELETE", `${roles(id)}/${other}/invites/${BOB.id}`, id)).code).toBe("not_allowed");
+      expect((await managed(who, "DELETE", `${roles(id)}/${role}/claims/${holder.id}`, id)).code).toBe("not_allowed");
+    }
+    expect((await managed(OUTSIDER, "DELETE", `${roles(id)}/${other}`, id)).code).toBe("workspace_not_found");
+    expect((await listed(id, other, BOB)).mine).toBe("invited");
+    expect((await listed(id, role)).filled).toBe(1);
   });
 
   it("never widens on release after the room narrowed the holder", async () => {
@@ -4741,6 +4868,10 @@ describe("work roles and claims", () => {
     expect((await set(coordinator, LEAD.id, flagged.version)).code).toBe("not_allowed");
     expect((await set(LEAD, LEAD.id, flagged.version)).code).toBe("not_allowed");
     expect((await set(BOB, BOB.id, flagged.version)).code).toBe("task_not_found");
+    // A hidden task answers the same however the request is formed, and a known one the same as an unknown one.
+    expect((await api(BOB, "POST", `${tasks}/${task.body.id}/set-requester`, {})).code).toBe("task_not_found");
+    expect((await api(BOB, "POST", `${tasks}/tsk_none/set-requester`, {})).code).toBe("task_not_found");
+    expect((await api(coordinator, "POST", `${tasks}/${task.body.id}/set-requester`, {})).code).toBe("not_allowed");
     const taken = await set(coordinator, coordinator.id, flagged.version);
     expect([taken.body.requester, taken.body.needs_attention]).toEqual([coordinator.id, false]);
     // It's no longer an open case, so a further change is refused.
@@ -4754,6 +4885,24 @@ describe("work roles and claims", () => {
     expect((await api(LEAD, "POST", `${tasks}/${second.body.id}/set-requester`, { version: orphan.version, requester: LEAD.id })).code).toBe("not_allowed");
     expect((await managed(OWNER, "PUT", `/v1/workspaces/${id}/members/${LEAD.id}/access`, id, { preset: "coordinator" })).status).toBe(200);
     expect((await api(LEAD, "POST", `${tasks}/${second.body.id}/set-requester`, { version: orphan.version, requester: LEAD.id })).status).toBe(200);
+  });
+
+  it("doesn't let a Coordinator take a task from a requester who came back", async () => {
+    const { id, tasks } = await room();
+    const lead = await opening(id, { preset: "coordinator", is_lead: true });
+    const coordinator = await join(id);
+    await invite(id, lead, coordinator);
+    await claim(id, lead, coordinator);
+    const requester = await join(id, "member");
+    const task = await api(requester, "POST", tasks, { title: "Back again", instructions: "x", reviewer: LEAD.id });
+    const owner = orgAdmin("org_a");
+    expect((await api(owner, "POST", `/v1/workspaces/${id}/members/${requester.id}/withdraw`, {})).status).toBe(200);
+    expect((await api(owner, "POST", `/v1/workspaces/${id}/members/${requester.id}/owner-consent`, {})).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: requester.id, kind: "agent", org_id: "org_a", role: "member" })).status).toBe(200);
+    const back = (await api(LEAD, "GET", `${tasks}/${task.body.id}`)).body.task;
+    expect(back.needs_attention).toBe(true);
+    expect((await api(coordinator, "POST", `${tasks}/${task.body.id}/set-requester`, { version: back.version, requester: coordinator.id })).code).toBe("not_allowed");
+    expect((await api(ADMIN, "POST", `${tasks}/${task.body.id}/set-requester`, { version: back.version, requester: requester.id })).status).toBe(200);
   });
 
   it("moves tasks off a reviewer whose claim takes review away, and closes only vacant openings", async () => {

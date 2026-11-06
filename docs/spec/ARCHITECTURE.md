@@ -184,7 +184,7 @@ access_grant(principal_id, tasks, artifacts, conversations, review, granted_by, 
        -- one row per participant, from their role's preset; an owner's or human admin's role overrides it
 work_role(id, title, responsibilities, capacity, preset, is_lead, version, created_by, created_at, closed_at?)
        -- at most one open lead, by a partial unique index
-role_claim(id, role_id, principal_id, status: active|released|revoked, claimed_at, ended_at?, end_reason?, copied_preset,
+role_claim(id, role_id, principal_id, status: active|released|revoked, claimed_at, ended_at?, end_reason?, copied_preset, grant_version,
            prior_role, prior_tasks, prior_artifacts, prior_conversations, prior_review)
        -- one active claim per principal, by a partial unique index, for now
 role_invite(role_id, principal_id, invited_by, created_at)

@@ -559,15 +559,20 @@ fn the_coordinator_takes_over_only_a_task_whose_requester_left_and_only_for_itse
         ..task()
     };
     assert_eq!(
-        authorize_requester_change(&lead, &orphan, "stranger"),
+        authorize_requester_change(&lead, &orphan, "stranger", false),
         Verdict::Allow
     );
     assert_eq!(
-        authorize_requester_change(&lead, &orphan, "someone_else"),
+        authorize_requester_change(&lead, &orphan, "someone_else", false),
         Verdict::Forbidden
     );
     assert_eq!(
-        authorize_requester_change(&lead, &task(), "stranger"),
+        authorize_requester_change(&lead, &task(), "stranger", false),
+        Verdict::Forbidden
+    );
+    // The flag can outlast a requester coming back, and then it's theirs again.
+    assert_eq!(
+        authorize_requester_change(&lead, &orphan, "stranger", true),
         Verdict::Forbidden
     );
     // It's the scope, not any other, and the plain action stays with owners and admins.
@@ -589,14 +594,14 @@ fn the_coordinator_takes_over_only_a_task_whose_requester_left_and_only_for_itse
             ..caller("req", Agent, Role::Member)
         };
         assert_ne!(
-            authorize_requester_change(&other, &orphan, "req"),
+            authorize_requester_change(&other, &orphan, "req", false),
             Verdict::Allow,
             "{scope:?}"
         );
     }
     let admin = caller("x", Person, Role::Admin);
     assert_eq!(
-        authorize_requester_change(&admin, &task(), "anyone"),
+        authorize_requester_change(&admin, &task(), "anyone", true),
         Verdict::Allow
     );
     let agent_admin = Caller {
@@ -604,7 +609,7 @@ fn the_coordinator_takes_over_only_a_task_whose_requester_left_and_only_for_itse
         ..caller("req", Agent, Role::Admin)
     };
     assert_ne!(
-        authorize_requester_change(&agent_admin, &orphan, "req"),
+        authorize_requester_change(&agent_admin, &orphan, "req", false),
         Verdict::Allow
     );
     let outsider = Caller {
@@ -612,8 +617,14 @@ fn the_coordinator_takes_over_only_a_task_whose_requester_left_and_only_for_itse
         ..caller("x", Agent, Role::None)
     };
     assert_eq!(
-        authorize_requester_change(&outsider, &orphan, "x"),
+        authorize_requester_change(&outsider, &orphan, "x", false),
         Verdict::NotParticipant
+    );
+    // A hidden task stays hidden, however the request is formed.
+    let guest = caller("stranger", Agent, Role::Guest);
+    assert_eq!(
+        authorize_requester_change(&guest, &orphan, "", false),
+        Verdict::Hidden
     );
 }
 
@@ -625,46 +636,41 @@ fn only_agents_claim_roles() {
 
 #[test]
 fn ending_a_claim_restores_what_was_had_and_otherwise_never_widens() {
-    // Nothing changed meanwhile: back to what it had, up or down.
+    // Nobody touched it meanwhile: back to what it had, up or down.
     assert_eq!(
-        scopes_after_claim(Scopes::GUEST, Scopes::COORDINATOR, Scopes::COORDINATOR),
+        scopes_after_claim(Scopes::GUEST, Scopes::COORDINATOR, true),
         Scopes::GUEST
     );
     assert_eq!(
-        scopes_after_claim(
-            Scopes::MEMBER,
-            Scopes::PUBLIC_PARTICIPANT,
-            Scopes::PUBLIC_PARTICIPANT
-        ),
+        scopes_after_claim(Scopes::MEMBER, Scopes::PUBLIC_PARTICIPANT, true),
         Scopes::MEMBER
     );
-    // The room changed it meanwhile: the narrower, whichever way it moved.
+    // The room set it, even to the same values: the narrower, whichever way it moved.
+    assert_eq!(
+        scopes_after_claim(Scopes::MEMBER, Scopes::GUEST, false),
+        Scopes::GUEST
+    );
     let adjusted = Scopes {
         conversations: ConversationScope::Own,
         ..Scopes::COORDINATOR
     };
-    let ended = scopes_after_claim(Scopes::MEMBER, Scopes::COORDINATOR, adjusted);
     assert_eq!(
-        ended,
+        scopes_after_claim(Scopes::MEMBER, adjusted, false),
         Scopes {
             conversations: ConversationScope::Own,
             ..Scopes::MEMBER
         }
     );
     assert_eq!(
-        scopes_after_claim(
-            Scopes::GUEST,
-            Scopes::PUBLIC_PARTICIPANT,
-            Scopes::COORDINATOR
-        ),
+        scopes_after_claim(Scopes::GUEST, Scopes::COORDINATOR, false),
         Scopes::GUEST
     );
     for prior in every_scopes() {
         for current in every_scopes() {
-            let kept = scopes_after_claim(prior, Scopes::COORDINATOR, current);
-            if current != Scopes::COORDINATOR {
-                assert_eq!(kept, prior.narrower(current));
-            }
+            assert_eq!(
+                scopes_after_claim(prior, current, false),
+                prior.narrower(current)
+            );
         }
     }
 }

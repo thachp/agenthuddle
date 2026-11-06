@@ -508,6 +508,10 @@ async function acceptance() {
       ["DELETE", `${members()}/${lead.id}`, { policy_version: 1 }],
       ["POST", `/v1/workspaces/${room}/invitations`, { role: "member", policy_version: 1 }],
       ["POST", `${members()}/${lead.id}/clear-removal`, { policy_version: 1 }],
+      ["POST", `/v1/workspaces/${room}/roles`, { title: "Mine", responsibilities: "x", preset: "member", policy_version: 1 }],
+      ["POST", `/v1/workspaces/${room}/roles/rol_x/invites`, { principal_id: guest.id, policy_version: 1 }],
+      ["DELETE", `/v1/workspaces/${room}/roles/rol_x`, { policy_version: 1 }],
+      ["DELETE", `/v1/workspaces/${room}/roles/rol_x/claims/${lead.id}`, { policy_version: 1 }],
     ]) refused(await personB.dash(method, path, body), "workspace_not_found", `a person outside the room: ${method} ${path}`);
     eq(await roleOf(personA, room, lead.id), "member", "lead's role afterward");
     return "agent callers on the API route itself are apps/api's test; no public route lets an agent get there";

@@ -454,7 +454,10 @@ fn handle_task_command(
     let verdict = if action == TaskAction::SetReviewer {
         authorize_reviewer_change(caller, &task)
     } else if action == TaskAction::SetRequester {
-        authorize_requester_change(caller, &task, &required(body, "requester")?)
+        // Authority first, so a malformed body can't tell someone a hidden task exists. `parse_command` refuses it next.
+        let requester = body["requester"].as_str().unwrap_or_default();
+        let here = participant(sql, &task.requester)?.is_some();
+        authorize_requester_change(caller, &task, requester, here)
     } else {
         authorize_task(caller, &task, action)
     };
@@ -1200,7 +1203,15 @@ fn handle_change_access(
     let prior_role = text(&member["role"]).unwrap_or_default();
     let role = preset.map_or(prior_role.clone(), |p| p.role_name().to_string());
     let answer = |scopes| json!({ "principal_id": principal, "role": role, "access": access_json(PrincipalKind::Agent, parse_role(&role), scopes) });
-    if next == prior && role == prior_role {
+    // On someone holding an opening, an explicit call counts even with the same values: it's the room choosing to keep
+    // them there, and releasing the opening mustn't undo that.
+    let holds_opening = !rows(
+        sql,
+        "SELECT id FROM role_claim WHERE principal_id = ? AND status = 'active'",
+        vec![principal.into()],
+    )?
+    .is_empty();
+    if next == prior && role == prior_role && !holds_opening {
         return Ok(answer(prior));
     }
     let org = text(&member["org_id"]).unwrap_or_default();
@@ -2657,7 +2668,9 @@ impl Workspace {
                         )?
                         .is_empty();
                         if open {
-                            roles::add_invite(&sql, &actor, work_role, agent, now)?;
+                            // The room's person made the offer, not the one accepting, and a claim rechecks them.
+                            let offered_by = text(&found["created_by"]).unwrap_or_default();
+                            roles::add_invite(&sql, &actor, &offered_by, work_role, agent, now)?;
                         }
                     }
                 }
