@@ -256,8 +256,8 @@ async function settle(page) {
 /** Waits until React has taken over the page, so keys and clicks reach it. */
 async function hydrated(page) {
   await page.waitForFunction(() => {
-    const element = document.querySelector("a[href], button, input");
-    return !element || Object.keys(element).some((name) => name.startsWith("__reactProps"));
+    // Every control, because parts of a page hydrate at different times: the shell's first link says nothing about a form further down.
+    return [...document.querySelectorAll("a[href], button, input, textarea, select")].every((element) => Object.keys(element).some((name) => name.startsWith("__reactProps")));
   });
 }
 
@@ -402,6 +402,45 @@ async function keyboardPaths(s) {
     ok(await page.evaluate(() => document.activeElement?.id === "main-content"), `after creating, focus is on ${await activeText(page)}, not on the new screen's main region`);
     await page.keyboard.press("Tab");
     ok(await page.evaluate(() => document.getElementById("main-content").contains(document.activeElement)), `Tab from the new screen's main region went to ${await activeText(page)}, not into that screen`);
+  });
+
+  await keyboardPath("a create form filled in before the page is ready still sends what it shows", async () => {
+    const own = await contextFor(s.owner).newPage();
+    let body;
+    await own.route("**/api/v1/workspaces", (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      body = route.request().postDataJSON();
+      return route.fulfill({ status: 403, json: { error: { code: "not_allowed" } } });
+    });
+    // Scripts held back, as on a slow connection, so nothing is hydrated while this types.
+    let release;
+    const ready = new Promise((done) => (release = done));
+    await own.route(/_next\/static\/.*\.js/, async (route) => {
+      await ready;
+      await route.continue();
+    });
+    try {
+      await own.goto(`${app}/workrooms/new`, { waitUntil: "commit" });
+      const name = own.getByRole("textbox", { name: "Name" });
+      await name.waitFor();
+      const fields = own.locator("form textarea");
+      await name.focus();
+      await own.keyboard.type("Early room");
+      await fields.nth(0).focus();
+      await own.keyboard.type("Early goal");
+      await fields.nth(1).focus();
+      await own.keyboard.type("Early context");
+      release();
+      await hydrated(own);
+      await name.focus();
+      await own.keyboard.press("Enter");
+      await own.getByRole("alert").filter({ hasText: "no workroom was created" }).waitFor({ timeout: 15_000 });
+      ok(body?.name === "Early room", `it sent the name ${JSON.stringify(body?.name)}`);
+      ok(JSON.stringify(body).includes("Early goal") && JSON.stringify(body).includes("Early context"), `it left out what was typed: ${JSON.stringify(body)}`);
+    } finally {
+      release();
+      await own.close();
+    }
   });
 
   await keyboardPath("a refused create keeps focus and says why", async () => {

@@ -70,6 +70,17 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
   const [limited, setLimited] = useState(false);
   const keys = useRef(new Map<number, string>());
   const noticeRef = useRef<HTMLDivElement>(null);
+  const nameField = useRef<HTMLInputElement>(null);
+  const goalField = useRef<HTMLTextAreaElement>(null);
+  const contextField = useRef<HTMLTextAreaElement>(null);
+
+  // What's typed before the page hydrates, or restored by the browser, shows in the fields without React hearing of it. Without
+  // this, the form would look filled in while sending nothing of it.
+  useEffect(() => {
+    if (nameField.current?.value) setName(nameField.current.value);
+    if (goalField.current?.value) setGoal(goalField.current.value);
+    if (contextField.current?.value) setContext(contextField.current.value);
+  }, []);
   const addRef = useRef<HTMLButtonElement>(null);
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -175,21 +186,21 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
     <form onSubmit={create} className="space-y-4">
       <label className="block space-y-1">
         <span className="font-medium">Name</span>
-        <Input value={name} required autoFocus readOnly={locked} aria-invalid={tooLong} aria-describedby="workroom-name-help" onChange={(event) => setName(event.target.value)} />
+        <Input ref={nameField} value={name} required autoFocus readOnly={locked} aria-invalid={tooLong} aria-describedby="workroom-name-help" onChange={(event) => setName(event.target.value)} />
       </label>
       <p id="workroom-name-help" className="text-sm text-muted-foreground">
         {tooLong ? "That's too long. Names can be up to 200 bytes." : "People and agents in this workroom will see it."}
       </p>
       <label className="block space-y-1">
         <span className="font-medium">Goal (optional)</span>
-        <textarea className={TEXTAREA} rows={2} value={goal} readOnly={locked} aria-invalid={goalTooLong} aria-describedby="workroom-goal-help" onChange={(event) => setGoal(event.target.value)} />
+        <textarea ref={goalField} className={TEXTAREA} rows={2} value={goal} readOnly={locked} aria-invalid={goalTooLong} aria-describedby="workroom-goal-help" onChange={(event) => setGoal(event.target.value)} />
       </label>
       <p id="workroom-goal-help" className="text-sm text-muted-foreground">
         {goalTooLong ? "That's too long. A goal can be up to 2,048 bytes." : "What this workroom is for."}
       </p>
       <label className="block space-y-1">
         <span className="font-medium">Context (optional)</span>
-        <textarea className={TEXTAREA} rows={5} value={context} readOnly={locked} aria-invalid={contextTooLong} aria-describedby="workroom-context-help" onChange={(event) => setContext(event.target.value)} />
+        <textarea ref={contextField} className={TEXTAREA} rows={5} value={context} readOnly={locked} aria-invalid={contextTooLong} aria-describedby="workroom-context-help" onChange={(event) => setContext(event.target.value)} />
       </label>
       <p id="workroom-context-help" className="text-sm text-muted-foreground">
         {contextTooLong ? "That's too long. Context can be up to 32,768 bytes." : "Anything participants should know. Everyone in this workroom can read it, and it gives no one any permission."}
