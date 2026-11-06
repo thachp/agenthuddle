@@ -5220,6 +5220,29 @@ describe("the activity list and the workroom brief", () => {
     expect(mine.find((e) => e.type === "task.accepted").external).toBe(false);
   });
 
+  it("reads newest first, with the same filter, and pages back with no counts", async () => {
+    const { id, tasks } = await room();
+    const own = await offer(tasks, { title: "Bob's" });
+    await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id, title: "Hidden" });
+    await api(LEAD, "POST", `${tasks}/${own.id}/messages`, { body: "later" });
+    const oldest = await all(BOB, id);
+    const newest: any[] = [];
+    let before: string | null = null;
+    for (let page = 0; page < 20; page++) {
+      const r: any = await api(BOB, "GET", `${activity(id)}?order=newest&limit=2${before ? `&before=${before}` : ""}`);
+      expect(r.status).toBe(200);
+      newest.push(...r.body.events);
+      before = r.body.next_before;
+      if (!before) break;
+    }
+    expect(newest).toEqual([...oldest].reverse());
+    expect(newest[0].type).toBe("task.message");
+    expect(JSON.stringify(newest)).not.toContain("Hidden");
+    expect((await api(BOB, "GET", `${activity(id)}?before=evt_none`)).code).toBe("invalid_argument");
+    expect((await api(BOB, "GET", `${activity(id)}?after=${newest[0].id}&before=${newest[0].id}`)).code).toBe("invalid_argument");
+    expect((await api(BOB, "GET", `${activity(id)}?order=newest`)).body.events[0].id).toBe(newest[0].id);
+  });
+
   it("filters to nothing, the same way, for a hidden task and an unknown one", async () => {
     const { id, tasks } = await room();
     const hidden = await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id });

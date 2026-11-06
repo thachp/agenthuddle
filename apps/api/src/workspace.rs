@@ -2121,23 +2121,33 @@ mod queries {
         if !(1..=ACTIVITY_PAGE).contains(&limit) {
             return Err(ApiError::invalid_argument());
         }
-        let after = match query_str(url, "after") {
-            None => 0,
-            Some(id) => rows(
+        // An event's own ID is the cursor, in either direction, so nothing here counts what the viewer can't see.
+        let seq_of = |id: String| -> R<i64> {
+            rows(
                 sql,
                 "SELECT seq FROM event WHERE id = ?",
                 vec![id.as_str().into()],
             )?
             .first()
             .map(|row| int(&row["seq"]))
-            .ok_or_else(ApiError::invalid_argument)?,
+            .ok_or_else(ApiError::invalid_argument)
+        };
+        let (after, before) = (query_str(url, "after"), query_str(url, "before"));
+        let newest = before.is_some() || query_str(url, "order").as_deref() == Some("newest");
+        if newest && after.is_some() {
+            return Err(ApiError::invalid_argument());
+        }
+        let edge = if newest {
+            before.map_or(Ok(i64::MAX), seq_of)?
+        } else {
+            after.map_or(Ok(0), seq_of)?
         };
         let task_filter = query_str(url, "task");
         let actor_filter = query_str(url, "actor");
         let id = caller.id.as_str();
         // Someone who sees the whole room gets every task's and room's events. Otherwise, their own tasks, the room's
         // events for everyone, and what they did themselves.
-        let mut query = "SELECT seq, id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, created_at FROM event WHERE seq > ?1 AND (?2 IS NULL OR task_id = ?2) AND (?3 IS NULL OR actor_id = ?3)".to_string();
+        let mut query = "SELECT seq, id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, created_at FROM event WHERE seq COMPARE ?1 AND (?2 IS NULL OR task_id = ?2) AND (?3 IS NULL OR actor_id = ?3)".replace("COMPARE", if newest { "<" } else { ">" });
         let whole_room = sees_whole_room(caller);
         if !whole_room {
             let everyone = EVENTS_FOR_EVERYONE
@@ -2145,12 +2155,13 @@ mod queries {
                 .join(", ");
             query.push_str(&format!(" AND ((task_id IS NULL AND (type IN ({everyone}) OR actor_id = ?4)) OR task_id IN (SELECT id FROM task WHERE requester_id = ?4 OR assignee_id = ?4 OR reviewer_id = ?4))"));
         }
-        query.push_str(if whole_room {
-            " ORDER BY seq LIMIT ?4"
+        query.push_str(if newest {
+            " ORDER BY seq DESC"
         } else {
-            " ORDER BY seq LIMIT ?5"
+            " ORDER BY seq"
         });
-        let mut bindings = vec![after.into(), opt(&task_filter), opt(&actor_filter)];
+        query.push_str(if whole_room { " LIMIT ?4" } else { " LIMIT ?5" });
+        let mut bindings = vec![edge.into(), opt(&task_filter), opt(&actor_filter)];
         if !whole_room {
             bindings.push(id.into());
         }
@@ -2189,7 +2200,11 @@ mod queries {
             }));
         }
         let next = (found.len() as i64 == limit).then_some(last).flatten();
-        Ok(json!({ "events": events, "next_after": next }))
+        Ok(if newest {
+            json!({ "events": events, "next_before": next })
+        } else {
+            json!({ "events": events, "next_after": next })
+        })
     }
 
     /// Changes that were refused for lack of authority, newest first, for those who may read the audit log.

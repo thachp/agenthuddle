@@ -380,6 +380,22 @@ async function keyboardPaths(s) {
     await phone.close();
   });
 
+  await keyboardPath("filter the room's activity, also at phone width", async () => {
+    await page.goto(`${app}/w/${s.room}/activity`);
+    await hydrated(page);
+    const filter = page.getByRole("button", { name: "Filter" });
+    await tabTo(page, filter, "Filter");
+    await page.keyboard.press("Enter");
+    await page.waitForURL(/activity\?/, { timeout: 15_000 });
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    await small.goto(`${app}/w/${s.room}/activity`);
+    await small.getByRole("button", { name: "Filter" }).waitFor({ timeout: 15_000 });
+    const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    ok(overflow <= 0, `activity scrolls sideways by ${overflow}px at 375px`);
+    await phone.close();
+  });
+
   await keyboardPath("review a task", async () => {
     await page.goto(`${app}/w/${s.room}/tasks`);
     await hydrated(page);

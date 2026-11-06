@@ -67,6 +67,9 @@ const AUDIT_ACTIONS: Record<string, string> = {
 
 export const auditAction = (action: string) => AUDIT_ACTIONS[action] ?? action;
 
+/** An ID from a URL, kept only if it could be one, so a typed URL can't reach the API as anything else. */
+export const safeId = (value: string | string[] | undefined) => (typeof value === "string" && /^[\w-]{1,128}$/.test(value) ? value : null);
+
 export const pageAfter = (value: string | string[] | undefined) => (typeof value === "string" && /^\d{1,15}$/.test(value) ? Number(value) : 0);
 
 /** A room's own changes have no target to show, and "workspace" is an internal word. */
