@@ -1,6 +1,6 @@
 //! SQLite access for a workspace: schema, row mapping and writes shared by commands.
 use crate::error::ApiError;
-use podster_core::{Decision, EventKind, Task, TaskStatus};
+use podster_core::{handoff_of, Decision, EventKind, HandoffKind, Task, TaskStatus};
 use podster_policy::{ArtifactScope, ConversationScope, ReviewScope, Scopes, TaskScope};
 use serde_json::Value;
 use std::{cell::RefCell, rc::Rc};
@@ -83,6 +83,12 @@ CREATE INDEX role_invite_principal ON role_invite (principal_id);
 ALTER TABLE invitation ADD COLUMN work_role_id TEXT;
 ", "
 ALTER TABLE workspace ADD COLUMN require_person_review INTEGER NOT NULL DEFAULT 0;
+", "
+CREATE TABLE handoff (seq INTEGER PRIMARY KEY AUTOINCREMENT, from_id TEXT NOT NULL, to_id TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX handoff_edge ON handoff (from_id, to_id, kind, created_at);
+CREATE INDEX handoff_line ON handoff (from_id, to_id, seq);
+CREATE INDEX handoff_task ON handoff (task_id);
+CREATE INDEX event_actor ON event (actor_id, created_at);
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -225,6 +231,28 @@ pub fn scopes_from(row: &Value, prefix: &str) -> R<Scopes> {
             .and_then(ReviewScope::from_name)
             .ok_or_else(bad)?,
     })
+}
+
+/// Records a handoff with its event, so a collaboration line says what happened, whoever holds the task later.
+pub fn record_handoff(
+    sql: &SqlStorage,
+    from: &str,
+    to: &str,
+    kind: HandoffKind,
+    task: &str,
+    now: i64,
+) -> R<()> {
+    exec(
+        sql,
+        "INSERT INTO handoff (from_id, to_id, kind, task_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        vec![
+            from.into(),
+            to.into(),
+            kind.name().into(),
+            task.into(),
+            now.into(),
+        ],
+    )
 }
 
 /// Whether this room requires a person to review (decision 5).
@@ -393,6 +421,12 @@ pub fn record_decision(
     now: i64,
 ) -> R<()> {
     for draft in &decision.events {
+        // Only to someone still here, as with a message: work can't be handed to someone who has left.
+        if let Some((kind, to)) = handoff_of(draft.kind, actor, &decision.task) {
+            if participant(sql, to)?.is_some() {
+                record_handoff(sql, actor, to, kind, &decision.task.id, now)?;
+            }
+        }
         let mut recipients: Vec<String> = draft.recipients.iter().cloned().collect();
         if draft.kind == EventKind::TaskNeedsAttention {
             recipients.extend(room_admins(sql)?);

@@ -1203,3 +1203,45 @@ fn a_claim_needs_an_invite_and_an_opening_and_asking_again_takes_nothing() {
         Ok(ClaimOutcome::AlreadyHeld)
     );
 }
+
+#[test]
+fn handoffs_are_offers_submissions_and_change_requests_between_two_participants() {
+    let named = Task {
+        requester: "req".into(),
+        assignee: Some("asg".into()),
+        reviewer: "rev".into(),
+        ..task(Submitted)
+    };
+    assert_eq!(
+        handoff_of(EventKind::TaskOffered, "req", &named),
+        Some((HandoffKind::Offer, "asg"))
+    );
+    // A reassignment's own event tells the old assignee, and the offer that comes with it is the handoff.
+    assert_eq!(handoff_of(EventKind::TaskReassigned, "req", &named), None);
+    assert_eq!(
+        handoff_of(EventKind::TaskSubmitted, "asg", &named),
+        Some((HandoffKind::Submission, "rev"))
+    );
+    assert_eq!(
+        handoff_of(EventKind::TaskChangesRequested, "rev", &named),
+        Some((HandoffKind::ChangeRequest, "asg"))
+    );
+    // Handing work to yourself isn't a handoff, and nor is anything else that happens to a task.
+    assert_eq!(handoff_of(EventKind::TaskOffered, "asg", &named), None);
+    assert_eq!(handoff_of(EventKind::TaskAccepted, "asg", &named), None);
+    assert_eq!(handoff_of(EventKind::TaskCompleted, "rev", &named), None);
+    assert_eq!(
+        handoff_of(EventKind::TaskNeedsAttention, "req", &named),
+        None
+    );
+    // Changes requested on a task whose assignee left go to nobody.
+    let open = Task {
+        assignee: None,
+        ..named
+    };
+    assert_eq!(
+        handoff_of(EventKind::TaskChangesRequested, "rev", &open),
+        None
+    );
+    assert_eq!(HandoffKind::ChangeRequest.name(), "change_request");
+}

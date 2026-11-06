@@ -9,6 +9,7 @@ import { loadNames, loadTasks, orgNamesOf, orgRows } from "../tasks/load-tasks";
 import { kindOf, nameOf, textNameOf } from "../tasks/task-model";
 import { FIELD, MOBILE_TARGET } from "../team/field";
 import { membersOf } from "../team/model";
+import { ClearFilters } from "./clear-filters";
 import { eventVerb, safeId } from "./model";
 import { Time } from "./time";
 
@@ -39,7 +40,9 @@ export default async function Activity({ params, searchParams }: { params: Promi
   const pageLink = (cursor: string) => `${base}?${new URLSearchParams({ before: cursor, ...Object.fromEntries(filters) })}`;
   return (
     <section className="max-w-3xl space-y-3">
-      <h1 className="text-2xl font-semibold">Activity</h1>
+      <h1 id="activity-heading" tabIndex={-1} className="text-2xl font-semibold outline-none">
+        Activity
+      </h1>
       <p className="text-sm text-muted-foreground">What happened here, newest first, as far as you may see it. Reading this changes nothing in anyone's inbox.</p>
       {/* Keyed on the filters, because a default value only applies on mount, and Clear, Back and Forward don't remount otherwise. */}
       <form key={filters.toString()} method="get" action={base} className="flex flex-wrap items-end gap-3 rounded-lg border p-3">
@@ -70,9 +73,7 @@ export default async function Activity({ params, searchParams }: { params: Promi
           Filter
         </Button>
         {filtered ? (
-          <Link href={base} prefetch={false} className="text-sm text-primary underline">
-            Clear
-          </Link>
+          <ClearFilters href={base} />
         ) : null}
       </form>
       {events.ok ? (

@@ -15,16 +15,17 @@ use crate::{
 use podster_assertion::TargetMember;
 use podster_core::{
     apply_departure, apply_review_ended, decide, decide_claim, decide_create, validate_brief,
-    validate_role, Artifact, ClaimOutcome, ClaimRefusal, ClaimState, Command, NewTask, Observed,
-    Task, TaskPatch, TaskStatus, MAX_MESSAGE_BYTES,
+    validate_role, Artifact, ClaimOutcome, ClaimRefusal, ClaimState, Command, HandoffKind, NewTask,
+    Observed, Task, TaskPatch, TaskStatus, MAX_MESSAGE_BYTES,
 };
 use podster_policy::{
     authorize_requester_change, authorize_reviewer_change, authorize_task, authorize_workroom,
     can_review, can_see_event, can_see_task, denied_change_name, effective_scopes,
     is_authority_refusal, may_claim_role, may_decide_review, may_recover_ownership,
-    org_departure_ends, owner_authority_holds, scopes_after_claim, sees_whole_room, task_view,
-    ArtifactScope, ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope,
-    Role, Scopes, TaskAction, TaskScope, Verdict, WorkroomAction, EVENTS_FOR_EVERYONE,
+    org_departure_ends, owner_authority_holds, reads_every_thread, scopes_after_claim,
+    sees_whole_room, task_view, ArtifactScope, ArtifactView, Caller, ConversationScope, Preset,
+    PrincipalKind, ReviewScope, Role, Scopes, TaskAction, TaskScope, Verdict, WorkroomAction,
+    EVENTS_FOR_EVERYONE,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -70,6 +71,7 @@ const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 type Identity = Verified;
 
+mod collaboration;
 mod roles;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
@@ -569,6 +571,7 @@ fn handle_send_message(
     let mut recipients = Vec::new();
     for party in parties {
         if party != caller.id && participant(sql, &party)?.is_some() {
+            store::record_handoff(sql, &caller.id, &party, HandoffKind::Message, task_id, now)?;
             recipients.push(party);
         }
     }
@@ -3449,6 +3452,10 @@ impl Workspace {
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
                 ["roles"] => roles::list_roles(&sql, &who),
+                ["collaboration"] => collaboration::read_map(&sql, &who),
+                ["collaboration", "handoffs"] => collaboration::read_edge(&sql, &who, &url),
+                #[cfg(feature = "failpoints")]
+                ["collaboration", "costs"] => collaboration::read_costs(&sql, &who, &url),
                 ["brief"] => queries::get_brief(&sql, &who),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
