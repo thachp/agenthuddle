@@ -385,6 +385,51 @@ describe("Needs my review in a room past one page", () => {
     expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
   });
 
+  it("never loses a row when an old task joins the list and the first page ends sooner", async () => {
+    const user = userEvent.setup();
+    setUrl("/w/ws_1/tasks?review=mine");
+    const older = task("older", { status: "submitted", reviewer: "per_me" });
+    const between = task("between", { status: "submitted", reviewer: "per_me" });
+    const later = task("later", { status: "submitted", reviewer: "per_me" });
+    replies[QUERY] = { tasks: [mine, between], next_cursor: 7 };
+    replies["cursor=7&status=submitted&mine=true"] = { tasks: [later], next_cursor: null };
+    const { rerender } = show();
+    await screen.findByRole("link", { name: "Title between" });
+    await user.click(button());
+    await screen.findByRole("link", { name: "Title later" });
+    // A page holds the same number of rows, so the old task pushes "between" off the end of the first page.
+    replies[QUERY] = { tasks: [older, mine], next_cursor: 6 };
+    replies["cursor=6&status=submitted&mine=true"] = { tasks: [between, later], next_cursor: null };
+    rerender(screenWith([task("a")], 50));
+    await screen.findByRole("link", { name: "Title older" });
+    // The way back to it is the cursor the new first page gave, not a gap nothing would fetch.
+    await user.click(button());
+    expect(await screen.findByRole("link", { name: "Title between" })).toBeInTheDocument();
+    expect(reads.at(-1)).toBe("cursor=6&status=submitted&mine=true");
+    expect(screen.getByRole("link", { name: "Title later" })).toBeInTheDocument();
+  });
+
+  it("keeps later pages when the first page reaches past where they start, without listing a row twice", async () => {
+    const user = userEvent.setup();
+    setUrl("/w/ws_1/tasks?review=mine");
+    const second = task("second", { status: "submitted", reviewer: "per_me" });
+    replies[QUERY] = { tasks: [mine], next_cursor: 7 };
+    replies["cursor=7&status=submitted&mine=true"] = { tasks: [second], next_cursor: 9 };
+    const { rerender } = show();
+    await screen.findByRole("link", { name: "Title mine" });
+    await user.click(button());
+    await screen.findByRole("link", { name: "Title second" });
+    replies[QUERY] = { tasks: [second], next_cursor: 8 };
+    rerender(screenWith([task("a")], 50));
+    await waitFor(() => expect(reads.filter((query) => query === QUERY)).toHaveLength(2));
+    await settled();
+    expect(screen.getAllByRole("link", { name: "Title second" })).toHaveLength(1);
+    expect(button()).toBeInTheDocument();
+    replies["cursor=9&status=submitted&mine=true"] = { tasks: [], next_cursor: null };
+    await user.click(button());
+    await waitFor(() => expect(reads.at(-1)).toBe("cursor=9&status=submitted&mine=true"));
+  });
+
   it("drops later pages when the first page now ends the list", async () => {
     const user = userEvent.setup();
     setUrl("/w/ws_1/tasks?review=mine");
