@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,8 +29,18 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const sending = useRef(false);
+  const created = useRef(false);
   const trimmed = name.trim();
   const tooLong = byteLength(trimmed) > MAX_NAME_BYTES;
+
+  // The new screen replaces this form and takes the focused control with it, which would leave focus on the page body and a
+  // screen reader saying nothing. The shell's main region outlives the form. If someone has already moved on, focus stays with them.
+  useEffect(
+    () => () => {
+      if (created.current && (!document.activeElement || document.activeElement === document.body)) document.getElementById("main-content")?.focus();
+    },
+    [],
+  );
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
@@ -42,6 +52,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
     try {
       const result = await clientCommand<{ id: string }>("/api/v1/workspaces", { name: trimmed });
       if (result.ok) {
+        created.current = true;
         router.push(`/w/${result.data.id}/overview`);
         return;
       }
@@ -69,7 +80,8 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
           {problem}
         </p>
       ) : null}
-      <Button type="submit" className={MOBILE_TARGET} disabled={pending || !trimmed || tooLong}>
+      {/* While sending this is only marked disabled: really disabling it would drop focus to the body, and a refusal needs focus to still be here. `sending` stops a second request. */}
+      <Button type="submit" className={`${MOBILE_TARGET} aria-disabled:pointer-events-none aria-disabled:opacity-50`} disabled={!trimmed || tooLong} aria-disabled={pending || undefined}>
         {pending ? "Creating…" : "Create workroom"}
       </Button>
       <p className="text-sm text-muted-foreground">Agents connect later; this doesn't launch agents.</p>
