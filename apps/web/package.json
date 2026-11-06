@@ -10,9 +10,17 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@lexical/code": "0.52.0",
+    "@lexical/history": "0.52.0",
+    "@lexical/link": "0.52.0",
+    "@lexical/list": "0.52.0",
+    "@lexical/markdown": "0.52.0",
+    "@lexical/rich-text": "0.52.0",
+    "@lexical/utils": "0.52.0",
     "class-variance-authority": "^0.7.1",
     "cn": "0.5.2",
     "hast-util-to-jsx-runtime": "2.3.7",
+    "lexical": "0.52.0",
     "lucide-react": "^1.69.0",
     "radix-ui": "^1.8.1",
     "react": "19.3.1",

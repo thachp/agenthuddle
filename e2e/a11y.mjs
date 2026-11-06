@@ -10,6 +10,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 import { chromium } from "playwright";
 import { AuthAgent, key, ok, Person, Target } from "./lib.mjs";
 
@@ -99,6 +100,7 @@ async function seed() {
   await guest.must("accept_task", { ...at(linkThread), version: linkThread.version });
   for (let i = 0; i < 6; i++) await guest.must("send_message", { ...at(linkThread), body: `[link ${i}](https://example.com/${i})\n\n${"## A heading\n\n- A bullet with some words\n- Another bullet\n\n".repeat(120)}`.slice(0, 8 * 1024) });
   const numberedBrief = await make("Task with a long numbered list", { instructions: Array.from({ length: 120 }, (_, i) => `${i + 1}. An item`).join("\n") });
+  const composeTask = await make("Task for the message box", { assignee: guest.id });
   // A long brief that has to end up formatted: this proves the worker runs, under the real CSP, from the real build.
   // Nothing limits this one but the clock: it parses for over a second, with nothing deep and little rendered.
   const slowBrief = await make("Task with a slow brief", { instructions: runOfMarks });
@@ -169,7 +171,7 @@ async function seed() {
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
   const opening = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Lead coordinator", responsibilities: "Plans the work and **follows up**.", is_lead: true, policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
-  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -944,6 +946,228 @@ async function keyboardPaths(s) {
       await own.close();
       if (viewport) await context.close();
     }
+  });
+
+  // Opens the Discussion tab, and focuses the box by keyboard, which is what loads the editor.
+  const openBox = async (context) => {
+    const own = await context.newPage();
+    await own.goto(`${app}/w/${s.room}/tasks?task=${s.composeTask.id}`);
+    const sheet = own.getByRole("dialog");
+    await sheet.getByRole("tab", { name: /^Discussion/ }).click();
+    await hydrated(own);
+    return { own, sheet, box: sheet.getByRole("textbox", { name: "Post a message" }) };
+  };
+  const pasteInto = (box, text, html) =>
+    box.evaluate((el, [plain, markup]) => {
+      const data = new DataTransfer();
+      data.setData("text/plain", plain);
+      if (markup) data.setData("text/html", markup);
+      el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+    }, [text, html]);
+  const editable = (box) => box.evaluate((el) => el.isContentEditable).catch(() => false);
+  const untilEditor = async (sheet) => {
+    await sheet.locator('[role="textbox"][contenteditable="true"]').waitFor({ timeout: 15_000 });
+    return sheet.locator('[role="textbox"][contenteditable="true"]');
+  };
+
+  await keyboardPath("the message box loads its editor only when used, under the real CSP", async () => {
+    const { own, sheet, box } = await openBox(contextFor(s.owner));
+    const refused = [];
+    own.on("console", (message) => {
+      if (/Content Security Policy/.test(message.text())) refused.push(message.text());
+    });
+    ok(!(await editable(box)), "the box is an editor before it's used");
+    const loaded = [];
+    own.on("response", async (response) => {
+      if (/\.js(\?|$)/.test(response.url())) loaded.push(response.body().then((body) => ({ url: response.url(), size: body.length, gzip: gzipSync(body).length })));
+    });
+    const focusAt = Date.now();
+    await box.focus();
+    const editor = await untilEditor(sheet);
+    await own.waitForFunction(() => document.activeElement?.getAttribute("role") === "textbox", null, { timeout: 5_000 });
+    console.log(`     editor ready ${Date.now() - focusAt}ms after focus, locally`);
+    const chunks = await Promise.all(loaded);
+    const [raw, gzip] = [chunks.reduce((sum, chunk) => sum + chunk.size, 0), chunks.reduce((sum, chunk) => sum + chunk.gzip, 0)];
+    console.log(`     loaded on first use: ${chunks.length} scripts, ${Math.round(raw / 1024)} KB, ${Math.round(gzip / 1024)} KB gzipped`);
+    ok(chunks.length > 0, "nothing loaded when the box was used, so this proves nothing");
+    await audit(own, "Message editor");
+    await own.keyboard.type("Plain task_id then **bold** end");
+    await own.waitForTimeout(100);
+    ok((await editor.locator("strong, b, .font-bold").count()) === 1, "typing Markdown didn't format it");
+    ok(refused.length === 0, `the policy refused something: ${refused[0]}`);
+    await own.close();
+  });
+
+  await keyboardPath("the message box works by keyboard, and sends what it shows", async () => {
+    const { own, sheet, box } = await openBox(contextFor(s.owner));
+    const sent = [];
+    own.on("request", (request) => {
+      if (request.method() === "POST" && /\/messages$/.test(new URL(request.url()).pathname)) sent.push({ body: request.postDataJSON().body, key: request.headers()["idempotency-key"] });
+    });
+    await box.focus();
+    const editor = await untilEditor(sheet);
+    await own.waitForFunction(() => document.activeElement?.getAttribute("role") === "textbox");
+    await own.keyboard.type("**bold** word and task_id");
+    // Shift+Tab reaches the toolbar, and Tab doesn't get stuck in the box.
+    await own.keyboard.press("Shift+Tab");
+    ok(await own.evaluate(() => Boolean(document.activeElement?.closest('[role="toolbar"]'))), "Shift+Tab didn't reach the toolbar");
+    await own.keyboard.press("Tab");
+    await tabTo(own, sheet.getByRole("button", { name: "Show as Markdown" }), "the Markdown toggle");
+    await own.keyboard.press("Enter");
+    const plain = sheet.locator("textarea#thread-message");
+    await plain.waitFor({ timeout: 5_000 });
+    const written = await plain.inputValue();
+    ok(written === "**bold** word and task_id", `the box says it will send ${JSON.stringify(written)}`);
+    await tabTo(own, sheet.getByRole("button", { name: "Use formatting" }), "the formatting toggle");
+    await own.keyboard.press("Enter");
+    await untilEditor(sheet);
+    await tabTo(own, sheet.getByRole("button", { name: "Post message" }), "the post button");
+    await own.keyboard.press("Enter");
+    await sheet.getByText("Posted.").waitFor({ timeout: 15_000 });
+    ok(sent[0]?.body === written, `it sent ${JSON.stringify(sent[0]?.body)}, not what it showed`);
+    await sheet.locator("article strong").filter({ hasText: "bold" }).first().waitFor({ timeout: 15_000 });
+    ok((await editor.innerText()).trim() === "", "the box wasn't cleared after posting");
+    await own.waitForFunction(() => document.activeElement?.getAttribute("role") === "textbox", null, { timeout: 5_000 });
+    await own.close();
+  });
+
+  await keyboardPath("what's typed in the message box is what the thread shows", async () => {
+    const { own, sheet, box } = await openBox(contextFor(s.owner));
+    const sent = [];
+    own.on("request", (request) => {
+      if (request.method() === "POST" && /\/messages$/.test(new URL(request.url()).pathname)) sent.push(request.postDataJSON().body);
+    });
+    await box.focus();
+    const editor = await untilEditor(sheet);
+    await own.waitForFunction(() => document.activeElement?.getAttribute("role") === "textbox");
+    const keys = own.keyboard;
+    await keys.type("# Plan");
+    await keys.press("Enter");
+    await keys.type("First line");
+    await keys.press("Enter");
+    await keys.type("- one");
+    await keys.press("Enter");
+    await keys.type("two");
+    await keys.press("Enter");
+    await keys.press("Enter");
+    await keys.type("> quoted");
+    await keys.press("Enter");
+    await keys.press("Enter");
+    await keys.type("end typo");
+    await keys.press("ControlOrMeta+z");
+    await keys.type(" 2 * 3 and file_name");
+    await sheet.getByRole("button", { name: "Bold" }).click();
+    await editor.focus();
+    await keys.type(" strong");
+    await sheet.getByRole("button", { name: "Bold" }).click();
+    await editor.focus();
+    await keys.type(" after");
+    const shown = await editor.evaluate((el) => ["ul li", "blockquote, .border-l-2", "h1"].map((selector) => el.querySelectorAll(selector).length));
+    await sheet.getByRole("button", { name: "Post message" }).click();
+    await sheet.getByText("Posted.").waitFor({ timeout: 15_000 });
+    console.log(`     typed and sent: ${JSON.stringify(sent[0])}`);
+    const article = sheet.locator("article").filter({ hasText: "First line" }).last();
+    await article.waitFor({ timeout: 15_000 });
+    const rendered = await article.evaluate((el) => ["ul li", "blockquote", "h4", "strong"].map((selector) => el.querySelectorAll(selector).length));
+    console.log(`     editor showed list/quote/heading ${JSON.stringify(shown)}, thread shows list/quote/heading/bold ${JSON.stringify(rendered)}`);
+    ok(rendered[0] === shown[0] && rendered[1] === 1 && rendered[2] === 1 && rendered[3] >= 1, "the thread doesn't show what the box showed");
+    ok(sent[0].includes("file_name") && !sent[0].includes("\\_"), `it sent escapes nobody typed: ${sent[0]}`);
+    await own.close();
+  });
+
+  await keyboardPath("the message box takes hostile HTML as inert text", async () => {
+    const { own, sheet, box } = await openBox(contextFor(s.owner));
+    await box.focus();
+    const editor = await untilEditor(sheet);
+    const hostile = `<img src=x onerror="window.pwned=1"><script>window.pwned=2</script><a href="javascript:window.pwned=3">click</a><iframe src="https://evil.test"></iframe>`;
+    await pasteInto(editor, hostile, hostile);
+    await own.waitForTimeout(200);
+    ok((await editor.locator("img, script, a, iframe").count()) === 0, "pasted HTML became elements in the editor");
+    ok((await editor.innerText()).includes("<img src=x"), "pasted HTML didn't arrive as text");
+    await sheet.getByRole("button", { name: "Post message" }).click();
+    await sheet.getByText("Posted.").waitFor({ timeout: 15_000 });
+    const posted = sheet.locator("article").filter({ hasText: "<img src=x" }).last();
+    await posted.waitFor({ timeout: 15_000 });
+    ok((await posted.locator("img, script, iframe, a").count()) === 0, "pasted HTML became elements in the thread");
+    ok((await own.evaluate(() => window.pwned)) === undefined, "pasted HTML ran");
+    await own.close();
+  });
+
+  await keyboardPath("the message box keeps a draft and its key through a failed send", async () => {
+    const { own, sheet, box } = await openBox(contextFor(s.owner));
+    const keys = [];
+    await own.route("**/messages", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      keys.push(route.request().headers()["idempotency-key"]);
+      return keys.length === 1 ? route.fulfill({ status: 502, json: { error: { code: "bad_gateway" } } }) : route.fallback();
+    });
+    await box.focus();
+    const editor = await untilEditor(sheet);
+    await own.waitForFunction(() => document.activeElement?.getAttribute("role") === "textbox");
+    await own.keyboard.type("A draft to keep");
+    await sheet.getByRole("button", { name: "Post message" }).click();
+    await sheet.getByRole("alert").first().waitFor({ timeout: 15_000 });
+    ok((await editor.innerText()).includes("A draft to keep"), "a failed send lost the draft");
+    ok(await editable(editor), "the box stayed read-only after a failed send");
+    await sheet.getByRole("button", { name: "Post message" }).click();
+    await sheet.getByText("Posted.").waitFor({ timeout: 15_000 });
+    ok(keys.length === 2 && keys[0] === keys[1], `a retry after an unknown outcome used a new key: ${JSON.stringify(keys)}`);
+    await own.close();
+  });
+
+  await keyboardPath("the message box enforces the limit, and very long text goes to plain text", async () => {
+    const { own, sheet, box } = await openBox(contextFor(s.owner));
+    await box.focus();
+    const editor = await untilEditor(sheet);
+    await pasteInto(editor, "x".repeat(16 * 1024));
+    await own.waitForTimeout(200);
+    ok(await sheet.getByRole("button", { name: "Post message" }).isEnabled(), "16 KB exactly was refused");
+    // Typing with that much in the box.
+    await own.evaluate(() => {
+      window.longestBlock = 0;
+      new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) window.longestBlock = Math.max(window.longestBlock, entry.duration);
+      }).observe({ type: "longtask" });
+    });
+    await editor.focus();
+    await own.keyboard.press("End");
+    await own.keyboard.type("yyyyy");
+    await own.waitForTimeout(200);
+    console.log(`     typing at 16 KB: longest block ${await own.evaluate(() => Math.round(window.longestBlock))}ms`);
+    ok(await sheet.getByText("That's too long").isVisible(), "over the limit wasn't reported");
+    ok(await sheet.getByRole("button", { name: "Post message" }).isDisabled(), "over the limit could be posted");
+    await pasteInto(editor, "z".repeat(70 * 1024));
+    const plain = sheet.locator("textarea#thread-message");
+    await plain.waitFor({ timeout: 5_000 });
+    ok((await plain.inputValue()).length > 70 * 1024, "very long pasted text didn't reach the plain box");
+    await own.close();
+  });
+
+  await keyboardPath("the message box falls back to plain text if the editor can't load", async () => {
+    const { own, sheet, box } = await openBox(contextFor(s.owner));
+    await own.route(/\.js(\?|$)/, (route) => route.abort());
+    await box.focus();
+    await sheet.getByText("Formatting isn't available").waitFor({ timeout: 15_000 });
+    await own.unroute(/\.js(\?|$)/);
+    ok((await box.evaluate((el) => el.tagName)) === "TEXTAREA", "there's no plain box after the editor failed to load");
+    await box.fill("Sent without the editor");
+    await sheet.getByRole("button", { name: "Post message" }).click();
+    await sheet.getByText("Posted.").waitFor({ timeout: 15_000 });
+    await own.close();
+  });
+
+  await keyboardPath("the message box at phone width", async () => {
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const { own, sheet, box } = await openBox(phone);
+    await box.focus();
+    await untilEditor(sheet);
+    const sizes = await sheet.evaluate((dialog) => ({ page: document.documentElement.scrollWidth - window.innerWidth, sheet: dialog.scrollWidth - dialog.clientWidth }));
+    ok(sizes.page <= 0 && sizes.sheet <= 0, `the box scrolls sideways at 375px: ${JSON.stringify(sizes)}`);
+    for (const name of ["Bold", "Italic", "Inline code", "Bullets", "Numbers"]) {
+      const height = (await sheet.getByRole("button", { name }).boundingBox())?.height ?? 0;
+      ok(height >= 44, `${name} is ${height}px tall at 375px`);
+    }
+    await phone.close();
   });
 
   await keyboardPath("long messages are in the accessibility tree, off-screen too", async () => {

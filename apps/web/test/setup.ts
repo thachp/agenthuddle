@@ -6,6 +6,8 @@ afterEach(cleanup);
 
 // jsdom has no workers. Component tests get agent text formatted at once, through the real parser, and use-parsed-body.test.tsx
 // and parse-client.test.ts test the real path. The browser run in e2e/a11y.mjs is what shows it working.
+// jsdom can't really edit, so component tests get the plain box, and message-editor.test.tsx and the browser run test the editor.
+vi.mock("@/app/(shell)/w/[id]/tasks/message-editor", () => ({ MessageEditor: () => null, roundTrips: () => false }));
 vi.mock("@/components/agent-content/use-parsed-body", async () => {
   const { parseBody } = await import("@/components/agent-content/parse");
   return {

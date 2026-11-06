@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { taskPath } from "./task-actions";
-import { FIELD_CLASS } from "./task-bits";
+import type { MessageFieldHandle } from "./message-editor";
+import { MessageField } from "./message-field";
 import { changeProblem, LIMITS, messageStillUnknown, tooLong } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
 
@@ -20,7 +21,7 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
   const [sending, setSending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [posted, setPosted] = useState(false);
-  const fieldRef = useRef<HTMLTextAreaElement>(null);
+  const fieldRef = useRef<MessageFieldHandle>(null);
   const body = text.trim();
   // A message has no version to catch a second attempt, so only its key can. Each post whose outcome is unknown keeps its key, even if the words change and change back.
   const unknownOutcomes = useRef(new Map<string, string>());
@@ -71,17 +72,18 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
 
   return (
     <form onSubmit={post} aria-label="New message" className="space-y-2 border-t pt-3">
-      <Label htmlFor="thread-message">Post a message</Label>
-      <textarea
-        ref={fieldRef}
+      <Label id="thread-message-label" htmlFor="thread-message">
+        Post a message
+      </Label>
+      <MessageField
         id="thread-message"
-        rows={3}
-        readOnly={sending}
-        aria-describedby="thread-message-hint"
-        className={FIELD_CLASS}
+        labelId="thread-message-label"
+        handle={fieldRef}
         value={text}
-        onChange={(event) => {
-          setText(event.target.value);
+        readOnly={sending}
+        describedBy="thread-message-hint"
+        onChange={(next) => {
+          setText(next);
           setPosted(false);
         }}
       />
