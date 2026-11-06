@@ -147,7 +147,10 @@ function EditTask({ api, me, names, savedEdit, onDone, onNotice }: Pick<Props, "
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [changed]);
 
+  // Read-only while a command or its re-read is out: a draft typed then would answer to a version this form hasn't shown,
+  // and could replace someone's edit unseen. Not disabled, which would drop focus.
   const setField = (name: keyof TaskDraft, value: string) => {
+    if (saving) return;
     const next = { ...draft, [name]: value };
     setDraftState(next);
     savedEdit.current = { readAt: task, draft: next };
@@ -185,19 +188,19 @@ function EditTask({ api, me, names, savedEdit, onDone, onNotice }: Pick<Props, "
       ) : null}
       <div className="space-y-1">
         <Label htmlFor="edit-title">Title</Label>
-        <Input ref={titleRef} id="edit-title" required value={draft.title} onChange={(event) => setField("title", event.target.value)} />
+        <Input ref={titleRef} id="edit-title" required readOnly={saving} value={draft.title} onChange={(event) => setField("title", event.target.value)} />
       </div>
       <div className="space-y-1">
         <Label htmlFor="edit-instructions">Instructions</Label>
-        <textarea id="edit-instructions" required rows={6} className={FIELD_CLASS} value={draft.instructions} onChange={(event) => setField("instructions", event.target.value)} />
+        <textarea id="edit-instructions" required rows={6} readOnly={saving} className={FIELD_CLASS} value={draft.instructions} onChange={(event) => setField("instructions", event.target.value)} />
       </div>
       <div className="space-y-1">
         <Label htmlFor="edit-criteria">Acceptance criteria (optional)</Label>
-        <textarea id="edit-criteria" rows={3} className={FIELD_CLASS} value={draft.criteria} onChange={(event) => setField("criteria", event.target.value)} />
+        <textarea id="edit-criteria" rows={3} readOnly={saving} className={FIELD_CLASS} value={draft.criteria} onChange={(event) => setField("criteria", event.target.value)} />
       </div>
       <div className="space-y-1">
         <Label htmlFor="edit-due">Due (informational)</Label>
-        <Input id="edit-due" type="datetime-local" value={draft.due} onChange={(event) => setField("due", event.target.value)} aria-describedby={task.due_at !== null ? "edit-due-hint" : undefined} />
+        <Input id="edit-due" type="datetime-local" readOnly={saving} value={draft.due} onChange={(event) => setField("due", event.target.value)} aria-describedby={task.due_at !== null ? "edit-due-hint" : undefined} />
         {task.due_at !== null ? (
           <p id="edit-due-hint" className="text-xs text-muted-foreground">
             A due date can be changed but not removed yet. Leaving this empty keeps it.
@@ -258,7 +261,7 @@ function ChangePerson({ api, me, names, onNotice, which, choices, current, depar
   const key = useIntentKey(`${which}:${data.task.version}:${person}`);
   const id = `change-${which}`;
 
-  if (choices.length === 0) return <p className="text-sm text-muted-foreground">Nobody else in this workroom can be the {which}.</p>;
+  if (choices.length === 0) return <p className="text-sm text-muted-foreground">Nobody else in this workroom can be the {which}.{which === "reviewer" && data.room.require_person_review ? " It requires a person to review, so add one on Team." : ""}</p>;
 
   const change = async () => {
     if (!person) return;
@@ -355,8 +358,10 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
             id="changes-reason"
             rows={4}
             className={FIELD_CLASS}
+            readOnly={saving}
             value={reason}
             onChange={(event) => {
+              if (saving) return;
               setReason(event.target.value);
               setDirty(event.target.value.length > 0);
             }}

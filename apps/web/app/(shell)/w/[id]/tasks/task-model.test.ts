@@ -267,3 +267,62 @@ describe("a post whose earlier attempt has an unknown outcome", () => {
     expect(messageStillUnknown(401)).toMatch(/signed out, so we still can't tell/);
   });
 });
+
+describe("who can be named reviewer", () => {
+  const room = { owner: "per_owner", members: [
+    { principal_id: "agt_a", kind: "agent", org_id: "o", role: "member" },
+    { principal_id: "agt_public", kind: "agent", org_id: "o", role: "guest", access: { review: "none", artifacts: "shared" } },
+    { principal_id: "agt_unread", kind: "agent", org_id: "o", role: "guest", access: { review: "when_named", artifacts: "shared" } },
+    { principal_id: "per_m", kind: "person", org_id: "o", role: "member" },
+  ] };
+
+  it("leaves out whoever the read says can't review, and the assignee", () => {
+    expect(reviewerChoices(room, "per_m")).toEqual(["per_owner", "agt_a"]);
+  });
+
+  it("leaves out every agent where a person must review", () => {
+    expect(reviewerChoices({ ...room, require_person_review: true }, "")).toEqual(["per_owner", "per_m"]);
+  });
+
+  it("offers every participant as requester, whether or not they could review", () => {
+    const task = { requester: "per_m", reviewer: "per_owner", needs_attention: false };
+    const personRoom = { ...room, require_person_review: true };
+    expect(newRequesterChoices(personRoom, task, "admin")).toEqual(expect.arrayContaining(["agt_a", "agt_public", "agt_unread"]));
+    expect(newRequesterChoices(room, task, "admin")).toContain("agt_public");
+  });
+
+  it("says why when nobody named on a flagged task has left", () => {
+    const flaggedTask = { needs_attention: true, requester: "per_m", reviewer: "agt_a", status: "open" } as never;
+    expect(flagText(flaggedTask, { ...room, require_person_review: true }, "per_owner", "owner")).toMatch(/^This workroom requires a person to review, so this task needs a new reviewer\./);
+    expect(flagText(flaggedTask, room, "per_owner", "owner")).toMatch(/left and came back/);
+    expect(flagText(flaggedTask, room, "per_owner", "owner")).not.toMatch(/^Someone left/);
+  });
+
+  it("doesn't blame person review when the reviewer is a person, as with a requester who came back", () => {
+    const back = { needs_attention: true, requester: "agt_a", reviewer: "per_m", status: "open" } as never;
+    const text = flagText(back, { ...room, require_person_review: true }, "per_owner", "owner");
+    expect(text).not.toMatch(/requires a person to review/);
+    expect(text).toMatch(/left and came back/);
+  });
+
+  it("gives a guest neutral wording, because its read can't show why", () => {
+    const seen = { needs_attention: true, requester: "per_gone", reviewer: "agt_a", status: "open" } as never;
+    const onlyItself = { owner: "per_owner", require_person_review: true, members: [{ principal_id: "agt_me", kind: "agent", org_id: "o", role: "guest" }] };
+    const text = flagText(seen, onlyItself, "agt_me", "guest");
+    expect(text).toMatch(/^This task needs a new reviewer or requester\./);
+    expect(text).not.toMatch(/requires a person|Someone left/);
+  });
+
+  it("treats a departed owner as gone, and offers them for nothing", () => {
+    const left = { ...room, owner_left_at: 5 };
+    const task = { requester: "per_m", reviewer: "agt_a", needs_attention: false };
+    expect(newRequesterChoices(left, task, "admin")).not.toContain("per_owner");
+    expect(reviewerChoices(left, "")).not.toContain("per_owner");
+    expect(flagged({ needs_attention: true, requester: "per_owner", reviewer: "agt_a" }, left, "admin")).toEqual({ requester: true, reviewer: false });
+  });
+
+  it("still names who left, not who merely can't review", () => {
+    const task = { needs_attention: true, requester: "agt_public", reviewer: "agt_gone" };
+    expect(flagged(task, room, "admin")).toEqual({ requester: false, reviewer: true });
+  });
+});

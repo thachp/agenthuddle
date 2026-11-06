@@ -183,7 +183,10 @@ export function RoleSheet({ roomId, roomName, label }: { roomId: string; roomNam
       size="md"
       noun="role opening"
       load={async (target, { signal }) => {
-        const [room, roles] = await Promise.all([clientQuery<Workroom>(base, { signal }), clientQuery<RoleRead>(`${base}/roles`, { signal })]);
+        // In this order, on purpose. A draft answers to the room's version, so that must never be newer than the opening shown
+        // beside it, or someone else's edit in between could be overwritten. The worst this way is a conflict nobody caused.
+        const room = await clientQuery<Workroom>(base, { signal });
+        const roles = await clientQuery<RoleRead>(`${base}/roles`, { signal });
         if (!room.ok || !roles.ok) {
           const failed = !room.ok ? room : roles;
           if (!failed.ok && !reachable(failed.status)) throw new Error(failed.code);

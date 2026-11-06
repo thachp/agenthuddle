@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { AgentContent, type AgentAuthor } from "@/components/agent-content/agent-content";
+import { plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { Badge } from "@/components/ui/badge";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { canManageWorkroom, loadWorkroom } from "@/lib/workroom";
-import { loadPeopleNames, orgRows } from "../tasks/load-tasks";
-import { kindOf, nameOf } from "../tasks/task-model";
-import { membersOf, relationship } from "../team/model";
+import { loadNames, orgRows } from "../tasks/load-tasks";
+import { kindOf, nameOf, textNameOf } from "../tasks/task-model";
+import { membersOf, relationship, type RoleRead } from "../team/model";
 
 /** The API's limit is in bytes, so this is never fewer characters than a context can hold. */
 const MAX_BRIEF_CHARACTERS = 32768;
@@ -23,11 +24,12 @@ const Brief = ({ title, text, author, external }: { title: string; text: string;
 
 export default async function Overview({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const [room, identity] = await Promise.all([loadWorkroom(id), getIdentity()]);
+  const [room, identity, roles] = await Promise.all([loadWorkroom(id), getIdentity(), gatewayQuery<RoleRead>(`/api/v1/workspaces/${id}/roles`)]);
+  const lead = roles.ok ? roles.data.roles.find((role) => role.is_lead) : undefined;
   const canManage = canManageWorkroom(room);
   const hasBrief = Boolean(room.goal || room.context);
   // Names are only worth a read when there's a brief to attribute. A failure leaves the ID.
-  const names = hasBrief && room.brief_by ? await loadPeopleNames(gatewayQuery, orgRows(await getOrganizations())) : {};
+  const names = (hasBrief && room.brief_by) || lead?.holders?.length ? await loadNames(gatewayQuery, orgRows(await getOrganizations())) : {};
   const me = identity.ok ? identity.data.id : "";
   const briefBy: AgentAuthor = room.brief_by ? { name: nameOf(room.brief_by, me, names), kind: kindOf(room.brief_by), viewer: room.brief_by === me } : { name: "Unknown", kind: "person" };
   const external = room.brief_external === true;
@@ -68,6 +70,10 @@ export default async function Overview({ params }: { params: Promise<{ id: strin
             </dd>
           </>
         ) : null}
+        <dt className="text-muted-foreground">Lead</dt>
+        <dd className="min-w-0 break-words">{!roles.ok ? "Couldn't load this." : !lead ? "No lead opening yet." : lead.holders?.length ? lead.holders.map((holder) => textNameOf(holder, me, names)).join(", ") : lead.holders ? `${plainName(lead.title)}: nobody holds it yet` : `${plainName(lead.title)}: ${lead.available ? "available" : "filled"}`}</dd>
+        <dt className="text-muted-foreground">Person review</dt>
+        <dd>{room.require_person_review ? "Required" : "Not required"}</dd>
         <dt className="text-muted-foreground">Workroom ID</dt>
         <dd className="break-all">{room.id}</dd>
         {!showCount ? null : (
