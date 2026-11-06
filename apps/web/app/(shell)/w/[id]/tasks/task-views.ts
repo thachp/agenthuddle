@@ -1,0 +1,67 @@
+import { GROUP_ORDER, TASK_STATUS, TASK_STATUSES, type Task, type TaskStatus } from "./task-model";
+
+/** What the Tasks page shows, all of it held in the URL (docs/spec/TASK-PLANNING.md). Nothing here decides anything: it arranges what the server already allowed. */
+
+export type TaskView = "list" | "board";
+export type TaskViewState = { view: TaskView; reviewMine: boolean; showCanceled: boolean };
+type Changes = Record<string, string | null>;
+
+/** A missing or unknown value means the default, so an old or mistyped link still opens the page. */
+export function readViewState(search: Pick<URLSearchParams, "get">): TaskViewState {
+  return { view: search.get("view") === "board" ? "board" : "list", reviewMine: search.get("review") === "mine", showCanceled: search.get("canceled") === "show" };
+}
+
+/** Changes only the named parameters, so `task` and anything else in the URL stay as they are. */
+export function hrefWithChanges(pathname: string, search: URLSearchParams, changes: Changes) {
+  const next = new URLSearchParams(search);
+  for (const [name, value] of Object.entries(changes)) {
+    if (value === null) next.delete(name);
+    else next.set(name, value);
+  }
+  const query = next.toString();
+  return query ? `${pathname}?${query}` : pathname;
+}
+
+export const viewChange = (view: TaskView): Changes => ({ view: view === "list" ? null : view });
+export const reviewChange = (reviewMine: boolean): Changes => ({ review: reviewMine ? "mine" : null });
+export const canceledChange = (showCanceled: boolean): Changes => ({ canceled: showCanceled ? "show" : null });
+
+/** The task filter both views share. Hiding canceled tasks is how the Board is arranged, so `onBoard` adds that. */
+export const applyReviewFilter = (tasks: Task[], state: Pick<TaskViewState, "reviewMine">, me: string) => (state.reviewMine ? tasks.filter((task) => task.status === "submitted" && task.reviewer === me) : tasks);
+export const onBoard = (tasks: Task[], state: Pick<TaskViewState, "showCanceled">) => (state.showCanceled ? tasks : tasks.filter((task) => task.status !== "canceled"));
+
+/** The Board's five columns, in the spec's order. Canceled is the optional sixth. */
+export const BOARD_COLUMNS: TaskStatus[] = ["open", "offered", "accepted", "submitted", "completed"];
+
+export type TaskGroup = { key: string; label: string; tasks: Task[] };
+
+/**
+ * Newest first within each group, for every view. The API can add a state before this does, and those tasks are still the
+ * viewer's and still count toward progress, so they get a group of their own rather than vanishing.
+ */
+export function groupTasks(tasks: Task[], order: TaskStatus[] = GROUP_ORDER): TaskGroup[] {
+  const groups = order.map((status) => ({ key: status, label: TASK_STATUS[status].label, tasks: tasks.filter((task) => task.status === status).toReversed() }));
+  const unknown = tasks.filter((task) => !TASK_STATUSES.includes(task.status)).toReversed();
+  return unknown.length > 0 ? [...groups, { key: "unknown", label: "Unknown state", tasks: unknown }] : groups;
+}
+
+/** A count from a page isn't a total, so it says what it counts. */
+export const countText = (count: number, partial: boolean) => (partial ? `${count} loaded` : `${count}`);
+
+export type Progress = { completed: number; active: number; percent: number | null };
+
+/** Only reviewer-approved work counts, and canceled tasks count on neither side. Halves round up, and no tasks has no percentage. */
+export function progressOf(tasks: Pick<Task, "status">[]): Progress {
+  const active = tasks.filter((task) => task.status !== "canceled").length;
+  const completed = tasks.filter((task) => task.status === "completed").length;
+  return { completed, active, percent: active === 0 ? null : Math.floor((200 * completed + active) / (2 * active)) };
+}
+
+/** A filter is the viewer's choice, and "you can see" is an authorization boundary. The label keeps them apart. */
+export function progressScope({ filtered, limited }: { filtered: boolean; limited: boolean }) {
+  if (filtered) return limited ? "Progress for filtered tasks you can see" : "Progress for filtered tasks";
+  return limited ? "Progress for tasks you can see" : "Progress";
+}
+
+/** Guests get only the tasks they're part of. Anyone else with a role sees the room's. This words a label, and grants nothing. */
+export const isLimitedViewer = (role: string | undefined) => role !== "owner" && role !== "admin" && role !== "member";

@@ -39,6 +39,8 @@ async function seed() {
   const make = (title, extra = {}) => lead.must("create_task", { workspace_id: room, title, instructions: "**Write** the design, and [link](https://example.com) the result.\n\n- One\n- Two", ...extra });
 
   await make("An open task");
+  // An unbroken title has to wrap inside a card on a phone, not widen the page.
+  await make(`A_task_with_a_long_unbroken_title_${"x".repeat(120)}`);
   await make("An offered task", { assignee: guest.id });
   const accepted = await make("An accepted task", { assignee: guest.id });
   await guest.must("accept_task", { ...at(accepted), version: accepted.version });
@@ -114,6 +116,10 @@ const screens = (s) => {
     ["Tasks", `${w}/tasks`, "An open task"],
     ["Tasks, empty", `/w/${s.emptyRoom}/tasks`, "Tasks"],
     ["Task Sheet, review", `${w}/tasks?task=${s.reviewScreen.id}`, "Approve submission", "owner", true],
+    ["Tasks, board", `${w}/tasks?view=board`, "An open task"],
+    ["Tasks, board with canceled shown", `${w}/tasks?view=board&canceled=show`, "A canceled task"],
+    ["Tasks, board, empty", `/w/${s.emptyRoom}/tasks?view=board`, "No tasks in scope"],
+    ["Task Sheet over the board", `${w}/tasks?view=board&task=${s.reviewScreen.id}`, "Approve submission", "owner", true],
     ["Activity", `${w}/activity`, "Activity"],
     ["Team", `${w}/team`, "Lead agent"],
     ["Access Sheet", `${w}/team?agent=${s.lead.id}`, "Revoke workroom access", "owner", true],
@@ -307,6 +313,83 @@ async function keyboardPaths(s) {
     await page.waitForFunction(() => document.activeElement?.getAttribute("data-sheet-launcher")?.startsWith("task:"), undefined, { timeout: 5000 }).catch(async () => {
       throw new Error(`closing the Sheet left focus on ${await activeText(page)}, not the link that opened it`);
     });
+  });
+
+  await keyboardPath("switch to the board and open a card", async () => {
+    await page.goto(`${app}/w/${s.room}/tasks`);
+    await hydrated(page);
+    const board = page.getByRole("link", { name: "Board", exact: true });
+    await tabTo(page, board, "the Board link");
+    await page.keyboard.press("Enter");
+    await page.waitForURL(/view=board/, { timeout: 15_000 });
+    ok(await board.evaluate((el) => el === document.activeElement && el.getAttribute("aria-current") === "true"), `switching views left focus on ${await activeText(page)}, or Board isn't marked current`);
+    const live = await page.getByText(/Board view, showing \d+ of \d+ tasks/).evaluate((el) => el.getAttribute("aria-live"));
+    ok(live === "polite", "switching views isn't announced");
+    const card = page.getByRole("link", { name: "An open task", exact: true });
+    await tabTo(page, card, "the card's link");
+    await page.keyboard.press("Enter");
+    await page.getByRole("dialog").waitFor({ timeout: 15_000 });
+    ok(await insideDialog(page), `opening the Sheet left focus on ${await activeText(page)}`);
+    ok(page.url().includes("view=board") && page.url().includes("task="), `opening a card changed the view: ${page.url()}`);
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.getAttribute("data-sheet-launcher")?.startsWith("task:"), undefined, { timeout: 5000 }).catch(async () => {
+      throw new Error(`closing the Sheet left focus on ${await activeText(page)}, not the card that opened it`);
+    });
+    ok(page.url().includes("view=board"), `closing the Sheet lost the view: ${page.url()}`);
+  });
+
+  await keyboardPath("Back, Forward and reload restore the view, filter and Sheet", async () => {
+    const current = (name) => page.getByRole("link", { name, exact: true }).and(page.locator('[aria-current="true"]')).waitFor({ timeout: 15_000 });
+    const mine = page.getByRole("checkbox", { name: "Needs my review" });
+    await page.goto(`${app}/w/${s.room}/tasks`);
+    await hydrated(page);
+    await tabTo(page, mine, "the review filter");
+    await page.keyboard.press("Space");
+    await page.waitForURL(/review=mine/, { timeout: 15_000 });
+    await tabTo(page, page.getByRole("link", { name: "Board", exact: true }), "the Board link");
+    await page.keyboard.press("Enter");
+    await current("Board");
+    await page.reload();
+    await hydrated(page);
+    await current("Board");
+    ok(await mine.isChecked(), "reloading lost the filter");
+    await page.goBack();
+    await current("List");
+    ok(await mine.isChecked(), "Back lost the filter");
+    await page.goBack();
+    await page.waitForFunction(() => !location.search.includes("review=mine"), undefined, { timeout: 15_000 });
+    await page.waitForFunction(() => !document.querySelector('input[type="checkbox"]')?.checked, undefined, { timeout: 5000 });
+    await page.goForward();
+    await page.goForward();
+    await current("Board");
+    await page.goto(`${app}/w/${s.room}/tasks?view=board&task=${s.reviewScreen.id}`);
+    await page.getByRole("button", { name: /Approve submission/ }).waitFor({ timeout: 15_000 });
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
+    await current("Board");
+  });
+
+  await keyboardPath("the board at phone width", async () => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    try {
+      await page.goto(`${app}/w/${s.room}/tasks?view=board&canceled=show`);
+      await hydrated(page);
+      await page.getByText("A canceled task").waitFor({ timeout: 15_000 });
+      const overflow = await page.evaluate(() => [document.documentElement, document.getElementById("main-content")].filter((el) => el && el.scrollWidth > el.clientWidth).map((el) => el.tagName));
+      ok(overflow.length === 0, `the page scrolls sideways at 375px: ${overflow.join(", ")}`);
+      await audit(page, "Tasks, board, phone");
+      const link = page.getByRole("link", { name: "An open task", exact: true });
+      await tabTo(page, link, "the card's link");
+      await page.keyboard.press("Enter");
+      await page.getByRole("dialog").waitFor({ timeout: 15_000 });
+      const box = await page.getByRole("dialog").boundingBox();
+      ok(box && box.width <= 375, `the Sheet is wider than the phone: ${box?.width}`);
+      await page.keyboard.press("Escape");
+      await page.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
+    } finally {
+      await page.setViewportSize({ width: 1280, height: 900 });
+    }
   });
 
   await keyboardPath("revoke access", async () => {

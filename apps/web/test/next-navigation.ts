@@ -49,6 +49,11 @@ export const back = () => {
   notify();
 };
 
+// vinext patches this so `useSearchParams` follows it, as Next does.
+window.history.pushState = (_data, _unused, next) => {
+  if (next) navigate(String(next));
+};
+
 export const currentUrl = () => url.pathname + url.search;
 
 const later = (apply: () => void) => (holdNavigation ? void held.push(apply) : apply());
