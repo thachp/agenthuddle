@@ -74,8 +74,9 @@ export function useParsedBody(text: string, article: RefObject<HTMLElement | nul
         ? null
         : new IntersectionObserver(
             (entries) => {
-              if (!entries.some((entry) => entry.isIntersecting)) return;
-              isNear = true;
+              // The latest says where it is now. A result that arrives after the reader has moved away waits like any other.
+              isNear = entries[entries.length - 1].isIntersecting;
+              if (!isNear) return;
               prioritizeParse(text);
               applyIfDue();
             },

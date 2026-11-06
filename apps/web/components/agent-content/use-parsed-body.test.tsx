@@ -113,6 +113,25 @@ describe("what shows while text is parsed", () => {
     expect(formatted(container)).toBe(true);
   });
 
+  it("holds a result that arrives after the reader has moved away", () => {
+    const bodies = Array.from({ length: Math.floor(APPLY_OUT_OF_VIEW_NODES / parseBody(big)!.nodes) + 1 }, (_, index) => `${index} ${big}`);
+    const { container } = render(
+      <>
+        {bodies.map((body) => (
+          <AgentContent key={body} author={author} body={body} />
+        ))}
+      </>,
+    );
+    const last = bodies.length - 1;
+    near(last);
+    act(() => observers[last].callback([{ isIntersecting: false } as IntersectionObserverEntry], {} as IntersectionObserver));
+    act(() => FakeWorker.last.ready());
+    for (const body of bodies) answer(body);
+    expect(formatted(container.querySelectorAll("article")[last])).toBe(false);
+    near(last);
+    expect(formatted(container.querySelectorAll("article")[last])).toBe(true);
+  });
+
   it("applies a large result at once when it's already near", () => {
     const container = show(big);
     near();
