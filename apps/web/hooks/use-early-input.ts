@@ -55,17 +55,16 @@ export function useEarlyInput<T extends HTMLElement = HTMLFormElement>() {
   const hydrating = useRef(useSyncExternalStore(noSubscription, () => false, () => true));
   useEffect(() => {
     if (!hydrating.current) return;
-    // Not during this effect, where React would batch the events.
-    const first = setTimeout(() => {
-      const controls = [...(ref.current?.querySelectorAll<HTMLInputElement>("input, textarea, select") ?? [])];
-      const steps = controls.flatMap((control) => (control.disabled ? [] : (handOver(control) ?? [])));
-      // One at a time, so a form whose state is one object sees the last step's result before the next.
-      const next = () => {
-        steps.shift()?.();
-        if (steps.length > 0) setTimeout(next);
-      };
-      next();
-    });
+    // Read now: leaving the hydrating state re-renders the form straight after this effect, which resets the fields to React's values.
+    const controls = [...(ref.current?.querySelectorAll<HTMLInputElement>("input, textarea, select") ?? [])];
+    const steps = controls.flatMap((control) => (control.disabled ? [] : (handOver(control) ?? [])));
+    // Handed over later, because React would batch events sent during this effect, and one at a time, so a form whose state is one
+    // object sees the last step's result before the next.
+    const next = () => {
+      steps.shift()?.();
+      if (steps.length > 0) first = setTimeout(next);
+    };
+    let first = setTimeout(next);
     return () => clearTimeout(first);
   }, []);
   return ref;
