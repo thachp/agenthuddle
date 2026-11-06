@@ -359,6 +359,7 @@ async function keyboardPaths(s) {
     const card = page.getByRole("link", { name: "An open task", exact: true });
     // The stretched link covers the card, except the truncated ID, which keeps its tooltip.
     const hits = await card.evaluate((link) => {
+      link.scrollIntoView({ block: "center" });
       const top = (el) => {
         const box = el.getBoundingClientRect();
         return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
