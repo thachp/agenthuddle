@@ -1,4 +1,5 @@
 import type { GatewayResult } from "@/lib/gateway/result";
+import type { PlanRead } from "./plan-summary";
 import type { Names, Task } from "./task-model";
 
 type Query = <T>(path: string) => Promise<GatewayResult<T>>;
@@ -18,6 +19,12 @@ export async function loadTasks(query: Query, workspace: string, filter = "", ma
   }
   return { ok: true, data: { tasks, more: cursor !== null, cursor } };
 }
+
+/**
+ * One read of the room's plan, to boil down on the server with `planSummary`, so the browser never holds it. It only adds to
+ * the page: a failure leaves the counts of what's loaded, labeled partial. It decides nothing about access.
+ */
+export const loadPlan = (query: Query, workspace: string) => query<PlanRead>(`/api/v1/workspaces/${encodeURIComponent(workspace)}/plan`);
 
 /** Whether a failed read says nothing about access. A success doesn't either, for checking several reads at once. */
 export const isOutage = (result: GatewayResult<unknown>) => result.ok || result.status >= 500 || result.status === 429;

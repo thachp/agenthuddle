@@ -3,7 +3,7 @@
 import { memo } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { SheetLink } from "@/components/sheet/target-sheet";
-import { PrincipalName, TaskStatusBadge } from "./task-bits";
+import { BlockedLine, PrincipalName, TaskStatusBadge } from "./task-bits";
 import { nameOf, type Names, type TaskSummary } from "./task-model";
 import { countText, groupTasks } from "./task-views";
 
@@ -11,7 +11,7 @@ import { countText, groupTasks } from "./task-views";
  * Grouped by state. The API gives tasks no creation or update time, so rows can't show the age the design asks for, and
  * they keep `groupTasks`'s order within a group.
  */
-export function TaskList({ tasks, partial, paged = false, me, names }: { tasks: TaskSummary[]; partial: boolean; paged?: boolean; me: string; names: Names }) {
+export function TaskList({ blocked = {}, tasks, partial, paged = false, me, names }: { blocked?: Record<string, string>; tasks: TaskSummary[]; partial: boolean; paged?: boolean; me: string; names: Names }) {
   return (
     <div className="space-y-4">
       {groupTasks(tasks, undefined, paged).map((group) => {
@@ -23,7 +23,7 @@ export function TaskList({ tasks, partial, paged = false, me, names }: { tasks: 
             </h2>
             <ul className="divide-y rounded-lg border">
               {group.tasks.map((task) => (
-                <TaskRow key={task.id} task={task} me={me} names={names} />
+                <TaskRow key={task.id} task={task} blocked={blocked[task.id]} me={me} names={names} />
               ))}
             </ul>
           </section>
@@ -34,7 +34,7 @@ export function TaskList({ tasks, partial, paged = false, me, names }: { tasks: 
 }
 
 /** Memoized because a long list renders thousands of these, and most changes touch one. */
-const TaskRow = memo(function TaskRow({ task, me, names }: { task: TaskSummary; me: string; names: Names }) {
+const TaskRow = memo(function TaskRow({ task, blocked, me, names }: { task: TaskSummary; blocked?: string; me: string; names: Names }) {
   return (
     <li className="grid gap-x-4 gap-y-1 p-3 lg:grid-cols-[minmax(0,2fr)_auto_minmax(0,1fr)_minmax(0,1fr)] lg:items-center">
       <div className="min-w-0">
@@ -43,6 +43,7 @@ const TaskRow = memo(function TaskRow({ task, me, names }: { task: TaskSummary; 
           <span className="min-w-0">{plainName(task.title)}</span>
         </SheetLink>
         {task.needs_attention ? <p className="text-xs text-status-amber">Needs a new reviewer or requester</p> : null}
+        <BlockedLine status={task.status} words={blocked} />
       </div>
       <TaskStatusBadge status={task.status} />
       <div className="min-w-0 text-sm">

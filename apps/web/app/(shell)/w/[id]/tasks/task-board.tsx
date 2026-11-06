@@ -4,7 +4,7 @@ import { memo } from "react";
 import { cn } from "cn";
 import { plainName } from "@/components/agent-content/text";
 import { SheetLink } from "@/components/sheet/target-sheet";
-import { PrincipalName, TaskStatusBadge } from "./task-bits";
+import { BlockedLine, PrincipalName, TaskStatusBadge } from "./task-bits";
 import { nameOf, type Names, type TaskStatus, type TaskSummary } from "./task-model";
 import { BOARD_COLUMNS, countText, groupTasks } from "./task-views";
 
@@ -13,7 +13,7 @@ import { BOARD_COLUMNS, countText, groupTasks } from "./task-views";
  * every lifecycle action stays in the task Sheet, where the server decides it. Columns stack on a narrow screen, so the
  * page never has to scroll sideways.
  */
-export function TaskBoard({ tasks, partial, paged = false, showCanceled, selected, me, names }: { tasks: TaskSummary[]; partial: boolean; paged?: boolean; showCanceled: boolean; selected: string | null; me: string; names: Names }) {
+export function TaskBoard({ blocked = {}, tasks, partial, paged = false, showCanceled, selected, me, names }: { blocked?: Record<string, string>; tasks: TaskSummary[]; partial: boolean; paged?: boolean; showCanceled: boolean; selected: string | null; me: string; names: Names }) {
   const columns = groupTasks(tasks, showCanceled ? [...BOARD_COLUMNS, "canceled"] : BOARD_COLUMNS, paged);
   return (
     <div className="@container">
@@ -29,7 +29,7 @@ export function TaskBoard({ tasks, partial, paged = false, showCanceled, selecte
             ) : (
               <ul className="space-y-2">
                 {column.tasks.map((task) => (
-                  <TaskCard key={task.id} task={task} selected={task.id === selected} me={me} names={names} />
+                  <TaskCard key={task.id} task={task} blocked={blocked[task.id]} selected={task.id === selected} me={me} names={names} />
                 ))}
               </ul>
             )}
@@ -46,7 +46,7 @@ export function TaskBoard({ tasks, partial, paged = false, showCanceled, selecte
  */
 const ABOVE_LINK = "relative z-10 w-fit max-w-full min-w-0";
 
-const TaskCard = memo(function TaskCard({ task, selected, me, names }: { task: TaskSummary; selected: boolean; me: string; names: Names }) {
+const TaskCard = memo(function TaskCard({ task, blocked, selected, me, names }: { task: TaskSummary; blocked?: string; selected: boolean; me: string; names: Names }) {
   return (
     <li className={cn("relative isolate space-y-1 rounded-lg border bg-card p-3 text-card-foreground hover:border-ring", selected && "border-ring")}>
       <p className={cn(ABOVE_LINK, "truncate text-xs text-muted-foreground")} title={task.id}>
@@ -56,6 +56,7 @@ const TaskCard = memo(function TaskCard({ task, selected, me, names }: { task: T
         {plainName(task.title)}
       </SheetLink>
       {task.needs_attention ? <p className="text-xs text-status-amber">Needs a new reviewer or requester</p> : null}
+      <BlockedLine status={task.status} words={blocked} />
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-xs">
         <dt className="text-muted-foreground">Assignee</dt>
         <dd className={ABOVE_LINK}>{task.assignee ? <PrincipalName id={task.assignee} label={nameOf(task.assignee, me, names)} me={me} /> : "Unassigned"}</dd>
