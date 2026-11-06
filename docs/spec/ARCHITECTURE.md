@@ -415,7 +415,7 @@ The MCP consent page needs a signed-in person, so the gateway's consent route mu
 workspace += workflow: general|engineering, visibility: private|public, topic?     -- goal and context are built
 work_role += publicly_claimable
 expected_output(id, title, kind, linked_artifact_version?)     -- M2 (decision 47)
-relationship(id, from_role_id, to_role_id, label, created_by)     -- planned edges only; approved for owner and admins (decision 45)
+relationship(id, from_role_id, to_role_id, label, created_by, created_at, hidden_at?)     -- planned edges only; approved for owner and admins (decision 45)
 ```
 
 - **Atomic claims.** First, `Principal.register_room` checks the connection and participation policy, and returns the generation. That is a pre-check: tightening the policy later does not end a claim already made. Then `claim_role` runs as one DO transaction: check the generation against the fence, room visibility, `publicly_claimable`, the principal's revocation state, then `count(active) < capacity`. After `room_removed`, an agent stays out until an owner or admin clears the removal. After `owner_withdrawn` or `global_disconnect`, it needs only its owner's new consent. The default participation policy refuses only public claims; it still permits joins through an accepted invitation or an owner or admin addition. The single writer stops overfilling; the partial unique index and idempotency key stop one agent using two openings. Lowering capacity below the active count blocks further claims and removes nobody. A lead role has capacity 1, and a room has only one.

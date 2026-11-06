@@ -37,6 +37,8 @@ capabilities:
 person_only:
   - getCollaboration
   - listHandoffs
+  - addPlannedRelationship
+  - removePlannedRelationship
   - setReviewPolicy
   - createRole
   - updateRole

@@ -10,7 +10,12 @@ vi.mock("@/lib/gateway/server", () => ({
   getIdentity: async () => identity,
   getOrganizations: async () => ({ ok: true, data: { organizations: [] } }),
 }));
-vi.mock("@/lib/workroom", () => ({ loadWorkroom: async () => ({ id: "ws_1" }) }));
+let workroom: Record<string, unknown>;
+vi.mock("@/lib/workroom", () => ({
+  loadWorkroom: async () => workroom,
+  canManageWorkroom: (room: { policy_version?: number | null }) => room.policy_version !== null && room.policy_version !== undefined,
+  isArchived: (room: { status?: string }) => room.status === "archived",
+}));
 
 const { default: Collaboration } = await import("./page");
 const { textNameOf } = await import("../tasks/task-model");
@@ -20,6 +25,7 @@ const path = "/api/v1/workspaces/ws_1/collaboration";
 const show = async (query: Record<string, string> = {}) => render(await Collaboration({ params, searchParams: Promise.resolve(query) }));
 
 beforeEach(() => {
+  workroom = { id: "ws_1" };
   setUrl("/w/ws_1/collaboration");
   replies.clear();
   identity = { ok: true, data: { id: "per_me", orgs: [], admin_orgs: [] } } as never;
@@ -131,5 +137,120 @@ describe("Collaboration", () => {
     await show();
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
     expect(screen.queryByText(/No handoffs/)).toBeNull();
+  });
+});
+
+describe("planned relationships", () => {
+  const line = { id: "rel_1", from_role: "rol_a", from_title: "Architect **x**", to_role: "rol_b", to_title: "Engineer", label: "Hands <b>designs</b> to", created_by: "per_me", created_at: 1 };
+  const withPlanned = (planned: unknown[]) => {
+    const read = replies.get(path) as { data: Record<string, unknown> };
+    replies.set(path, { ok: true, data: { ...read.data, planned } });
+  };
+  const roles = (list: { id: string; title: string }[]) => replies.set("/api/v1/workspaces/ws_1/roles", { ok: true, data: { roles: list } });
+  const section = () => within(screen.getByRole("heading", { name: "Planned relationships" }).closest("section") as HTMLElement);
+
+  it("says planned in words, keeps a label inert, and says it isn't a record or a grant", async () => {
+    withPlanned([line]);
+    const { container } = await show();
+    const planned = section();
+    expect(planned.getByText("Planned: Architect **x** to Engineer")).toBeInTheDocument();
+    expect(planned.getByText("Hands <b>designs</b> to")).toBeInTheDocument();
+    expect(container.querySelector("b")).toBeNull();
+    expect(planned.getByText(/Planned, not recorded/)).toBeInTheDocument();
+    expect(planned.getByText(/isn't a record of anything that happened, and it grants nothing/)).toBeInTheDocument();
+    // Nothing to change for someone who doesn't manage the room, and no request for their openings.
+    expect(planned.queryByRole("button")).toBeNull();
+    expect(planned.queryByRole("combobox")).toBeNull();
+  });
+
+  it("draws a plan dashed, between roles, with the same words as the list", async () => {
+    withPlanned([line]);
+    const { container } = await show({ view: "map" });
+    const map = screen.getByRole("group", { name: /planned relationships between work roles/ });
+    const link = within(map).getByRole("link", { name: "Planned: Architect **x** to Engineer: Hands <b>designs</b> to. Planned, not recorded." });
+    expect(link).toHaveAttribute("href", "#planned-rel_1");
+    expect(link.querySelector("path[stroke-dasharray]")).not.toBeNull();
+    expect(container.querySelector('[id="planned-rel_1"]')?.tagName).toBe("LI");
+    // Recorded lines stay solid, and a square stands for each role.
+    const recorded = within(map).getByRole("link", { name: /agt_b to You|agt_b to/ });
+    expect(recorded.querySelector("path[stroke-dasharray]")).toBeNull();
+    expect(map.querySelectorAll("rect")).toHaveLength(2);
+    expect(screen.getByText(/Dashed lines join work roles/)).toBeInTheDocument();
+  });
+
+  it("draws a map of plans alone, with nothing recorded yet", async () => {
+    replies.set(path, { ok: true, data: { edges: [], nodes: [{ id: "per_me" }], planned: [line] } });
+    await show({ view: "map" });
+    expect(screen.getByRole("group", { name: /Map of who/ })).toBeInTheDocument();
+    expect(screen.getByText(/No handoffs to show/)).toBeInTheDocument();
+  });
+
+  it("shows no section at all when the read leaves plans out, so nobody is told there are none", async () => {
+    await show();
+    expect(screen.queryByRole("heading", { name: "Planned relationships" })).toBeNull();
+    expect(screen.queryByText(/planned/i)).toBeNull();
+    await show({ view: "map" });
+    expect(screen.queryByText(/Dashed lines/)).toBeNull();
+  });
+
+  it("leaves out who set a line when the read does", async () => {
+    const { created_by: _hidden, ...line2 } = line;
+    withPlanned([line2]);
+    await show();
+    expect(section().queryByText(/Set by/)).toBeNull();
+    expect(section().getByText("Planned, not recorded.")).toBeInTheDocument();
+  });
+
+  it("says nothing's planned when the read says so", async () => {
+    withPlanned([]);
+    await show();
+    expect(section().getByText("Nothing's planned yet.")).toBeInTheDocument();
+  });
+
+  it("gives the owner and admins the form and Remove", async () => {
+    workroom = { id: "ws_1", policy_version: 3, status: "active" };
+    withPlanned([line]);
+    roles([{ id: "rol_a", title: "Architect" }, { id: "rol_b", title: "Engineer" }]);
+    await show();
+    const planned = section();
+    expect(planned.getByRole("button", { name: "Remove" })).toHaveAccessibleDescription("Planned: Architect **x** to Engineer");
+    expect(planned.getByRole("combobox", { name: "From role" })).toBeInTheDocument();
+    expect(planned.getByRole("combobox", { name: "To role" })).toBeInTheDocument();
+    expect(planned.getByRole("textbox", { name: "What flows between them" })).toBeInTheDocument();
+    expect(planned.getByRole("button", { name: "Add planned line" })).toBeInTheDocument();
+  });
+
+  it("offers no changes in an archived room", async () => {
+    workroom = { id: "ws_1", policy_version: 3, status: "archived" };
+    withPlanned([line]);
+    roles([{ id: "rol_a", title: "Architect" }, { id: "rol_b", title: "Engineer" }]);
+    await show();
+    expect(section().queryByRole("button")).toBeNull();
+    expect(section().queryByRole("combobox")).toBeNull();
+    expect(section().getByText("Planned: Architect **x** to Engineer")).toBeInTheDocument();
+  });
+
+  it("sends a manager to Team without two openings, and reports a failed read of them", async () => {
+    workroom = { id: "ws_1", policy_version: 3, status: "active" };
+    withPlanned([]);
+    roles([{ id: "rol_a", title: "Architect" }]);
+    const first = await show();
+    expect(section().getByRole("link", { name: "Team" })).toHaveAttribute("href", "/w/ws_1/team");
+    expect(section().queryByRole("button")).toBeNull();
+    first.unmount();
+    replies.delete("/api/v1/workspaces/ws_1/roles");
+    await show();
+    expect(section().getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(section().queryByRole("button", { name: "Add planned line" })).toBeNull();
+    expect(section().queryByRole("link", { name: "Team" })).toBeNull();
+  });
+
+  it("stops offering the form at the limit", async () => {
+    workroom = { id: "ws_1", policy_version: 3, status: "active" };
+    withPlanned(Array.from({ length: 100 }, (_, index) => ({ ...line, id: `rel_${index}` })));
+    roles([{ id: "rol_a", title: "Architect" }, { id: "rol_b", title: "Engineer" }]);
+    await show();
+    expect(section().getByText(/all 100 planned lines/)).toBeInTheDocument();
+    expect(section().queryByRole("button", { name: "Add planned line" })).toBeNull();
   });
 });

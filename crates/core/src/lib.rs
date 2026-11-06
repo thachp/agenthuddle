@@ -21,6 +21,8 @@ pub const MAX_CONTEXT_BYTES: usize = 32 * 1024;
 pub const MAX_ROLE_TITLE_BYTES: usize = 200;
 pub const MAX_RESPONSIBILITIES_BYTES: usize = 4 * 1024;
 pub const MAX_ROLE_CAPACITY: i64 = 50;
+pub const MAX_PLANNED_LABEL_BYTES: usize = 200;
+pub const MAX_PLANNED_RELATIONSHIPS: i64 = 100;
 
 pub type PrincipalId = String;
 
@@ -337,6 +339,18 @@ pub fn validate_role(title: &str, responsibilities: &str, capacity: i64) -> Resu
         return Err(CoreError::InvalidArgument("capacity"));
     }
     Ok(())
+}
+
+/// A planned line between two work roles: from one to another, with words to say what flows along it.
+pub fn validate_planned_relationship(
+    from_role: &str,
+    to_role: &str,
+    label: &str,
+) -> Result<(), CoreError> {
+    if from_role == to_role {
+        return Err(CoreError::InvalidArgument("to_role_id"));
+    }
+    require_text(label, "label", MAX_PLANNED_LABEL_BYTES)
 }
 
 /// What a room knows about someone asking to fill an opening.

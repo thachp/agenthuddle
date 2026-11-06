@@ -130,7 +130,12 @@ pub(super) fn read_map(sql: &SqlStorage, who: &Participant) -> R<Value> {
         .iter()
         .map(|edge| json!({ "from": edge["from_id"], "to": edge["to_id"], "kind": edge["kind"], "count": int(&edge["n"]), "last_at": edge["last_at"] }))
         .collect();
-    Ok(json!({ "edges": edges, "nodes": nodes }))
+    let mut map = json!({ "edges": edges, "nodes": nodes });
+    // Left out, not empty, for someone it doesn't reach: an empty list would tell them no plan exists.
+    if sees_planned_relationships(caller) {
+        map["planned"] = planned::read(sql, caller)?;
+    }
+    Ok(map)
 }
 
 /// One line's handoffs, newest first. There's no cursor, so nothing here counts past what the viewer can see.
@@ -170,5 +175,6 @@ pub(super) fn read_costs(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Va
     let line = cost(&line_query(limit), bindings)?;
     let people = json!([from, to]).to_string();
     let last_active = cost(LAST_ACTIVE, vec![people.as_str().into()])?;
-    Ok(json!({ "map": map, "line": line, "last_active": last_active }))
+    let planned = cost(planned::READ, vec![])?;
+    Ok(json!({ "map": map, "line": line, "last_active": last_active, "planned": planned }))
 }

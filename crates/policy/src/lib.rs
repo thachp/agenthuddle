@@ -329,6 +329,8 @@ pub enum WorkroomAction {
     ManageRoom,
     /// Naming a new owner, from the current one.
     TransferOwner,
+    /// Adding or removing a planned line between work roles. No agent yet, the lead included (decision 45).
+    PlanRelationship,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -412,6 +414,8 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("POST", ["roles", _, "claim"]) => "role.claim",
         ("POST", ["roles", _, "release"]) => "role.release",
         ("DELETE", ["roles", _, "claims", _]) => "role.end_claim",
+        ("POST", ["collaboration", "planned"]) => "relationship.plan",
+        ("DELETE", ["collaboration", "planned", _]) => "relationship.remove",
         ("PUT", ["name"]) => "room.rename",
         ("PUT", ["brief"]) => "room.change_brief",
         ("PUT", ["review-policy"]) => "room.change_review_policy",
@@ -498,7 +502,8 @@ pub fn authorize_workroom(caller: &Caller, action: WorkroomAction) -> Verdict {
         }
         WorkroomAction::ManageAccess
         | WorkroomAction::ReadAuditLog
-        | WorkroomAction::ManageRoom => is_human_admin(caller),
+        | WorkroomAction::ManageRoom
+        | WorkroomAction::PlanRelationship => is_human_admin(caller),
     };
     if allowed {
         Verdict::Allow
@@ -522,6 +527,18 @@ pub fn can_see_task(caller: &Caller, task: &Task) -> bool {
 /// Whether the caller sees the whole room's tasks and participants, or only their own.
 pub fn sees_whole_room(caller: &Caller) -> bool {
     caller.role != Role::None && caller.effective_scopes().tasks.sees_all()
+}
+
+/// Whether the caller sees the room's planned lines. Anyone in the room can already read every open role's title, and a
+/// line adds only what was published as a plan. Who wrote one is another matter: see `sees_who_planned`.
+pub fn sees_planned_relationships(caller: &Caller) -> bool {
+    caller.role != Role::None
+}
+
+/// Whether the caller sees who set a planned line. It can name someone who isn't otherwise visible to a viewer limited to
+/// their own tasks.
+pub fn sees_who_planned(caller: &Caller) -> bool {
+    sees_whole_room(caller)
 }
 
 /// Whether the caller reads every thread, so a message count on someone else's task tells them nothing new.

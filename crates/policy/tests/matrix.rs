@@ -102,6 +102,7 @@ fn agents_never_hold_admin_authority_even_with_a_stored_role() {
             WorkroomAction::AppointAdmin,
             WorkroomAction::ReadAuditLog,
             WorkroomAction::ManageRoom,
+            WorkroomAction::PlanRelationship,
             WorkroomAction::CreateTask,
         ] {
             assert_eq!(
@@ -992,4 +993,65 @@ fn only_a_conversation_scope_for_all_reads_every_thread() {
         scopes: Scopes::MEMBER,
         ..caller("x", Agent, Role::None)
     }));
+}
+
+#[test]
+fn only_people_who_run_the_room_plan_relationships() {
+    for (kind, role, want) in [
+        (Person, Role::Owner, Verdict::Allow),
+        (Person, Role::Admin, Verdict::Allow),
+        (Person, Role::Member, Verdict::Forbidden),
+        (Person, Role::Guest, Verdict::Forbidden),
+        (Person, Role::None, Verdict::NotParticipant),
+        (Agent, Role::Owner, Verdict::Forbidden),
+        (Agent, Role::Admin, Verdict::Forbidden),
+        (Agent, Role::Member, Verdict::Forbidden),
+        (Agent, Role::Guest, Verdict::Forbidden),
+        (Agent, Role::None, Verdict::NotParticipant),
+    ] {
+        assert_eq!(
+            authorize_workroom(&caller("x", kind, role), WorkroomAction::PlanRelationship),
+            want,
+            "{kind:?} {role:?}"
+        );
+    }
+    assert_eq!(
+        denied_change_name("POST", &["collaboration", "planned"]),
+        Some("relationship.plan")
+    );
+    assert_eq!(
+        denied_change_name("DELETE", &["collaboration", "planned", "rel_1"]),
+        Some("relationship.remove")
+    );
+    assert_eq!(denied_change_name("GET", &["collaboration"]), None);
+}
+
+#[test]
+fn planned_lines_reach_everyone_in_the_room_but_only_some_learn_who_set_them() {
+    for (kind, role, sees, names) in [
+        (Person, Role::Owner, true, true),
+        (Person, Role::Admin, true, true),
+        (Person, Role::Member, true, true),
+        (Agent, Role::Member, true, true),
+        (Person, Role::Guest, true, false),
+        (Agent, Role::Guest, true, false),
+        (Agent, Role::Admin, true, false),
+        (Agent, Role::Owner, true, false),
+        (Person, Role::None, false, false),
+        (Agent, Role::None, false, false),
+    ] {
+        let who = caller("x", kind, role);
+        assert_eq!(sees_planned_relationships(&who), sees, "{kind:?} {role:?}");
+        assert_eq!(sees_who_planned(&who), names, "{kind:?} {role:?}");
+    }
+    let mut narrowed = caller("x", Agent, Role::Member);
+    narrowed.scopes.tasks = TaskScope::Own;
+    assert!(sees_planned_relationships(&narrowed));
+    assert!(!sees_who_planned(&narrowed));
+    assert!(!can_see_event(
+        &caller("x", Agent, Role::Guest),
+        "relationship.planned",
+        "per_owner",
+        None
+    ));
 }

@@ -273,6 +273,7 @@ pub(super) fn handle_close_role(
         vec![now.into(), id.into()],
     )?;
     withdraw_offers_of_role(sql, id)?;
+    planned::hide_with_role(sql, caller, id, now)?;
     audit(sql, caller, "role.closed", id, None, None, now)?;
     let mut everyone = room_people(sql)?;
     everyone.retain(|principal| *principal != caller.id);

@@ -141,7 +141,25 @@ paths:
     get: { operationId: listActivity, tags: [queries], summary: "What happened in the room for this viewer, oldest first unless `order` or `before` asks for newest first. A full page gives the next cursor as `next_after` or `next_before`, and a shorter one gives null. A task's events follow whether they can see the task now. A room's own events follow whether they see the member list, apart from a fixed few everyone sees and what they did themselves. A `reason` is null without the conversation scope. It has no read state and acknowledges no inbox. Events carry no sequence number, and the cursor is an event's ID, so nothing counts what's hidden", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/collaboration:
     parameters: [{ $ref: "#/components/parameters/ws" }]
-    get: { operationId: getCollaboration, tags: [queries], summary: "Who has worked with whom, as `edges` of `from`, `to`, `kind` (`offer`, `submission`, `change_request` or `message`), `count` and `last_at`, and `nodes` of `id` with `role_title`, `last_active` and `gone` where the viewer may see them. `gone` means no longer in the workroom, and someone who doesn't manage access isn't told an owner has left. Someone limited to their own tasks gets only lines from those tasks whose both ends are on the task now, including lines of their own, and who they touch. Messages count only where the viewer reads the thread. Lines describe work, not permissions", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getCollaboration, tags: [queries], summary: "Who has worked with whom, as `edges` of `from`, `to`, `kind` (`offer`, `submission`, `change_request` or `message`), `count` and `last_at`, and `nodes` of `id` with `role_title`, `last_active` and `gone` where the viewer may see them. `planned` lists intended lines between open work roles, for anyone in the room, each with `id`, `from_role`, `from_title`, `to_role`, `to_title`, `label` and `created_at`, oldest first, at most 100, plus `created_by` for someone who sees the whole room. `gone` means no longer in the workroom, and someone who doesn't manage access isn't told an owner has left. Someone limited to their own tasks gets only lines from those tasks whose both ends are on the task now, including lines of their own, and who they touch. Messages count only where the viewer reads the thread. Lines describe work, not permissions", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}/collaboration/planned:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    post:
+      operationId: addPlannedRelationship
+      tags: [commands]
+      summary: "Plan a line from one open work role to another, with a label. Owner or admin, and never an agent, the lead included. At most 100 showing in a room, and one per ordered pair of roles. There's no edit: remove it and add it again. A line grants nothing and proves nothing. 409 `relationship_exists` for the same direction twice, and 404 `role_not_found` for a closed or unknown role"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, from_role_id, to_role_id, label], properties: { policy_version: { type: integer }, from_role_id: { type: string }, to_role_id: { type: string, description: "Not the same role as `from_role_id`." }, label: { type: string, minLength: 1, description: "At most 200 bytes. Text to read, never instructions or permissions." } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/collaboration/planned/{relationship}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: relationship, in: path, required: true, schema: { type: string } }]
+    delete:
+      operationId: removePlannedRelationship
+      tags: [commands]
+      summary: "Remove a planned line. Owner or admin, and never an agent, the lead included. 404 `relationship_not_found` if it's gone. Closing a role hides its lines, which keep their history and stop counting toward the limit"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/collaboration/handoffs:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: from, in: query, required: true, schema: { type: string } }, { name: to, in: query, required: true, schema: { type: string } }]
     get: { operationId: listHandoffs, tags: [queries], summary: "One line's handoffs, newest first, at most 50, under the same limits, each with `kind`, `task_id`, `task_title` and `created_at`. `truncated` says there are more", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
@@ -592,5 +610,5 @@ components:
           properties:
             code:
               type: string
-              enum: [role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
             message: { type: string }

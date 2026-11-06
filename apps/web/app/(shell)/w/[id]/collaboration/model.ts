@@ -1,7 +1,10 @@
+import { plainName } from "@/components/agent-content/text";
+
 /** What the room says about who has worked with whom, as far as this viewer may see. Lines describe work, not permissions. */
 export type Edge = { from: string; to: string; kind: string; count: number; last_at: number };
 export type Node = { id: string; role_title?: string; last_active?: number; gone?: boolean };
-export type CollaborationRead = { edges: Edge[]; nodes: Node[] };
+/** `planned` is left out for someone it doesn't reach, which doesn't mean there's no plan. */
+export type CollaborationRead = { edges: Edge[]; nodes: Node[]; planned?: PlannedLine[] };
 export type Handoff = { kind: string; task_id: string; task_title: string; created_at: number };
 
 const KIND_LABELS: Record<string, [string, string]> = {
@@ -57,3 +60,14 @@ export function positions(ids: string[]) {
 }
 
 export const MAP_SIZE = SIZE;
+
+/** An intended line between two work roles, set by the owner or an admin. It's a plan: it isn't a record of anything, and it grants nothing. */
+export type PlannedLine = { id: string; from_role: string; from_title: string; to_role: string; to_title: string; label: string; created_at: number; /** Only for someone who sees the whole room. */ created_by?: string };
+
+export const MAX_PLANNED_LABEL_BYTES = 200;
+export const MAX_PLANNED_LINES = 100;
+
+/** The same words on the map and in the list, so nothing rests on the line being dashed. Text in them is someone's, and it's data. */
+export const plannedName = (line: Pick<PlannedLine, "from_title" | "to_title">) => `Planned: ${plainName(line.from_title)} to ${plainName(line.to_title)}`;
+
+export const plannedAnchor = (line: Pick<PlannedLine, "id">) => `planned-${line.id}`;

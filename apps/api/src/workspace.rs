@@ -15,17 +15,17 @@ use crate::{
 use podster_assertion::TargetMember;
 use podster_core::{
     apply_departure, apply_review_ended, decide, decide_claim, decide_create, validate_brief,
-    validate_role, Artifact, ClaimOutcome, ClaimRefusal, ClaimState, Command, HandoffKind, NewTask,
-    Observed, Task, TaskPatch, TaskStatus, MAX_MESSAGE_BYTES,
+    validate_planned_relationship, validate_role, Artifact, ClaimOutcome, ClaimRefusal, ClaimState,
+    Command, HandoffKind, NewTask, Observed, Task, TaskPatch, TaskStatus, MAX_MESSAGE_BYTES,
 };
 use podster_policy::{
     authorize_requester_change, authorize_reviewer_change, authorize_task, authorize_workroom,
     can_review, can_see_event, can_see_task, denied_change_name, effective_scopes,
     is_authority_refusal, may_claim_role, may_decide_review, may_recover_ownership,
     org_departure_ends, owner_authority_holds, reads_every_thread, scopes_after_claim,
-    sees_whole_room, task_view, ArtifactScope, ArtifactView, Caller, ConversationScope, Preset,
-    PrincipalKind, ReviewScope, Role, Scopes, TaskAction, TaskScope, Verdict, WorkroomAction,
-    EVENTS_FOR_EVERYONE,
+    sees_planned_relationships, sees_who_planned, sees_whole_room, task_view, ArtifactScope,
+    ArtifactView, Caller, ConversationScope, Preset, PrincipalKind, ReviewScope, Role, Scopes,
+    TaskAction, TaskScope, Verdict, WorkroomAction, EVENTS_FOR_EVERYONE,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -72,6 +72,7 @@ const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 type Identity = Verified;
 
 mod collaboration;
+mod planned;
 mod roles;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
@@ -3585,6 +3586,27 @@ impl Workspace {
                     test_fail,
                     move |sql, who, now| {
                         handle_change_role(sql, &who.caller, &target, &body, target_member, now)
+                    },
+                )
+            }
+            (Method::Post, ["collaboration", "planned"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| planned::handle_add(sql, &who.caller, &body, now),
+            ),
+            (Method::Delete, ["collaboration", "planned", relationship]) => {
+                let relationship = (*relationship).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        planned::handle_remove(sql, &who.caller, &relationship, &body, now)
                     },
                 )
             }
