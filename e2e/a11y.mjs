@@ -288,8 +288,39 @@ async function keyboardPaths(s) {
     await page.keyboard.press("Enter");
     await page.waitForURL(/\/w\/[^/]+\/overview/, { timeout: 15_000 });
     await page.getByText("Keyboard room").first().waitFor({ timeout: 15_000 });
-    const focused = await activeText(page);
-    ok(!focused.startsWith("BODY"), `after creating, focus is lost on the page body rather than moved to the new screen`);
+    await page.waitForFunction(() => document.activeElement?.id === "main-content", null, { timeout: 5_000 }).catch(() => {});
+    ok(await page.evaluate(() => document.activeElement?.id === "main-content"), `after creating, focus is on ${await activeText(page)}, not on the new screen's main region`);
+    await page.keyboard.press("Tab");
+    ok(await page.evaluate(() => document.getElementById("main-content").contains(document.activeElement)), `Tab from the new screen's main region went to ${await activeText(page)}, not into that screen`);
+  });
+
+  await keyboardPath("a refused create keeps focus and says why", async () => {
+    // The owner is allowed to create, so a refusal has to be staged. Only the response is; the form is the real one.
+    await page.route("**/api/v1/workspaces", (route) => (route.request().method() === "POST" ? route.fulfill({ status: 403, json: { error: { code: "not_allowed" } } }) : route.fallback()));
+    try {
+      await page.goto(`${app}/workrooms/new`);
+      const name = page.getByRole("textbox", { name: "Name" });
+      await name.waitFor();
+      await hydrated(page);
+      await tabTo(page, name, "the name field");
+      await page.keyboard.type("Refused room");
+      const alert = page.getByRole("alert").filter({ hasText: "no workroom was created" });
+      const focusedOn = (locator) => locator.evaluate((el) => el === document.activeElement);
+
+      await page.keyboard.press("Enter");
+      await alert.waitFor({ timeout: 15_000 });
+      ok(await focusedOn(name), `a refusal after Enter in the field left focus on ${await activeText(page)}`);
+
+      const button = page.getByRole("button", { name: "Create workroom" });
+      await tabTo(page, button, "the create button");
+      await page.keyboard.press("Enter");
+      await page.getByRole("button", { name: "Create workroom" }).waitFor({ timeout: 15_000 });
+      await alert.waitFor({ timeout: 15_000 });
+      ok(await focusedOn(button), `a refusal after Enter on the button left focus on ${await activeText(page)}`);
+      ok(new URL(page.url()).pathname === "/workrooms/new", `a refusal moved the page to ${page.url()}`);
+    } finally {
+      await page.unroute("**/api/v1/workspaces");
+    }
   });
 
   await keyboardPath("review a task", async () => {
