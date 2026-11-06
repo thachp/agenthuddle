@@ -710,6 +710,7 @@ async function keyboardPaths(s) {
     const refusal = dialog.getByRole("alert").filter({ hasText: "wait for itself" });
     await refusal.waitFor({ timeout: 15_000 });
     ok(await refusal.evaluate((el) => document.activeElement === el), "focus didn't move to the refusal");
+    await audit(page, "Task plan form, with a refusal");
     ok(!(await refusal.textContent()).includes("Plan the"), "the refusal named a task");
 
     const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
@@ -720,6 +721,7 @@ async function keyboardPaths(s) {
     await small.getByLabel("Estimate in working days").waitFor({ timeout: 15_000 });
     const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     ok(overflow <= 0, `the plan form scrolls sideways by ${overflow}px at 375px`);
+    await audit(small, "Task plan form, phone");
     await phone.close();
   });
 
