@@ -901,6 +901,8 @@ async function keyboardPaths(s) {
     try {
       await own.goto(longUrl());
       await hydrated(own);
+      // The list streams in after the shell, so the button can be on screen before React has it, and a script's click is lost then.
+      await own.waitForFunction(() => Object.keys(document.querySelector("[data-task-load-more]") ?? {}).some((key) => key.startsWith("__reactProps")), null, { timeout: 15_000 });
       await own.evaluate(() => {
         window.__longest = 0;
         new PerformanceObserver((list) => list.getEntries().forEach((entry) => (window.__longest = Math.max(window.__longest, entry.duration)))).observe({ entryTypes: ["longtask"] });
@@ -914,7 +916,7 @@ async function keyboardPaths(s) {
             window.__longest = 0;
             document.querySelector("[data-task-load-more]").click();
             while (document.querySelectorAll('[data-sheet-launcher^="task:"]').length <= before) {
-              if (performance.now() - started > 30_000) throw new Error(`no new rows after 30 s at ${before}: ${document.querySelector("[data-task-load-more]")?.textContent}, ${document.querySelector('[role="alert"]')?.textContent}`);
+              if (performance.now() - started > 30_000) throw new Error(`no new rows after 30 s at ${before}: ${document.querySelector("[data-task-load-more]")?.textContent}, ${document.querySelector('[role="alert"]')?.textContent}, ${performance.getEntriesByType("resource").filter((entry) => entry.name.includes("/tasks?cursor=")).length} reads`);
               await new Promise((done) => setTimeout(done, 5));
             }
             await new Promise(requestAnimationFrame);
@@ -922,7 +924,10 @@ async function keyboardPaths(s) {
           }, loaded);
         }
         const stats = await own.evaluate(() => ({ elements: document.querySelectorAll("*").length, longest: Math.round(window.__longest) }));
-        report.push(`${milestone} rows: last page ${page} ms, longest block ${stats.longest} ms, ${stats.elements} elements, ${await heapMb()} MB heap after GC`);
+        const heap = await heapMb();
+        report.push(`${milestone} rows: last page ${page} ms, longest block ${stats.longest} ms, ${stats.elements} elements, ${heap} MB heap after GC`);
+        // These pages carry 64 KB of instructions a row. Rows that kept them would hold 320 MB by the end.
+        ok(heap < 120, `${milestone} rows hold ${heap} MB of heap after GC`);
         ok(page < 3000, `adding a page at ${milestone} rows took ${page} ms`);
       }
       const opened = Date.now();

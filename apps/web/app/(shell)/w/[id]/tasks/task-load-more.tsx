@@ -19,7 +19,8 @@ export function TaskLoadMore({ pages, count, reviews, paused }: { pages: TaskPag
   const buttonHadFocus = button.current !== null && document.activeElement === button.current;
 
   useLayoutEffect(() => {
-    if (cursor === null && buttonHadFocus) done.current?.focus();
+    // A read can show one page was everything, which leaves no line to go to.
+    if (cursor === null && buttonHadFocus) (done.current ?? document.getElementById("main-content"))?.focus();
   });
 
   if (cursor === null) {

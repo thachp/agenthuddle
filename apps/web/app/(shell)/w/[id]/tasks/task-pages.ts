@@ -19,13 +19,13 @@ export type TaskPages = {
   announce: { count: number } | null;
   /** Reads the next page, unless one is already on its way. */
   load: () => void;
-  /** Reads from the start again and replaces what's held, keeping it on screen until the answer comes. */
+  /** Reads the first page again, keeping what's held on screen until the answer comes, and later pages after it. */
   restart: () => void;
 };
 
 /** A read that doesn't reach the screen is at most this far from the reader's place. */
-type Held = { generation: number; tasks: TaskSummary[]; cursor: number | null | undefined; pages: number; announce: { count: number } | null; lost: boolean };
-const nothingHeld = (generation: number): Held => ({ generation, tasks: [], cursor: undefined, pages: 0, announce: null, lost: false });
+type Held = { generation: number; tasks: TaskSummary[]; firstPageRows: number; laterFrom: number | null; cursor: number | null | undefined; pages: number; announce: { count: number } | null; lost: boolean };
+const nothingHeld = (generation: number): Held => ({ generation, tasks: [], firstPageRows: 0, laterFrom: null, cursor: undefined, pages: 0, announce: null, lost: false });
 
 /**
  * Keeps what the reader is looking at where it is when rows arrive above it, because a page adds to every group. Chrome and
@@ -91,14 +91,16 @@ export function useTaskPages(workspace: string, filter: string, start: number | 
           if (result.ok) {
             const rows = result.data.tasks.map(summaryOf);
             restore.current = rememberPlace();
-            setStored((now) => ({
-              generation,
-              tasks: replace ? rows : [...(now.generation === generation ? now.tasks : []), ...rows],
-              cursor: result.data.next_cursor,
-              pages: replace ? 1 : (now.generation === generation ? now.pages : 0) + 1,
-              announce: replace ? null : { count: rows.length },
-              lost: false,
-            }));
+            const next = result.data.next_cursor;
+            setStored((before) => {
+              const now = before.generation === generation ? before : nothingHeld(generation);
+              if (!replace) return { ...now, tasks: [...now.tasks, ...rows], firstPageRows: now.pages === 0 ? rows.length : now.firstPageRows, laterFrom: now.pages === 1 ? from : now.laterFrom, cursor: next, pages: now.pages + 1, announce: { count: rows.length }, lost: false };
+              // Later pages stay, as the reader's place, only if the new first page reaches where they start. An old task can join a
+              // filtered list at a low position, which ends the first page sooner, and a row between the two would then be on
+              // neither and nothing would fetch it. Rows past that point overlap at most, and `mergeTasks` removes those.
+              const keepLater = next !== null && now.laterFrom !== null && next >= now.laterFrom;
+              return { ...now, tasks: keepLater ? [...rows, ...now.tasks.slice(now.firstPageRows)] : rows, firstPageRows: rows.length, laterFrom: keepLater ? now.laterFrom : null, cursor: keepLater ? now.cursor : next, pages: keepLater ? now.pages : 1, announce: null, lost: false };
+            });
             setStatus("idle");
           } else if (result.status === 401) {
             goToSignIn();
