@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
+import { AgentContent } from "@/components/agent-content/agent-content";
 import type { SheetApi } from "@/components/sheet/target-sheet";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -20,6 +22,7 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
   const [sending, setSending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [posted, setPosted] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const fieldRef = useRef<HTMLTextAreaElement>(null);
   const body = text.trim();
   // A message has no version to catch a second attempt, so only its key can. Each post whose outcome is unknown keeps its key, even if the words change and change back.
@@ -59,6 +62,8 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
       setText("");
       setPosted(true);
       refresh();
+      // Focus goes back to the box, which has to be showing first.
+      flushSync(() => setPreviewing(false));
       fieldRef.current?.focus();
     } catch {
       setProblem(changeProblem("message", "unknown", 0));
@@ -71,11 +76,18 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
 
   return (
     <form onSubmit={post} aria-label="New message" className="space-y-2 border-t pt-3">
-      <Label htmlFor="thread-message">Post a message</Label>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Label htmlFor="thread-message">Post a message</Label>
+        {/* Only shows the text. What's sent is always the box's own text, whether or not this was ever open. */}
+        <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-8" aria-pressed={previewing} onClick={() => setPreviewing(!previewing)}>
+          Preview
+        </Button>
+      </div>
       <textarea
         ref={fieldRef}
         id="thread-message"
         rows={3}
+        hidden={previewing}
         readOnly={sending}
         aria-describedby="thread-message-hint"
         className={FIELD_CLASS}
@@ -85,6 +97,12 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
           setPosted(false);
         }}
       />
+      {previewing ? (
+        <section aria-label="Preview of your message" className="space-y-1">
+          <p className="text-xs text-muted-foreground">This is how it'll look.</p>
+          {body ? <AgentContent author={{ name: "You", kind: "person", viewer: true }} body={body} /> : <p className="text-sm text-muted-foreground">Nothing to preview yet.</p>}
+        </section>
+      ) : null}
       <p id="thread-message-hint" className="text-xs text-muted-foreground">
         Everyone who can see this task can read it. A message doesn't change what anyone is allowed to do.
       </p>
