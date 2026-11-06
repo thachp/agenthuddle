@@ -24,6 +24,8 @@ export type TaskSheetProps = {
   room?: Room;
   /** Whether a task the viewer can read is filtered off the screen behind this Sheet. */
   outsideFilter?: (task: string) => boolean;
+  /** Called with each read of the open task, so a list past its first page can show what a person just did to it. */
+  onTaskRead?: (task: TaskDetail["task"]) => void;
 };
 
 async function read<T>(path: string, signal: AbortSignal) {
@@ -39,7 +41,7 @@ async function read<T>(path: string, signal: AbortSignal) {
   return null;
 }
 
-export function TaskSheet({ me, names, orgNames = {}, resolve, room, outsideFilter }: TaskSheetProps) {
+export function TaskSheet({ me, names, orgNames = {}, resolve, room, outsideFilter, onTaskRead }: TaskSheetProps) {
   return (
     <TargetSheet<LoadedTask>
       param="task"
@@ -50,6 +52,7 @@ export function TaskSheet({ me, names, orgNames = {}, resolve, room, outsideFilt
         if (!where) return null;
         const base = `/api/v1/workspaces/${encodeURIComponent(where.workspace)}`;
         const [detail, loadedRoom] = await Promise.all([read<TaskDetail>(`${base}/tasks/${encodeURIComponent(where.task)}`, signal), room ? room : read<Room>(base, signal)]);
+        if (detail) onTaskRead?.(detail.task);
         return detail && loadedRoom ? { ...detail, workspace: where.workspace, room: loadedRoom } : null;
       }}
       title={(data) => plainName(data.task.title)}

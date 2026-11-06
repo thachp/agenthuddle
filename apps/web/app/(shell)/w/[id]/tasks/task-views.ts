@@ -28,6 +28,19 @@ export const canceledChange = (showCanceled: boolean): Changes => ({ canceled: s
 
 /** The task filter both views share. Hiding canceled tasks is how the Board is arranged, so `onBoard` adds that. */
 export const applyReviewFilter = (tasks: Task[], state: Pick<TaskViewState, "reviewMine">, me: string) => (state.reviewMine ? tasks.filter((task) => task.status === "submitted" && task.reviewer === me) : tasks);
+/** What the server can narrow "Needs my review" to, so it finds reviews past the loaded pages. `applyReviewFilter` narrows the rest. */
+export const REVIEW_QUERY = "&status=submitted&mine=true";
+
+/** Each task once, where it first appeared, as its latest version. A version only goes up, so an older read can't undo a newer one. */
+export function mergeTasks(...lists: Task[][]) {
+  const merged = new Map<string, Task>();
+  for (const task of lists.flat()) {
+    const held = merged.get(task.id);
+    if (!held || task.version > held.version) merged.set(task.id, task);
+  }
+  return [...merged.values()];
+}
+
 export const onBoard = (tasks: Task[], state: Pick<TaskViewState, "showCanceled">) => (state.showCanceled ? tasks : tasks.filter((task) => task.status !== "canceled"));
 
 /** The Board's five columns, in the spec's order. Canceled is the optional sixth. */

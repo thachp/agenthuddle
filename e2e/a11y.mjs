@@ -169,7 +169,21 @@ async function seed() {
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
   const opening = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Lead coordinator", responsibilities: "Plans the work and **follows up**.", is_lead: true, policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
-  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  // Hundreds of tasks, with the one review waiting for the owner on the last page, past anything the screen first reads.
+  const longRoom = await owner.createRoom("Long room");
+  const longWorker = await AuthAgent.connect(target, owner, "Long room agent");
+  await owner.addAgent(longRoom, lead);
+  await owner.addAgent(longRoom, longWorker);
+  const inLong = (title, extra = {}) => lead.must("create_task", { workspace_id: longRoom, title, instructions: "A row in a long list.", idempotency_key: crypto.randomUUID(), ...extra });
+  const LONG_TASKS = 320;
+  for (let start = 0; start < LONG_TASKS; start += 20) {
+    await Promise.all(Array.from({ length: Math.min(20, LONG_TASKS - start) }, (_, i) => inLong(`Long task ${String(start + i).padStart(3, "0")}`)));
+  }
+  const lastReview = await inLong("The review past every loaded page", { assignee: longWorker.id, reviewer: owner.id });
+  const lastTaken = await longWorker.must("accept_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastReview.version });
+  await longWorker.must("submit_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastTaken.version, note: "Ready", artifacts: [], idempotency_key: crypto.randomUUID() });
+
+  return { longRoom, lastReview, LONG_TASKS, opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -197,6 +211,7 @@ const screens = (s) => {
     ["Tasks, board", `${w}/tasks?view=board`, "An open task"],
     ["Tasks, board with canceled shown", `${w}/tasks?view=board&canceled=show`, "A canceled task"],
     ["Tasks, board, empty", `/w/${s.emptyRoom}/tasks?view=board`, "No tasks in scope"],
+    ["Tasks, long list", `/w/${s.longRoom}/tasks`, "Load more"],
     ["Task Sheet over the board", `${w}/tasks?view=board&task=${s.reviewScreen.id}`, "Approve submission", "owner", true],
     ["Activity", `${w}/activity`, "Activity"],
     ["Team", `${w}/team`, "Lead agent"],
@@ -666,6 +681,192 @@ async function keyboardPaths(s) {
     await page.keyboard.press("Escape");
     await page.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
     await current("Board");
+  });
+
+  const longUrl = (query = "") => `${app}/w/${s.longRoom}/tasks${query}`;
+  const rows = (where) => where.locator('[data-sheet-launcher^="task:"]').count();
+  const waitForRows = (where, above) => where.waitForFunction((n) => document.querySelectorAll('[data-sheet-launcher^="task:"]').length > n, above, { timeout: 30_000 });
+  const everyRow = s.LONG_TASKS + 1;
+  /** Stops the page from loading by itself, for the paths that are about the button. */
+  const buttonOnly = async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.addInitScript(() => {
+      window.IntersectionObserver = class {
+        observe() {}
+        disconnect() {}
+      };
+    });
+    return own;
+  };
+
+  await keyboardPath("Load more with the keyboard, to the end of a long list", async () => {
+    const own = await buttonOnly();
+    try {
+      await own.goto(longUrl());
+      await hydrated(own);
+      const first = await rows(own);
+      ok(first === 50, `the first read showed ${first} rows, not one page`);
+      const more = own.getByRole("button", { name: "Load more" });
+      await tabTo(own, more, "Load more", 120);
+      for (let loaded = first; loaded < everyRow; ) {
+        await own.keyboard.press("Enter");
+        await waitForRows(own, loaded);
+        loaded = await rows(own);
+        const live = await own.locator('[aria-live="polite"]').filter({ hasText: /view, showing/ }).textContent();
+        ok(/more tasks? loaded/.test(live), `a loaded page wasn't announced: ${live}`);
+        if (loaded < everyRow) {
+          await own.waitForFunction(() => document.activeElement?.textContent === "Load more", null, { timeout: 15_000 });
+        }
+      }
+      await own.waitForFunction(() => document.activeElement?.textContent?.startsWith("All "), null, { timeout: 15_000 });
+      ok((await own.getByText(`All ${everyRow} tasks shown.`).count()) === 1, "the end of the list doesn't say so");
+      // With everything loaded, the progress is a real one, for the whole set.
+      ok((await own.getByRole("progressbar").count()) === 1, "progress still says partial with every task loaded");
+    } finally {
+      await own.close();
+    }
+  });
+
+  await keyboardPath("a Sheet opened past the first page keeps the list, Back and focus", async () => {
+    const own = await buttonOnly();
+    try {
+      await own.goto(longUrl());
+      await hydrated(own);
+      const more = own.getByRole("button", { name: "Load more" });
+      await more.waitFor();
+      await tabTo(own, more, "Load more", 120);
+      await own.keyboard.press("Enter");
+      await waitForRows(own, 50);
+      const late = own.getByRole("link", { name: "Long task 060", exact: true });
+      // Backward from the button, which is how far a keyboard user has got.
+      for (let i = 0; i < 120 && !(await late.evaluate((el) => el === document.activeElement)); i++) await own.keyboard.press("Shift+Tab");
+      ok(await late.evaluate((el) => el === document.activeElement), "couldn't reach a row from the second page");
+      await own.keyboard.press("Enter");
+      await own.getByRole("dialog").waitFor({ timeout: 15_000 });
+      ok(own.url().includes("task="), "opening the row didn't reach the URL");
+      await own.keyboard.press("Escape");
+      await own.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
+      await own.waitForFunction(() => document.activeElement?.textContent?.includes("Long task 060"), null, { timeout: 15_000 });
+      ok((await rows(own)) > 50, "closing the Sheet dropped the pages already loaded");
+      // Closing reaches the URL a moment later, and Back before that would leave the page's first entry.
+      await own.waitForURL((url) => !url.search.includes("task="), { timeout: 15_000 });
+      await own.goBack();
+      await own.waitForURL(/task=/, { timeout: 15_000 });
+      await own.getByRole("dialog").waitFor({ timeout: 5_000 }).catch(() => { throw new Error(`Back to ${own.url()} didn't open the Sheet`); });
+      ok((await rows(own)) > 50, "Back dropped the pages already loaded");
+      await own.goForward();
+      await own.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
+      // A deep link to a task no page has reached still opens. Closing it has no row to go back to, so focus lands on the page.
+      await own.goto(longUrl(`?task=${s.lastReview.id}`));
+      await own.getByRole("button", { name: /Approve submission/ }).waitFor({ timeout: 30_000 });
+      await own.waitForFunction(() => document.activeElement?.closest('[role="dialog"]'), null, { timeout: 15_000 });
+      await own.keyboard.press("Escape");
+      await own.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
+      await own.waitForFunction(() => document.activeElement && document.activeElement !== document.body, null, { timeout: 15_000 }).catch(async () => {
+        throw new Error(`closing a deep-linked Sheet left focus on ${await activeText(own)}`);
+      });
+    } finally {
+      await own.close();
+    }
+  });
+
+  await keyboardPath("Needs my review finds a review past the loaded pages", async () => {
+    const own = await buttonOnly();
+    try {
+      await own.goto(longUrl());
+      await hydrated(own);
+      const mine = own.getByRole("checkbox", { name: "Needs my review" });
+      await tabTo(own, mine, "the review filter");
+      await own.keyboard.press("Space");
+      await own.getByRole("link", { name: "The review past every loaded page" }).waitFor({ timeout: 15_000 });
+      ok(await mine.evaluate((el) => el === document.activeElement), `the filter's answer moved focus to ${await activeText(own)}`);
+      ok((await rows(own)) === 1, `the filter shows ${await rows(own)} rows`);
+      await own.goto(longUrl("?review=mine&view=board"));
+      await own.getByRole("link", { name: "The review past every loaded page" }).waitFor({ timeout: 30_000 });
+    } finally {
+      await own.close();
+    }
+  });
+
+  await keyboardPath("a long list loads near the bottom without moving the reader, and what it costs", async () => {
+    for (const [view, query] of [["List", ""], ["Board", "?view=board"]]) {
+      const own = await contextFor(s.owner).newPage();
+      const reads = [];
+      own.on("request", (request) => {
+        if (/\/tasks\?cursor=/.test(request.url())) reads.push(request.url());
+      });
+      try {
+        const opened = Date.now();
+        await own.goto(longUrl(query));
+        await own.getByRole("link", { name: "Long task 000", exact: true }).waitFor({ timeout: 30_000 });
+        const firstScreen = Date.now() - opened;
+        await hydrated(own);
+        ok(reads.length <= 1, `${view}: ${reads.length} page reads before anyone scrolled`);
+        const loadedAt = Date.now();
+        let worst = 0;
+        const shifts = [];
+        for (let loaded = await rows(own); loaded < everyRow; ) {
+          // A row in view right now, and where it sits.
+          const before = await own.evaluate(() => {
+            window.scrollTo(0, document.documentElement.scrollHeight);
+            const row = [...document.querySelectorAll('[data-sheet-launcher^="task:"]')].find((el) => {
+              const box = el.getBoundingClientRect();
+              return box.top >= 0 && box.bottom <= innerHeight;
+            });
+            window.__anchor = row;
+            return row?.getBoundingClientRect().top;
+          });
+          await waitForRows(own, loaded);
+          await own.evaluate(() => new Promise(requestAnimationFrame));
+          const after = await own.evaluate(() => window.__anchor?.getBoundingClientRect().top);
+          if (before !== undefined && after !== undefined) {
+            shifts.push(Math.round(Math.abs(after - before)));
+            worst = Math.max(worst, Math.abs(after - before));
+          }
+          loaded = await rows(own);
+        }
+        const allLoaded = Date.now() - loadedAt;
+        ok(worst <= 2, `${view}: a row in view moved as rows arrived: ${shifts.join(", ")}px by page`);
+        const sideways = await own.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+        ok(sideways <= 0, `${view}: the page scrolls sideways by ${sideways}px`);
+        const cost = await own.evaluate(() => ({ nodes: document.querySelectorAll("*").length, heapMb: Math.round((performance.memory?.usedJSHeapSize ?? 0) / 1048576) }));
+        // How long a person waits for the switch once every row is there.
+        const other = own.getByRole("link", { name: view === "List" ? "Board" : "List", exact: true });
+        const switched = await other.evaluate(async (link) => {
+          const started = performance.now();
+          link.click();
+          await new Promise((done) => requestAnimationFrame(() => setTimeout(done)));
+          return Math.round(performance.now() - started);
+        });
+        console.log(`measure ${view}: ${everyRow} tasks, first screen ${firstScreen} ms, the rest ${allLoaded} ms over ${reads.length} reads, worst row shift ${worst}px, ${cost.nodes} elements, ${cost.heapMb} MB heap, switching view ${switched} ms`);
+      } finally {
+        await own.close();
+      }
+    }
+  });
+
+  await keyboardPath("a long list at phone width", async () => {
+    const own = await contextFor(s.owner).newPage();
+    await own.setViewportSize({ width: 375, height: 812 });
+    try {
+      for (const query of ["", "?view=board"]) {
+        await own.goto(longUrl(query));
+        await hydrated(own);
+        const more = own.getByRole("button", { name: /Load more|Loading more/ });
+        await more.waitFor();
+        const box = await more.boundingBox();
+        ok(box && box.height >= 44, `Load more is ${box?.height}px tall at 375px`);
+        await own.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+        await waitForRows(own, 50);
+        const sideways = await own.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+        ok(sideways <= 0, `the page scrolls sideways by ${sideways}px at 375px`);
+      }
+      await audit(own, "Tasks, long list, phone");
+      await own.evaluate(() => window.scrollTo(0, 0));
+      await tabTo(own, own.locator('[data-sheet-launcher^="task:"]').first(), "a row", 120);
+    } finally {
+      await own.close();
+    }
   });
 
   await keyboardPath("the board at phone width", async () => {
