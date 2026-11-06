@@ -432,8 +432,9 @@ async function keyboardPaths(s) {
     await page.keyboard.press("Escape");
     await page.getByRole("dialog").waitFor({ state: "detached", timeout: 15_000 });
     await page.waitForFunction(() => document.activeElement?.closest("svg") !== null, null, { timeout: 15_000 });
+    await page.waitForURL((url) => !url.search.includes("line="), { timeout: 15_000 });
     // The same line again, from the list below the map: it comes back there, not to the map.
-    const listed = page.locator('section a[href*="line="]').first();
+    const listed = page.locator('section[aria-labelledby="collab-lines"] a[href*="line="]').first();
     await listed.focus();
     await page.keyboard.press("Enter");
     await page.getByRole("dialog").getByRole("link").first().waitFor({ timeout: 15_000 });
