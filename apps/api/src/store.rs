@@ -86,6 +86,7 @@ ALTER TABLE workspace ADD COLUMN require_person_review INTEGER NOT NULL DEFAULT 
 ", "
 CREATE TABLE handoff (seq INTEGER PRIMARY KEY AUTOINCREMENT, from_id TEXT NOT NULL, to_id TEXT NOT NULL, kind TEXT NOT NULL, task_id TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE INDEX handoff_edge ON handoff (from_id, to_id, kind, created_at);
+CREATE INDEX handoff_line ON handoff (from_id, to_id, seq);
 CREATE INDEX handoff_task ON handoff (task_id);
 CREATE INDEX event_actor ON event (actor_id, created_at);
 "];

@@ -432,6 +432,7 @@ async function keyboardPaths(s) {
     await page.keyboard.press("Escape");
     await page.getByRole("dialog").waitFor({ state: "detached", timeout: 15_000 });
     await page.waitForFunction(() => document.activeElement?.closest("svg") !== null, null, { timeout: 15_000 });
+    ok((await page.getByRole("region", { name: /scrolls sideways/ }).count()) === 0, "the map's box is a tab stop though it doesn't scroll");
     await page.waitForURL((url) => !url.search.includes("line="), { timeout: 15_000 });
     // The same line again, from the list below the map: it comes back there, not to the map.
     const listed = page.locator('section[aria-labelledby="collab-lines"] a[href*="line="]').first();
@@ -449,6 +450,11 @@ async function keyboardPaths(s) {
       const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       ok(overflow <= 0, `${path} scrolls sideways by ${overflow}px at 375px`);
     }
+    // At this width the map's box is cut off, so the keyboard has to be able to move it.
+    const box = small.getByRole("region", { name: /scrolls sideways/ });
+    await box.focus();
+    await small.keyboard.press("ArrowRight");
+    await small.waitForFunction(() => document.activeElement?.scrollLeft > 0, null, { timeout: 15_000 });
     await phone.close();
   });
 

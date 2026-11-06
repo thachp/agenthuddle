@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatewayResult } from "@/lib/gateway/result";
 import { setUrl } from "@/test/next-navigation";
@@ -14,7 +14,6 @@ vi.mock("@/lib/workroom", () => ({ loadWorkroom: async () => ({ id: "ws_1" }) })
 
 const { default: Collaboration } = await import("./page");
 const { textNameOf } = await import("../tasks/task-model");
-const { truncate } = await import("@/components/agent-content/text");
 
 const params = Promise.resolve({ id: "ws_1" });
 const path = "/api/v1/workspaces/ws_1/collaboration";
@@ -85,26 +84,45 @@ describe("Collaboration", () => {
     expect(screen.getAllByText("No longer in this workroom")).toHaveLength(1);
   });
 
-  it("labels a chosen name in the map, cut without splitting a character", async () => {
-    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_a", name: `a${"😀".repeat(40)}` }, { id: "agt_b", name: "Podster" }] } });
+  it("cuts a long name on the map without losing its label or splitting a character", async () => {
+    replies.set("/api/agents", {
+      ok: true,
+      data: { agents: [{ id: "agt_a", name: "Podster Support Team Official" }, { id: "agt_b", name: `a${"😀".repeat(40)}` }] },
+    });
     const { container } = await show({ view: "map" });
     const labels = [...container.querySelectorAll("svg g text")].map((el) => el.textContent ?? "");
-    expect(labels).toContain(truncate(textNameOf("agt_b", "per_me", { agt_b: "Podster" }), 24).text);
-    expect(labels.some((label) => label.startsWith("a😀"))).toBe(true);
-    expect(textNameOf("agt_b", "per_me", { agt_b: "Podster" })).not.toBe("Podster");
-    expect(labels.every((label) => !/[\uD800-\uDBFF]$/.test(label))).toBe(true);
+    expect(labels).toContain("Podster Support Tea… (chosen name)");
+    expect(labels.some((label) => label.startsWith("a😀") && label.endsWith("…") && !/[\uD800-\uDBFF]…$/.test(label))).toBe(true);
+    expect(labels.filter((label) => label.includes("(chosen name)"))).toHaveLength(1);
   });
 
-  it("makes each link big enough, and scrolls the map in its own box", async () => {
-    await show({ view: "map" });
+  it("labels a short chosen name in full, and doesn't label the viewer", async () => {
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_a", name: "Podster Admin" }] } });
+    const { container } = await show({ view: "map" });
+    const labels = [...container.querySelectorAll("svg g text")].map((el) => el.textContent ?? "");
+    expect(labels).toContain("Podster Admin (chosen name)");
+    expect(labels).toContain("You");
+  });
+
+  it("makes each link big enough, and the map's box a tab stop only when it scrolls", async () => {
+    const widths = vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(560);
+    const box = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(343);
+    const narrow = await show({ view: "map" });
     expect(screen.getByRole("link", { name: "List" }).className).toContain("min-h-6");
-    expect(screen.getByRole("region", { name: /Collaboration map/ })).toHaveAttribute("tabindex", "0");
+    expect(await screen.findByRole("region", { name: /scrolls sideways/ })).toHaveAttribute("tabindex", "0");
+    narrow.unmount();
+    box.mockReturnValue(640);
+    widths.mockReturnValue(640);
+    const { container } = await show({ view: "map" });
+    await waitFor(() => expect(screen.queryByRole("region", { name: /scrolls sideways/ })).toBeNull());
+    expect(container.querySelector("figure [tabindex]")).toBeNull();
+    vi.restoreAllMocks();
   });
 
   it("says what empty means, without a map to draw", async () => {
     replies.set(path, { ok: true, data: { edges: [], nodes: [{ id: "per_me" }] } });
     await show({ view: "map" });
-    expect(screen.getByText(/Recording began recently/)).toBeInTheDocument();
+    expect(screen.getByText(/recorded from when this feature started/)).toBeInTheDocument();
     expect(screen.queryByRole("group", { name: /Map of who/ })).toBeNull();
   });
 

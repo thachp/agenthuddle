@@ -5525,12 +5525,36 @@ describe("the collaboration list and map", () => {
     expect(await count(id, "handoff")).toBe(handoffs);
   });
 
-  it("reads through its indexes, so a view doesn't scan the room's history once per person", async () => {
-    const { id } = await room();
-    const plan = (query: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec(`EXPLAIN QUERY PLAN ${query}`).toArray().map((row: any) => row.detail).join(" | ") as string);
-    expect(await plan("SELECT j.value, (SELECT max(created_at) FROM event WHERE actor_id = j.value) FROM json_each('[\"x\"]') j")).toContain("COVERING INDEX event_actor");
-    expect(await plan("SELECT from_id, to_id, kind, count(*) AS n, max(created_at) AS last_at FROM handoff GROUP BY from_id, to_id, kind")).toContain("COVERING INDEX handoff_edge");
-    expect(await plan("SELECT kind FROM handoff WHERE handoff.task_id IN (SELECT id FROM task WHERE requester_id = 'x' OR assignee_id = 'x' OR reviewer_id = 'x') GROUP BY from_id, to_id, kind")).toContain("handoff_task");
+  it("reads through its indexes, so a view's cost doesn't follow the room's whole history", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    const hidden = await offer(tasks, { assignee: CAROL.id, title: "Hidden" });
+    // A long line and a long history, none of it on a task Bob is on, and a few rows on the one he is.
+    await runInDurableObject(stub(id), (_: any, state: any) => {
+      const rows = (values: string, count: number) => state.storage.sql.exec(`WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM g WHERE n < ${count}) ${values}`);
+      rows(`INSERT INTO handoff (from_id, to_id, kind, task_id, created_at) SELECT '${LEAD.id}', '${BOB.id}', 'offer', '${hidden.id}', n FROM g`, 5000);
+      rows(`INSERT INTO handoff (from_id, to_id, kind, task_id, created_at) SELECT '${LEAD.id}', '${BOB.id}', 'offer', '${t.id}', n FROM g`, 3);
+      rows(`INSERT INTO event (id, type, actor_id, created_at) SELECT 'evt_seed' || n, 'task.updated', '${LEAD.id}', n FROM g`, 5000);
+    });
+    const costs = async (who: Who) => {
+      const r = await api(who, "GET", `${map(id)}/costs?from=${LEAD.id}&to=${BOB.id}`);
+      expect(r.status).toBe(200);
+      return r.body;
+    };
+    const whole = await costs(OWNER);
+    expect(whole.line.plan).toContain("handoff_line");
+    expect(whole.line.plan).not.toContain("TEMP B-TREE");
+    // Each row read twice at most over the 51 it needs, and not the 5,003 on the line.
+    expect(whole.line.rows_read).toBeLessThan(200);
+    expect(whole.last_active.plan).toContain("COVERING INDEX event_actor");
+    expect(whole.last_active.rows_read).toBeLessThan(10);
+    expect(whole.map.plan).toContain("handoff_edge");
+    const guest = await costs(BOB);
+    expect(guest.map.plan).toContain("handoff_task");
+    expect(guest.map.rows_read).toBeLessThan(100);
+    expect(guest.line.plan).toContain("handoff_line");
+    // Known: a guest with few visible rows on a long line walks the pair, so this follows the rows hidden from them.
+    expect(guest.line.rows_read).toBeLessThan(5100);
   });
 
   it("shows whole-room viewers everyone, with role and last active", async () => {

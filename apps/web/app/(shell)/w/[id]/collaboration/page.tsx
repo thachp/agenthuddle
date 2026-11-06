@@ -1,13 +1,14 @@
 import Link from "next/link";
 import { AuthorLine } from "@/components/agent-content/agent-content";
-import { plainName, truncate } from "@/components/agent-content/text";
+import { plainName } from "@/components/agent-content/text";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { loadWorkroom } from "@/lib/workroom";
 import { Time } from "../activity/time";
 import { loadNames, orgRows } from "../tasks/load-tasks";
-import { kindOf, nameOf, textNameOf } from "../tasks/task-model";
+import { kindOf, nameOf, shortNameOf, textNameOf } from "../tasks/task-model";
+import { MapBox } from "./map-box";
 import { LineSheet } from "./collaboration-sheet";
 import { lineSummary, linesOf, lineTarget, MAP_SIZE, positions, type CollaborationRead, type Line, type Node } from "./model";
 
@@ -41,7 +42,7 @@ export default async function Collaboration({ params, searchParams }: { params: 
               Map
             </Link>
           </nav>
-          {lines.length === 0 ? <p className="text-muted-foreground">No handoffs to show. Offers, submissions, change requests and messages appear here once they happen on tasks you can see. Recording began recently, so earlier work in this room won't appear.</p> : null}
+          {lines.length === 0 ? <p className="text-muted-foreground">No handoffs to show. Offers, submissions, change requests and messages appear here once they happen on tasks you can see. Handoffs are recorded from when this feature started, so earlier work won't appear.</p> : null}
           {showMap && lines.length > 0 ? <CollaborationMap nodes={nodes} lines={lines} me={me} names={names} /> : null}
           {lines.length > 0 ? (
             <section aria-labelledby="collab-lines" className="space-y-2">
@@ -96,8 +97,7 @@ function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: L
   const placed = positions(nodes.map((node) => node.id));
   return (
     <figure className="space-y-1">
-      {/* It scrolls in its own box on a phone, so labels stay readable and the page itself doesn't scroll sideways. */}
-      <div tabIndex={0} role="region" aria-label="Collaboration map, which scrolls" className="overflow-x-auto rounded-lg border">
+      <MapBox>
       <svg viewBox={`0 0 ${MAP_SIZE} ${MAP_SIZE}`} role="group" aria-label="Map of who has worked with whom. The list below says the same." className="h-auto w-full min-w-[560px]">
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -111,8 +111,8 @@ function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: L
           const bend = { x: (from.x + to.x) / 2 + (to.y - from.y) * 0.08, y: (from.y + to.y) / 2 - (to.x - from.x) * 0.08 };
           return (
             <SheetLink key={lineTarget(line)} param="line" target={lineTarget(line)} aria-label={`${textNameOf(line.from, me, names)} to ${textNameOf(line.to, me, names)}: ${line.total} in all, ${lineSummary(line)}`}>
-              {/* A wide, invisible line to press, because the one you see is thin. */}
-              <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" stroke="transparent" strokeWidth={24} />
+              {/* A wide, invisible line to press, because the one you see is thin: 24 px even where the map is at its smallest. */}
+              <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" stroke="transparent" strokeWidth={28} />
               <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" strokeWidth={2} markerEnd="url(#arrow)" className="stroke-muted-foreground hover:stroke-primary" />
               <text x={bend.x} y={bend.y} textAnchor="middle" fontSize={16} className="fill-foreground">
                 {line.total}
@@ -123,17 +123,23 @@ function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: L
         {nodes.map((node) => {
           const at = placed.get(node.id);
           if (!at) return null;
+          const short = shortNameOf(node.id, me, names, 20);
           return (
             <g key={node.id}>
               <circle cx={at.x} cy={at.y} r={6} className="fill-primary" />
-              <text x={at.x} y={at.y - 12} textAnchor="middle" fontSize={14} className="fill-foreground">
-                {truncate(textNameOf(node.id, me, names), 24).text}
+              <text x={at.x} y={at.y - (short.label ? 28 : 12)} textAnchor="middle" fontSize={14} className="fill-foreground">
+                {short.name}
+                {short.label ? (
+                  <tspan x={at.x} dy={16}>
+                    {` ${short.label}`}
+                  </tspan>
+                ) : null}
               </text>
             </g>
           );
         })}
       </svg>
-      </div>
+      </MapBox>
       <figcaption className="text-sm text-muted-foreground">{NOTE} Each number counts the handoffs on that line.</figcaption>
     </figure>
   );

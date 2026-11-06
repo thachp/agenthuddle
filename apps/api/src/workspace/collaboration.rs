@@ -7,14 +7,14 @@ const HANDOFFS_LISTED: i64 = 50;
 
 /// The part of a query that limits handoffs to this viewer, with the caller's ID as `?1`.
 ///
-/// Someone limited to their own tasks also sees a line only if both its ends are on that task now, or are them. Otherwise an
-/// old offer or reviewer would name a participant they have no other way to learn of.
+/// Someone limited to their own tasks also sees a line only if both its ends are on that task now, including lines of their
+/// own. Otherwise an old offer or reviewer would name a participant they have no other way to learn of.
 fn visible_handoffs(caller: &Caller) -> (&'static str, Vec<V>) {
     // The `IN` starts from the handoffs of this viewer's own tasks, so the read doesn't walk the room's whole history.
     const OWN_NOW: &str = "handoff.task_id IN (SELECT id FROM task WHERE requester_id = ?1 OR assignee_id = ?1 OR reviewer_id = ?1)
         AND EXISTS (SELECT 1 FROM task t WHERE t.id = handoff.task_id
-            AND handoff.from_id IN (?1, t.requester_id, t.assignee_id, t.reviewer_id)
-            AND handoff.to_id IN (?1, t.requester_id, t.assignee_id, t.reviewer_id))";
+            AND handoff.from_id IN (t.requester_id, t.assignee_id, t.reviewer_id)
+            AND handoff.to_id IN (t.requester_id, t.assignee_id, t.reviewer_id))";
     let id = caller.id.as_str();
     if !sees_whole_room(caller) {
         return (OWN_NOW, vec![id.into()]);
@@ -28,14 +28,29 @@ fn visible_handoffs(caller: &Caller) -> (&'static str, Vec<V>) {
     )
 }
 
+fn map_query(limit: &str) -> String {
+    format!("SELECT from_id, to_id, kind, count(*) AS n, max(created_at) AS last_at FROM handoff WHERE {limit} GROUP BY from_id, to_id, kind ORDER BY last_at DESC")
+}
+
+/// One seek per person shown. A `GROUP BY actor_id` would read every event the room has ever had, on each view.
+const LAST_ACTIVE: &str = "SELECT j.value AS id, (SELECT max(created_at) FROM event WHERE actor_id = j.value) AS at FROM json_each(?) j";
+
+fn line_query(limit: &str) -> String {
+    format!("SELECT handoff.kind, handoff.task_id, handoff.created_at, title.title AS task_title FROM handoff JOIN task title ON title.id = handoff.task_id WHERE handoff.from_id = ?2 AND handoff.to_id = ?3 AND {limit} ORDER BY handoff.seq DESC LIMIT ?4")
+}
+
+fn line_bindings(caller: &Caller, from: &str, to: &str) -> (&'static str, Vec<V>) {
+    let (limit, mut bindings) = visible_handoffs(caller);
+    bindings.push(from.into());
+    bindings.push(to.into());
+    bindings.push((HANDOFFS_LISTED + 1).into());
+    (limit, bindings)
+}
+
 pub(super) fn read_map(sql: &SqlStorage, who: &Participant) -> R<Value> {
     let caller = &who.caller;
     let (limit, bindings) = visible_handoffs(caller);
-    let edges = rows(
-        sql,
-        &format!("SELECT from_id, to_id, kind, count(*) AS n, max(created_at) AS last_at FROM handoff WHERE {limit} GROUP BY from_id, to_id, kind ORDER BY last_at DESC"),
-        bindings,
-    )?;
+    let edges = rows(sql, &map_query(limit), bindings)?;
     let whole_room = sees_whole_room(caller);
     let mut ids = BTreeSet::from([caller.id.clone()]);
     for edge in &edges {
@@ -80,7 +95,6 @@ pub(super) fn read_map(sql: &SqlStorage, who: &Participant) -> R<Value> {
             }
         }
     }
-    // One seek per person shown. A `GROUP BY actor_id` would read every event the room has ever had, on each view.
     let dated: Vec<&String> = if whole_room {
         ids.iter().collect()
     } else {
@@ -88,7 +102,7 @@ pub(super) fn read_map(sql: &SqlStorage, who: &Participant) -> R<Value> {
     };
     for row in rows(
         sql,
-        "SELECT j.value AS id, (SELECT max(created_at) FROM event WHERE actor_id = j.value) AS at FROM json_each(?) j",
+        LAST_ACTIVE,
         vec![json!(dated).to_string().as_str().into()],
     )? {
         if let (Some(id), Some(at)) = (text(&row["id"]), row["at"].as_i64()) {
@@ -123,15 +137,8 @@ pub(super) fn read_map(sql: &SqlStorage, who: &Participant) -> R<Value> {
 pub(super) fn read_edge(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
     let from = query_str(url, "from").ok_or_else(ApiError::invalid_argument)?;
     let to = query_str(url, "to").ok_or_else(ApiError::invalid_argument)?;
-    let (limit, mut bindings) = visible_handoffs(&who.caller);
-    bindings.push(from.as_str().into());
-    bindings.push(to.as_str().into());
-    bindings.push((HANDOFFS_LISTED + 1).into());
-    let found = rows(
-        sql,
-        &format!("SELECT handoff.kind, handoff.task_id, handoff.created_at, title.title AS task_title FROM handoff JOIN task title ON title.id = handoff.task_id WHERE handoff.from_id = ?2 AND handoff.to_id = ?3 AND {limit} ORDER BY handoff.seq DESC LIMIT ?4"),
-        bindings,
-    )?;
+    let (limit, bindings) = line_bindings(&who.caller, &from, &to);
+    let found = rows(sql, &line_query(limit), bindings)?;
     let truncated = found.len() as i64 > HANDOFFS_LISTED;
     let handoffs: Vec<Value> = found
         .iter()
@@ -139,4 +146,29 @@ pub(super) fn read_edge(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Val
         .map(|row| json!({ "kind": row["kind"], "task_id": row["task_id"], "task_title": row["task_title"], "created_at": row["created_at"] }))
         .collect();
     Ok(json!({ "handoffs": handoffs, "truncated": truncated }))
+}
+
+/// What the reads above cost this viewer, from the queries they really run. Only tests can reach this.
+#[cfg(feature = "failpoints")]
+pub(super) fn read_costs(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
+    let cost = |query: &str, bindings: Vec<V>| -> R<Value> {
+        let plan = rows(
+            sql,
+            &format!("EXPLAIN QUERY PLAN {query}"),
+            bindings.clone(),
+        )?;
+        let plan: Vec<String> = plan.iter().filter_map(|row| text(&row["detail"])).collect();
+        let cursor = sql.exec(query, bindings)?;
+        let _ = cursor.to_array::<Value>()?;
+        Ok(json!({ "plan": plan.join(" | "), "rows_read": cursor.rows_read() }))
+    };
+    let from = query_str(url, "from").ok_or_else(ApiError::invalid_argument)?;
+    let to = query_str(url, "to").ok_or_else(ApiError::invalid_argument)?;
+    let (limit, bindings) = visible_handoffs(&who.caller);
+    let map = cost(&map_query(limit), bindings)?;
+    let (limit, bindings) = line_bindings(&who.caller, &from, &to);
+    let line = cost(&line_query(limit), bindings)?;
+    let people = json!([from, to]).to_string();
+    let last_active = cost(LAST_ACTIVE, vec![people.as_str().into()])?;
+    Ok(json!({ "map": map, "line": line, "last_active": last_active }))
 }

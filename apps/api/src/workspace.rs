@@ -3454,6 +3454,8 @@ impl Workspace {
                 ["roles"] => roles::list_roles(&sql, &who),
                 ["collaboration"] => collaboration::read_map(&sql, &who),
                 ["collaboration", "handoffs"] => collaboration::read_edge(&sql, &who, &url),
+                #[cfg(feature = "failpoints")]
+                ["collaboration", "costs"] => collaboration::read_costs(&sql, &who, &url),
                 ["brief"] => queries::get_brief(&sql, &who),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
