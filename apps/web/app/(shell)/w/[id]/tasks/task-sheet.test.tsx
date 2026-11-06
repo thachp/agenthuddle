@@ -817,6 +817,70 @@ describe("what the viewer's access leaves out", () => {
   });
 });
 
+describe("Review latest on an edit", () => {
+  it("won't take typing while its read is out, so the form can't answer to a version it hasn't shown", async () => {
+    const user = userEvent.setup();
+    let version = 5;
+    let title = "Design the API";
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let gated = false;
+    const posts: { version: number; title?: string }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      if (init.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        posts.push(body);
+        if (body.version !== version) return refused(409, "version_conflict");
+        version += 1;
+        title = body.title ?? title;
+        return json(200, task({ status: "accepted", requester: "per_me", reviewer: "agt_b", version, title }));
+      }
+      if (gated) await gate;
+      return json(200, detail({ status: "accepted", requester: "per_me", reviewer: "agt_b", version, title }));
+    });
+    await open();
+    await user.click(screen.getByRole("button", { name: "Edit task" }));
+    await user.type(screen.getByLabelText("Title"), "!");
+    // Someone else's edit.
+    version = 6;
+    title = "THEIR TITLE";
+    await user.click(screen.getByRole("button", { name: "Save edit" }));
+    await screen.findByText(/This task changed while you were editing/);
+    gated = true;
+    await user.click(screen.getByRole("button", { name: "Review latest" }));
+    const box = screen.getByLabelText("Title");
+    expect(box).toHaveAttribute("readonly");
+    await user.type(box, "{Backspace}?");
+    expect(box).toHaveValue("Design the API!");
+    release();
+    // The person now sees what changed, and only then can save against the version they've seen.
+    expect(await screen.findByText(/Since you started, this changed: title/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Title")).not.toHaveAttribute("readonly");
+    await user.click(screen.getByRole("button", { name: "Save edit" }));
+    await waitFor(() => expect(posts).toHaveLength(2));
+    expect(posts[1]).toMatchObject({ version: 6 });
+  });
+
+  it("won't take typing in a change request while a command is out", async () => {
+    const user = userEvent.setup();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit = {}) => {
+      if (init.method === "POST") await gate;
+      return json(200, detail({ status: "submitted", reviewer: "per_me", assignee: "agt_a", submission_no: 2 }));
+    });
+    await open();
+    await user.click(await screen.findByRole("button", { name: /Request changes/ }));
+    const reason = await screen.findByLabelText(/What needs to change/);
+    await user.type(reason, "Fix it");
+    await user.click(screen.getByRole("button", { name: /Request changes to submission/ }));
+    await waitFor(() => expect(reason).toHaveAttribute("readonly"));
+    await user.type(reason, " more");
+    expect(reason).toHaveValue("Fix it");
+    release();
+  });
+});
+
 describe("changing the reviewer or requester", () => {
   it("after a lost response shows the latest, with the choice gone if it went through", async () => {
     const user = userEvent.setup();
