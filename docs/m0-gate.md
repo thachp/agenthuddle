@@ -96,11 +96,12 @@ On 2026-11-05, with `main` at `84c7c0c` deployed, the project's owner ran part o
 
 | Check | Result |
 | --- | --- |
-| axe with WCAG 2.0, 2.1 and 2.2 A and AA rules, including contrast, on 29 screens and states, each in light and dark | 58 runs, no violations, after the fixes below |
+| axe with WCAG 2.0, 2.1 and 2.2 A and AA rules, including contrast, on 33 screens and states, each in light and dark | 66 runs, no violations, after the fixes below |
 | Theme colors by contrast ratio: 4.5:1 for text, 3:1 for controls and focus rings | 56 pairs pass, after the fixes below |
 | Keyboard only: review a task | Passes: focus moves into the Sheet, the approval is in a live region, and Escape returns focus to the link that opened it |
 | Keyboard only: revoke access | Passes: focus moves into the Sheet and the confirmation, and ends on a status that says what happened |
-| Keyboard only: create a room | **Fails on focus only.** Every step works, then focus falls to the page body when the new screen opens. See below |
+| Keyboard only: create a room | Passes: focus moves to the new screen's main region, and the next Tab goes into that screen |
+| Keyboard only: a refused create | Passes: focus stays on the field or button that submitted, and the reason appears in an alert. The run stages the refusal by answering the request itself |
 | The checks themselves | A low-contrast element placed on the page has to trip axe, and the dark theme has to change the page's background |
 
 Fixed here, all in shared labels and styles:
@@ -110,17 +111,14 @@ Fixed here, all in shared labels and styles:
 - A timestamp's `aria-label` was on `<time>`, which is just as unreliable (`app/(shell)/w/[id]/activity/time.tsx`).
 - The dropdown's destructive item used a color at 2.87:1 in dark (`components/ui/dropdown-menu.tsx`). No screen uses that item yet.
 
-Left open, for the session that owns the shell:
-
-- **Focus after a client-side navigation.** After creating a room, nothing has focus, so a screen reader hears nothing about the new screen. The same probably applies to any navigation that removes the focused control. The fix is probably small: in `apps/web/components/shell/app-shell.tsx`, move focus to `#main-content` when the path changes and nothing has focus. [e2e/a11y-known.json](../e2e/a11y-known.json) lists this, and the run fails once it's fixed until that entry is removed. So UI-10 isn't complete.
-
 What this doesn't prove:
 
-- **No screen reader was run.** UI-10 asks for one. Only the live regions are checked, and only for the two paths above that have one.
+- **No screen reader was run.** UI-10 asks for one, so it stays local only and incomplete. Focus and the alert's presence are checked, not what's actually spoken, and that includes what a screen reader says on arriving at the new room.
+- **Only room creation hands focus over.** The form does it itself when the new screen replaces it. Other navigations that remove the focused control haven't been checked, and may still drop focus to the page body.
 - **The dark theme isn't switched on in the product.** The run adds the class itself, and turning it on is still the owner's open design question.
 - **axe couldn't decide some things, and they aren't passes.** It couldn't work out the background behind `section[aria-labelledby="agent-connection"] p` in the agent Sheet, `section[aria-labelledby="access-services"] p` in the access Sheet, and the buttons in the revoke confirmation, because they overlap other layers. It also asks a person to confirm `aria-hidden-focus` while a Sheet is open, on Radix's focus guards and the page behind. A results file lists them all under `unchecked`. The theme check covers the colors these use, but not how they stack.
 - **Only what renders is checked.** Hover, focus and pressed colors, screens at 375 px wide (UI-12), and agent-written content beyond the seeded examples aren't covered. Screens with an unusual state, such as an archived room or a guest's view, aren't visited.
-- **All of it is local,** so nothing here is proved on a deployment.
+- **All of it is local,** so nothing here is proved on a deployment. Status: local only.
 
 ## Wake
 
