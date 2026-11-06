@@ -407,6 +407,101 @@ async function keyboardPaths(s) {
     ok(await page.evaluate(() => document.getElementById("main-content").contains(document.activeElement)), `Tab from the new screen's main region went to ${await activeText(page)}, not into that screen`);
   });
 
+  // What React holds against what's on screen, after filling in everything before scripts arrive.
+  const fillEarly = async (path, person, org) => {
+    const context = contextFor(person);
+    if (org) await context.addCookies([{ name: ORG_COOKIE, value: org, domain: new URL(app).hostname, path: "/" }]);
+    const own = await context.newPage();
+    let release;
+    const ready = new Promise((done) => (release = done));
+    await own.route(/_next\/static\/.*\.js/, async (route) => {
+      await ready;
+      await route.continue();
+    });
+    await own.goto(`${app}${path}`, { waitUntil: "commit" });
+    // React reveals streamed parts in batches, and a part still hidden can't be filled in.
+    await own.waitForFunction(() => document.readyState !== "loading" && !window.$RB?.length);
+    const fields = own.locator("main input:not([type=hidden]), main textarea, main select, form input:not([type=hidden]), form textarea, form select");
+    for (let i = 0; i < (await fields.count()); i++) {
+      const field = fields.nth(i);
+      const { tag, type, usable } = await field.evaluate((el) => ({ tag: el.tagName, type: el.type, usable: el.getClientRects().length > 0 && !el.disabled && !el.readOnly }));
+      if (!usable) continue;
+      if (tag === "SELECT") await field.evaluate((el) => (el.selectedIndex = (el.selectedIndex + 1) % el.options.length));
+      else if (type === "checkbox") await field.evaluate((el) => (el.checked = !el.checked));
+      else if (type === "number") await field.fill("3");
+      else await field.fill("Early");
+    }
+    release();
+    await hydrated(own);
+    await own.waitForTimeout(300);
+    const lost = await own.evaluate(() =>
+      [...document.querySelectorAll("input:not([type=hidden]), textarea, select")].flatMap((el) => {
+        const props = el[Object.keys(el).find((key) => key.startsWith("__reactProps"))];
+        const checkable = el.type === "checkbox";
+        if (!props || !((checkable ? "checked" : "value") in props)) return [];
+        return String(checkable ? el.checked : el.value) === String((checkable ? props.checked : props.value) ?? "") ? [] : [el.labels?.[0]?.textContent?.trim().slice(0, 30) ?? el.id];
+      }),
+    );
+    if (org) await context.clearCookies({ name: ORG_COOKIE });
+    return { own, lost };
+  };
+
+  await keyboardPath("forms filled in before the page is ready keep what they show", async () => {
+    const screensToFill = [
+      [`/w/${s.room}/tasks`],
+      [`/w/${s.room}/team`],
+      [`/w/${s.room}/collaboration`],
+      [`/w/${s.room}/settings`],
+      [`/w/${s.transferRoom}/settings`],
+      ["/settings/organization"],
+      ["/settings/organization", s.owner, s.teamOrg],
+      [`/claim?agent_id=${s.pending.pluginId}&code=${s.pending.userCode}`],
+      [`/oauth/consent?${s.consent}`],
+      [`/invitations/${s.roomInvite.token}`, s.partner],
+    ];
+    for (const [path, person = s.owner, org] of screensToFill) {
+      const { own, lost } = await fillEarly(path, person, org);
+      await own.close();
+      ok(lost.length === 0, `${path.split("?")[0]} shows what React doesn't hold: ${lost.join(", ")}`);
+    }
+    // And it counts: the buttons that were stuck disabled work.
+    const team = await fillEarly(`/w/${s.room}/team`, s.owner);
+    for (const name of ["Add opening", "Add agent", "Add person"]) ok(await team.own.getByRole("button", { name, exact: true }).isEnabled(), `${name} stayed disabled for a form filled in early`);
+    await team.own.close();
+    const { own } = await fillEarly(`/w/${s.room}/settings`, s.owner);
+    const save = own.getByRole("button", { name: "Save goal and context" });
+    ok(await save.isEnabled(), "Save stayed disabled for a goal typed early");
+    // The browser restores fields on coming back, which can land after the form has hydrated.
+    await own.goto(`${app}/agents`);
+    await own.goBack();
+    await hydrated(own);
+    await own.waitForTimeout(500);
+    const goal = await own.locator("form textarea").first().inputValue();
+    console.log(`     coming back, the browser ${goal ? "restored" : "didn't restore"} the goal`);
+    ok(!goal || (await save.isEnabled()), "a restored goal left Save disabled");
+    await own.close();
+  });
+
+  await keyboardPath("a filter ticked after the page is ready isn't sent again on load or coming back", async () => {
+    const own = await contextFor(s.owner).newPage();
+    try {
+      await own.goto(`${app}/w/${s.room}/tasks`);
+      await hydrated(own);
+      await own.getByRole("checkbox", { name: "Needs my review" }).click();
+      await own.waitForURL(/[?&]/, { timeout: 15_000 });
+      const [entries, url] = await own.evaluate(() => [history.length, location.href]);
+      await own.evaluate(() => {
+        window.dispatchEvent(new Event("load"));
+        window.dispatchEvent(new Event("pageshow"));
+      });
+      await own.waitForTimeout(500);
+      const after = await own.evaluate(() => [history.length, location.href]);
+      ok(after[0] === entries && after[1] === url, `a late load or pageshow moved the page: ${entries} entries to ${after[0]}, ${after[1]}`);
+    } finally {
+      await own.close();
+    }
+  });
+
   await keyboardPath("a create form filled in before the page is ready still sends what it shows", async () => {
     const own = await contextFor(s.owner).newPage();
     let body;

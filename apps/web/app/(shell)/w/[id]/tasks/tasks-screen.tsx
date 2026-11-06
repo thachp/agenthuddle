@@ -1,6 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type AnchorHTMLAttributes } from "react";
 import { cn } from "cn";
 import { ReadFailure } from "@/components/shell/read-failure";
@@ -85,6 +86,7 @@ export function KeptTasksScreen({ read }: { read: TasksRead | null }) {
 }
 
 export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNames, orgNames, plan = null, stale = false }: TasksRead & { stale?: boolean }) {
+  const early = useEarlyInput<HTMLLabelElement>();
   const pathname = usePathname();
   const search = useSearchParams();
   const router = useRouter();
@@ -169,7 +171,7 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
           </ul>
         </nav>
         {tasks.length > 0 ? (
-          <label className="flex min-h-11 w-fit items-center gap-2 text-sm sm:min-h-6">
+          <label ref={early} className="flex min-h-11 w-fit items-center gap-2 text-sm sm:min-h-6">
             <input type="checkbox" className="size-4" checked={state.reviewMine} onChange={(event) => moveUrl(hrefFor(reviewChange(event.target.checked)))} />
             Needs my review
           </label>

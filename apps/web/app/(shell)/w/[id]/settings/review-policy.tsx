@@ -1,12 +1,14 @@
 "use client";
 
 import { useState } from "react";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { Button } from "@/components/ui/button";
 import { CommandNotice, useCommands } from "../team/commands";
 import { MOBILE_TARGET } from "../team/field";
 
 /** Whether a person must review here. Shown to those the server says may manage this room, and Rust decides each request. */
 export function ReviewPolicy({ roomId, requirePerson, policyVersion, archived }: { roomId: string; requirePerson: boolean; policyVersion: number; archived: boolean }) {
+  const early = useEarlyInput<HTMLDivElement>();
   const commands = useCommands(policyVersion);
   const { send, clear, retrying } = commands;
   // Null until the person changes it, so a change from elsewhere shows after a refresh.
@@ -27,7 +29,7 @@ export function ReviewPolicy({ roomId, requirePerson, policyVersion, archived }:
   };
 
   return (
-    <div className="space-y-2">
+    <div ref={early} className="space-y-2">
       <CommandNotice commands={commands} />
       <label className="flex items-start gap-2">
         <input

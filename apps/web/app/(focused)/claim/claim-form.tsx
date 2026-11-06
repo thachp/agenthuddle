@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { clientCommand } from "@/lib/gateway/client";
@@ -10,6 +11,7 @@ export type ClaimChoices = { agent_id: string; agent_name: string | null; code: 
 
 /** Who is asking, which organization and what it means. Nothing submits on Enter or takes focus, so confirming is deliberate. */
 export function ClaimForm({ choices }: { choices: ClaimChoices }) {
+  const early = useEarlyInput();
   const [choice, setChoice] = useState(() => firstChoice(choices.orgs));
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -37,7 +39,7 @@ export function ClaimForm({ choices }: { choices: ClaimChoices }) {
       </div>
     );
   return (
-    <form className="space-y-4" onSubmit={(event) => event.preventDefault()}>
+    <form ref={early} className="space-y-4" onSubmit={(event) => event.preventDefault()}>
       <p>
         {choices.agent_name ? (
           <>

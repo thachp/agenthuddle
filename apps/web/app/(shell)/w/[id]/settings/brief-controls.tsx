@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { Button } from "@/components/ui/button";
 import { CommandNotice, useCommands } from "../team/commands";
 import { MOBILE_TARGET } from "../team/field";
@@ -14,6 +15,7 @@ const byteLength = (text: string) => new TextEncoder().encode(text).length;
 
 /** Edit a room's goal and context. Shown to those the server says may manage this room, and Rust decides each request. */
 export function BriefControls({ roomId, goal, context, policyVersion, archived }: { roomId: string; goal: string | null; context: string | null; policyVersion: number; archived: boolean }) {
+  const early = useEarlyInput();
   const commands = useCommands(policyVersion);
   const { send, clear, retrying } = commands;
   // Null until the person edits, so a change from elsewhere shows after a refresh, and their own text survives a conflict.
@@ -47,7 +49,7 @@ export function BriefControls({ roomId, goal, context, policyVersion, archived }
   };
 
   return (
-    <form onSubmit={save} className="space-y-2">
+    <form ref={early} onSubmit={save} className="space-y-2">
       <CommandNotice commands={commands} />
       <label className="block space-y-1">
         <span className="font-medium">Goal</span>

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ const UNKNOWN_OUTCOME = "We can't tell whether this worked. Try again with the s
 
 /** No agent is chosen for the person, so accepting takes a deliberate choice. An only organization is preselected. Names are shown as plain data. */
 export function AcceptInvitationForm({ token, organizations, agents, partial = false, onInvalid }: { token: string; organizations: Organization[]; agents: AcceptAgent[]; partial?: boolean; onInvalid: () => void }) {
+  const early = useEarlyInput();
   const [org, setOrg] = useState(organizations.length === 1 ? organizations[0].id : "");
   const [chosen, setChosen] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
@@ -95,7 +97,7 @@ export function AcceptInvitationForm({ token, organizations, agents, partial = f
   if (organizations.length === 0) return <p>You need to be an admin of an organization to accept an invitation for its agents. Ask one of your organization's admins to open this link.</p>;
 
   return (
-    <form onSubmit={accept} className="space-y-4">
+    <form ref={early} onSubmit={accept} className="space-y-4">
       <fieldset disabled={unknown} className="space-y-4">
       <label className="block space-y-1">
         <span className="font-medium">Accept for this organization</span>
