@@ -1,6 +1,6 @@
 # Podster concept mockups
 
-These ten images were produced during the November 3–4, 2026 design discussion. They are static concepts with demo data, not screenshots of an implemented product. The [product spec](../spec/PRODUCT.md), [access-control requirements](../spec/ACCESS-CONTROL.md) and [design spec](../spec/DESIGN.md) are authoritative where image labels or example controls differ. The design spec's [reconciliation table](../spec/DESIGN.md#11-mockup-reconciliation) lists the required changes for each image.
+These fifteen images were produced during the November 3–5, 2026 design discussions. They are static concepts with demo data, not screenshots of an implemented product. The [product spec](../spec/PRODUCT.md), [access-control requirements](../spec/ACCESS-CONTROL.md) and [design spec](../spec/DESIGN.md) are authoritative where image labels or example controls differ. The design spec's [reconciliation table](../spec/DESIGN.md#11-mockup-reconciliation) lists the required changes for each image.
 
 Latest revisions of Create Workroom and Connect an Agent are included; superseded iterations are omitted. No live account, repository, deployment, domain or permission is created by these images. Example URLs, names, counts and notification choices are illustrative.
 
@@ -65,3 +65,33 @@ Right-side Sheet concept for a selected agent and workroom, with scoped capabili
 The image's “Owner only” label is shorthand: the approved model permits the workroom owner and owner-appointed human admins to manage local agent access. Ordinary members and agents cannot change permissions. An agent's own owner controls connecting or withdrawing that agent; owning an agent alone does not grant permission to administer a workroom. GitHub, merge and deployment authority requires separate valid delegation. Final copy and controls must follow the [access-control requirements](../spec/ACCESS-CONTROL.md).
 
 ![Manage workroom access](manage-access.png)
+
+## Task Board and task detail
+
+Approved November 5 direction: List / Board / Gantt switching, scoped progress and clickable task details in the existing right-side Sheet. Follow the [Claude implementation handoff](../spec/TASK-PLANNING.md) for canonical states, interaction and permissions; no interactive prototype exists. Billing tasks, dates and counts are demo data.
+
+![Task Board and task detail](podster-board-task-detail.png)
+
+## Gantt and duration forecast
+
+Approved complementary timeline concept with finish-to-start dependencies, estimates and qualified forecast. Timeline pixels are conceptual: the handoff defines exact fixture math, tied critical paths and release-note slack. Forecasts are estimates, not delivery commitments; these dates are not Podster's real schedule.
+
+![Gantt and duration forecast](podster-gantt-forecast.png)
+
+## Contributors and configured models
+
+Latest revised future concept: internal, volunteer and paid contributors, self-described skills and configured provider/model/version. DemoProvider / DemoCode / demo-v1 are fictional. Follow [Contributors and limits](../spec/CONTRIBUTORS-AND-LIMITS.md) for provenance, unknown/multiple/routed models and private-agent visibility. Older paid-only versions and the persona comparison are excluded.
+
+![Contributors and configured models](contributors-and-models.png)
+
+## Per-task resource and financial limits
+
+Resource caps can apply to all contributor types; financial caps apply to paid arrangements only. Internal/volunteer work has no contributor hourly charge. These controls, prices and enforcement are unimplemented concepts; see the [shipping gates](../spec/CONTRIBUTORS-AND-LIMITS.md#gated-engineering-decisions-before-shipping).
+
+![Per-task resource and financial limits](resource-and-financial-limits.png)
+
+## Task resource use and charges
+
+Future Task Sheet/full-page expansion concept: active use, nonbillable waits/pauses and accrued task cost are distinct. A recorded pause does not prove independent execution stopped, and accrued cost is not settlement. The brief reconciles End this task and verifies the illustrative 2h active / 2h18m elapsed / $24 fixture.
+
+![Task resource use and charges](task-resource-use-and-charges.png)
