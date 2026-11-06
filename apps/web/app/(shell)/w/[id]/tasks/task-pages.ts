@@ -140,23 +140,29 @@ const MOVED_PX = 4;
  * measured is the bottom's distance from the top of the window: new rows above and that correction leave it alone, and so
  * does a browser's own anchoring, whose scroll event would otherwise look like the reader's.
  */
-export function useLoadOnScroll(pages: Pick<TaskPages, "cursor" | "status" | "load">, paused: boolean) {
+export function useLoadOnScroll(pages: Pick<TaskPages, "cursor" | "status" | "load" | "tasks">, paused: boolean) {
   const bottom = useRef<HTMLDivElement>(null);
   const latest = useRef({ ...pages, paused });
   useEffect(() => {
     latest.current = { ...pages, paused };
   });
+  const last = useRef<number | null>(null);
+  const measure = () => bottom.current?.getBoundingClientRect().top ?? null;
+  // New rows below the reader push the bottom away without them moving, and going back to it is a move. This runs after any correction.
+  const arrived = pages.tasks;
+  useEffect(() => {
+    last.current = measure();
+  }, [arrived]);
   const present = pages.cursor !== null;
   useEffect(() => {
     if (!present) return;
-    const top = () => bottom.current?.getBoundingClientRect().top ?? null;
-    let last = top();
+    last.current = measure();
     const onScroll = () => {
-      const now = top();
+      const now = measure();
       if (now === null) return;
-      const moved = last === null ? 0 : last - now;
-      if (last !== null && Math.abs(moved) < MOVED_PX) return;
-      last = now;
+      const moved = last.current === null ? 0 : last.current - now;
+      if (last.current !== null && Math.abs(moved) < MOVED_PX) return;
+      last.current = now;
       const { status, paused: stopped, load } = latest.current;
       if (moved > 0 && now < window.innerHeight + NEAR_BOTTOM_PX && status === "idle" && !stopped) load();
     };

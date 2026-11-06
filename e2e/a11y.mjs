@@ -984,7 +984,9 @@ async function keyboardPaths(s) {
             window.__anchor = row;
             return row?.getBoundingClientRect().top;
           });
-          await waitForRows(own, loaded);
+          await waitForRows(own, loaded).catch(async () => {
+            throw new Error(`${view}: going back to the bottom at ${loaded} rows read nothing, after ${reads.length} reads`);
+          });
           await own.evaluate(() => new Promise(requestAnimationFrame));
           const after = await own.evaluate(() => window.__anchor?.getBoundingClientRect().top);
           if (before !== undefined && after !== undefined) {

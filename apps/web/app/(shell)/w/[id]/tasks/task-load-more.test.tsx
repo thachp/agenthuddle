@@ -148,6 +148,21 @@ describe("loading as the reader scrolls", () => {
     expect(reads).toEqual(["cursor=50", "cursor=100"]);
   });
 
+  it("reads again when a jump back to the bottom follows a page that landed below them", async () => {
+    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=100"] = { tasks: [task("c")], next_cursor: 150 };
+    show();
+    scrollTo(500);
+    // The new rows push the bottom away before the page finishes showing.
+    bottomTop = 3000;
+    expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
+    await settled();
+    // One jump, such as the End key, lands exactly where the last scroll did.
+    scrollTo(500);
+    expect(await screen.findByRole("link", { name: "Title c" })).toBeInTheDocument();
+    expect(reads).toEqual(["cursor=50", "cursor=100"]);
+  });
+
   it("doesn't read when they scroll up, or while still far from the bottom", async () => {
     replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
     show();
