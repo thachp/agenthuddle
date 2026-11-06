@@ -45,7 +45,7 @@ describe("Collaboration", () => {
     expect(line.getAttribute("href")).toContain("line=agt_a%7Eagt_b");
     expect(list.getByText("2 offers, 1 message")).toBeInTheDocument();
     expect(screen.getByText(/Lines describe work, not permissions/)).toBeInTheDocument();
-    expect(screen.queryByText(/online\b(?! )/i)).toBeNull();
+    expect(screen.queryByText(/^(online|idle)$/i)).toBeNull();
     expect(screen.queryByRole("group", { name: /Map of who/ })).toBeNull();
   });
 
@@ -60,7 +60,7 @@ describe("Collaboration", () => {
     const { container } = await show({ view: "map" });
     expect(screen.getByRole("link", { name: "Map" })).toHaveAttribute("aria-current", "page");
     const map = screen.getByRole("group", { name: /Map of who/ });
-    const line = within(map).getByRole("link", { name: /to agt_b: 2 offers, 1 message/ });
+    const line = within(map).getByRole("link", { name: /to agt_b: 3 in all, 2 offers, 1 message/ });
     expect(line.getAttribute("href")).toContain("line=agt_a%7Eagt_b");
     expect(container.querySelectorAll("svg a")).toHaveLength(2);
     expect(screen.getByRole("heading", { name: "Who has worked with whom" })).toBeInTheDocument();

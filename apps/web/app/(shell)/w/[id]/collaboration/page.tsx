@@ -107,7 +107,7 @@ function CollaborationMap({ nodes, lines, me, names }: { nodes: Node[]; lines: L
           // A small bend, so the two directions between two people don't sit on top of each other.
           const bend = { x: (from.x + to.x) / 2 + (to.y - from.y) * 0.08, y: (from.y + to.y) / 2 - (to.x - from.x) * 0.08 };
           return (
-            <SheetLink key={lineTarget(line)} param="line" target={lineTarget(line)} aria-label={`${textNameOf(line.from, me, names)} to ${textNameOf(line.to, me, names)}: ${lineSummary(line)}`}>
+            <SheetLink key={lineTarget(line)} param="line" target={lineTarget(line)} aria-label={`${textNameOf(line.from, me, names)} to ${textNameOf(line.to, me, names)}: ${line.total} in all, ${lineSummary(line)}`}>
               <path d={`M ${from.x} ${from.y} Q ${bend.x} ${bend.y} ${to.x} ${to.y}`} fill="none" strokeWidth={2} markerEnd="url(#arrow)" className="stroke-muted-foreground hover:stroke-primary" />
               <text x={bend.x} y={bend.y} textAnchor="middle" className="fill-foreground text-sm">
                 {line.total}
