@@ -9,6 +9,7 @@ import { auditAction, auditTarget, pageAfter } from "../activity/model";
 import { loadPeopleNames } from "../tasks/load-tasks";
 import { Time } from "../activity/time";
 import { membersOf, type AuditRow } from "../team/model";
+import { BriefControls } from "./brief-controls";
 import { RoomControls } from "./room-controls";
 import { TransferOwnership } from "./transfer-ownership";
 
@@ -49,6 +50,10 @@ export default async function Settings({ params, searchParams }: { params: Promi
           <dd>Private. Only people and agents added or invited here can open it.</dd>
         </dl>
         <RoomControls roomId={id} name={room.name} policyVersion={room.policy_version} archived={isArchived(room)} />
+      </Section>
+
+      <Section id="settings-brief" title="Goal and context">
+        <BriefControls roomId={id} goal={room.goal ?? null} context={room.context ?? null} policyVersion={room.policy_version} archived={isArchived(room)} />
       </Section>
 
       <Section id="settings-admins" title="Administrators">

@@ -122,7 +122,7 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
             Details
           </Tabs.Trigger>
           <Tabs.Trigger value="discussion" className={TAB_CLASS}>
-            Discussion ({data.messages.length})
+            {data.visible?.conversation === false ? "Discussion" : `Discussion (${data.messages.length})`}
           </Tabs.Trigger>
           <Tabs.Trigger value="activity" className={TAB_CLASS}>
             Activity
@@ -134,7 +134,7 @@ function TaskBody({ api, me, names, orgNames }: { api: SheetApi<LoadedTask>; me:
         {/* Stays mounted, so a draft or a post in flight outlives a look at another tab. */}
         <Tabs.Content value="discussion" forceMount hidden={tab !== "discussion"} className="mt-4 space-y-3 outline-none">
           <Discussion data={data} me={me} names={names} orgNames={orgNames} />
-          {isArchivedRoom(data.room) ? null : <TaskComposer api={api} />}
+          {isArchivedRoom(data.room) || data.visible?.conversation === false ? null : <TaskComposer api={api} />}
         </Tabs.Content>
         <Tabs.Content value="activity" className="mt-4 outline-none">
           <Activity data={data} me={me} names={names} orgNames={orgNames} />
@@ -168,7 +168,7 @@ export function Details({ data, me, names, orgNames }: SectionProps) {
       </section>
       <section className="space-y-2">
         <h3 className="font-medium">Submissions</h3>
-        {data.submissions.length === 0 ? <p className="text-sm text-muted-foreground">Nothing submitted yet.</p> : null}
+        {data.visible?.submissions === "own" ? <p className="text-sm text-muted-foreground">Your access here shows only what you submitted. There may be other submissions on this task.</p> : data.submissions.length === 0 ? <p className="text-sm text-muted-foreground">Nothing submitted yet.</p> : null}
         <ol className="space-y-3">
           {data.submissions.toReversed().map((submission) => (
             <li key={submission.submission_no} className="space-y-2 rounded-lg border p-3">
@@ -228,6 +228,7 @@ function ArtifactList({ artifacts, me, names, orgNames }: { artifacts: Artifact[
 const RECENT_MESSAGES = 20;
 
 function Discussion({ data, me, names, orgNames }: SectionProps) {
+  if (data.visible?.conversation === false) return <p className="text-sm text-muted-foreground">Your access here doesn't include this task's discussion, so there may be messages you can't see.</p>;
   if (data.messages.length === 0) return <p className="text-sm text-muted-foreground">No messages yet. Agents post their progress here, and you can too.</p>;
   return (
     <>
@@ -249,6 +250,8 @@ function Discussion({ data, me, names, orgNames }: SectionProps) {
 export function Activity({ data, me, names, orgNames }: SectionProps) {
   if (data.history.length === 0) return <p className="text-sm text-muted-foreground">Nothing has happened yet.</p>;
   return (
+    <>
+    {data.visible?.conversation === false ? <p className="mb-3 text-sm text-muted-foreground">Your access here doesn't include the reasons people gave.</p> : null}
     <ol className="space-y-3">
       {data.history.toReversed().map((event) => (
         <li key={event.id} className="space-y-1 border-b pb-3 text-sm last:border-b-0">
@@ -263,6 +266,7 @@ export function Activity({ data, me, names, orgNames }: SectionProps) {
         </li>
       ))}
     </ol>
+    </>
   );
 }
 

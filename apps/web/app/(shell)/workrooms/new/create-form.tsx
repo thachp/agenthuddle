@@ -6,9 +6,12 @@ import { plainName } from "@/components/agent-content/text";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { clientCommand } from "@/lib/gateway/client";
+import { TEXTAREA } from "../../w/[id]/settings/brief-controls";
 import { MOBILE_TARGET } from "../../w/[id]/team/field";
 
 const MAX_NAME_BYTES = 200;
+const MAX_GOAL_BYTES = 2048;
+const MAX_CONTEXT_BYTES = 32768;
 
 const byteLength = (text: string) => new TextEncoder().encode(text).length;
 
@@ -18,7 +21,7 @@ const UNKNOWN_OUTCOME = "We can't tell whether a workroom was created. Check My 
 export function createProblem(status: number, code: string) {
   if (status === 429) return "Too many requests. Wait a minute and try again.";
   if (status >= 500) return UNKNOWN_OUTCOME;
-  if (code === "invalid_argument") return "Check the name, and try again.";
+  if (code === "invalid_argument") return "Check the name, goal and context, and try again.";
   if (code === "limit_exceeded") return "This organization has reached its limit of 20 workrooms, so no workroom was created. Archived workrooms count toward it.";
   return status === 403 ? "That didn't work, and no workroom was created. Only an organization's admins can create its workrooms." : "That didn't work, and no workroom was created.";
 }
@@ -26,12 +29,19 @@ export function createProblem(status: number, code: string) {
 export function CreateWorkroomForm({ organization, personal = false }: { organization: string | null; personal?: boolean }) {
   const router = useRouter();
   const [name, setName] = useState("");
+  const [goal, setGoal] = useState("");
+  const [context, setContext] = useState("");
   const [pending, setPending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const sending = useRef(false);
   const created = useRef(false);
   const trimmed = name.trim();
+  const trimmedGoal = goal.trim();
+  const trimmedContext = context.trim();
   const tooLong = byteLength(trimmed) > MAX_NAME_BYTES;
+  const goalTooLong = byteLength(trimmedGoal) > MAX_GOAL_BYTES;
+  const contextTooLong = byteLength(trimmedContext) > MAX_CONTEXT_BYTES;
+  const blocked = !trimmed || tooLong || goalTooLong || contextTooLong;
 
   // The new screen replaces this form and takes the focused control with it, which would leave focus on the page body and a
   // screen reader saying nothing. The shell's main region outlives the form. If someone has already moved on, focus stays with them.
@@ -45,12 +55,12 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
   const create = async (event: FormEvent) => {
     event.preventDefault();
     // Creating isn't idempotent in the API yet, so a second click must not send a second request.
-    if (sending.current || !trimmed || tooLong) return;
+    if (sending.current || blocked) return;
     sending.current = true;
     setPending(true);
     setProblem(null);
     try {
-      const result = await clientCommand<{ id: string }>("/api/v1/workspaces", { name: trimmed });
+      const result = await clientCommand<{ id: string }>("/api/v1/workspaces", { name: trimmed, ...(trimmedGoal ? { goal: trimmedGoal } : {}), ...(trimmedContext ? { context: trimmedContext } : {}) });
       if (result.ok) {
         created.current = true;
         router.push(`/w/${result.data.id}/overview`);
@@ -73,6 +83,20 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
       <p id="workroom-name-help" className="text-sm text-muted-foreground">
         {tooLong ? "That's too long. Names can be up to 200 bytes." : "People and agents in this workroom will see it."}
       </p>
+      <label className="block space-y-1">
+        <span className="font-medium">Goal (optional)</span>
+        <textarea className={TEXTAREA} rows={2} value={goal} aria-invalid={goalTooLong} aria-describedby="workroom-goal-help" onChange={(event) => setGoal(event.target.value)} />
+      </label>
+      <p id="workroom-goal-help" className="text-sm text-muted-foreground">
+        {goalTooLong ? "That's too long. A goal can be up to 2,048 bytes." : "What this workroom is for."}
+      </p>
+      <label className="block space-y-1">
+        <span className="font-medium">Context (optional)</span>
+        <textarea className={TEXTAREA} rows={5} value={context} aria-invalid={contextTooLong} aria-describedby="workroom-context-help" onChange={(event) => setContext(event.target.value)} />
+      </label>
+      <p id="workroom-context-help" className="text-sm text-muted-foreground">
+        {contextTooLong ? "That's too long. Context can be up to 32,768 bytes." : "Anything participants should know. Everyone in this workroom can read it, and it gives no one any permission."}
+      </p>
       <p className="text-sm text-muted-foreground">{organization ? <>Owned by {plainName(organization)}. You can switch organization from your profile menu. You'll be its owner.</> : "Owned by your current organization. You'll be its owner."}</p>
       {personal ? <p className="text-sm text-muted-foreground">This is your personal organization, so nobody can take this workroom over if you can't get back into your account. Use a team organization if it may need a successor.</p> : null}
       {problem ? (
@@ -81,7 +105,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
         </p>
       ) : null}
       {/* While sending this is only marked disabled: really disabling it would drop focus to the body, and a refusal needs focus to still be here. `sending` stops a second request. */}
-      <Button type="submit" className={`${MOBILE_TARGET} aria-disabled:pointer-events-none aria-disabled:opacity-50`} disabled={!trimmed || tooLong} aria-disabled={pending || undefined}>
+      <Button type="submit" className={`${MOBILE_TARGET} aria-disabled:pointer-events-none aria-disabled:opacity-50`} disabled={blocked} aria-disabled={pending || undefined}>
         {pending ? "Creating…" : "Create workroom"}
       </Button>
       <p className="text-sm text-muted-foreground">Agents connect later; this doesn't launch agents.</p>

@@ -216,6 +216,8 @@ An authorized human representative of the agent-owning organization can disconne
 
 "Own tasks" means tasks where the participant is requester, assignee or reviewer.
 
+Presets and scopes are built, locally only, for agents. A person's access follows their role. Each scope takes one of these values, and nothing else can be stored: tasks `own`, `own_create`, `all`, `all_create` or `coordinate`; artifacts `shared`, `own` or `all`; conversations `own` or `all`; review `none` or `when_named`. A guest's invitation switch ([decision 14](#decisions-needed)) is `own_create`. Applying a preset also sets the matching kernel role: Member and Coordinator are `member`, and Guest and Public participant are `guest`. Until M2 can share anything, **Read shared** means only what the participant submitted itself. The Coordinator's takeover arrives with work roles, so `coordinate` is `all_create` for now. Taking review away from an agent follows the reviewer half of the [departure rules](#when-a-participant-leaves) on its open tasks.
+
 ### Invitations (private workrooms)
 
 - **Own-organization agents:** the workroom owner/admin may admit an already-connected agent only within the agent owner’s authorized participation policy. Shared organization membership alone does not let a workroom admin connect, claim or override withdrawal of that identity.
@@ -421,6 +423,7 @@ The Rust API is private, service-only and never called directly from browser cod
 | Message body | 16 KB of Markdown |
 | Artifacts per submission | 10, HTTPS links only |
 | Fields | Title 500 bytes; instructions 64 KB; acceptance criteria 16 KB; note 16 KB; reason 4 KB |
+| Workroom brief | Goal 2 KB; context 32 KB; both optional |
 | Inbox | 10,000 events per agent; unread kept 30 days, acked 7 days; `read_inbox` returns at most 50 |
 | Wake | One URL per agent; at most once per 1 min–24 h (default 15 min); off after 3 failures in a row |
 | Invitations | Expire after 7 days |

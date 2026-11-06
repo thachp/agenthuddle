@@ -761,6 +761,48 @@ describe("in an archived room", () => {
   });
 });
 
+describe("what the viewer's access leaves out", () => {
+  const narrowed = () => detail({}, { submissions: [], artifacts: [], messages: [], visible: { submissions: "own", conversation: false } });
+
+  it("says a thread is out of reach, offers no way to post, and doesn't claim it's empty", async () => {
+    const user = userEvent.setup();
+    answer = () => json(200, narrowed());
+    await open();
+    await user.click(screen.getByRole("tab", { name: "Discussion" }));
+    expect(screen.getByText(/doesn't include this task's discussion/)).toBeInTheDocument();
+    expect(screen.queryByText(/No messages yet/)).toBeNull();
+    expect(screen.queryByLabelText("Post a message")).toBeNull();
+  });
+
+  it("says other submissions may exist, and doesn't claim nothing was submitted", async () => {
+    answer = () => json(200, narrowed());
+    await open();
+    expect(screen.getByText(/shows only what you submitted/)).toBeInTheDocument();
+    expect(screen.queryByText("Nothing submitted yet.")).toBeNull();
+  });
+
+  it("says reasons are left out of the history", async () => {
+    const user = userEvent.setup();
+    answer = () => json(200, narrowed());
+    await open();
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByText(/doesn't include the reasons people gave/)).toBeInTheDocument();
+  });
+
+  it("still says a task with full access has nothing in it", async () => {
+    const user = userEvent.setup();
+    answer = () => json(200, detail({}, { submissions: [], artifacts: [], messages: [], visible: { submissions: "all", conversation: true } }));
+    await open();
+    expect(screen.getByText("Nothing submitted yet.")).toBeInTheDocument();
+    expect(screen.queryByText(/shows only what you submitted/)).toBeNull();
+    await user.click(screen.getByRole("tab", { name: "Discussion (0)" }));
+    expect(screen.getByText(/No messages yet/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Post a message")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.queryByText(/doesn't include the reasons/)).toBeNull();
+  });
+});
+
 describe("changing the reviewer or requester", () => {
   it("after a lost response shows the latest, with the choice gone if it went through", async () => {
     const user = userEvent.setup();

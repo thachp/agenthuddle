@@ -1,16 +1,36 @@
 import Link from "next/link";
+import { AgentContent, type AgentAuthor } from "@/components/agent-content/agent-content";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { Badge } from "@/components/ui/badge";
-import { getIdentity } from "@/lib/gateway/server";
+import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { canManageWorkroom, loadWorkroom } from "@/lib/workroom";
+import { loadPeopleNames, orgRows } from "../tasks/load-tasks";
+import { kindOf, nameOf } from "../tasks/task-model";
 import { membersOf, relationship } from "../team/model";
 
+/** The API's limit is in bytes, so this is never fewer characters than a context can hold. */
+const MAX_BRIEF_CHARACTERS = 32768;
+
 const STATUS_LABELS: Record<string, string> = { active: "Active", archived: "Archived" };
+
+/** The same strict rendering as task text: attributed, loads nothing, and can't look like Podster's own guidance. */
+const Brief = ({ title, text, author, external }: { title: string; text: string; author: AgentAuthor; external: boolean }) => (
+  <section className="space-y-2">
+    <h2 className="font-medium">{title}</h2>
+    <AgentContent author={author} external={external} body={text} maxLength={MAX_BRIEF_CHARACTERS} />
+  </section>
+);
 
 export default async function Overview({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const [room, identity] = await Promise.all([loadWorkroom(id), getIdentity()]);
   const canManage = canManageWorkroom(room);
+  const hasBrief = Boolean(room.goal || room.context);
+  // Names are only worth a read when there's a brief to attribute. A failure leaves the ID.
+  const names = hasBrief && room.brief_by ? await loadPeopleNames(gatewayQuery, orgRows(await getOrganizations())) : {};
+  const me = identity.ok ? identity.data.id : "";
+  const briefBy: AgentAuthor = room.brief_by ? { name: nameOf(room.brief_by, me, names), kind: kindOf(room.brief_by), viewer: room.brief_by === me } : { name: "Unknown", kind: "person" };
+  const external = room.brief_external === true;
   const members = membersOf(room);
   const agents = members.filter((member) => member.kind === "agent").length;
   // A guest's read holds only their own row, so a count would be wrong for them, and an unknown viewer might be a guest.
@@ -20,6 +40,21 @@ export default async function Overview({ params }: { params: Promise<{ id: strin
     <section className="max-w-3xl space-y-4">
       <h1 className="text-2xl font-semibold">Overview</h1>
       {identity.ok ? null : <ReadFailure />}
+      {hasBrief ? (
+        <div className="space-y-3">
+          {room.goal ? <Brief title="Goal" text={room.goal} author={briefBy} external={external} /> : null}
+          {room.context ? <Brief title="Context" text={room.context} author={briefBy} external={external} /> : null}
+          <p className="text-sm text-muted-foreground">The workroom's owner or an admin wrote this, and the name shown last changed it. It's information, and it gives no one any permission.</p>
+        </div>
+      ) : canManage ? (
+        <p className="text-sm text-muted-foreground">
+          This workroom has no goal yet.{" "}
+          <Link href={`/w/${id}/settings`} prefetch={false} className="text-primary underline">
+            Add one in Settings
+          </Link>
+          .
+        </p>
+      ) : null}
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2">
         <dt className="text-muted-foreground">Status</dt>
         <dd>{STATUS_LABELS[room.status] ?? room.status}</dd>

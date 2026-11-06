@@ -16,6 +16,8 @@ pub const MAX_NOTE_BYTES: usize = 16 * 1024;
 pub const MAX_URI_BYTES: usize = 2 * 1024;
 pub const MAX_LABEL_BYTES: usize = 256;
 pub const MAX_REFERENCE_BYTES: usize = 128;
+pub const MAX_GOAL_BYTES: usize = 2 * 1024;
+pub const MAX_CONTEXT_BYTES: usize = 32 * 1024;
 
 pub type PrincipalId = String;
 
@@ -306,6 +308,18 @@ fn event<'a>(
         recipients,
         reason: None,
     }
+}
+
+/// A workroom's goal and context, which are optional. They're text for participants to read, and nothing acts on them.
+pub fn validate_brief(goal: Option<&str>, context: Option<&str>) -> Result<(), CoreError> {
+    let usable = |text: &str, max: usize| !text.trim().is_empty() && text.len() <= max;
+    if goal.is_some_and(|g| !usable(g, MAX_GOAL_BYTES)) {
+        return Err(CoreError::InvalidArgument("goal"));
+    }
+    if context.is_some_and(|c| !usable(c, MAX_CONTEXT_BYTES)) {
+        return Err(CoreError::InvalidArgument("context"));
+    }
+    Ok(())
 }
 
 /// Short references such as commit hashes and task IDs.
@@ -643,6 +657,44 @@ pub fn decide(
 ///
 /// `requester_can_review` says whether the requester is eligible under the reviewer rules, such as a room's
 /// person-review policy. The task never completes because of a departure.
+/// A reviewer who can't review any more falls back to the requester, if the requester can, and otherwise the task is
+/// flagged for an owner or admin. `task` already reflects anything else that changed with it.
+fn replace_reviewer(
+    task: &mut Task,
+    former: &str,
+    requester_can_review: bool,
+    events: &mut Vec<EventDraft>,
+) {
+    let requester_usable = task.requester != former
+        && task.assignee.as_deref() != Some(task.requester.as_str())
+        && requester_can_review;
+    if requester_usable {
+        task.reviewer = task.requester.clone();
+        let requester = task.requester.clone();
+        events.push(event(EventKind::TaskReviewerChanged, former, [&requester]));
+    } else {
+        task.needs_reviewer = true;
+        events.push(event(EventKind::TaskNeedsAttention, former, []));
+    }
+}
+
+/// An owner or admin took review away from someone still named as a task's reviewer. They stay in the room, so this
+/// follows only the reviewer half of the departure rules. The actor on the event is the former reviewer, as on departure.
+pub fn apply_review_ended(
+    task: &Task,
+    former: &str,
+    requester_can_review: bool,
+) -> Option<Decision> {
+    if task.status.is_terminal() || task.reviewer != former {
+        return None;
+    }
+    let mut next = task.clone();
+    let mut events = Vec::new();
+    replace_reviewer(&mut next, former, requester_can_review, &mut events);
+    next.version = task.version.saturating_add(1);
+    Some(Decision { task: next, events })
+}
+
 pub fn apply_departure(
     task: &Task,
     departed: &str,
@@ -672,20 +724,7 @@ pub fn apply_departure(
         }
     }
     if task.reviewer == departed {
-        let requester_usable = task.requester != departed
-            && next.assignee.as_deref() != Some(task.requester.as_str())
-            && requester_can_review;
-        if requester_usable {
-            next.reviewer = task.requester.clone();
-            events.push(event(
-                EventKind::TaskReviewerChanged,
-                departed,
-                [&task.requester],
-            ));
-        } else {
-            next.needs_reviewer = true;
-            events.push(event(EventKind::TaskNeedsAttention, departed, []));
-        }
+        replace_reviewer(&mut next, departed, requester_can_review, &mut events);
     }
     if task.requester == departed {
         next.needs_requester = true;

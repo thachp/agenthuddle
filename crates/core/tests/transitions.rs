@@ -1045,3 +1045,71 @@ fn a_replaced_assignee_hears_about_it_as_a_reassignment() {
     assert_eq!(events[1].kind, EventKind::TaskReassigned);
     assert!(events[1].recipients.contains("asg"));
 }
+
+#[test]
+fn a_brief_has_limits_and_may_be_absent() {
+    use podster_core::{validate_brief, CoreError, MAX_CONTEXT_BYTES, MAX_GOAL_BYTES};
+    assert_eq!(validate_brief(None, None), Ok(()));
+    assert_eq!(validate_brief(Some("Ship it"), Some("Notes")), Ok(()));
+    let goal = "g".repeat(MAX_GOAL_BYTES);
+    let context = "c".repeat(MAX_CONTEXT_BYTES);
+    assert_eq!(validate_brief(Some(&goal), Some(&context)), Ok(()));
+    let long_goal = "g".repeat(MAX_GOAL_BYTES + 1);
+    let long_context = "c".repeat(MAX_CONTEXT_BYTES + 1);
+    assert_eq!(
+        validate_brief(Some(&long_goal), None),
+        Err(CoreError::InvalidArgument("goal"))
+    );
+    assert_eq!(
+        validate_brief(None, Some(&long_context)),
+        Err(CoreError::InvalidArgument("context"))
+    );
+    assert_eq!(
+        validate_brief(Some("  \n"), None),
+        Err(CoreError::InvalidArgument("goal"))
+    );
+    assert_eq!(
+        validate_brief(None, Some("")),
+        Err(CoreError::InvalidArgument("context"))
+    );
+}
+
+#[test]
+fn losing_review_changes_only_the_reviewer_and_only_on_open_tasks() {
+    let named = Task {
+        requester: "req".into(),
+        assignee: Some("asg".into()),
+        reviewer: "rev".into(),
+        ..task(Submitted)
+    };
+    let to_requester = apply_review_ended(&named, "rev", true).unwrap();
+    assert_eq!(to_requester.task.reviewer, "req");
+    assert_eq!(to_requester.task.status, Submitted);
+    assert_eq!(to_requester.task.assignee.as_deref(), Some("asg"));
+    assert!(!to_requester.task.needs_reviewer);
+    assert_eq!(to_requester.task.version, named.version + 1);
+    let flagged = apply_review_ended(&named, "rev", false).unwrap();
+    assert_eq!(flagged.task.reviewer, "rev");
+    assert!(flagged.task.needs_reviewer);
+    assert!(apply_review_ended(&named, "someone_else", true).is_none());
+    assert!(apply_review_ended(
+        &Task {
+            status: Completed,
+            ..named.clone()
+        },
+        "rev",
+        true
+    )
+    .is_none());
+    // A requester who's also the assignee can't take over.
+    let own = Task {
+        assignee: Some("req".into()),
+        ..named
+    };
+    assert!(
+        apply_review_ended(&own, "rev", true)
+            .unwrap()
+            .task
+            .needs_reviewer
+    );
+}
