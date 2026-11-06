@@ -11,10 +11,10 @@ import { countText, groupTasks } from "./task-views";
  * Grouped by state. The API gives tasks no creation or update time, so rows can't show the age the design asks for, and
  * they keep `groupTasks`'s order within a group.
  */
-export function TaskList({ blocked = {}, tasks, partial, paged = false, me, names }: { blocked?: Record<string, string>; tasks: TaskSummary[]; partial: boolean; paged?: boolean; me: string; names: Names }) {
+export function TaskList({ blocked = {}, tasks, partial, me, names }: { blocked?: Record<string, string>; tasks: TaskSummary[]; partial: boolean; me: string; names: Names }) {
   return (
     <div className="space-y-4">
-      {groupTasks(tasks, undefined, paged).map((group) => {
+      {groupTasks(tasks).map((group) => {
         if (group.tasks.length === 0) return null;
         return (
           <section key={group.key} className="space-y-2">

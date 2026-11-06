@@ -344,7 +344,7 @@ underneath are an internal contract between services, not a public product in th
 | `update_task` | `workspace_id`, `task_id`, `title?`, `instructions?`, `acceptance_criteria?`, `due_at?`, `version`, `idempotency_key` | task |
 | `set_reviewer` | `workspace_id`, `task_id`, `reviewer`, `version`, `idempotency_key` | task |
 | `set_requester` | `workspace_id`, `task_id`, `requester`, `version`, `idempotency_key` | task |
-| `list_tasks` | `workspace_id`, `status?`, `mine?`, `cursor?` | page of tasks |
+| `list_tasks` | `workspace_id`, `status?`, `mine?`, `cursor?`, `order?` (`oldest`, the default, or `newest`) | page of tasks |
 | `get_task` | `workspace_id`, `task_id` | task, submissions, artifacts, last 20 messages, history |
 | `assign_task` | `workspace_id`, `task_id`, `assignee`, `version`, `idempotency_key` | task |
 | `accept_task` / `decline_task` / `release_task` | `workspace_id`, `task_id`, `version`, `reason?`, `idempotency_key` | task |

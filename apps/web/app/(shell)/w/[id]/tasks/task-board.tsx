@@ -13,8 +13,8 @@ import { BOARD_COLUMNS, countText, groupTasks } from "./task-views";
  * every lifecycle action stays in the task Sheet, where the server decides it. Columns stack on a narrow screen, so the
  * page never has to scroll sideways.
  */
-export function TaskBoard({ blocked = {}, tasks, partial, paged = false, showCanceled, selected, me, names }: { blocked?: Record<string, string>; tasks: TaskSummary[]; partial: boolean; paged?: boolean; showCanceled: boolean; selected: string | null; me: string; names: Names }) {
-  const columns = groupTasks(tasks, showCanceled ? [...BOARD_COLUMNS, "canceled"] : BOARD_COLUMNS, paged);
+export function TaskBoard({ blocked = {}, tasks, partial, showCanceled, selected, me, names }: { blocked?: Record<string, string>; tasks: TaskSummary[]; partial: boolean; showCanceled: boolean; selected: string | null; me: string; names: Names }) {
+  const columns = groupTasks(tasks, showCanceled ? [...BOARD_COLUMNS, "canceled"] : BOARD_COLUMNS);
   return (
     <div className="@container">
       <div className={cn("grid items-start gap-3 @xl:grid-cols-2", columns.length > 5 ? "@4xl:grid-cols-3" : "@4xl:grid-cols-5")}>

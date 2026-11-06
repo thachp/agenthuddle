@@ -4,11 +4,12 @@ import { loadWorkroom } from "@/lib/workroom";
 import { isOutage, loadNames, loadPlan, loadTasks, orgNamesOf, orgRows } from "./load-tasks";
 import { planSummary } from "./plan-summary";
 import { summaryOf, type Room } from "./task-model";
+import { NEWEST_QUERY } from "./task-views";
 import { KeptTasksScreen } from "./tasks-screen";
 
 export async function TasksRead({ id }: { id: string }) {
   const orgs = orgRows(await getOrganizations());
-  const [room, identity, tasks, names, plan] = await Promise.all([loadWorkroom(id), getIdentity(), loadTasks(gatewayQuery, id), loadNames(gatewayQuery, orgs), loadPlan(gatewayQuery, id)]);
+  const [room, identity, tasks, names, plan] = await Promise.all([loadWorkroom(id), getIdentity(), loadTasks(gatewayQuery, id, NEWEST_QUERY), loadNames(gatewayQuery, orgs), loadPlan(gatewayQuery, id)]);
   if (tasks.ok && identity.ok) return <KeptTasksScreen key={id} read={{ room: room as Room, tasks: tasks.data.tasks.map(summaryOf), cursor: tasks.data.cursor, plan: plan.ok ? planSummary(plan.data, identity.data.id) : null, me: identity.data.id, names, orgNames: orgNamesOf(orgs) }} />;
   // An outage isn't an empty list, and can keep what's on screen. Any other failure may mean access is gone, so the tasks go too.
   return [tasks, identity].every(isOutage) ? <KeptTasksScreen key={id} read={null} /> : <ReadFailure />;

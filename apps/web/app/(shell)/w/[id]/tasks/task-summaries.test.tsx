@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import type { Room, Task, TaskSummary } from "./task-model";
 import { useTaskPages } from "./task-pages";
+import { NEWEST_QUERY, REVIEW_QUERY } from "./task-views";
 
 /** Every way a task gets into the list's state, which must not hold instructions: at 64 KB each, a long list would keep hundreds of megabytes. */
 const full = (id: string, version = 1): Task => ({ id, title: id, instructions: "LONG", acceptance_criteria: "LONG", requester: "per_me", assignee: null, reviewer: "per_o", status: "open", version, due_at: null, follow_up_of: null, submission_no: 0, needs_attention: false });
@@ -36,6 +37,16 @@ beforeEach(() => {
 });
 
 describe("what a list holds", () => {
+  it("reads newest first, in the page's own read and later ones", async () => {
+    const paths: string[] = [];
+    vi.stubGlobal("fetch", async (path: string) => (paths.push(path), new Response(JSON.stringify({ tasks: [], next_cursor: null }), { status: 200 })));
+    const { result } = renderHook(() => useTaskPages("ws_1", NEWEST_QUERY, 50, 0, null));
+    act(() => result.current.load());
+    await waitFor(() => expect(paths).toEqual(["/api/v1/workspaces/ws_1/tasks?cursor=50&order=newest"]));
+    expect(NEWEST_QUERY).toBe("&order=newest");
+    expect(REVIEW_QUERY).toContain(NEWEST_QUERY);
+  });
+
   it("the page's own read", async () => {
     const element = await TasksRead({ id: "ws_1" });
     expectSummaries((element.props as { read: { tasks: unknown[] } }).read.tasks);
@@ -55,5 +66,7 @@ describe("what a list holds", () => {
     act(() => seen.onTask?.(full("new")));
     expect(seen.rows).toHaveLength(2);
     expectSummaries(seen.rows);
+    // On top until a read of the first page has it.
+    expect((seen.rows[0] as TaskSummary).id).toBe("new");
   });
 });
