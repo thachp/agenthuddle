@@ -169,17 +169,20 @@ describe("parsing in a worker", () => {
   });
 
   it("forgets the oldest results once they add up, whatever their count", () => {
-    const body = (index: number) => `${index}\n${"- a\n".repeat(3000)}`;
-    const count = Math.ceil(MAX_CACHED_NODES / 9_000) + 1;
-    requestParse(body(0), vi.fn());
+    // Only the size matters here, so nothing is really parsed.
+    const large = { tree: { type: "root" as const, children: [] }, nodes: 9_000 };
+    const count = Math.ceil(MAX_CACHED_NODES / large.nodes) + 1;
+    requestParse("0", vi.fn());
     FakeWorker.last.ready();
-    FakeWorker.last.answer();
+    FakeWorker.last.answer("0", large);
     for (let index = 1; index < count; index++) {
-      requestParse(body(index), vi.fn());
-      FakeWorker.last.answer();
+      requestParse(`${index}`, vi.fn());
+      FakeWorker.last.answer(`${index}`, large);
     }
-    expect(cachedParse(body(count - 1))).toBeTruthy();
-    expect(cachedParse(body(0))).toBeUndefined();
+    const fits = Math.floor(MAX_CACHED_NODES / large.nodes);
+    expect(cachedParse(`${count - 1}`)).toBe(large);
+    expect(cachedParse(`${count - fits}`)).toBe(large);
+    expect(cachedParse(`${count - fits - 1}`)).toBeUndefined();
   });
 
   it("goes on after one body breaks a worker", () => {

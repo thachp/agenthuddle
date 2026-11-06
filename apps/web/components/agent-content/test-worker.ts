@@ -1,4 +1,4 @@
-import { parseBody } from "./parse";
+import { parseBody, type ParsedBody } from "./parse";
 
 /** A worker that answers only when told to, and remembers what it was asked. */
 export class FakeWorker {
@@ -22,8 +22,9 @@ export class FakeWorker {
   ready() {
     this.onmessage?.({ data: { ready: true } });
   }
-  answer(text = this.asked.at(-1)!) {
-    this.onmessage?.({ data: { text, parsed: parseBody(text) } });
+  /** Parses for real, unless told what the result is. */
+  answer(text = this.asked.at(-1)!, parsed: ParsedBody | null = parseBody(text)) {
+    this.onmessage?.({ data: { text, parsed } });
   }
   static get last() {
     return FakeWorker.all.at(-1)!;
