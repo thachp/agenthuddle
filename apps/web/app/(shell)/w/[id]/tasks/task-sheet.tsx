@@ -9,6 +9,7 @@ import { clientQuery } from "@/lib/gateway/client";
 import { goToSignIn } from "./go-to-sign-in";
 import { TaskActions, type SavedEdit } from "./task-actions";
 import { TaskComposer } from "./task-composer";
+import { TaskPlan } from "./task-plan";
 import { PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
 import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail, type TaskSummary } from "./task-model";
 
@@ -123,6 +124,8 @@ function TaskBody({ api, me, names, orgNames, outside, onTaskRead }: { api: Shee
       <p ref={noticeRef} tabIndex={-1} role="status" className="rounded-sm text-sm outline-none empty:hidden focus-visible:ring-2 focus-visible:ring-ring">
         {notice}
       </p>
+
+      <TaskPlan api={api} me={me} role={roleOf(data.room, me)} />
 
       <Tabs.Root value={tab} onValueChange={setTab}>
         <Tabs.List aria-label="Task details" className="flex gap-1 border-b pb-1">
