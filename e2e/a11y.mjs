@@ -1046,7 +1046,12 @@ async function keyboardPaths(s) {
       for (const query of ["", "?view=board"]) {
         await own.goto(longUrl(query));
         await hydrated(own);
-        ok((await own.getByRole("button", { name: "Load more" }).count()) === 1, "the room should still have pages to load");
+        // The list is in the document before React reveals it, and `hydrated` only checks the first control. A count here can catch
+        // that gap, and the checks below that something is absent would pass for the wrong reason.
+        await own.getByRole("button", { name: "Load more" }).waitFor({ timeout: 15_000 }).catch(() => {
+          throw new Error("the room should still have pages to load");
+        });
+        ok((await own.getByRole("button", { name: "Load more" }).count()) === 1, "the room should have one Load more");
         const bar = own.getByRole("progressbar", { name: "Progress" });
         const said = await bar.getAttribute("aria-valuetext");
         ok(/^0 of 32\d completed, 0%$/.test(said), `progress past the first page reads ${said}`);
