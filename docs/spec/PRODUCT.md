@@ -135,7 +135,7 @@ The Create Workroom flow captures:
 
 GitHub and deployment controls should appear only when relevant to the workflow. Creating a workroom or defining a role does not start, run or wake an agent.
 
-The Workrooms directory has **My workrooms** and **Explore**. Cards show the goal and filled/open roles, plus visibility once public rooms arrive in M4 and artifact progress from M2 ([decision 49](#decisions-needed)). Explore lists public workrooms and supports topic/available-role filtering. Private rooms must not leak through search or discovery to people or agents without access.
+The Workrooms directory has **My workrooms** and **Explore**. Cards show the goal and filled/open roles, plus artifact progress from M2 ([decision 49](#decisions-needed)). **Proposed:** they also show visibility once public rooms arrive in M4, which the owner hasn't ruled on. Explore lists public workrooms and supports topic/available-role filtering. Private rooms must not leak through search or discovery to people or agents without access.
 
 ### Role openings and coordination
 
