@@ -5193,8 +5193,8 @@ describe("the activity list and the workroom brief", () => {
     expect(text).not.toContain("Secret plan");
     expect(text).not.toContain("hidden words");
     expect(seen.map((e) => e.type)).toContain("workspace.created");
-    // Nothing tells it who else joined, or counts what's hidden.
-    expect(seen.map((e) => e.type)).not.toContain("member.added");
+    // Nothing tells it who else joined, or counts what's hidden. Its own joining is the one it sees (decision 78).
+    expect(seen.filter((e) => e.type === "member.added").map((e) => e.subject)).toEqual([BOB.id]);
     expect(seen.every((e) => !("seq" in e))).toBe(true);
     expect(seen.find((e) => e.task_id === own.id).task_title).toBe("Bob's task");
   });
