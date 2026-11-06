@@ -1,11 +1,11 @@
 "use client";
 
 import { Bot, ExternalLink, User } from "lucide-react";
-import { Children, useEffect, useRef, useState } from "react";
+import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Badge } from "@/components/ui/badge";
-import { remarkBodyLimits } from "./limits";
+import { CANT_FORMAT_NOTE, nestedTooDeep, NOTE_CLASS, PLAIN_TEXT_CLASS, remarkBodyLimits } from "./limits";
 import { authoritySoundingName, chosenNameLabel, destinationHost, plainName, safeLinkUrl, truncate } from "./text";
 
 /** `viewer` means this is the person looking, whose "You" is ours and not a name anyone chose. */
@@ -15,7 +15,7 @@ export type AgentAuthor = { name: string; kind: "agent" | "person"; organization
 const ALLOWED = ["p", "em", "strong", "del", "code", "pre", "ul", "ol", "li", "blockquote", "a", "img", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "thead", "tbody", "tr", "th", "td", "input"];
 
 /** Every level is one fixed level below a screen's section headings, and no bigger than the text around it, so agent text can't pass for the page's own structure. */
-const heading: Components["h1"] = ({ children }) => (Children.count(children) === 0 ? null : <h4 className="font-semibold">{children}</h4>);
+const heading: Components["h1"] = ({ children }) => <h4 className="font-semibold">{children}</h4>;
 
 /** Wide tables scroll here and not the page. Scrolling has to work by keyboard, so this takes focus, but only when it scrolls: a tab stop per table adds up. Its name is ours. */
 function TableScroller({ children }: { children: React.ReactNode }) {
@@ -88,19 +88,51 @@ const COMPONENTS: Components = {
   },
 };
 
+function PlainText({ text }: { text: string }) {
+  return (
+    <>
+      <p className={NOTE_CLASS}>{CANT_FORMAT_NOTE}</p>
+      <p className={PLAIN_TEXT_CLASS}>{text}</p>
+    </>
+  );
+}
+
+/** One message that can't be rendered shows as its own text, and the rest of the page stays. */
+class RenderBoundary extends Component<{ text: string; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    return this.state.failed ? <PlainText text={this.props.text} /> : this.props.children;
+  }
+}
+
 /**
  * Text an agent wrote. It's attributed, can't load anything and can't become markup, and it never carries instructions
  * for Podster, or looks like Podster's own guidance.
  */
 export function AgentContent({ author, external = false, body, maxLength }: { author: AgentAuthor; external?: boolean; body: string; maxLength?: number }) {
   const { text, truncated } = truncate(body, maxLength);
+  // A task's Sheet re-renders while it's open, and parsing every message again each time adds up in a long thread.
+  const content = useMemo(
+    () =>
+      nestedTooDeep(text) ? (
+        <PlainText text={text} />
+      ) : (
+        <RenderBoundary key={text} text={text}>
+          <Markdown remarkPlugins={[remarkGfm, remarkBodyLimits]} allowedElements={ALLOWED} unwrapDisallowed urlTransform={(url) => url} components={COMPONENTS}>
+            {text}
+          </Markdown>
+        </RenderBoundary>
+      ),
+    [text],
+  );
   return (
     <article className="min-w-0 rounded-lg border p-3">
       <AuthorLine author={author} external={external} />
       <div className="mt-2 space-y-2 break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_.task-list-item]:list-none [&_ul]:list-disc [&_ul]:pl-5">
-        <Markdown remarkPlugins={[remarkGfm, remarkBodyLimits]} allowedElements={ALLOWED} unwrapDisallowed urlTransform={(url) => url} components={COMPONENTS}>
-          {text}
-        </Markdown>
+        {content}
       </div>
       {truncated ? <p className="mt-2 text-xs text-muted-foreground">Shortened for display.</p> : null}
     </article>
