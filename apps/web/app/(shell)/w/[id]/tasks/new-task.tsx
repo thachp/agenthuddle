@@ -9,12 +9,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { FIELD_CLASS } from "./task-bits";
-import { createProblem, textNameOf, UNKNOWN_CREATE, reviewerChoices, type Names, type Room, type Task } from "./task-model";
+import { createProblem, textNameOf, UNKNOWN_CREATE, reviewerChoices, type Names, type Room, type Task, type TaskSummary } from "./task-model";
 
 const PRIMARY = "min-h-11 sm:min-h-9";
 
 /** On the page rather than in a Dialog, which the design keeps for confirmations. Cancel saves nothing. */
-export function NewTask({ room, me, names }: { room: Room; me: string; names: Names }) {
+export function NewTask({ room, me, names, onTask }: { room: Room; me: string; names: Names; onTask?: (task: TaskSummary) => void }) {
   const [open, setOpen] = useState(false);
   const [created, setCreated] = useState<{ id: string; message: string } | null>(null);
   const launcher = useRef<HTMLButtonElement>(null);
@@ -36,6 +36,7 @@ export function NewTask({ room, me, names }: { room: Room; me: string; names: Na
           me={me}
           names={names}
           onCancel={close}
+          onTask={onTask}
           onCreated={(result) => {
             setCreated(result);
             close();
@@ -67,7 +68,7 @@ export function NewTask({ room, me, names }: { room: Room; me: string; names: Na
   );
 }
 
-function NewTaskForm({ room, me, names, onCancel, onCreated }: { room: Room; me: string; names: Names; onCancel: () => void; onCreated: (result: { id: string; message: string }) => void }) {
+function NewTaskForm({ room, me, names, onCancel, onTask, onCreated }: { room: Room; me: string; names: Names; onCancel: () => void; onTask?: (task: TaskSummary) => void; onCreated: (result: { id: string; message: string }) => void }) {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [instructions, setInstructions] = useState("");
@@ -104,6 +105,7 @@ function NewTaskForm({ room, me, names, onCancel, onCreated }: { room: Room; me:
       }
       // Says what the server did, which is what the list behind this now shows too.
       const task = result.data;
+      onTask?.(task);
       onCreated({
         id: task.id,
         message: task.assignee ? `Offered to ${textNameOf(task.assignee, me, names)}. It will see this at its next session or wake.` : `Created “${plainName(task.title)}”. It's open until you offer it to an agent.`,
