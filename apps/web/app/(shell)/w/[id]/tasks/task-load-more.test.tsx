@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { summaryOf, type Room, type Task } from "./task-model";
 import { rememberPlace } from "./task-pages";
-import { endOfListText, mergeTasks, soFarText } from "./task-views";
+import { advanceFirstPage, endOfListText, MAX_PUSHED_OFF, mergeTasks, soFarText, type FirstPageHistory } from "./task-views";
 import { TasksScreen } from "./tasks-screen";
 
 const signIn = vi.hoisted(() => vi.fn());
@@ -60,8 +60,8 @@ describe("Load more", () => {
 
   it("keeps going to the end, then moves focus to the line that replaces the button", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
-    replies["cursor=100"] = { tasks: [task("c")], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=100&order=newest"] = { tasks: [task("c")], next_cursor: null };
     show();
     await user.click(button());
     expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
@@ -70,20 +70,20 @@ describe("Load more", () => {
     await user.click(button());
     const done = await screen.findByText(/End of the list when it loaded: 3 tasks/);
     await waitFor(() => expect(done).toHaveFocus());
-    expect(reads).toEqual(["cursor=50", "cursor=100"]);
+    expect(reads).toEqual(["cursor=50&order=newest", "cursor=100&order=newest"]);
     expect(screen.getByRole("progressbar")).toBeInTheDocument();
   });
 
   it("reads one page at a time, however often it's pressed", async () => {
     const user = userEvent.setup();
     let finish: (reply: Reply) => void = () => undefined;
-    replies["cursor=50"] = () => new Promise((resolve) => (finish = resolve));
+    replies["cursor=50&order=newest"] = () => new Promise((resolve) => (finish = resolve));
     show();
     await user.click(button());
     await user.click(button());
     expect(button()).toHaveAttribute("aria-disabled", "true");
     expect(button()).toHaveFocus();
-    expect(reads).toEqual(["cursor=50"]);
+    expect(reads).toEqual(["cursor=50&order=newest"]);
     await act(async () => finish({ tasks: [task("b")], next_cursor: 100 }));
     expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
   });
@@ -93,18 +93,18 @@ describe("Load more", () => {
     expect(mergeTasks([task("a", { title: "Old" })], [task("a", { title: "New", version: 2 })]).map((t) => t.title)).toEqual(["New"]);
   });
 
-  it("keeps rows in loaded order once a room is too long for a page, so a new page lands below the reader", async () => {
+  it("puts a new page below what's there, in the order the read gave", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: null };
     show();
     await user.click(button());
     const later = await screen.findByRole("link", { name: "Title b" });
     expect(row("Title a").compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("stays newest first in a room that fits on a page", () => {
-    show([task("a"), task("b")], null);
-    expect(row("Title b").compareDocumentPosition(row("Title a")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  it("shows a room that fits on a page in the order the read gave, which is newest first", () => {
+    show([task("new"), task("old")], null);
+    expect(row("Title new").compareDocumentPosition(row("Title old")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("holds no instructions or criteria for a row, which the Sheet reads for itself", () => {
@@ -126,15 +126,15 @@ describe("Load more", () => {
 describe("loading as the reader scrolls", () => {
   it("reads nothing until they move", async () => {
     bottomTop = 100;
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };
     show();
     await settled();
     expect(reads).toEqual([]);
   });
 
   it("gives one scroll one page, even when that page lands above them and they're still at the bottom", async () => {
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
-    replies["cursor=100"] = { tasks: [task("c")], next_cursor: 150 };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=100&order=newest"] = { tasks: [task("c")], next_cursor: 150 };
     show();
     scrollTo(500);
     expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
@@ -142,15 +142,15 @@ describe("loading as the reader scrolls", () => {
     scrollTo(500);
     scrollTo(498);
     await settled();
-    expect(reads).toEqual(["cursor=50"]);
+    expect(reads).toEqual(["cursor=50&order=newest"]);
     scrollTo(400);
     expect(await screen.findByRole("link", { name: "Title c" })).toBeInTheDocument();
-    expect(reads).toEqual(["cursor=50", "cursor=100"]);
+    expect(reads).toEqual(["cursor=50&order=newest", "cursor=100&order=newest"]);
   });
 
   it("reads again when a jump back to the bottom follows a page that landed below them", async () => {
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
-    replies["cursor=100"] = { tasks: [task("c")], next_cursor: 150 };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=100&order=newest"] = { tasks: [task("c")], next_cursor: 150 };
     show();
     scrollTo(500);
     // The new rows push the bottom away before the page finishes showing.
@@ -160,11 +160,11 @@ describe("loading as the reader scrolls", () => {
     // One jump, such as the End key, lands exactly where the last scroll did.
     scrollTo(500);
     expect(await screen.findByRole("link", { name: "Title c" })).toBeInTheDocument();
-    expect(reads).toEqual(["cursor=50", "cursor=100"]);
+    expect(reads).toEqual(["cursor=50&order=newest", "cursor=100&order=newest"]);
   });
 
   it("doesn't read when they scroll up, or while still far from the bottom", async () => {
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };
     show();
     scrollTo(4000);
     await settled();
@@ -173,7 +173,7 @@ describe("loading as the reader scrolls", () => {
     await screen.findByRole("link", { name: "Title b" });
     scrollTo(700);
     await settled();
-    expect(reads).toEqual(["cursor=50"]);
+    expect(reads).toEqual(["cursor=50&order=newest"]);
   });
 
   it("doesn't read behind an open Sheet", async () => {
@@ -190,13 +190,13 @@ describe("loading as the reader scrolls", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load more tasks");
     scrollTo(400);
     await settled();
-    expect(reads).toEqual(["cursor=50"]);
+    expect(reads).toEqual(["cursor=50&order=newest"]);
   });
 });
 
 describe("focus when the list ends", () => {
   it("moves from the button when a scroll ended the list while it held focus", async () => {
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: null };
     show();
     button().focus();
     scrollTo(500);
@@ -206,8 +206,8 @@ describe("focus when the list ends", () => {
 
   it("stays on a row when the list ends, even after the button has been pressed", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
-    replies["cursor=100"] = { tasks: [task("c")], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=100&order=newest"] = { tasks: [task("c")], next_cursor: null };
     show();
     await user.click(button());
     await screen.findByRole("link", { name: "Title b" });
@@ -248,12 +248,12 @@ describe("focus when the list ends", () => {
 describe("failures", () => {
   it("keeps what's loaded through an outage or a rate limit, and can try again", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { status: 429 };
+    replies["cursor=50&order=newest"] = { status: 429 };
     show();
     await user.click(button());
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load more tasks");
     expect(row("Title a")).toBeInTheDocument();
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: null };
     await user.click(button());
     expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -261,7 +261,7 @@ describe("failures", () => {
 
   it("signs in again on a 401, keeping nothing new", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { status: 401 };
+    replies["cursor=50&order=newest"] = { status: 401 };
     show();
     await user.click(button());
     await waitFor(() => expect(signIn).toHaveBeenCalled());
@@ -269,7 +269,7 @@ describe("failures", () => {
 
   it("calls a bad request a failed read, not lost access", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { status: 400 };
+    replies["cursor=50&order=newest"] = { status: 400 };
     show();
     await user.click(button());
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load more tasks");
@@ -278,7 +278,7 @@ describe("failures", () => {
 
   it.each([403, 404])("takes everything off the screen on a %i, and Try again's good read brings the list back", async (status) => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { status };
+    replies["cursor=50&order=newest"] = { status };
     const { rerender } = show();
     await user.click(button());
     await waitFor(() => expect(screen.queryByRole("link", { name: "Title a" })).not.toBeInTheDocument());
@@ -290,7 +290,7 @@ describe("failures", () => {
 
   it("drops the read when the person leaves", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = () => new Promise(() => undefined);
+    replies["cursor=50&order=newest"] = () => new Promise(() => undefined);
     const { unmount } = show();
     await user.click(button());
     await waitFor(() => expect(signals).toHaveLength(1));
@@ -302,7 +302,7 @@ describe("failures", () => {
 describe("when the viewer's view of the room narrows", () => {
   const loaded = async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { tasks: [task("later")], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("later")], next_cursor: null };
     const view = show([task("a"), task("b")], 50);
     await user.click(button());
     await screen.findByRole("link", { name: "Title later" });
@@ -322,18 +322,60 @@ describe("when the viewer's view of the room narrows", () => {
     expect(screen.queryByRole("link", { name: "Title later" })).not.toBeInTheDocument();
   });
 
-  it("keeps them when the first page just grows or a task on it changes", async () => {
+  it("keeps them when new tasks join the first page or a task on it changes", async () => {
     const { rerender } = await loaded();
-    rerender(screenWith([task("a", { status: "completed", version: 2 }), task("b"), task("c")], 50));
+    rerender(screenWith([task("c"), task("a", { status: "completed", version: 2 }), task("b")], 50));
     expect(row("Title later")).toBeInTheDocument();
     expect(row("Title c")).toBeInTheDocument();
+  });
+
+  it("keeps a row a new task pushed off the first page, which no later page would have", async () => {
+    const { rerender } = await loaded();
+    rerender(screenWith([task("c"), task("a")], 50));
+    expect(row("Title c")).toBeInTheDocument();
+    expect(row("Title a")).toBeInTheDocument();
+    expect(row("Title b")).toBeInTheDocument();
+    expect(row("Title later")).toBeInTheDocument();
+    // Pushed off again, and still in reading order.
+    rerender(screenWith([task("d"), task("c")], 50));
+    const links = screen.getAllByRole("link", { name: /^Title / }).map((link) => link.textContent);
+    expect(links).toEqual(["Title d", "Title c", "Title a", "Title b", "Title later"]);
+  });
+
+  it("starts over rather than holding pushed-off rows without limit, and until then loses none", () => {
+    const page = (newest: number) => [task(`t${newest}`), task(`t${newest - 1}`)];
+    let seen: FirstPageHistory = { rows: page(1), role: "member", generation: 0, pushedOff: [] };
+    for (let newest = 2; seen.generation === 0; newest += 1) {
+      const next = advanceFirstPage(seen, page(newest), "member");
+      if (next.generation === 0) {
+        // Everything ever shown is on the page or held: t0 up to the newest.
+        expect(next.pushedOff).toHaveLength(newest - 1);
+        expect(next.pushedOff.at(-1)?.id).toBe("t0");
+      }
+      seen = next;
+    }
+    expect(seen.generation).toBe(1);
+    expect(seen.pushedOff).toEqual([]);
+    expect(seen.rows.map((row) => row.id)).toEqual(page(MAX_PUSHED_OFF + 2).map((row) => row.id));
+  });
+
+  it("starts over when more tasks arrive between reads than a first page holds, which is safe if abrupt", () => {
+    const seen: FirstPageHistory = { rows: [task("a"), task("b")], role: "member", generation: 0, pushedOff: [] };
+    expect(advanceFirstPage(seen, [task("x"), task("y")], "member")).toMatchObject({ generation: 1, pushedOff: [] });
+  });
+
+  it("drops later pages when a first page of the same size has different rows", async () => {
+    const { rerender } = await loaded();
+    rerender(screenWith([task("x"), task("y")], 50));
+    expect(screen.queryByRole("link", { name: "Title later" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Title a" })).not.toBeInTheDocument();
   });
 });
 
 describe("Needs my review in a room past one page", () => {
   const mine = task("mine", { status: "submitted", reviewer: "per_me" });
   const theirs = task("theirs", { status: "submitted", reviewer: "per_o", requester: "per_me" });
-  const QUERY = "cursor=0&status=submitted&mine=true";
+  const QUERY = "cursor=0&status=submitted&mine=true&order=newest";
 
   it("asks the server, and shows only reviews that are the viewer's", async () => {
     setUrl("/w/ws_1/tasks?review=mine");
@@ -371,7 +413,7 @@ describe("Needs my review in a room past one page", () => {
     setUrl("/w/ws_1/tasks?review=mine");
     const second = task("second", { status: "submitted", reviewer: "per_me" });
     replies[QUERY] = { tasks: [mine], next_cursor: 7 };
-    replies["cursor=7&status=submitted&mine=true"] = { tasks: [second], next_cursor: null };
+    replies["cursor=7&status=submitted&mine=true&order=newest"] = { tasks: [second], next_cursor: null };
     const { rerender } = show();
     await screen.findByRole("link", { name: "Title mine" });
     await user.click(button());
@@ -385,27 +427,27 @@ describe("Needs my review in a room past one page", () => {
     expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
   });
 
-  it("never loses a row when an old task joins the list and the first page ends sooner", async () => {
+  it("never loses a row when a task joins the list and the first page ends sooner", async () => {
     const user = userEvent.setup();
     setUrl("/w/ws_1/tasks?review=mine");
-    const older = task("older", { status: "submitted", reviewer: "per_me" });
+    const newer = task("newer", { status: "submitted", reviewer: "per_me" });
     const between = task("between", { status: "submitted", reviewer: "per_me" });
     const later = task("later", { status: "submitted", reviewer: "per_me" });
     replies[QUERY] = { tasks: [mine, between], next_cursor: 7 };
-    replies["cursor=7&status=submitted&mine=true"] = { tasks: [later], next_cursor: null };
+    replies["cursor=7&status=submitted&mine=true&order=newest"] = { tasks: [later], next_cursor: null };
     const { rerender } = show();
     await screen.findByRole("link", { name: "Title between" });
     await user.click(button());
     await screen.findByRole("link", { name: "Title later" });
-    // A page holds the same number of rows, so the old task pushes "between" off the end of the first page.
-    replies[QUERY] = { tasks: [older, mine], next_cursor: 6 };
-    replies["cursor=6&status=submitted&mine=true"] = { tasks: [between, later], next_cursor: null };
+    // A page holds the same number of rows, so the new one pushes "between" off the end of the first page.
+    replies[QUERY] = { tasks: [newer, mine], next_cursor: 8 };
+    replies["cursor=8&status=submitted&mine=true&order=newest"] = { tasks: [between, later], next_cursor: null };
     rerender(screenWith([task("a")], 50));
-    await screen.findByRole("link", { name: "Title older" });
+    await screen.findByRole("link", { name: "Title newer" });
     // The way back to it is the cursor the new first page gave, not a gap nothing would fetch.
     await user.click(button());
     expect(await screen.findByRole("link", { name: "Title between" })).toBeInTheDocument();
-    expect(reads.at(-1)).toBe("cursor=6&status=submitted&mine=true");
+    expect(reads.at(-1)).toBe("cursor=8&status=submitted&mine=true&order=newest");
     expect(screen.getByRole("link", { name: "Title later" })).toBeInTheDocument();
   });
 
@@ -414,20 +456,36 @@ describe("Needs my review in a room past one page", () => {
     setUrl("/w/ws_1/tasks?review=mine");
     const second = task("second", { status: "submitted", reviewer: "per_me" });
     replies[QUERY] = { tasks: [mine], next_cursor: 7 };
-    replies["cursor=7&status=submitted&mine=true"] = { tasks: [second], next_cursor: 9 };
+    replies["cursor=7&status=submitted&mine=true&order=newest"] = { tasks: [second], next_cursor: 3 };
     const { rerender } = show();
     await screen.findByRole("link", { name: "Title mine" });
     await user.click(button());
     await screen.findByRole("link", { name: "Title second" });
-    replies[QUERY] = { tasks: [second], next_cursor: 8 };
+    // "mine" left the list, so the first page now runs further down.
+    replies[QUERY] = { tasks: [second], next_cursor: 6 };
     rerender(screenWith([task("a")], 50));
     await waitFor(() => expect(reads.filter((query) => query === QUERY)).toHaveLength(2));
     await settled();
     expect(screen.getAllByRole("link", { name: "Title second" })).toHaveLength(1);
     expect(button()).toBeInTheDocument();
-    replies["cursor=9&status=submitted&mine=true"] = { tasks: [], next_cursor: null };
+    replies["cursor=3&status=submitted&mine=true&order=newest"] = { tasks: [], next_cursor: null };
     await user.click(button());
-    await waitFor(() => expect(reads.at(-1)).toBe("cursor=9&status=submitted&mine=true"));
+    await waitFor(() => expect(reads.at(-1)).toBe("cursor=3&status=submitted&mine=true&order=newest"));
+  });
+
+  it("finds a new review after the list has reached its end", async () => {
+    const user = userEvent.setup();
+    setUrl("/w/ws_1/tasks?review=mine");
+    const second = task("second", { status: "submitted", reviewer: "per_me" });
+    replies[QUERY] = { tasks: [mine], next_cursor: 7 };
+    replies["cursor=7&status=submitted&mine=true&order=newest"] = { tasks: [second], next_cursor: null };
+    const { rerender } = show();
+    await screen.findByRole("link", { name: "Title mine" });
+    await user.click(button());
+    await screen.findByText(/End of the list/);
+    replies[QUERY] = { tasks: [task("arrived", { status: "submitted", reviewer: "per_me" })], next_cursor: 8 };
+    rerender(screenWith([task("a")], 50));
+    expect(await screen.findByRole("link", { name: "Title arrived" })).toBeInTheDocument();
   });
 
   it("drops later pages when the first page now ends the list", async () => {
@@ -435,7 +493,7 @@ describe("Needs my review in a room past one page", () => {
     setUrl("/w/ws_1/tasks?review=mine");
     const second = task("second", { status: "submitted", reviewer: "per_me" });
     replies[QUERY] = { tasks: [mine], next_cursor: 7 };
-    replies["cursor=7&status=submitted&mine=true"] = { tasks: [second], next_cursor: 9 };
+    replies["cursor=7&status=submitted&mine=true&order=newest"] = { tasks: [second], next_cursor: 9 };
     const { rerender } = show();
     await screen.findByRole("link", { name: "Title mine" });
     await user.click(button());
@@ -449,7 +507,7 @@ describe("Needs my review in a room past one page", () => {
     const user = userEvent.setup();
     setUrl("/w/ws_1/tasks?review=mine");
     replies[QUERY] = { tasks: [mine], next_cursor: null };
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: null };
     show();
     await screen.findByRole("link", { name: "Title mine" });
     const filter = screen.getByRole("checkbox", { name: "Needs my review" });
@@ -457,7 +515,7 @@ describe("Needs my review in a room past one page", () => {
     await user.click(button());
     expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
     await user.click(filter);
-    await waitFor(() => expect(reads).toEqual([QUERY, "cursor=50", QUERY]));
+    await waitFor(() => expect(reads).toEqual([QUERY, "cursor=50&order=newest", QUERY]));
   });
 
   it("never says more shown than loaded", async () => {
@@ -472,7 +530,7 @@ describe("Needs my review in a room past one page", () => {
 describe("announcing", () => {
   it("says a page arrived, once, and a later read of the first page doesn't say it again", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { tasks: [task("b"), task("c")], next_cursor: 100 };
+    replies["cursor=50&order=newest"] = { tasks: [task("b"), task("c")], next_cursor: 100 };
     const { rerender } = show();
     await user.click(button());
     const live = await screen.findByText(/2 more tasks loaded/);
@@ -484,7 +542,7 @@ describe("announcing", () => {
 
   it("gets one right, and stops saying it after a view change", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: 100 };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };
     show();
     await user.click(button());
     const live = await screen.findByText(/1 more task loaded/);
@@ -527,7 +585,7 @@ describe("a task past the first page", () => {
 
   it("shows what the Sheet just read, because later pages aren't read again", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { tasks: [task("b")], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: null };
     show();
     await user.click(button());
     await screen.findByRole("link", { name: "Title b" });
@@ -539,7 +597,7 @@ describe("a task past the first page", () => {
 
   it("takes a command's own answer, so closing before the read after it can't leave the old status", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { tasks: [task("b", { status: "submitted", reviewer: "per_me", submission_no: 1 })], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("b", { status: "submitted", reviewer: "per_me", submission_no: 1 })], next_cursor: null };
     show();
     await user.click(button());
     await screen.findByRole("link", { name: "Title b" });
@@ -563,7 +621,7 @@ describe("progress and Blocked from the plan", () => {
 
   it("gives the whole room's count past the loaded pages, with a bar, and doesn't jump as pages load", async () => {
     const user = userEvent.setup();
-    replies["cursor=50"] = { tasks: [task("c")], next_cursor: null };
+    replies["cursor=50&order=newest"] = { tasks: [task("c")], next_cursor: null };
     render(withPlan(summary()));
     expect(screen.getByRole("progressbar", { name: "Progress" })).toHaveAttribute("aria-valuenow", "38");
     expect(screen.getByText("3 of 8 completed · 38%")).toBeInTheDocument();
@@ -596,7 +654,7 @@ describe("progress and Blocked from the plan", () => {
 
   it("counts Needs my review apart from the room", () => {
     setUrl("/w/ws_1/tasks?review=mine");
-    replies["cursor=0&status=submitted&mine=true"] = { tasks: [], next_cursor: null };
+    replies["cursor=0&status=submitted&mine=true&order=newest"] = { tasks: [], next_cursor: null };
     render(withPlan(summary()));
     expect(screen.getByRole("progressbar", { name: "Progress for filtered tasks" })).toHaveAttribute("aria-valuetext", "0 of 2 completed, 0%");
   });
@@ -611,6 +669,21 @@ describe("progress and Blocked from the plan", () => {
     expect(screen.getByText("Blocked: waiting on “Title a”")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /^Blocked/ })).toBeNull();
     expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(5);
+  });
+
+  it("finds Blocked for a row from a later page, or one pushed off the first page, by its ID wherever it sits", async () => {
+    const user = userEvent.setup();
+    const blocked = { later: "Blocked: waiting on “Title a”", b: "Blocked: waiting on “Title later”" };
+    replies["cursor=50&order=newest"] = { tasks: [task("later")], next_cursor: null };
+    const { rerender } = render(withPlan(summary({ blocked })));
+    await user.click(button());
+    await screen.findByRole("link", { name: "Title later" });
+    // A new task pushes "b" off the first page.
+    rerender(withPlan(summary({ blocked }), [task("new"), task("a")]));
+    expect(screen.getAllByRole("link", { name: /^Title / }).map((link) => link.textContent)).toEqual(["Title new", "Title a", "Title b", "Title later"]);
+    expect(screen.getByText("Blocked: waiting on “Title a”")).toBeInTheDocument();
+    expect(screen.getByText("Blocked: waiting on “Title later”")).toBeInTheDocument();
+    expect(screen.getByText("3 of 8 completed · 38%")).toBeInTheDocument();
   });
 
   it("drops Blocked from a task that has since finished", () => {

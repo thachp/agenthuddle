@@ -179,6 +179,10 @@ async function seed() {
   await owner.addAgent(longRoom, longWorker);
   const inLong = (title, extra = {}) => lead.must("create_task", { workspace_id: longRoom, title, instructions: "A row in a long list.", idempotency_key: crypto.randomUUID(), ...extra });
   const LONG_TASKS = 320;
+  // The oldest task, so it's on the last page of a newest-first read.
+  const lastReview = await inLong("The review past every loaded page", { assignee: longWorker.id, reviewer: owner.id });
+  const lastTaken = await longWorker.must("accept_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastReview.version });
+  await longWorker.must("submit_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastTaken.version, note: "Ready", artifacts: [], idempotency_key: crypto.randomUUID() });
   for (let start = 0; start < LONG_TASKS; start += 20) {
     await Promise.all(Array.from({ length: Math.min(20, LONG_TASKS - start) }, (_, i) => inLong(`Long task ${String(start + i).padStart(3, "0")}`, (start + i) % 5 === 0 ? { assignee: longWorker.id } : {})));
   }
@@ -188,9 +192,6 @@ async function seed() {
   for (let start = 0; start < 60; start += 20) {
     await Promise.all(Array.from({ length: 20 }, (_, i) => lead.must("create_task", { workspace_id: shortListRoom, title: `Short list ${String(start + i).padStart(2, "0")}`, instructions: "A row.", idempotency_key: crypto.randomUUID() })));
   }
-  const lastReview = await inLong("The review past every loaded page", { assignee: longWorker.id, reviewer: owner.id });
-  const lastTaken = await longWorker.must("accept_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastReview.version });
-  await longWorker.must("submit_task", { workspace_id: longRoom, task_id: lastReview.id, version: lastTaken.version, note: "Ready", artifacts: [], idempotency_key: crypto.randomUUID() });
 
   // Two openings and a planned line between them, so the Collaboration screens have a plan to show.
   const plannedTo = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Delivery engineer with a long title that has to wrap", responsibilities: "Builds what's planned.", capacity: 1, preset: "member", policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
@@ -198,7 +199,7 @@ async function seed() {
   // A task waiting on another, both on the first page.
   const planned = await owner.must("GET", `/v1/workspaces/${longRoom}/plan`);
   const longId = (title) => planned.tasks.find((task) => task.title === title).id;
-  await owner.must("PUT", `/v1/workspaces/${longRoom}/tasks/${longId("Long task 001")}/plan`, { plan_revision: planned.plan_revision, predecessors: [longId("Long task 000")] });
+  await owner.must("PUT", `/v1/workspaces/${longRoom}/tasks/${longId("Long task 319")}/plan`, { plan_revision: planned.plan_revision, predecessors: [longId("Long task 318")] });
   return { longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
@@ -921,7 +922,7 @@ async function keyboardPaths(s) {
       await tabTo(own, more, "Load more", 120);
       await own.keyboard.press("Enter");
       await waitForRows(own, 50);
-      const late = own.getByRole("link", { name: "Long task 060", exact: true });
+      const late = own.getByRole("link", { name: "Long task 250", exact: true });
       // Backward from the button, which is how far a keyboard user has got.
       for (let i = 0; i < 120 && !(await late.evaluate((el) => el === document.activeElement)); i++) await own.keyboard.press("Shift+Tab");
       ok(await late.evaluate((el) => el === document.activeElement), "couldn't reach a row from the second page");
@@ -930,7 +931,7 @@ async function keyboardPaths(s) {
       ok(own.url().includes("task="), "opening the row didn't reach the URL");
       await own.keyboard.press("Escape");
       await own.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
-      await own.waitForFunction(() => document.activeElement?.textContent?.includes("Long task 060"), null, { timeout: 15_000 });
+      await own.waitForFunction(() => document.activeElement?.textContent?.includes("Long task 250"), null, { timeout: 15_000 });
       ok((await rows(own)) > 50, "closing the Sheet dropped the pages already loaded");
       // Closing reaches the URL a moment later, and Back before that would leave the page's first entry.
       await own.waitForURL((url) => !url.search.includes("task="), { timeout: 15_000 });
@@ -1005,11 +1006,12 @@ async function keyboardPaths(s) {
     const own = await buttonOnly();
     // Pages the server would have to hold thousands of tasks to answer, with instructions at their limit, which rows don't keep.
     const instructions = "x".repeat(64 * 1024);
-    await own.route(/\/tasks\?cursor=\d+$/, (route) => {
-      const from = Number(new URL(route.request().url()).searchParams.get("cursor"));
-      const start = Math.max(from, 1000);
+    let served = 0;
+    await own.route(/\/tasks\?cursor=\d+&order=newest$/, (route) => {
+      const start = 1000 + served;
+      served += 50;
       const tasks = Array.from({ length: 50 }, (_, i) => ({ id: `tsk_many_${start + i}`, title: `Many ${start + i}`, instructions, acceptance_criteria: null, requester: s.owner.id, assignee: null, reviewer: s.owner.id, status: i % 2 ? "open" : "completed", version: 1, due_at: null, follow_up_of: null, submission_no: 0, needs_attention: false }));
-      return route.fulfill({ json: { tasks, next_cursor: start + 50 } });
+      return route.fulfill({ json: { tasks, next_cursor: 1 } });
     });
     const cdp = await own.context().newCDPSession(own);
     await cdp.send("HeapProfiler.enable");
@@ -1052,7 +1054,7 @@ async function keyboardPaths(s) {
         ok(page < 3000, `adding a page at ${milestone} rows took ${page} ms`);
       }
       const opened = Date.now();
-      await own.getByRole("link", { name: "Long task 001", exact: true }).click();
+      await own.getByRole("link", { name: "Long task 300", exact: true }).click();
       await own.getByRole("dialog").waitFor({ timeout: 30_000 });
       const sheet = Date.now() - opened;
       await own.keyboard.press("Escape");
@@ -1160,12 +1162,17 @@ async function keyboardPaths(s) {
       for (const query of ["", "?view=board"]) {
         await own.goto(longUrl(query));
         await hydrated(own);
-        ok((await own.getByRole("button", { name: "Load more" }).count()) === 1, "the room should still have pages to load");
+        // The list is in the document before React reveals it, and `hydrated` only checks the first control. A count here can catch
+        // that gap, and the checks below that something is absent would pass for the wrong reason.
+        await own.getByRole("button", { name: "Load more" }).waitFor({ timeout: 15_000 }).catch(() => {
+          throw new Error("the room should still have pages to load");
+        });
+        ok((await own.getByRole("button", { name: "Load more" }).count()) === 1, "the room should have one Load more");
         const bar = own.getByRole("progressbar", { name: "Progress" });
         const said = await bar.getAttribute("aria-valuetext");
         ok(/^0 of 32\d completed, 0%$/.test(said), `progress past the first page reads ${said}`);
         ok((await own.getByText(/partial/).count()) === 0, "progress still says partial with a complete plan");
-        await own.getByText("Blocked: waiting on “Long task 000”").waitFor({ timeout: 15_000 });
+        await own.getByText("Blocked: waiting on “Long task 318”").waitFor({ timeout: 15_000 });
         ok((await own.getByRole("heading", { name: /^Blocked/ }).count()) === 0, "Blocked became a column");
       }
     } finally {
@@ -1175,7 +1182,7 @@ async function keyboardPaths(s) {
     const small = await phone.newPage();
     for (const query of ["", "?view=board"]) {
       await small.goto(longUrl(query));
-      await small.getByText("Blocked: waiting on “Long task 000”").waitFor({ timeout: 15_000 });
+      await small.getByText("Blocked: waiting on “Long task 318”").waitFor({ timeout: 15_000 });
       const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       ok(overflow <= 0, `tasks${query} scrolls sideways by ${overflow}px at 375px with Blocked on it`);
     }
@@ -1192,7 +1199,7 @@ async function keyboardPaths(s) {
       try {
         const opened = Date.now();
         await own.goto(longUrl(query));
-        await own.getByRole("link", { name: "Long task 000", exact: true }).waitFor({ timeout: 30_000 });
+        await own.getByRole("link", { name: "Long task 319", exact: true }).waitFor({ timeout: 30_000 });
         const firstScreen = Date.now() - opened;
         await hydrated(own);
         ok(reads.length <= 1, `${view}: ${reads.length} page reads before anyone scrolled`);
