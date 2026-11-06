@@ -10,9 +10,10 @@ const ME = { ok: true as const, data: { id: "per_me" } };
 const failed = (status: number) => ({ ok: false as const, status, code: "error" });
 let tasks: GatewayResult<unknown>;
 let identity: GatewayResult<unknown>;
+let plan: GatewayResult<unknown> = failed(404);
 
 vi.mock("@/lib/gateway/server", () => ({
-  gatewayQuery: async (path: string) => (path.includes("/tasks") ? tasks : failed(404)),
+  gatewayQuery: async (path: string) => (path.includes("/tasks") ? tasks : path.endsWith("/plan") ? plan : failed(404)),
   getIdentity: async () => identity,
   getOrganizations: async () => ({ ok: true, data: { organizations: [] } }),
 }));
@@ -32,6 +33,24 @@ async function refreshedWith(nextTasks: GatewayResult<unknown>, nextIdentity: Ga
 }
 
 beforeEach(() => setUrl("/w/ws_1/tasks"));
+
+describe("the plan read", () => {
+  const planReply = (data: object) => ({ ok: true as const, data: { complete: true, tasks: [], edges: [], plan_revision: 1, ...data } });
+
+  it("gives Blocked and leaves the page standing when it fails", async () => {
+    tasks = GOOD_TASKS;
+    identity = ME;
+    plan = failed(503);
+    const first = render(await TasksRead({ id: "ws_1" }));
+    expect(screen.getByRole("link", { name: "A private title" })).toBeInTheDocument();
+    expect(screen.getByText("Couldn't check which tasks are blocked.")).toBeInTheDocument();
+    first.unmount();
+    plan = planReply({ tasks: [{ id: "tsk_0", title: "First", status: "open", reviewer: "per_me" }, { ...task }], edges: [{ predecessor: "tsk_0", successor: "tsk_1" }] });
+    render(await TasksRead({ id: "ws_1" }));
+    expect(screen.getByText("Blocked: waiting on “First”")).toBeInTheDocument();
+    expect(screen.queryByText(/Couldn't check/)).toBeNull();
+  });
+});
 
 describe("a refresh that fails", () => {
   it.each([
