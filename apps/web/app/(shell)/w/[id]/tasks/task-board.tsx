@@ -39,11 +39,16 @@ export function TaskBoard({ tasks, partial, showCanceled, selected, me, names }:
   );
 }
 
-/** The title is the card's one link, stretched across it, so the whole card opens the Sheet and a screen reader hears one name. */
+/**
+ * The title is the card's one link, stretched across it, so the whole card opens the Sheet and a screen reader hears one
+ * name. Truncated IDs sit above it, sized to their text, so their full value still shows on hover. They take no focus.
+ */
+const ABOVE_LINK = "relative z-10 w-fit max-w-full min-w-0";
+
 function TaskCard({ task, selected, me, names }: { task: Task; selected: boolean; me: string; names: Names }) {
   return (
-    <li className={cn("relative space-y-1 rounded-lg border bg-card p-3 text-card-foreground hover:border-ring", selected && "border-ring")}>
-      <p className="truncate text-xs text-muted-foreground" title={task.id}>
+    <li className={cn("relative isolate space-y-1 rounded-lg border bg-card p-3 text-card-foreground hover:border-ring", selected && "border-ring")}>
+      <p className={cn(ABOVE_LINK, "truncate text-xs text-muted-foreground")} title={task.id}>
         {task.id}
       </p>
       <SheetLink param="task" target={task.id} className="block font-medium break-words text-primary outline-none rounded-sm after:absolute after:inset-0 after:rounded-lg focus-visible:ring-2 focus-visible:ring-ring">
@@ -52,11 +57,11 @@ function TaskCard({ task, selected, me, names }: { task: Task; selected: boolean
       {task.needs_attention ? <p className="text-xs text-status-amber">Needs a new reviewer or requester</p> : null}
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-xs">
         <dt className="text-muted-foreground">Assignee</dt>
-        <dd className="min-w-0">{task.assignee ? <PrincipalName id={task.assignee} label={nameOf(task.assignee, me, names)} me={me} /> : "Unassigned"}</dd>
+        <dd className={ABOVE_LINK}>{task.assignee ? <PrincipalName id={task.assignee} label={nameOf(task.assignee, me, names)} me={me} /> : "Unassigned"}</dd>
         {task.status === "submitted" ? (
           <>
             <dt className="text-muted-foreground">Reviewer</dt>
-            <dd className="min-w-0">
+            <dd className={ABOVE_LINK}>
               <PrincipalName id={task.reviewer} label={nameOf(task.reviewer, me, names)} me={me} />
             </dd>
           </>

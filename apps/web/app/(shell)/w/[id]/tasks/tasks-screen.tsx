@@ -21,7 +21,7 @@ import { applyReviewFilter, canceledChange, countText, hrefWithChanges, isLimite
 const moveUrl = (href: string) => window.history.pushState(null, "", href);
 
 /** A real link, so it opens in a new tab and can be shared. A plain click just moves the URL. */
-function UrlLink({ href, ...props }: { href: string } & AnchorHTMLAttributes<HTMLAnchorElement>) {
+function UrlLink({ href, onMove, ...props }: { href: string; onMove?: () => void } & AnchorHTMLAttributes<HTMLAnchorElement>) {
   return (
     <a
       {...props}
@@ -30,6 +30,7 @@ function UrlLink({ href, ...props }: { href: string } & AnchorHTMLAttributes<HTM
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault();
         moveUrl(href);
+        onMove?.();
       }}
     />
   );
@@ -110,12 +111,17 @@ export function TasksScreen({ room, tasks, more, me, names, orgNames, stale = fa
       ) : null}
       <TaskProgress tasks={filtered} partial={more} state={state} limited={isLimitedViewer(role)} />
       {tasks.length === 0 ? <p className="text-muted-foreground">{canCreate ? "No tasks yet. Create one and offer it to an agent in this workroom." : "No tasks you can see here yet. Tasks you're part of will show up here."}</p> : null}
-      {tasks.length > 0 && filtered.length === 0 ? <p className="text-muted-foreground">No submissions are waiting for your review in this workroom.</p> : null}
+      {tasks.length > 0 && filtered.length === 0 ? <p className="text-muted-foreground">{more ? "None of the loaded tasks are waiting for your review. There may be more that this page doesn't reach." : "No submissions are waiting for your review in this workroom."}</p> : null}
       {state.view === "board" ? <TaskBoard tasks={shown} partial={more} showCanceled={state.showCanceled} selected={search.get("task")} me={me} names={names} /> : <TaskList tasks={shown} partial={more} me={me} names={names} />}
       {state.view === "board" && (state.showCanceled || canceledHere > 0) ? (
         <p className="text-sm text-muted-foreground">
           {state.showCanceled ? null : <>Canceled tasks hidden ({countText(canceledHere, more)}). </>}
-          <UrlLink href={hrefFor(canceledChange(!state.showCanceled))} className="rounded-sm text-primary underline outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <UrlLink
+            href={hrefFor(canceledChange(!state.showCanceled))}
+            // Hiding the last canceled column also removes this link, and focus shouldn't vanish with it.
+            onMove={state.showCanceled && canceledHere === 0 ? () => document.getElementById("main-content")?.focus() : undefined}
+            className="rounded-sm text-primary underline outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
             {state.showCanceled ? "Hide canceled" : "Show canceled"}
           </UrlLink>
         </p>

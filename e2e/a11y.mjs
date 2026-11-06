@@ -326,6 +326,17 @@ async function keyboardPaths(s) {
     const live = await page.getByText(/Board view, showing \d+ of \d+ tasks/).evaluate((el) => el.getAttribute("aria-live"));
     ok(live === "polite", "switching views isn't announced");
     const card = page.getByRole("link", { name: "An open task", exact: true });
+    // The stretched link covers the card, except the truncated ID, which keeps its tooltip.
+    const hits = await card.evaluate((link) => {
+      const top = (el) => {
+        const box = el.getBoundingClientRect();
+        return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      };
+      const item = link.closest("li");
+      return { id: top(item.querySelector("p[title]")).hasAttribute("title"), estimate: top(item.querySelector("dl dd:last-child")) === link };
+    });
+    ok(hits.id, "the card's link covers the task ID, so its tooltip can't show");
+    ok(hits.estimate, "the rest of the card doesn't open the Sheet");
     await tabTo(page, card, "the card's link");
     await page.keyboard.press("Enter");
     await page.getByRole("dialog").waitFor({ timeout: 15_000 });

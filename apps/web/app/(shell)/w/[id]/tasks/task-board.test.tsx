@@ -98,6 +98,18 @@ describe("the board", () => {
     expect(screen.queryByText("Title c")).toBeNull();
   });
 
+  it("hiding canceled when none are in scope removes the link, and focus moves to the main content", async () => {
+    setUrl("/w/ws_1/tasks?view=board&canceled=show&review=mine");
+    const user = userEvent.setup();
+    show([task("a", "submitted"), task("c", "canceled")]);
+    const hide = screen.getByRole("link", { name: "Hide canceled" });
+    hide.focus();
+    await user.keyboard("{Enter}");
+    expect(currentUrl()).toBe("/w/ws_1/tasks?view=board&review=mine");
+    expect(screen.queryByRole("link", { name: /canceled/i })).toBeNull();
+    expect(document.getElementById("main-content")).toHaveFocus();
+  });
+
   it("offers no canceled control when there's nothing to show", () => {
     show([task("a", "open")]);
     expect(screen.queryByRole("link", { name: "Show canceled" })).toBeNull();
@@ -116,10 +128,34 @@ describe("the board", () => {
     expect(review.getByText("Reviewer").nextElementSibling).toHaveTextContent("You");
   });
 
-  it("nothing can be dragged, and a card has no lifecycle control of its own", () => {
+  it("nothing can be dragged, and every column holds only links to the Sheet, with no control of its own", () => {
+    setUrl("/w/ws_1/tasks?view=board&canceled=show");
     const { container } = show(everyState);
     expect(container.querySelector("[draggable='true']")).toBeNull();
-    for (const name of [/approve/i, /accept/i, /complete/i, /submit/i]) expect(within(column(/^Awaiting review/)).queryByRole("button", { name })).toBeNull();
+    const columns = screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.parentElement!);
+    expect(columns).toHaveLength(TASK_STATUSES.length);
+    for (const [index, section] of columns.entries()) {
+      for (const role of ["button", "checkbox", "combobox", "menuitem", "textbox"]) expect(within(section).queryAllByRole(role)).toEqual([]);
+      const links = within(section).getAllByRole("link");
+      expect(links, `column ${index}`).toHaveLength(1);
+      expect(links[0].getAttribute("href")).toMatch(/[?&]task=t_/);
+    }
+  });
+
+  it("a truncated ID stays above the card's link, for its tooltip, without becoming a tab stop", async () => {
+    const user = userEvent.setup();
+    show([task("tsk_1", "submitted")]);
+    const id = screen.getByTitle("tsk_1");
+    expect(id).toHaveClass("relative", "z-10");
+    expect(screen.getByTitle("agt_a").closest("dd")).toHaveClass("relative", "z-10");
+    const stops: (Element | null)[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      await user.tab();
+      stops.push(document.activeElement);
+    }
+    expect(stops).toContain(screen.getByRole("link", { name: "Title tsk_1" }));
+    expect(stops).not.toContain(id);
+    expect(stops).not.toContain(screen.getByTitle("agt_a"));
   });
 
   it("a title is the text it is, and a long one's link stays one link", () => {
@@ -150,6 +186,13 @@ describe("the board", () => {
     expect(screen.getByText(/No tasks in scope · 0 of 0 completed/)).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).toBeNull();
     expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(5);
+  });
+
+  it("on a partial read, finding nothing to review only speaks for what loaded", () => {
+    setUrl("/w/ws_1/tasks?view=board&review=mine");
+    show([task("b", "accepted")], { more: true });
+    expect(screen.getByText(/None of the loaded tasks are waiting for your review. There may be more/)).toBeInTheDocument();
+    expect(screen.queryByText("No submissions are waiting for your review in this workroom.")).toBeNull();
   });
 
   it("labels partial counts on a partial read", () => {
