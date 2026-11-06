@@ -202,6 +202,11 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
 
   const loadRef = useRef(load);
   loadRef.current = load;
+  const versionRef = useRef(version);
+  versionRef.current = version;
+  // This Sheet's own command moved the version. Its draft carries on from what that read shows, so only someone else's change conflicts.
+  const ownChange = useRef(false);
+  const [settling, setSettling] = useState(false);
   const goneRef = useRef(onGone);
   goneRef.current = onGone;
   const goneCalled = useRef(false);
@@ -228,9 +233,17 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
           // It's gone, or the viewer's access is. Either way, nothing more about it shows.
           goneCalled.current = true;
           goneRef.current();
-        } else setLoaded({ phase: "ready", data, refreshFailed: false });
+        } else {
+          if (ownChange.current) draftVersion.current = versionRef.current ? versionRef.current(data) : draftVersion.current;
+          ownChange.current = false;
+          setSettling(false);
+          setLoaded({ phase: "ready", data, refreshFailed: false });
+        }
       })
       .catch(() => {
+        // Without a read there's no version to carry on from, so a draft keeps answering to the old one and conflicts rather than overwrites.
+        ownChange.current = false;
+        setSettling(false);
         // A read failure keeps prior data on screen.
         if (current) setLoaded((previous) => (previous.phase === "ready" ? { ...previous, refreshFailed: true } : { phase: "failed" }));
       });
@@ -327,6 +340,8 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
       if (!alive.current) return result;
       if (result.ok) {
         setDirty(false);
+        ownChange.current = true;
+        setSettling(true);
         setReloads((count) => count + 1);
       } else {
         if (result.code === "version_conflict") setConflict(true);
@@ -424,7 +439,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
                 {FAILURE_COPY[failedCode] ?? FAILURE_COPY.refused}
               </p>
             ) : null}
-            {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, setSending, saving: inFlight, run, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
+            {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, setSending, saving: inFlight || settling, run, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
           </div>
         </SheetContent>
       </Sheet>

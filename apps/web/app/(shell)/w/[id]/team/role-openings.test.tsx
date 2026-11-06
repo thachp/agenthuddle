@@ -333,6 +333,104 @@ describe("Managing an opening", () => {
   });
 });
 
+describe("a draft through this Sheet's own commands, against an API whose version moves", () => {
+  // As the real API does: every change moves the version, and a command naming an old one is refused.
+  let version: number;
+  let invited: string[];
+  let responsibilities: string;
+  let calls: { method: string; url: string; status: number }[];
+
+  beforeEach(() => {
+    version = 4;
+    invited = [];
+    responsibilities = "Builds it";
+    calls = [];
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+      const method = init.method ?? "GET";
+      if (method === "GET") {
+        if (url.endsWith("/roles")) return new Response(JSON.stringify({ external: false, roles: [{ ...vacant, responsibilities, invited: [...invited] }] }), { status: 200 });
+        return new Response(JSON.stringify({ id: ROOM, status: "active", policy_version: version, members: props.members }), { status: 200 });
+      }
+      const body = JSON.parse(String(init.body));
+      if (body.policy_version !== version) {
+        calls.push({ method, url, status: 409 });
+        return new Response(JSON.stringify({ error: { code: "version_conflict" } }), { status: 409 });
+      }
+      version += 1;
+      if (url.endsWith("/invites")) invited.push(body.principal_id);
+      else if (url.includes("/invites/")) invited = invited.filter((id) => !url.endsWith(id));
+      else if (method === "PUT") responsibilities = body.responsibilities;
+      calls.push({ method, url, status: 200 });
+      return new Response("{}", { status: 200 });
+    });
+  });
+
+  const open = async () => {
+    setUrl(`/w/${ROOM}/team?role=rol_eng`);
+    render(<TeamScreen {...props} />);
+    const sheet = await screen.findByRole("dialog");
+    await within(sheet).findByLabelText("Responsibilities");
+    return sheet;
+  };
+  const saved = (sheet: HTMLElement) => within(sheet).getByRole("button", { name: "Save changes" });
+
+  it("invites, withdraws and saves with unsaved text, each against the version it moved to", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    await user.type(within(sheet).getByLabelText("Responsibilities"), " carefully");
+    await user.selectOptions(within(sheet).getByLabelText("Invite an agent in this workroom"), "agt_1");
+    await user.click(within(sheet).getByRole("button", { name: "Invite" }));
+    const withdraw = await within(sheet).findByRole("button", { name: "Withdraw invite to Code Agent" });
+    await waitFor(() => expect(withdraw).toBeEnabled());
+    expect(within(sheet).getByLabelText("Responsibilities")).toHaveValue("Builds it carefully");
+    await user.click(withdraw);
+    await within(sheet).findByText(/Invite to Code Agent withdrawn/);
+    await waitFor(() => expect(saved(sheet)).toBeEnabled());
+    await user.click(saved(sheet));
+    await waitFor(() => expect(responsibilities).toBe("Builds it carefully"));
+    expect(calls.map((call) => call.status)).toEqual([200, 200, 200]);
+    expect(screen.queryByText(/changed while you were editing/)).toBeNull();
+  });
+
+  it("still conflicts when someone else changes the room while a draft is open", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    await user.type(within(sheet).getByLabelText("Responsibilities"), " mine");
+    version += 1; // Someone else, in another tab.
+    await user.click(saved(sheet));
+    expect(await within(sheet).findByText(/changed while you were editing/)).toBeInTheDocument();
+    expect(responsibilities).toBe("Builds it");
+    expect(calls).toEqual([expect.objectContaining({ status: 409 })]);
+  });
+
+  it("still conflicts when someone else's change comes after this Sheet's own", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    await user.type(within(sheet).getByLabelText("Responsibilities"), " mine");
+    await user.selectOptions(within(sheet).getByLabelText("Invite an agent in this workroom"), "agt_1");
+    await user.click(within(sheet).getByRole("button", { name: "Invite" }));
+    await within(sheet).findByText(/Invited Code Agent/);
+    await waitFor(() => expect(saved(sheet)).toBeEnabled());
+    version += 1;
+    await user.click(saved(sheet));
+    expect(await within(sheet).findByText(/changed while you were editing/)).toBeInTheDocument();
+    expect(responsibilities).toBe("Builds it");
+  });
+
+  it("makes a second command wait for the version to arrive", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    await user.type(within(sheet).getByLabelText("Responsibilities"), " mine");
+    await user.selectOptions(within(sheet).getByLabelText("Invite an agent in this workroom"), "agt_1");
+    await user.click(within(sheet).getByRole("button", { name: "Invite" }));
+    await within(sheet).findByText(/Invited Code Agent/);
+    await waitFor(() => expect(saved(sheet)).toBeEnabled());
+    await user.click(saved(sheet));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls.every((call) => call.status === 200)).toBe(true);
+  });
+});
+
 describe("the access model", () => {
   it("knows each preset, and when scopes match none", () => {
     expect(matchingPreset({ tasks: "own", artifacts: "shared", conversations: "own", review: "none" })).toBe("public_participant");

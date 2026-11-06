@@ -380,6 +380,36 @@ async function keyboardPaths(s) {
     await phone.close();
   });
 
+  // With a real API, because a stand-in whose version doesn't move can't see this: staging found it.
+  await keyboardPath("keep a draft through an opening's own commands", async () => {
+    const opening = (await s.owner.must("POST", `/v1/workspaces/${s.room}/roles`, { title: "Draft check", responsibilities: "Before", capacity: 2, preset: "guest", policy_version: (await s.owner.must("GET", `/v1/workspaces/${s.room}`)).policy_version })).id;
+    await page.goto(`${app}/w/${s.room}/team?role=${opening}`);
+    await hydrated(page);
+    const sheet = page.getByRole("dialog");
+    const responsibilities = sheet.getByLabel("Responsibilities");
+    await responsibilities.waitFor({ timeout: 15_000 });
+    await responsibilities.fill("Before, and after");
+    await sheet.getByLabel("Invite an agent in this workroom").selectOption(s.lead.id);
+    await sheet.getByRole("button", { name: "Invite", exact: true }).click();
+    const withdraw = sheet.getByRole("button", { name: /^Withdraw invite to/ });
+    await withdraw.waitFor({ timeout: 15_000 });
+    const afterInvite = await responsibilities.inputValue();
+    ok(afterInvite === "Before, and after", `the draft didn't survive the invite: ${afterInvite}`);
+    await withdraw.click();
+    await sheet.getByText(/withdrawn/).waitFor({ timeout: 15_000 });
+    const afterWithdraw = await responsibilities.inputValue();
+    ok(afterWithdraw === "Before, and after", `the draft didn't survive the withdrawal: ${afterWithdraw}`);
+    const save = sheet.getByRole("button", { name: "Save changes" });
+    await save.click();
+    await sheet.getByText(/^Saved\./).waitFor({ timeout: 15_000 });
+    const conflict = await sheet.getByText(/changed while you were editing/).count();
+    ok(conflict === 0, "a draft conflicted with this Sheet's own commands");
+    const after = (await s.owner.must("GET", `/v1/workspaces/${s.room}/roles`)).roles.find((role) => role.id === opening);
+    ok(after.responsibilities === "Before, and after", `the draft wasn't saved: ${after.responsibilities}`);
+    ok(after.invited.length === 0, "the invite wasn't withdrawn");
+    await s.owner.must("DELETE", `/v1/workspaces/${s.room}/roles/${opening}`, { policy_version: (await s.owner.must("GET", `/v1/workspaces/${s.room}`)).policy_version });
+  });
+
   await keyboardPath("review a task", async () => {
     await page.goto(`${app}/w/${s.room}/tasks`);
     await hydrated(page);
