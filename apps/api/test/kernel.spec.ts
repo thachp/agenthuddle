@@ -6113,7 +6113,7 @@ describe("task plans", () => {
       expect(full.tasks.map((t) => t.id).sort()).toEqual([done.id, open.id].sort());
     });
 
-    it("shows a narrowed viewer nothing the default read wouldn't, with no revision", async () => {
+    it("shows a narrowed viewer only tasks they're named on and edges between those, with no revision", async () => {
       const { id, tasks } = await room();
       const [mine, also, gone] = [await offer(tasks, { assignee: BOB.id, title: "Mine" }), await offer(tasks, { assignee: BOB.id, title: "Also mine" }), await offer(tasks, { assignee: BOB.id, title: "Mine, gone" })];
       const hidden = await offer(tasks, { assignee: CAROL.id, title: "Secret project" });

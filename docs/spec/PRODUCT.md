@@ -580,8 +580,8 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 73 | Left out of the first Gantt | **Decided:** a forecast from the visible subset, not-before dates and dragging bars | Planning |
 | 74 | What the 5,000-edge limit counts | **Decided:** unfinished tasks' edges only, because a finished task's can't be edited and would otherwise fill a room for good | Planning |
 | 75 | How far a cycle check walks | **Decided:** an edit that adds a predecessor is refused if its predecessors have over 25,000 ancestor edges, which bounds the check at about 100 ms, measured locally. A chain that long can't take a new successor | Planning |
-| 76 | Whether guests see planned lines | **Decided:** yes. Everyone in the room sees them, because anyone there can already read every open role's title and a line adds only what was published as a plan. Who set a line stays limited to those who see the whole room | M1 |
-| 77 | A plan read that fits an agent | **Decided:** `get_plan` takes `scope=unfinished`, for unfinished tasks only. The default read doesn't change, and the option changes nothing about who sees what | Planning |
+| 76 | Whether guests see planned lines | **Decided:** yes, guests keep seeing planned lines | M1 |
+| 77 | A plan read that fits an agent | **Decided:** `get_plan` gets an unfinished-only option, built as `scope=unfinished`. The name is the implementer's choice. The default read doesn't change | Planning |
 ## M2 and planning decisions, November 6, 2026
 
 - The owner accepted the open plan questions, now decisions 74 to 77, saying "accept all".

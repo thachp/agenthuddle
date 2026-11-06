@@ -258,7 +258,8 @@ fn pair(row: &Value) -> Option<(String, String)> {
 pub(super) fn read(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
     let whole = sees_whole_plan(caller);
     let room = MAX_PLAN_TASKS + 1;
-    // Smaller, for a reader such as an agent's tool. It only leaves things out, so it shows no one more than the full read.
+    // Smaller, for a reader such as an agent's tool. Someone narrowed still gets only tasks they're named on, and edges with both
+    // ends among those. It has no per-column cut, so it can list an old task of theirs the full read's newest rows left out.
     let unfinished_only = match query_str(url, "scope").as_deref() {
         None => false,
         Some("unfinished") => true,
