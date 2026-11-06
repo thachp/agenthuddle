@@ -556,3 +556,65 @@ describe("a task past the first page", () => {
     await waitFor(() => expect(screen.getByRole("heading", { name: /^Completed/, hidden: true })).toBeInTheDocument());
   });
 });
+
+describe("progress and Blocked from the plan", () => {
+  const summary = (over: object = {}) => ({ whole: true, countsEvery: true, edgesEvery: true, all: { completed: 3, active: 8 }, review: { completed: 0, active: 2 }, blocked: {}, ...over });
+  const withPlan = (plan: unknown, tasks = [task("a"), task("b")], cursor: number | null = 50) => <TasksScreen room={room()} tasks={tasks} cursor={cursor} me="per_me" names={{}} plan={plan as never} />;
+
+  it("gives the whole room's count past the loaded pages, with a bar, and doesn't jump as pages load", async () => {
+    const user = userEvent.setup();
+    replies["cursor=50"] = { tasks: [task("c")], next_cursor: null };
+    render(withPlan(summary()));
+    expect(screen.getByRole("progressbar", { name: "Progress" })).toHaveAttribute("aria-valuenow", "38");
+    expect(screen.getByText("3 of 8 completed · 38%")).toBeInTheDocument();
+    expect(screen.queryByText(/partial/)).toBeNull();
+    await user.click(button());
+    await screen.findByRole("link", { name: "Title c" });
+    expect(screen.getByText("3 of 8 completed · 38%")).toBeInTheDocument();
+  });
+
+  it("stays partial when the plan read failed or stopped short, and says Blocked couldn't be checked", () => {
+    const first = render(withPlan(null));
+    expect(screen.getByText(/Loaded tasks only · partial/)).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByText("Couldn't check which tasks are blocked.")).toBeInTheDocument();
+    first.unmount();
+    render(withPlan(summary({ countsEvery: false, edgesEvery: false })));
+    expect(screen.getByText(/Loaded tasks only · partial/)).toBeInTheDocument();
+    expect(screen.getByText("Blocked covers only the tasks this read reached.")).toBeInTheDocument();
+  });
+
+  it("counts what's on screen for a room that fits on a page, which already has the person's own changes", () => {
+    render(withPlan(summary(), [task("a", { status: "completed" }), task("b")], null));
+    expect(screen.getByText("1 of 2 completed · 50%")).toBeInTheDocument();
+  });
+
+  it("labels a member narrowed to their own tasks by what the server said, not their role", () => {
+    render(withPlan(summary({ whole: false, edgesEvery: false })));
+    expect(screen.getByRole("progressbar", { name: "Progress for tasks you can see" })).toBeInTheDocument();
+  });
+
+  it("counts Needs my review apart from the room", () => {
+    setUrl("/w/ws_1/tasks?review=mine");
+    replies["cursor=0&status=submitted&mine=true"] = { tasks: [], next_cursor: null };
+    render(withPlan(summary()));
+    expect(screen.getByRole("progressbar", { name: "Progress for filtered tasks" })).toHaveAttribute("aria-valuetext", "0 of 2 completed, 0%");
+  });
+
+  it("shows Blocked in the list and on the board as a note, keeping the task's own state and adding no column", () => {
+    const blocked = { b: "Blocked: waiting on “Title a”" };
+    const first = render(withPlan(summary({ blocked })));
+    expect(screen.getByText("Blocked: waiting on “Title a”")).toBeInTheDocument();
+    first.unmount();
+    setUrl("/w/ws_1/tasks?view=board");
+    render(withPlan(summary({ blocked })));
+    expect(screen.getByText("Blocked: waiting on “Title a”")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Blocked/ })).toBeNull();
+    expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(5);
+  });
+
+  it("drops Blocked from a task that has since finished", () => {
+    render(withPlan(summary({ blocked: { a: "Blocked: waiting on “Other”" } }), [task("a", { status: "completed" }), task("b")]));
+    expect(screen.queryByText(/Blocked: waiting/)).toBeNull();
+  });
+});
