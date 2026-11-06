@@ -291,7 +291,7 @@ describe("who's offered creating a workroom", () => {
   const link = () => screen.queryByRole("link", { name: "Create a workroom" });
   const form = () => screen.queryByRole("button", { name: "Create workroom" });
 
-  beforeEach(() => replies.set("/api/v1/workspaces", rooms));
+  beforeEach(() => replies.set("/api/v1/workspaces/cards", rooms));
 
   it("offers it to an admin of the organization they're working in", async () => {
     identity = { ok: true, data: { ...member.data, org_id: "org_p" } };
@@ -362,7 +362,7 @@ describe("an archived room", () => {
   });
 
   it("marks it in My workrooms", async () => {
-    replies.set("/api/v1/workspaces", { ok: true, data: { workspaces: [{ workspace_id: "ws_1", workspace_name: "Launch", role: "owner", status: "archived" }] } });
+    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [{ workspace_id: "ws_1", workspace_name: "Launch", role: "owner", status: "archived", card: null }] } });
     render(await MyWorkrooms());
     expect(screen.getByText("Archived")).toBeInTheDocument();
   });
@@ -370,16 +370,75 @@ describe("an archived room", () => {
 
 describe("My workrooms", () => {
   it("shows a failed read as a failure, not as having no rooms", async () => {
-    replies.set("/api/v1/workspaces", failed(503));
+    replies.set("/api/v1/workspaces/cards", failed(503));
     render(await MyWorkrooms());
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
     expect(screen.queryByText(/aren't in a workroom/)).not.toBeInTheDocument();
   });
 
   it("lists rooms as plain text with the viewer's role", async () => {
-    replies.set("/api/v1/workspaces", { ok: true, data: { workspaces: [{ workspace_id: "ws_1", workspace_name: "<b>Launch</b>", role: "owner" }] } });
+    const card = { goal: "<b>Ship</b> **it**\u202E", goal_cut: true, external: true, roles: { count: 1, with_openings: 1, filled: 1, capacity: 3, listed: [{ title: "Writers", filled: 1, capacity: 3 }] } };
+    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [{ workspace_id: "ws_1", workspace_name: "<b>Launch</b>", role: "owner", card }] } });
     render(await MyWorkrooms());
     expect(screen.getByRole("link", { name: "<b>Launch</b>" })).toHaveAttribute("href", "/w/ws_1/overview");
     expect(screen.getByText("Owner")).toBeInTheDocument();
+    expect(screen.getByText("External")).toBeInTheDocument();
+    expect(screen.getByText(/<b>Ship<\/b> \*\*it\*\*…$/)).toBeInTheDocument();
+    expect(screen.getByText("1 of 3 roles filled")).toBeInTheDocument();
+    expect(screen.getByText("Writers 1 of 3").textContent).toBe("Roles: Writers 1 of 3");
+    expect(screen.queryByRole("link", { name: "More workrooms" })).toBeNull();
+  });
+
+  it("shows no counts to someone limited to their own tasks", async () => {
+    const card = { goal: null, goal_cut: false, external: false, roles: { count: 2, with_openings: 1, listed: [{ title: "Lead", available: false }, { title: "Writer", available: true }] } };
+    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [{ workspace_id: "ws_1", workspace_name: "L", role: "guest", card }] } });
+    render(await MyWorkrooms());
+    expect(screen.getByText("2 roles, 1 with openings")).toBeInTheDocument();
+    expect(screen.getByText("Lead full · Writer open").textContent).toBe("Roles: Lead full · Writer open");
+    expect(screen.queryByText(/Goal:/)).toBeNull();
+  });
+
+  it("keeps a multi-line goal's words apart, and shows no goal when nothing readable is left", async () => {
+    const roles = { count: 0, with_openings: 0, filled: 0, capacity: 0, listed: [] };
+    const row = (workspace_id: string, goal: string) => ({ workspace_id, workspace_name: workspace_id, role: "member", card: { goal, goal_cut: false, external: false, roles } });
+    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [row("a", "Ship the beta\nThen write docs"), row("b", "\u200D"), row("c", "\u3164"), row("d", "\u2800\uFE0F\u034F")] } });
+    render(await MyWorkrooms());
+    expect(screen.getByText(/Ship the beta Then write docs/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Goal:/)).toHaveLength(1);
+    expect(screen.queryByText(/Unnamed/)).toBeNull();
+  });
+
+  it("doesn't say someone has no rooms when a page came back empty", async () => {
+    const empty = async (data: object, query = {}) => {
+      replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [], ...data } });
+      const view = render(await MyWorkrooms({ searchParams: Promise.resolve(query) }));
+      const said = view.container.textContent ?? "";
+      view.unmount();
+      return said;
+    };
+    // Every row on the page was stale, and there's more.
+    const stale = await empty({ next_offset: 20 });
+    expect(stale).not.toMatch(/aren't in a workroom/);
+    expect(stale).toMatch(/No workrooms to show on this page/);
+    // Past the end.
+    const past = await empty({}, { offset: "500" });
+    expect(past).not.toMatch(/aren't in a workroom/);
+    expect(past).toMatch(/No workrooms to show on this page/);
+    expect(await empty({})).toMatch(/aren't in a workroom/);
+    expect(await empty({}, { offset: "0" })).toMatch(/aren't in a workroom/);
+  });
+
+  it("says so when a room can't answer, and keeps the rest of the row", async () => {
+    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [{ workspace_id: "ws_1", workspace_name: "L", role: "member", card: null }] } });
+    render(await MyWorkrooms());
+    expect(screen.getByRole("link", { name: "L" })).toBeInTheDocument();
+    expect(screen.getByText(/Couldn't load this workroom's goal and roles/)).toBeInTheDocument();
+  });
+
+  it("asks for the page in the URL, and links to the next", async () => {
+    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [], next_offset: 40 } });
+    render(await MyWorkrooms({ searchParams: Promise.resolve({ offset: "20" }) }));
+    expect(screen.getByRole("link", { name: "More workrooms" })).toHaveAttribute("href", "/workrooms?offset=40");
+    expect(queries).toContain("/api/v1/workspaces/cards?offset=20");
   });
 });

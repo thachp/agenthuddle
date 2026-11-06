@@ -2,7 +2,7 @@
 
 Status: **Proposed**, for the owner to confirm · Date: 2026-11-05
 
-The code is built and tested locally. Nothing is deployed, and no real email has been sent.
+The code is built and tested locally. Staging's config turns it on, and on 2026-11-06 its sign-in page offered email. This ADR has no record of a real email being sent, so the list under [Not proven until staging](#not-proven-until-staging) still stands. Production isn't deployed.
 
 ## Context
 
