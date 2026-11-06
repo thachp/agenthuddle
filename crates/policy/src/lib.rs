@@ -642,7 +642,7 @@ pub fn may_decide_review(kind: PrincipalKind, room_requires_person: bool) -> boo
 
 /// Room events anyone in the room can see, whatever their scope: what they can already read in the room's brief and
 /// openings. Everything else about the room, such as who joined or left, follows what they can see of its participants.
-pub const EVENTS_FOR_EVERYONE: [&str; 7] = [
+pub const EVENTS_FOR_EVERYONE: [&str; 8] = [
     "workspace.created",
     "workspace.archived",
     "workspace.unarchived",
@@ -650,6 +650,7 @@ pub const EVENTS_FOR_EVERYONE: [&str; 7] = [
     "workspace.review_policy_changed",
     "role.created",
     "role.updated",
+    "role.closed",
 ];
 
 /// Whether someone can see one event in a room's activity. A task's events follow the task, as it stands now. A room's

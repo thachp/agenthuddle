@@ -5070,6 +5070,21 @@ describe("requiring a person to review (decision 5)", () => {
     expect((await api(OWNER, "GET", `${tasks}/${toRequester.body.id}`)).body.task.reviewer).toBe(requester.id);
   });
 
+  it("doesn't flag a task again when it's turned on a second time", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks);
+    expect((await setting(id, true)).status).toBe(200);
+    const first = (await api(OWNER, "GET", `${tasks}/${t.id}`)).body;
+    expect(first.task.needs_attention).toBe(true);
+    const flags = (body: any) => body.history.filter((e: any) => e.type === "task.needs_attention").length;
+    expect(flags(first)).toBe(1);
+    expect((await setting(id, false)).status).toBe(200);
+    expect((await setting(id, true)).status).toBe(200);
+    const second = (await api(OWNER, "GET", `${tasks}/${t.id}`)).body;
+    expect(second.task.version).toBe(first.task.version);
+    expect(flags(second)).toBe(1);
+  });
+
   it("stops in an archived room, rolls back on failure, and upgrades a room that ran the last migration", async () => {
     const { id } = await room();
     const v = await version(id);
@@ -5121,6 +5136,37 @@ describe("the activity list and the workroom brief", () => {
     expect(seen.map((e) => e.type)).not.toContain("member.added");
     expect(seen.every((e) => !("seq" in e))).toBe(true);
     expect(seen.find((e) => e.task_id === own.id).task_title).toBe("Bob's task");
+  });
+
+  it("keeps the room's organization from anyone who doesn't see the whole room", async () => {
+    const { id, tasks } = await room();
+    const own = await offer(tasks);
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/brief`, { goal: "Ship", policy_version: (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version });
+    const narrow = await all(BOB, id);
+    const created = narrow.find((e) => e.type === "workspace.created");
+    expect([created.from, created.external]).toEqual([{ id: OWNER.id }, true]);
+    expect(narrow.find((e) => e.type === "workspace.brief_changed").from).toEqual({ id: OWNER.id });
+    // On its own task it already reads the same in the task's history.
+    expect(narrow.find((e) => e.task_id === own.id).from).toEqual({ id: LEAD.id, org: "org_a" });
+    expect((await all(LEAD, id)).find((e) => e.type === "workspace.created").from).toEqual({ id: OWNER.id, org: "org_a" });
+    expect((await all(OWNER, id)).find((e) => e.type === "workspace.created").from.org).toBe("org_a");
+  });
+
+  it("marks an actor with no known organization as external, as a task read does", async () => {
+    const { id } = await room();
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE event SET actor_org = NULL WHERE type = 'workspace.created'"));
+    expect((await all(LEAD, id)).find((e) => e.type === "workspace.created").external).toBe(true);
+  });
+
+  it("shows everyone an opening appear, change and close, and not who holds it", async () => {
+    const { id } = await room();
+    const v = async () => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const made = await api(OWNER, "POST", `/v1/workspaces/${id}/roles`, { title: "T", responsibilities: "R", preset: "guest", policy_version: await v() });
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/roles/${made.body.id}`, { capacity: 2, policy_version: await v() });
+    await api(OWNER, "DELETE", `/v1/workspaces/${id}/roles/${made.body.id}`, { policy_version: await v() });
+    const types = (await all(BOB, id)).map((e) => e.type);
+    expect(types).toEqual(expect.arrayContaining(["role.created", "role.updated", "role.closed"]));
+    expect(types).not.toContain("role.invited");
   });
 
   it("gives the same answer however much hidden work there is", async () => {

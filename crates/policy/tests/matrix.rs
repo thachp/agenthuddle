@@ -953,7 +953,6 @@ fn activity_follows_the_task_and_the_member_list() {
         "role.invited",
         "role.claimed",
         "role.claim_ended",
-        "role.closed",
         "owner.transferred",
         "something.new",
     ] {

@@ -1383,7 +1383,8 @@ fn handle_set_review_policy(sql: &SqlStorage, caller: &Caller, body: &Value, now
             )?;
             for row in &open {
                 let task = store::task_from_row(row)?;
-                if parse_kind_of(&task.reviewer) == PrincipalKind::Agent {
+                // Already flagged means someone has been told, so turning it on again changes nothing for them.
+                if parse_kind_of(&task.reviewer) == PrincipalKind::Agent && !task.needs_reviewer {
                     let requester_ok = eligible_reviewer(sql, &task.requester)?;
                     if let Some(decision) = apply_review_ended(&task, &task.reviewer, requester_ok)
                     {
@@ -2173,9 +2174,16 @@ mod queries {
                 Some(task) if !task_view(caller, task).conversation => Value::Null,
                 _ => row["reason"].clone(),
             };
+            // Which organization holds the room is for those who see all of it, as in the room read. On a task, the
+            // viewer already reads the same in its history.
+            let from = if whole_room || task.is_some() {
+                json!({ "id": actor, "org": row["actor_org"] })
+            } else {
+                json!({ "id": actor })
+            };
             events.push(json!({
-                "id": row["id"], "type": kind, "from": { "id": actor, "org": row["actor_org"] },
-                "external": row["actor_org"].as_str().is_some_and(|org| org != who.org),
+                "id": row["id"], "type": kind, "from": from,
+                "external": row["actor_org"].as_str() != Some(who.org.as_str()),
                 "task_id": row["task_id"], "task_title": task.as_ref().map(|t| t.title.clone()),
                 "reason": reason, "prior_status": row["prior_status"], "new_status": row["new_status"], "created_at": row["created_at"],
             }));
