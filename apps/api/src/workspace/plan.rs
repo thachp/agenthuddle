@@ -240,9 +240,11 @@ fn pair(row: &Value) -> Option<(String, String)> {
 /// plan can still change is here, with its whole predecessor list even if one of those is too old to be listed. That makes
 /// `set_task_plan`, which replaces a task's plan, safe to send from what this says.
 ///
-/// Rows read have a limit: at most `MAX_PLAN_TASKS` tasks and, for edges, `MAX_PLAN_EDGES` of each kind, however large the room's
-/// history gets. Someone limited to their own tasks gets those, with the edges between them, and no revision or time, because
-/// those move with tasks they can't see.
+/// Rows returned have a limit: at most `MAX_PLAN_TASKS` tasks and, for edges, `MAX_PLAN_EDGES` of each kind, however large the
+/// room's history gets. Rows read are bounded too, though not by those: someone narrowed can have up to about 150,000 edges
+/// examined, at 50 per task on 3,000 tasks, because the query filters out hidden predecessors before the limit counts. That
+/// doesn't depend on the room's history. Someone limited to their own tasks gets those, with the edges between them, and no
+/// revision or time, because those move with tasks they can't see.
 pub(super) fn read(sql: &SqlStorage, caller: &Caller) -> R<Value> {
     let whole = sees_whole_plan(caller);
     let room = MAX_PLAN_TASKS + 1;
