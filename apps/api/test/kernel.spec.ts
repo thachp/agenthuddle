@@ -5402,6 +5402,17 @@ describe("planned relationships", () => {
     expect((await managed(OWNER, "POST", planned(id), id, line(a, b, "Again"))).status).toBe(200);
   });
 
+  it("has the database hold one showing line per ordered pair, even if the handler's check were gone", async () => {
+    const { id, a, b } = await twoRoles();
+    const made = await managed(OWNER, "POST", planned(id), id, line(a, b));
+    const insert = `INSERT INTO relationship (id, from_role_id, to_role_id, label, created_by, created_at) VALUES ('rel_second', '${a}', '${b}', 'x', '${OWNER.id}', 1)`;
+    await expect(sql(id, insert)).rejects.toThrow(/UNIQUE/);
+    // Only lines still showing: once this one has ended, the pair is free.
+    expect((await managed(OWNER, "DELETE", `${planned(id)}/${made.body.id}`, id)).status).toBe(200);
+    await sql(id, insert);
+    expect((await read(OWNER, id)).planned.map((l: any) => l.id)).toEqual(["rel_second"]);
+  });
+
   it("leaves the policy version and access log alone, so a plan never gets in the way of an access change", async () => {
     const { id, a, b } = await twoRoles();
     const held = await version(id);
