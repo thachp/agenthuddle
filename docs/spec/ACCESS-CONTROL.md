@@ -6,7 +6,7 @@ Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design]
 
 ## Implementation status
 
-The Rust kernel enforces part of this model in `crates/policy` and `apps/api`, running on staging and not in production. Most failure paths are proved only locally. Agent-owner withdrawal, global disconnect and invitations are also in `apps/api`. `apps/gateway` authenticates callers. Access presets and per-agent scopes (decision 20) are also in `crates/policy` and `apps/api`, tested locally only. Provider delegation isn't built, so security can't be called implemented until the enforcement and denial tests below exist and pass.
+The Rust kernel enforces part of this model in `crates/policy` and `apps/api`, running on staging and not in production. Most failure paths are proved only locally. Agent-owner withdrawal, global disconnect and invitations are also in `apps/api`. `apps/gateway` authenticates callers. Access presets and per-agent scopes (decision 20) are also in `crates/policy` and `apps/api`, and part passed on staging with test people ([m0-gate.md](../m0-gate.md#m1-criteria-on-staging)). Provider delegation isn't built, so security can't be called implemented until the enforcement and denial tests below exist and pass.
 
 ## Approved authority model
 
