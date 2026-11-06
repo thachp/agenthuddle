@@ -42,14 +42,14 @@ async function seed() {
   await make("An offered task", { assignee: guest.id });
   const accepted = await make("An accepted task", { assignee: guest.id });
   await guest.must("accept_task", { ...at(accepted), version: accepted.version });
-  const submit = async (title, reviewer) => {
-    const task = await make(title, { assignee: guest.id, reviewer });
+  const submit = async (title, reviewer, extra = {}) => {
+    const task = await make(title, { assignee: guest.id, reviewer, ...extra });
     const taken = await guest.must("accept_task", { ...at(task), version: task.version });
     await guest.must("send_message", { ...at(task), body: "A question **about** scope, with `code` and <b>inert HTML</b>." });
     return guest.must("submit_task", { ...at(task), version: taken.version, note: "Ready for review", artifacts: [{ uri: "https://example.com/pr/1", label: "Pull request" }] });
   };
   const review = await submit("Task for keyboard review", owner.id);
-  const reviewScreen = await submit("Task for the review screen", owner.id);
+  const reviewScreen = await submit("Task for the review screen", owner.id, { instructions: `**Write** the design.\n\n# A heading\n\n- [x] A marked item\n- [ ] An unmarked item\n\n| Column one | Column two |\n| --- | --- |\n| ${"unbroken".repeat(30)} | **two** |` });
   const done = await submit("A completed task", lead.id);
   await lead.must("verify_task", { ...at(done), submission_no: 1 });
   const canceled = await make("A canceled task");
@@ -377,6 +377,30 @@ async function keyboardPaths(s) {
     }
     await phone.close();
   });
+  await keyboardPath("agent text at phone width", async () => {
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    await small.goto(`${app}/w/${s.room}/tasks?task=${s.reviewScreen.id}`);
+    await hydrated(small);
+    const scroller = small.getByRole("group", { name: "Table in this text" }).first();
+    await scroller.waitFor({ timeout: 15_000 });
+    const sizes = await scroller.evaluate((el) => ({ page: document.documentElement.scrollWidth - window.innerWidth, sheet: el.closest('[role="dialog"]').scrollWidth - el.closest('[role="dialog"]').clientWidth, table: el.scrollWidth - el.clientWidth }));
+    ok(sizes.page <= 0, `the page scrolls sideways by ${sizes.page}px at 375px`);
+    ok(sizes.sheet <= 0, `the Sheet scrolls sideways by ${sizes.sheet}px at 375px`);
+    ok(sizes.table > 0, "the wide table doesn't scroll in its own container, so this check proves nothing");
+    await tabTo(small, scroller, "the table");
+    await small.keyboard.press("ArrowRight");
+    await small.waitForFunction((el) => el.scrollLeft > 0, await scroller.elementHandle(), { timeout: 5_000 }).catch(() => {});
+    ok(await scroller.evaluate((el) => el.scrollLeft > 0), "the arrow keys don't scroll the table");
+    const box = small.getByRole("checkbox", { name: "Checklist mark in this text" }).first();
+    ok(await box.isDisabled(), "a checklist mark isn't disabled");
+    const before = await box.isChecked();
+    await box.click({ force: true });
+    ok((await box.isChecked()) === before, "clicking a checklist mark changed it");
+    ok((await small.getByRole("heading", { name: "A heading", level: 4 }).count()) > 0, "agent text's heading isn't at the fixed level");
+    await phone.close();
+  });
+
   await keyboardPath("transfer ownership", async () => {
     await page.goto(`${app}/w/${s.transferRoom}/settings`);
     await hydrated(page);

@@ -8,9 +8,42 @@ import { authoritySoundingName, chosenNameLabel, destinationHost, plainName, saf
 export type AgentAuthor = { name: string; kind: "agent" | "person"; organization?: string; viewer?: boolean };
 
 /** Everything else, raw HTML included, shows as the plain text it is. */
-const ALLOWED = ["p", "em", "strong", "del", "code", "pre", "ul", "ol", "li", "blockquote", "a", "img", "br", "hr"];
+const ALLOWED = ["p", "em", "strong", "del", "code", "pre", "ul", "ol", "li", "blockquote", "a", "img", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "table", "thead", "tbody", "tr", "th", "td", "input"];
 
+/** Every level is one fixed level below a screen's section headings, and no bigger than the text around it, so agent text can't pass for the page's own structure. */
+const heading: Components["h1"] = ({ children }) => <h4 className="font-semibold">{children}</h4>;
+
+/** These take only their children, so nothing Markdown can set reaches them, including a cell's alignment, which arrives as `style`. */
 const COMPONENTS: Components = {
+  h1: heading,
+  h2: heading,
+  h3: heading,
+  h4: heading,
+  h5: heading,
+  h6: heading,
+  // Wide tables scroll here and not the page. Scrolling has to work by keyboard, so this takes focus, and its name is ours.
+  table({ children }) {
+    return (
+      <div role="group" aria-label="Table in this text. It may scroll sideways." tabIndex={0} className="max-w-full overflow-x-auto rounded-md outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50">
+        <table className="border-collapse text-sm">{children}</table>
+      </div>
+    );
+  },
+  th({ children }) {
+    return (
+      <th scope="col" className="min-w-20 border bg-muted px-2 py-1 text-left align-top font-medium">
+        {children}
+      </th>
+    );
+  },
+  td({ children }) {
+    return <td className="min-w-20 border px-2 py-1 align-top">{children}</td>;
+  },
+  // A mark in the text and nothing more: it can't be changed, and it says nothing about a task's state, which only Podster's own controls show.
+  input({ type, checked }) {
+    if (type !== "checkbox") return null;
+    return <input type="checkbox" checked={Boolean(checked)} disabled readOnly aria-label="Checklist mark in this text" className="mr-1.5 align-middle" />;
+  },
   a({ href, children }) {
     const url = safeLinkUrl(href);
     if (!url) return <>{children}</>;
@@ -43,7 +76,7 @@ export function AgentContent({ author, external = false, body, maxLength }: { au
   return (
     <article className="min-w-0 rounded-lg border p-3">
       <AuthorLine author={author} external={external} />
-      <div className="mt-2 space-y-2 break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_ul]:list-disc [&_ul]:pl-5">
+      <div className="mt-2 space-y-2 break-words [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_code]:font-mono [&_ol]:list-decimal [&_ol]:pl-5 [&_pre]:overflow-x-auto [&_pre]:rounded-md [&_pre]:bg-muted [&_pre]:p-2 [&_.task-list-item]:list-none [&_ul]:list-disc [&_ul]:pl-5">
         <Markdown remarkPlugins={[remarkGfm]} allowedElements={ALLOWED} unwrapDisallowed urlTransform={(url) => url} components={COMPONENTS}>
           {text}
         </Markdown>

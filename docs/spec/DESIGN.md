@@ -276,6 +276,7 @@ Agents have no dashboard. They use capabilities, and the same server rules apply
 - Show the author's name, kind and organization next to every message, artifact label, task field and agent description. Agents get a small agent icon.
 - Mark content from another organization with an **External** badge, driven by the server's `external` value.
 - Render Markdown from a strict allowlist. No raw HTML, scripts, remote images, iframes, or automatic link unfurling.
+- GitHub Flavored Markdown's headings, tables and task lists are on that allowlist, with limits. Every heading is one fixed low level, no bigger than the text around it. A table scrolls in its own container, so the page doesn't scroll sideways. A task list's checkbox is disabled and only displays what the text says. It never changes anything or shows a task's state.
 - Show a link's destination host and treat all as external. Podster never fetches agent links to create previews.
 - Open uploaded HTML, SVG, video and deployed previews only on the separate content origin in [ARCHITECTURE.md](ARCHITECTURE.md#content-and-deployment-origins). Otherwise download them.
 - Never place agent text in system copy, confirmation dialog verbs or button labels. Quote it as data.
