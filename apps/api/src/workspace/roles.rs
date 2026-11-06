@@ -4,6 +4,8 @@
 use super::*;
 
 const MAX_ROLES: i64 = 50;
+const CARD_GOAL_CHARS: i64 = 200;
+const CARD_ROLES: usize = 3;
 const ACTIVE: &str = "active";
 
 /// The owner, if they haven't left, and the room's admins: who hears about changes to its openings.
@@ -734,6 +736,51 @@ pub(super) fn handle_end_claim(
     Ok(
         json!({ "role_id": id, "principal_id": principal, "status": "revoked", "access": access_json(kind, role, scopes) }),
     )
+}
+
+/// What a directory card shows of this room, for this viewer. It follows `list_roles` and `get_brief`, so it tells no one
+/// more than those would. It's one query, whose cost follows the room's open roles and active claims, plus one row read for
+/// each closed role, because those have no index.
+pub(super) fn read_card(sql: &SqlStorage, who: &Participant) -> R<Value> {
+    let room = rows(sql, "SELECT substr(goal, 1, ?) AS goal, length(goal) AS goal_length, owner_org_id FROM workspace", vec![(CARD_GOAL_CHARS + 1).into()])?;
+    let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
+    let found = rows(
+        sql,
+        "SELECT r.title, r.capacity, count(c.principal_id) AS filled FROM work_role r
+           LEFT JOIN role_claim c ON c.role_id = r.id AND c.status = 'active'
+          WHERE r.closed_at IS NULL GROUP BY r.id ORDER BY r.is_lead DESC, r.created_at, r.id",
+        vec![],
+    )?;
+    let whole_room = sees_whole_room(&who.caller);
+    let role_json = |row: &Value| {
+        let (filled, capacity) = (int(&row["filled"]), int(&row["capacity"]));
+        if whole_room {
+            json!({ "title": row["title"], "filled": filled, "capacity": capacity })
+        } else {
+            json!({ "title": row["title"], "available": filled < capacity })
+        }
+    };
+    let mut roles = json!({
+        "count": found.len(),
+        "with_openings": found.iter().filter(|row| int(&row["filled"]) < int(&row["capacity"])).count(),
+        "listed": found.iter().take(CARD_ROLES).map(role_json).collect::<Vec<_>>(),
+    });
+    if whole_room {
+        roles["filled"] = json!(found.iter().map(|row| int(&row["filled"])).sum::<i64>());
+        roles["capacity"] = json!(found.iter().map(|row| int(&row["capacity"])).sum::<i64>());
+    }
+    let goal: String = room["goal"]
+        .as_str()
+        .unwrap_or_default()
+        .chars()
+        .take(CARD_GOAL_CHARS as usize)
+        .collect();
+    Ok(json!({
+        "goal": if room["goal"].is_null() { Value::Null } else { json!(goal) },
+        "goal_cut": int(&room["goal_length"]) > CARD_GOAL_CHARS,
+        "external": room["owner_org_id"].as_str() != Some(who.org.as_str()),
+        "roles": roles,
+    }))
 }
 
 /// The room's openings, for anyone in it. Who holds them, and how many do, follow the same limit as the member list, so

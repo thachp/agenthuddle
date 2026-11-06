@@ -3453,6 +3453,7 @@ impl Workspace {
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
                 ["roles"] => roles::list_roles(&sql, &who),
+                ["card"] => roles::read_card(&sql, &who),
                 ["collaboration"] => collaboration::read_map(&sql, &who),
                 ["collaboration", "handoffs"] => collaboration::read_edge(&sql, &who, &url),
                 #[cfg(feature = "failpoints")]

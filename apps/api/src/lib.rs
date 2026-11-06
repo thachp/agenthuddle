@@ -10,12 +10,20 @@ mod wake;
 mod workspace;
 
 use error::ApiError;
+use futures_util::future::{join_all, select, Either};
 use podster_assertion::{verify, KeySet, Kind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
 use worker::*;
 
 pub const CALLER_HEADER: &str = "x-podster-caller";
+const CARDS_PER_PAGE: u32 = 20;
+const CARD_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
+    300
+} else {
+    3_000
+};
 pub const INTERNAL_INIT_PATH: &str = "/internal/init";
 pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
 pub const INTERNAL_PREVIEW_PATH: &str = "/internal/invitation-preview";
@@ -104,6 +112,85 @@ async fn list_workspaces(env: &Env, caller: &Caller) -> std::result::Result<Resp
         .map(|row| json!({ "workspace_id": row["workspace_id"], "workspace_name": row["workspace_name"], "role": row["role"], "status": row["workspace_status"] }))
         .collect();
     Ok(Response::from_json(&json!({ "workspaces": current }))?)
+}
+
+/// A page of the directory. The listing says which rooms to ask about, and each room decides what this person sees of it,
+/// so the read model authorizes nothing. A page is capped, because each row wakes a room.
+async fn list_workspace_cards(
+    env: &Env,
+    caller: &Caller,
+    url: &Url,
+) -> std::result::Result<Response, ApiError> {
+    let offset = match url.query_pairs().find(|(key, _)| key == "offset") {
+        Some((_, value)) => value
+            .parse::<u32>()
+            .map_err(|_| ApiError::invalid_argument())?,
+        None => 0,
+    };
+    let found = env
+        .d1("DB")?
+        .prepare("SELECT workspace_id, workspace_name, role, org_id, workspace_status FROM membership_index WHERE principal_id = ? AND removed = 0 AND owner_left_at IS NULL ORDER BY workspace_name, workspace_id LIMIT ? OFFSET ?")
+        .bind(&[caller.id.as_str().into(), (CARDS_PER_PAGE + 1).into(), offset.into()])?
+        .all()
+        .await?
+        .results::<Value>()?;
+    let more = found.len() > CARDS_PER_PAGE as usize;
+    let cards = found
+        .iter()
+        .take(CARDS_PER_PAGE as usize)
+        .filter(|row| {
+            row["org_id"]
+                .as_str()
+                .is_some_and(|org| org == caller.org || caller.orgs.iter().any(|o| o == org))
+        })
+        .map(|row| workspace_card(env, caller, row));
+    let cards: Vec<Value> = join_all(cards).await.into_iter().flatten().collect();
+    let mut body = json!({ "workspaces": cards });
+    if more {
+        body["next_offset"] = json!(offset + CARDS_PER_PAGE);
+    }
+    Ok(Response::from_json(&body)?)
+}
+
+/// `None` if the room says this person isn't in it, because the listing can lag. If the room can't answer in time, the row
+/// stays with no card, since the listing is all that's known, and one stuck room doesn't cost the others theirs.
+async fn workspace_card(env: &Env, caller: &Caller, row: &Value) -> Option<Value> {
+    let workspace = row["workspace_id"].as_str()?;
+    let mut listed = json!({ "workspace_id": workspace, "workspace_name": row["workspace_name"], "role": row["role"], "status": row["workspace_status"], "card": null });
+    let read = async {
+        // Tests can't otherwise make a room hang.
+        #[cfg(feature = "failpoints")]
+        if workspace.starts_with("ws_hang_") {
+            Delay::from(Duration::from_millis(CARD_TIMEOUT_MS * 20)).await;
+        }
+        let mut caller = caller.clone();
+        caller.workspace_id = workspace.to_string();
+        let stub = env
+            .durable_object("WORKSPACE")?
+            .id_from_name(workspace)?
+            .get_stub()?;
+        let path = format!("/v1/workspaces/{workspace}/card");
+        let mut response =
+            forward(stub, &path, "", caller_header(&caller)?, Method::Get, None).await?;
+        let card = match response.status_code() {
+            200 => Some(response.json::<Value>().await?),
+            _ => None,
+        };
+        Ok::<_, ApiError>((response.status_code(), card))
+    };
+    let timeout = Delay::from(Duration::from_millis(CARD_TIMEOUT_MS));
+    match select(Box::pin(read), timeout).await {
+        Either::Left((Ok((_, Some(card))), _)) => listed["card"] = card,
+        Either::Left((Ok((403 | 404, None)), _)) => return None,
+        Either::Left((Ok((status, None)), _)) => {
+            console_error!("room {workspace} answered {status} for its card");
+        }
+        Either::Left((Err(error), _)) => {
+            console_error!("couldn't read room {workspace}'s card: {:?}", error.code());
+        }
+        Either::Right(_) => console_error!("room {workspace}'s card timed out"),
+    }
+    Some(listed)
 }
 
 /// Rooms the agents of the organizations this person administers are in. It only shows them, and each read of a task
@@ -256,6 +343,9 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         }
         ["v1", "workspaces"] if method == Method::Get => {
             return list_workspaces(&env, &caller).await
+        }
+        ["v1", "workspaces", "cards"] if method == Method::Get => {
+            return list_workspace_cards(&env, &caller, &url).await
         }
         ["v1", "oversight", "rooms"] if method == Method::Get => {
             if is_agent {
