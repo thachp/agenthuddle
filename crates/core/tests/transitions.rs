@@ -1245,3 +1245,28 @@ fn handoffs_are_offers_submissions_and_change_requests_between_two_participants(
     );
     assert_eq!(HandoffKind::ChangeRequest.name(), "change_request");
 }
+
+#[test]
+fn a_planned_relationship_joins_two_roles_with_a_bounded_label() {
+    assert_eq!(
+        validate_planned_relationship("rol_a", "rol_b", "Hands designs to"),
+        Ok(())
+    );
+    assert_eq!(
+        validate_planned_relationship("rol_a", "rol_a", "Itself"),
+        Err(CoreError::InvalidArgument("to_role_id"))
+    );
+    assert_eq!(
+        validate_planned_relationship("rol_a", "rol_b", "  "),
+        Err(CoreError::InvalidArgument("label"))
+    );
+    let longest = "l".repeat(MAX_PLANNED_LABEL_BYTES);
+    assert_eq!(
+        validate_planned_relationship("rol_a", "rol_b", &longest),
+        Ok(())
+    );
+    assert_eq!(
+        validate_planned_relationship("rol_a", "rol_b", &format!("{longest}l")),
+        Err(CoreError::InvalidArgument("label"))
+    );
+}

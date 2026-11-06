@@ -169,7 +169,10 @@ async function seed() {
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
   const opening = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Lead coordinator", responsibilities: "Plans the work and **follows up**.", is_lead: true, policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
-  return { opening, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  // Two openings and a planned line between them, so the Collaboration screens have a plan to show.
+  const plannedTo = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Delivery engineer with a long title that has to wrap", responsibilities: "Builds what's planned.", capacity: 1, preset: "member", policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
+  await owner.must("POST", `/v1/workspaces/${room}/collaboration/planned`, { from_role_id: opening, to_role_id: plannedTo, label: "Hands the plan to, with a label long enough that the map cuts it short", policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version });
+  return { opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -406,7 +409,7 @@ async function keyboardPaths(s) {
   await keyboardPath("manage a role opening, and the Team page at phone width", async () => {
     await page.goto(`${app}/w/${s.room}/team`);
     await hydrated(page);
-    const link = page.getByRole("link", { name: "Manage opening" });
+    const link = page.getByRole("link", { name: "Manage opening" }).first();
     await tabTo(page, link, "the opening's link");
     await page.keyboard.press("Enter");
     const close = page.getByRole("button", { name: "Close opening" });
@@ -521,6 +524,61 @@ async function keyboardPaths(s) {
     await box.focus();
     await small.keyboard.press("ArrowRight");
     await small.waitForFunction(() => document.activeElement?.scrollLeft > 0, null, { timeout: 15_000 });
+    await phone.close();
+  });
+
+  await keyboardPath("plan a line, reach it from the map, and remove it, also at phone width", async () => {
+    await page.goto(`${app}/w/${s.room}/collaboration?view=map`);
+    await hydrated(page);
+    const form = page.locator("form", { hasText: "Plan a line" });
+    // By keyboard alone: Tab to each field, and typing a role's first letters chooses it.
+    const from = form.getByRole("combobox", { name: "From role" });
+    const to = form.getByRole("combobox", { name: "To role" });
+    await tabTo(page, from, "the From role select", 120);
+    await page.keyboard.type("Delivery");
+    await page.waitForFunction((id) => document.activeElement?.value === id, s.plannedTo, { timeout: 15_000 });
+    await page.keyboard.press("Tab");
+    await to.evaluate((el) => new Promise((done) => (document.activeElement === el ? done() : el.addEventListener("focus", done, { once: true }))));
+    await page.keyboard.type("Lead");
+    await page.waitForFunction((id) => document.activeElement?.value === id, s.opening, { timeout: 15_000 });
+    ok((await from.inputValue()) === s.plannedTo && (await to.inputValue()) === s.opening, "the keyboard didn't choose both roles");
+    await page.keyboard.press("Tab");
+    await page.waitForFunction(() => document.activeElement?.tagName === "INPUT", null, { timeout: 15_000 });
+    await page.keyboard.type("Asks questions of");
+    await page.keyboard.press("Tab");
+    await page.waitForFunction(() => document.activeElement?.textContent === "Add planned line", null, { timeout: 15_000 });
+    await page.keyboard.press("Enter");
+    const dashed = page.locator('svg a[href^="#planned-"]', { hasText: "Asks questions of" });
+    await dashed.waitFor({ timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.getAttribute("role") === "status", null, { timeout: 15_000 });
+    const name = await dashed.getAttribute("aria-label");
+    ok(name?.startsWith("Planned: Delivery engineer") && name.includes("Asks questions of") && name.includes("not recorded"), `a planned line's name is ${name}`);
+    ok((await dashed.locator("path[stroke-dasharray]").count()) === 1, "a planned line isn't dashed");
+    await dashed.focus();
+    await page.waitForFunction(() => document.activeElement?.closest("svg") !== null, null, { timeout: 15_000 });
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.activeElement?.tagName === "LI" && document.activeElement.id.startsWith("planned-"), null, { timeout: 15_000 });
+    const row = page.locator(`li#${await page.evaluate(() => document.activeElement.id)}`);
+    ok((await row.textContent()).includes("Planned, not recorded"), "the list's row doesn't say it's planned");
+    await page.keyboard.press("Tab");
+    await page.waitForFunction(() => document.activeElement?.textContent === "Remove", null, { timeout: 15_000 });
+    await page.keyboard.press("Enter");
+    const confirm = page.getByRole("alertdialog");
+    await confirm.waitFor({ timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.closest('[role="alertdialog"]') !== null, null, { timeout: 15_000 });
+    await confirm.getByRole("button", { name: "Remove line" }).focus();
+    await page.waitForFunction(() => document.activeElement?.textContent === "Remove line", null, { timeout: 15_000 });
+    await page.keyboard.press("Enter");
+    await dashed.waitFor({ state: "detached", timeout: 15_000 });
+    await page.waitForFunction(() => document.activeElement?.getAttribute("role") === "status", null, { timeout: 15_000 });
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    for (const path of [`/w/${s.room}/collaboration`, `/w/${s.room}/collaboration?view=map`]) {
+      await small.goto(`${app}${path}`);
+      await small.getByRole("heading", { name: "Planned relationships" }).waitFor({ timeout: 15_000 });
+      const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      ok(overflow <= 0, `${path} scrolls sideways by ${overflow}px at 375px with a plan on it`);
+    }
     await phone.close();
   });
 
