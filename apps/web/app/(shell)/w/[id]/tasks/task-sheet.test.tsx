@@ -392,25 +392,53 @@ describe("posting to the thread", () => {
   describe("previewing", () => {
     const WRITTEN = "_id ~/foo C:\\Users\\me **x** `a\\_b`\n\ndef __init__(self, *args):\n\nhttps://ex.com/~me/_x?a=*b";
     const write = (text: string) => fireEvent.change(screen.getByLabelText("Post a message"), { target: { value: text } });
-    const toggle = () => screen.getByRole("button", { name: "Preview" });
+    const toggle = () => screen.getByRole("button", { name: /^(Preview|Edit)$/ });
     const preview = () => screen.getByRole("region", { name: "Preview of your message" });
 
     it("shows how the text will look, and hides the box without losing it", async () => {
       const user = userEvent.setup();
       answer = () => json(200, detail());
       await openDiscussion(user);
-      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      expect(toggle()).toHaveTextContent("Preview");
       write("**bold** words");
       await user.click(toggle());
-      expect(toggle()).toHaveAttribute("aria-pressed", "true");
+      expect(toggle()).toHaveTextContent("Edit");
       expect(toggle()).toHaveFocus();
-      expect(within(preview()).getByText("This is how it'll look.")).toBeInTheDocument();
+      expect(within(preview()).getByText(/^Preview\. Not posted yet\. This shows how the text will look/)).toBeInTheDocument();
+      expect(within(preview()).getByText("Not posted yet.")).toBeInTheDocument();
       expect(within(preview()).getByText("bold").tagName).toBe("STRONG");
       expect(screen.getByLabelText("Post a message")).not.toBeVisible();
       await user.click(toggle());
       expect(screen.queryByRole("region", { name: "Preview of your message" })).toBeNull();
       expect(screen.getByLabelText("Post a message")).toBeVisible();
       expect(screen.getByLabelText("Post a message")).toHaveValue("**bold** words");
+    });
+
+    it("still asks before discarding a draft that's being previewed, and keeps it", async () => {
+      const user = userEvent.setup();
+      answer = () => json(200, detail());
+      await openDiscussion(user);
+      write("A draft");
+      await user.click(toggle());
+      expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+      await user.keyboard("{Escape}");
+      expect(await screen.findByText("Discard unsaved changes?")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Keep editing" }));
+      expect(within(preview()).getByText("A draft")).toBeInTheDocument();
+      expect(screen.getByLabelText("Post a message")).toHaveValue("A draft");
+    });
+
+    it("formats a large result, and sends it unchanged", async () => {
+      const user = userEvent.setup();
+      answer = (_, method) => (method === "POST" ? json(200, { id: "msg_2" }) : json(200, detail()));
+      await openDiscussion(user);
+      const large = "- item\n".repeat(600).trim();
+      write(large);
+      await user.click(toggle());
+      expect(preview().querySelectorAll("li")).toHaveLength(600);
+      await user.click(screen.getByRole("button", { name: "Post message" }));
+      expect(await screen.findByText("Posted.")).toBeInTheDocument();
+      expect(commands()[0]).toMatchObject({ body: { body: large } });
     });
 
     it("says when there's nothing to preview", async () => {

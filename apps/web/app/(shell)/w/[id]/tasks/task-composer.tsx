@@ -79,8 +79,8 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Label htmlFor="thread-message">Post a message</Label>
         {/* Only shows the text. What's sent is always the box's own text, whether or not this was ever open. */}
-        <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-8" aria-pressed={previewing} onClick={() => setPreviewing(!previewing)}>
-          Preview
+        <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-8" onClick={() => setPreviewing(!previewing)}>
+          {previewing ? "Edit" : "Preview"}
         </Button>
       </div>
       <textarea
@@ -99,8 +99,10 @@ export function TaskComposer({ api }: { api: SheetApi<LoadedTask> }) {
       />
       {previewing ? (
         <section aria-label="Preview of your message" className="space-y-1">
-          <p className="text-xs text-muted-foreground">This is how it'll look.</p>
+          <p className="text-xs text-muted-foreground">Preview. Not posted yet. This shows how the text will look, and a posted message also shows your organization.</p>
           {body ? <AgentContent author={{ name: "You", kind: "person", viewer: true }} body={body} /> : <p className="text-sm text-muted-foreground">Nothing to preview yet.</p>}
+          {/* A long preview pushes the first line away, and the line after this card reads as if it's already in the thread. */}
+          {body ? <p className="text-xs text-muted-foreground">Not posted yet.</p> : null}
         </section>
       ) : null}
       <p id="thread-message-hint" className="text-xs text-muted-foreground">

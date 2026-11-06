@@ -1022,13 +1022,14 @@ async function keyboardPaths(s) {
     const written = "_id ~/foo C:\\Users\\me **bold** `a\\_b`\n\ndef __init__(self, *args):\n\nhttps://ex.com/~me/_x?a=*b <img src=x onerror=\"window.pwned=1\"> [x](javascript:window.pwned=2)";
     const box = sheet.getByLabel("Post a message");
     await box.fill(written);
-    const toggle = sheet.getByRole("button", { name: "Preview" });
+    const toggle = sheet.getByRole("button", { name: /^(Preview|Edit)$/ });
     await tabTo(own, sheet.getByRole("button", { name: "Post message" }), "the post button");
     await toggle.focus();
     await own.keyboard.press("Enter");
     const preview = sheet.getByRole("region", { name: "Preview of your message" });
     await preview.locator("strong").first().waitFor({ timeout: 15_000 });
-    ok((await toggle.getAttribute("aria-pressed")) === "true", "the toggle doesn't say it's on");
+    ok((await toggle.innerText()).trim() === "Edit", "the toggle doesn't say how to get back");
+    ok((await preview.getByText("Not posted yet", { exact: false }).count()) === 2, "the preview doesn't say it isn't posted, before and after the card");
     ok(await toggle.evaluate((el) => el === document.activeElement), "focus left the toggle");
     ok((await preview.locator("img, script, iframe, a[href^='javascript']").count()) === 0, "hostile text became elements in the preview");
     ok((await own.evaluate(() => window.pwned)) === undefined, "hostile text ran in the preview");
@@ -1036,6 +1037,7 @@ async function keyboardPaths(s) {
     await own.keyboard.press("Enter");
     await box.waitFor({ timeout: 5_000 });
     ok((await box.inputValue()) === written, "closing the preview changed the text");
+    ok((await toggle.innerText()).trim() === "Preview", "the toggle didn't go back");
     await toggle.focus();
     await own.keyboard.press("Enter");
     await tabTo(own, sheet.getByRole("button", { name: "Post message" }), "the post button");
@@ -1059,12 +1061,17 @@ async function keyboardPaths(s) {
     await sheet.getByRole("tab", { name: /^Discussion/ }).click();
     await hydrated(own);
     await sheet.getByLabel("Post a message").fill(`A wide one: ${"unbroken".repeat(60)}\n\n| a | b |\n| - | - |\n| ${"wide".repeat(60)} | c |`);
-    const toggle = sheet.getByRole("button", { name: "Preview" });
+    const toggle = sheet.getByRole("button", { name: /^(Preview|Edit)$/ });
     ok(((await toggle.boundingBox())?.height ?? 0) >= 44, "the toggle is under 44px tall at 375px");
     await toggle.click();
     await sheet.getByRole("region", { name: "Preview of your message" }).locator("table").waitFor({ timeout: 15_000 });
     const sizes = await sheet.evaluate((dialog) => ({ page: document.documentElement.scrollWidth - window.innerWidth, sheet: dialog.scrollWidth - dialog.clientWidth }));
     ok(sizes.page <= 0 && sizes.sheet <= 0, `the preview scrolls sideways at 375px: ${JSON.stringify(sizes)}`);
+    // A result too large to apply out of view still formats here, because the preview is in view.
+    await toggle.click();
+    await sheet.getByLabel("Post a message").fill("- item\n".repeat(600).trim());
+    await toggle.click();
+    await sheet.getByRole("region", { name: "Preview of your message" }).locator("li").nth(599).waitFor({ state: "attached", timeout: 15_000 });
     await phone.close();
   });
 
