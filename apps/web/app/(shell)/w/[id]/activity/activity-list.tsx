@@ -22,8 +22,10 @@ type Props = {
   filters: string;
   first: RoomEvent[];
   nextBefore: string | null;
-  /** Where the reader goes if a later page can't be read. */
+  /** The way back to the first page. */
   newest: string;
+  /** This list starts from an older event, so the way back stays in reach above it. */
+  fromOlder: boolean;
   me: string;
   names: Record<string, string>;
   orgNames: Record<string, string>;
@@ -35,7 +37,7 @@ type Props = {
  * a downward move near the bottom, or the button, which does the same for anyone who can't or doesn't scroll. The server
  * filters every page for this viewer.
  */
-export function ActivityList({ roomId, filters, first, nextBefore, newest, me, names, orgNames, now }: Props) {
+export function ActivityList({ roomId, filters, first, nextBefore, newest, fromOlder, me, names, orgNames, now }: Props) {
   const [more, setMore] = useState<RoomEvent[]>([]);
   const [cursor, setCursor] = useState(nextBefore);
   const [status, setStatus] = useState<Status>("idle");
@@ -72,6 +74,7 @@ export function ActivityList({ roomId, filters, first, nextBefore, newest, me, n
           setStatus("stale");
         } else if (result.status === 403 || result.status === 404) {
           setStatus("lost");
+          setSpoken("");
         } else {
           setStatus("failed");
         }
@@ -100,6 +103,12 @@ export function ActivityList({ roomId, filters, first, nextBefore, newest, me, n
       <p aria-live="polite" aria-atomic="true" className="sr-only">
         {spoken ? `${spoken} ${eventsText(rows.length)} showing.` : ""}
       </p>
+      {/* An alert below brings its own, and two links to one place only say the same thing twice. */}
+      {fromOlder && status !== "stale" && status !== "lost" ? (
+        <Link href={newest} prefetch={false} className="block w-fit text-primary underline">
+          Back to the newest
+        </Link>
+      ) : null}
       <ol className="divide-y rounded-lg border empty:hidden">
         {rows.map((event) => {
           const author = { name: nameOf(event.from.id, me, names), kind: kindOf(event.from.id), organization: event.from.org ? (orgNames[event.from.org] ?? event.from.org) : undefined, viewer: event.from.id === me };

@@ -83,16 +83,12 @@ export default async function Activity({ params, searchParams }: { params: Promi
             first={rows}
             nextBefore={events.data.next_before}
             newest={filtered ? `${base}?${filters}` : base}
+            fromOlder={before !== null}
             me={me}
             names={names}
             orgNames={orgNames}
             now={now}
           />
-          {before ? (
-            <Link href={filtered ? `${base}?${filters}` : base} prefetch={false} className="block text-primary underline">
-              Back to the newest
-            </Link>
-          ) : null}
         </>
       ) : events.status === 400 ? (
         <p className="text-muted-foreground">

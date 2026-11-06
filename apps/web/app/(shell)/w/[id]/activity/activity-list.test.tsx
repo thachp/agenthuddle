@@ -38,7 +38,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-const list = (filters = "", first = [event("a")], nextBefore: string | null = "evt_a") => <ActivityList roomId="ws_1" filters={filters} first={first} nextBefore={nextBefore} newest="/w/ws_1/activity" me="per_me" names={{}} orgNames={{}} now={2} />;
+const list = (filters = "", first = [event("a")], nextBefore: string | null = "evt_a", fromOlder = false) => <ActivityList roomId="ws_1" filters={filters} first={first} nextBefore={nextBefore} newest="/w/ws_1/activity" fromOlder={fromOlder} me="per_me" names={{}} orgNames={{}} now={2} />;
 const button = () => screen.getByRole("button", { name: /Load more|Loading more/ });
 const shown = () => within(screen.getByRole("list")).getAllByRole("listitem").length;
 const live = () => document.querySelector('[aria-live="polite"]')?.textContent;
@@ -173,6 +173,50 @@ describe("Activity's Load more", () => {
     expect(alert).toHaveTextContent("You can't see this activity any more.");
     expect(alert).toHaveFocus();
     expect(screen.queryByRole("link", { name: "Task a" })).toBeNull();
+  });
+
+  it("says nothing about a loaded page once access is lost", async () => {
+    const user = userEvent.setup();
+    replies.evt_a = { events: [event("b")], next_before: "evt_b" };
+    replies.evt_b = { status: 403 };
+    render(list());
+    await user.click(button());
+    await screen.findByRole("link", { name: "Task b" });
+    expect(live()).toBe("1 more event loaded. 2 events showing.");
+    await user.click(button());
+    await screen.findByRole("alert");
+    expect(live()).toBe("");
+  });
+
+  it("offers the way back above a list from an older event, and only once when an alert brings its own", async () => {
+    const user = userEvent.setup();
+    replies.evt_a = { events: [event("b")], next_before: "evt_b" };
+    replies.evt_b = { status: 400 };
+    render(list("", [event("a")], "evt_a", true));
+    const back = () => screen.getAllByRole("link", { name: "Back to the newest" });
+    expect(back()).toHaveLength(1);
+    expect(back()[0].compareDocumentPosition(screen.getByRole("list")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await user.click(button());
+    await screen.findByRole("link", { name: "Task b" });
+    expect(back()).toHaveLength(1);
+    await user.click(button());
+    const alert = await screen.findByRole("alert");
+    expect(back()).toHaveLength(1);
+    expect(within(alert).getByRole("link", { name: "Back to the newest" })).toBeInTheDocument();
+  });
+
+  it.each([400, 403])("offers the way back once after a %i on a list from an older event's page", async (status) => {
+    const user = userEvent.setup();
+    replies.evt_a = { status };
+    render(list("", [event("a")], "evt_a", true));
+    await user.click(button());
+    await screen.findByRole("alert");
+    expect(screen.getAllByRole("link", { name: "Back to the newest" })).toHaveLength(1);
+  });
+
+  it("offers no way back on the first page until an alert needs one", () => {
+    render(list());
+    expect(screen.queryByRole("link", { name: "Back to the newest" })).toBeNull();
   });
 
   it("sends a 401 to sign in", async () => {
