@@ -224,6 +224,8 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   useEffect(() => {
     const controller = new AbortController();
     let current = true;
+    // Only a read begun after this Sheet's own change can speak for it. One already out may hold what came before.
+    const adopts = ownChange.current;
     setLoaded((previous) => (previous.phase === "failed" ? { phase: "loading" } : previous));
     loadRef
       .current(target, { signal: controller.signal })
@@ -234,16 +236,22 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
           goneCalled.current = true;
           goneRef.current();
         } else {
-          if (ownChange.current) draftVersion.current = versionRef.current ? versionRef.current(data) : draftVersion.current;
-          ownChange.current = false;
-          setSettling(false);
+          if (adopts && versionRef.current) draftVersion.current = versionRef.current(data);
+          if (adopts) {
+            ownChange.current = false;
+            setSettling(false);
+          }
           setLoaded({ phase: "ready", data, refreshFailed: false });
         }
       })
       .catch(() => {
+        // This read was replaced, and whichever replaced it answers.
+        if (!current) return;
         // Without a read there's no version to carry on from, so a draft keeps answering to the old one and conflicts rather than overwrites.
-        ownChange.current = false;
-        setSettling(false);
+        if (adopts) {
+          ownChange.current = false;
+          setSettling(false);
+        }
         // A read failure keeps prior data on screen.
         if (current) setLoaded((previous) => (previous.phase === "ready" ? { ...previous, refreshFailed: true } : { phase: "failed" }));
       });
@@ -422,6 +430,9 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
                   onClick={() => {
                     setConflict(false);
                     setDirty(false);
+                    // Reviewing is the person choosing to carry on from what's there now, so a form that keeps its text answers to that.
+                    ownChange.current = true;
+                    setSettling(true);
                     setReloads((count) => count + 1);
                   }}
                 >

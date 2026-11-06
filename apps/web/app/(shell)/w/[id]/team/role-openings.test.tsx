@@ -339,27 +339,61 @@ describe("a draft through this Sheet's own commands, against an API whose versio
   let invited: string[];
   let responsibilities: string;
   let calls: { method: string; url: string; status: number }[];
+  let roleVersion: number;
+  // Runs before a read answers, to arrange exactly what happens around it.
+  let onRead: ((url: string, signal?: AbortSignal | null) => Promise<Response | void> | Response | void) | null;
+  let onCommand: ((url: string) => Response | void) | null;
+  const seenKeys = new Set<string>();
+
+  /** Someone else, in another tab. */
+  const theirEdit = () => {
+    responsibilities = "THEIRS";
+    roleVersion += 1;
+    version += 1;
+  };
+  const hangs = (signal?: AbortSignal | null) => new Promise<Response>((_, reject) => signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError"))));
 
   beforeEach(() => {
     version = 4;
     invited = [];
     responsibilities = "Builds it";
     calls = [];
+    roleVersion = 1;
+    onRead = null;
+    onCommand = null;
+    seenKeys.clear();
     vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
       const method = init.method ?? "GET";
       if (method === "GET") {
-        if (url.endsWith("/roles")) return new Response(JSON.stringify({ external: false, roles: [{ ...vacant, responsibilities, invited: [...invited] }] }), { status: 200 });
+        const arranged = await onRead?.(url, init.signal);
+        if (arranged) return arranged;
+        if (url.endsWith("/roles")) return new Response(JSON.stringify({ external: false, roles: [{ ...vacant, version: roleVersion, responsibilities, invited: [...invited] }] }), { status: 200 });
         return new Response(JSON.stringify({ id: ROOM, status: "active", policy_version: version, members: props.members }), { status: 200 });
       }
       const body = JSON.parse(String(init.body));
+      const key = new Headers(init.headers).get("idempotency-key") ?? "";
+      // As the real API does, a stored answer comes before the version check.
+      if (seenKeys.has(key)) {
+        calls.push({ method, url, status: 200 });
+        return new Response("{}", { status: 200 });
+      }
+      const refused = onCommand?.(url);
+      if (refused) {
+        calls.push({ method, url, status: refused.status });
+        return refused;
+      }
       if (body.policy_version !== version) {
         calls.push({ method, url, status: 409 });
         return new Response(JSON.stringify({ error: { code: "version_conflict" } }), { status: 409 });
       }
       version += 1;
+      seenKeys.add(key);
       if (url.endsWith("/invites")) invited.push(body.principal_id);
       else if (url.includes("/invites/")) invited = invited.filter((id) => !url.endsWith(id));
-      else if (method === "PUT") responsibilities = body.responsibilities;
+      else if (method === "PUT") {
+        responsibilities = body.responsibilities;
+        roleVersion += 1;
+      }
       calls.push({ method, url, status: 200 });
       return new Response("{}", { status: 200 });
     });
@@ -417,17 +451,135 @@ describe("a draft through this Sheet's own commands, against an API whose versio
     expect(responsibilities).toBe("Builds it");
   });
 
-  it("makes a second command wait for the version to arrive", async () => {
-    const user = userEvent.setup();
-    const sheet = await open();
+  const draftThenInvite = async (user: ReturnType<typeof userEvent.setup>, sheet: HTMLElement) => {
     await user.type(within(sheet).getByLabelText("Responsibilities"), " mine");
     await user.selectOptions(within(sheet).getByLabelText("Invite an agent in this workroom"), "agt_1");
     await user.click(within(sheet).getByRole("button", { name: "Invite" }));
+  };
+
+  it("holds a second command until the re-read has given the new version", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    onRead = async () => {
+      await gate;
+    };
+    await draftThenInvite(user, sheet);
+    await within(sheet).findByText(/Invited Code Agent/);
+    // Held while the read is out, so nothing can go with the old version.
+    expect(within(sheet).getByRole("button", { name: "Saving…" })).toBeDisabled();
+    expect(within(sheet).getByRole("button", { name: "Invite" })).toBeDisabled();
+    release();
+    await waitFor(() => expect(saved(sheet)).toBeEnabled());
+    await user.click(saved(sheet));
+    await waitFor(() => expect(responsibilities).toBe("Builds it mine"));
+  });
+
+  it("can't overwrite an edit that lands after the room's version is read, inside the re-read", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    let armed = true;
+    onRead = (url) => {
+      // The room's version has been read. This lands before the opening is.
+      if (armed && url.endsWith("/roles") && calls.length === 1) {
+        armed = false;
+        theirEdit();
+      }
+    };
+    await draftThenInvite(user, sheet);
+    await within(sheet).findByText(/Invited Code Agent/);
+    await waitFor(() => expect(within(sheet).getByLabelText("Responsibilities")).toHaveValue("THEIRS"));
+    expect(responsibilities).toBe("THEIRS");
+  });
+
+  it("can't overwrite an edit that lands after the opening is read too", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    let reads = 0;
+    onRead = (url) => {
+      if (calls.length !== 1 || !url.endsWith("/roles")) return;
+      reads += 1;
+      if (reads > 1) return;
+      const answer = new Response(JSON.stringify({ external: false, roles: [{ ...vacant, version: roleVersion, responsibilities, invited: [...invited] }] }), { status: 200 });
+      // The opening's old text is on its way back. Someone else's edit lands now.
+      theirEdit();
+      return answer;
+    };
+    await draftThenInvite(user, sheet);
     await within(sheet).findByText(/Invited Code Agent/);
     await waitFor(() => expect(saved(sheet)).toBeEnabled());
     await user.click(saved(sheet));
-    await waitFor(() => expect(calls).toHaveLength(2));
-    expect(calls.every((call) => call.status === 200)).toBe(true);
+    expect(await within(sheet).findByText(/changed while you were editing/)).toBeInTheDocument();
+    expect(responsibilities).toBe("THEIRS");
+  });
+
+  it("isn't thrown by a read already out when a command succeeds", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    // The first attempt fails with nothing committed, and the read after that outage is still out when the retry succeeds.
+    let attempts = 0;
+    onCommand = () => {
+      attempts += 1;
+      return attempts === 1 ? new Response("{}", { status: 500 }) : undefined;
+    };
+    let hanging = true;
+    onRead = (_url, signal) => (hanging ? hangs(signal) : undefined);
+    await draftThenInvite(user, sheet);
+    await waitFor(() => expect(attempts).toBe(1));
+    await waitFor(() => expect(within(sheet).getByRole("button", { name: "Invite" })).toBeEnabled());
+    hanging = false;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    onRead = async () => {
+      await gate;
+    };
+    await user.click(within(sheet).getByRole("button", { name: "Invite" }));
+    await within(sheet).findByText(/Invited Code Agent/);
+    // The older read's abort has landed by now, and it mustn't let go of the hold on this one's behalf.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(within(sheet).getByRole("button", { name: "Saving…" })).toBeDisabled();
+    release();
+    await waitFor(() => expect(saved(sheet)).toBeEnabled());
+    await user.click(saved(sheet));
+    await waitFor(() => expect(responsibilities).toBe("Builds it mine"));
+    expect(within(sheet).queryByText(/changed while you were editing/)).toBeNull();
+  });
+
+  it("after a failed re-read, conflicts rather than overwrites, and one Review latest recovers", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    onRead = () => new Response("{}", { status: 503 });
+    await draftThenInvite(user, sheet);
+    await within(sheet).findByText(/Couldn't refresh/);
+    await waitFor(() => expect(saved(sheet)).toBeEnabled());
+    expect(within(sheet).getByLabelText("Responsibilities")).toHaveValue("Builds it mine");
+    onRead = null;
+    await user.click(saved(sheet));
+    await within(sheet).findByText(/changed while you were editing/);
+    expect(responsibilities).toBe("Builds it");
+    await user.click(within(sheet).getByRole("button", { name: "Review latest" }));
+    await waitFor(() => expect(saved(sheet)).toBeEnabled());
+    expect(within(sheet).getByLabelText("Responsibilities")).toHaveValue("Builds it mine");
+    await user.click(saved(sheet));
+    await waitFor(() => expect(responsibilities).toBe("Builds it mine"));
+    expect(within(sheet).queryByText(/changed while you were editing/)).toBeNull();
+  });
+
+  it("adopts nothing from a refused command, so someone else's change still conflicts", async () => {
+    const user = userEvent.setup();
+    const sheet = await open();
+    onCommand = (url) => (url.endsWith("/invites") ? new Response(JSON.stringify({ error: { code: "not_allowed" } }), { status: 403 }) : undefined);
+    await user.type(within(sheet).getByLabelText("Responsibilities"), " mine");
+    version += 1;
+    await user.selectOptions(within(sheet).getByLabelText("Invite an agent in this workroom"), "agt_1");
+    await user.click(within(sheet).getByRole("button", { name: "Invite" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await waitFor(() => expect(saved(sheet)).toBeEnabled());
+    expect(within(sheet).getByLabelText("Responsibilities")).toHaveValue("Builds it mine");
+    await user.click(saved(sheet));
+    await within(sheet).findByText(/changed while you were editing/);
+    expect(responsibilities).toBe("Builds it");
   });
 });
 
