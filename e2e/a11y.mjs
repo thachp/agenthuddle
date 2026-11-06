@@ -1079,11 +1079,24 @@ async function keyboardPaths(s) {
     const { own, sheet, box } = await openBox(contextFor(s.owner));
     await box.focus();
     const editor = await untilEditor(sheet);
-    const hostile = `<img src=x onerror="window.pwned=1"><script>window.pwned=2</script><a href="javascript:window.pwned=3">click</a><iframe src="https://evil.test"></iframe>`;
-    await pasteInto(editor, hostile, hostile);
+    // Different from the plain text, because Lexical uses HTML only when it differs. A clipboard offers both, and an attacker's page chooses both.
+    const html = `<b style="position:fixed">rich words</b><img src=x onerror="window.pwned=1"><script>window.pwned=2</script><a href="javascript:window.pwned=3">click</a><iframe src="https://evil.test"></iframe>`;
+    const plain = `plain words <img src=x onerror="window.pwned=1"> <a href="javascript:window.pwned=3">click</a>`;
+    await pasteInto(editor, plain, html);
     await own.waitForTimeout(200);
-    ok((await editor.locator("img, script, a, iframe").count()) === 0, "pasted HTML became elements in the editor");
-    ok((await editor.innerText()).includes("<img src=x"), "pasted HTML didn't arrive as text");
+    ok((await editor.locator("img, script, a, iframe, strong, b, [style*=fixed]").count()) === 0, "pasted HTML became elements in the editor");
+    const text = await editor.innerText();
+    ok(text.includes("<img src=x") && !text.includes("rich words"), `the editor took the HTML, not the plain text: ${text.slice(0, 80)}`);
+    await editor.evaluate((el, [words, markup]) => {
+      const data = new DataTransfer();
+      data.setData("text/plain", words);
+      data.setData("text/html", markup);
+      const box = el.getBoundingClientRect();
+      el.dispatchEvent(new DragEvent("drop", { dataTransfer: data, bubbles: true, cancelable: true, clientX: box.left + 5, clientY: box.top + 5 }));
+    }, [" dropped words", html]);
+    await own.waitForTimeout(200);
+    ok((await editor.locator("img, script, a, iframe, strong, b").count()) === 0, "dropped HTML became elements in the editor");
+    ok(!(await editor.innerText()).includes("rich words"), "the editor took dropped HTML");
     await sheet.getByRole("button", { name: "Post message" }).click();
     await sheet.getByText("Posted.").waitFor({ timeout: 15_000 });
     const posted = sheet.locator("article").filter({ hasText: "<img src=x" }).last();
