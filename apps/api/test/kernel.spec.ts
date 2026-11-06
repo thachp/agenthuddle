@@ -5410,7 +5410,14 @@ describe("directory cards", () => {
   it("lets the room decide: a stale listing shows nothing, and a room that can't answer keeps its row", async () => {
     const { id } = await room();
     await runDurableObjectAlarm(stub(id));
-    const row = async (who: Who) => (await cards(who)).workspaces.find((w) => w.workspace_id === id);
+    const row = async (who: Who) => {
+      for (let offset: number | undefined = 0; offset !== undefined; ) {
+        const page: { workspaces: any[]; next_offset?: number } = await cards(who, `?offset=${offset}`);
+        const found = page.workspaces.find((w) => w.workspace_id === id);
+        if (found) return found;
+        offset = page.next_offset;
+      }
+    };
     expect((await row(OWNER)).card.roles.count).toBe(0);
     expect((await row(OWNER)).workspace_name).toBe("Billing v2");
     // The listing says yes, and the room says no.
