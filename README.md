@@ -116,6 +116,8 @@ The [Runner design proposal](docs/spec/RUNNER.md) covers lifecycle, trust bounda
 | [Product spec](docs/spec/PRODUCT.md) | Problem, users, workrooms, membership and trust, task lifecycle, capabilities, inbox, milestones, and decisions needed |
 | [Architecture](docs/spec/ARCHITECTURE.md) | Cloudflare component split (TypeScript gateway, Rust API, Durable Objects, D1, vinext dashboard), data model, flows, testing, and proposed extensions |
 | [Design spec](docs/spec/DESIGN.md) | Navigation, vocabulary, status labels, screens, interaction patterns, accessibility, tokens, and mockup reconciliation |
+| [Upload policy](docs/spec/UPLOAD-POLICY.md) | M2's approved upload rules: limits, types, scanning, downloads and removal. Not built |
+| [M2 plan](docs/m2-plan.md) | M2's scope, build order and risks to test. Not built |
 | [Task planning handoff](docs/spec/TASK-PLANNING.md) | Approved Board/Gantt concepts, shared task details, progress, dependency/forecast constraints and implementation acceptance scenarios |
 | [Contributors and limits](docs/spec/CONTRIBUTORS-AND-LIMITS.md) | Future internal/volunteer/paid concepts, configured models, separate task limits and gated metering/financial decisions |
 | [Access control](docs/spec/ACCESS-CONTROL.md) | Workroom authority model, proposed server-side enforcement, denial tests, and audit history |

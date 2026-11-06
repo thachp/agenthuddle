@@ -1,10 +1,10 @@
 # Task planning: List, Board and Gantt
 
-Status: **approved product direction; implementation handoff** · Owner: Patrick Thach · 2026-11-05
+Status: **approved product direction; implementation handoff** · Owner: Patrick Thach · 2026-11-05, with engineering choices accepted on 2026-11-06 as [decisions 62 to 73](PRODUCT.md#decisions-needed)
 
 Companions: [Product](PRODUCT.md), [Design](DESIGN.md), [Access control](ACCESS-CONTROL.md), [Architecture](ARCHITECTURE.md), [mockup index](../mockups/README.md).
 
-Patrick approved two static concepts and requested documentation so Claude can implement them. This brief records that direction; it does not claim that Board, Gantt, planning fields or dependency APIs already exist or ship in M0. No interactive prototype was built. **Proposed** below marks engineering choices to resolve before implementation, rather than additional user decisions. Existing lifecycle and access-control requirements remain authoritative.
+Patrick approved two static concepts and requested documentation so Claude can implement them. This brief records that direction; it does not claim that Board, Gantt, planning fields or dependency APIs already exist or ship in M0. No interactive prototype was built. **Accepted** below marks engineering choices the owner has now settled, and none of them is built. **Proposed** marks what's left to settle in review. Existing lifecycle and access-control requirements remain authoritative.
 
 ## Approved experience and references
 
@@ -19,7 +19,7 @@ These originals are visual references, not pixel-level scheduling specifications
 ## Shared view and detail behavior
 
 - One permission-filtered task collection, filter model and selection drives all three views. Preserve the existing **Needs my review** filter and any implemented filters; expose only filters backed by actual authorized data. Do not invent roles or timestamps absent from the response.
-- Persist view and active filters in the URL alongside `task`, preserving unrelated query parameters. **Proposed** encoding: `view=list|board|gantt` and `review=mine`; default to List for missing/invalid view values. Reload and Back/Forward must restore view, filters and selection. Do not keep filters solely inside `TaskList` local state.
+- Persist view and active filters in the URL alongside `task`, preserving unrelated query parameters. Encoding: `view=list|board|gantt` and `review=mine`, with `view=board` and `review=mine` built and `view=gantt` to come with the Gantt; default to List for missing/invalid view values. Reload and Back/Forward must restore view, filters and selection. Do not keep filters solely inside `TaskList` local state.
 - Switching view keeps the selected task and Sheet open. Filtering out its launcher may keep the authorized task selected; explain that it is outside the current filter. Closing returns focus to its launcher in the current view, or the Tasks heading/main content if no launcher remains.
 - Cards, list-row titles and Gantt row/bar targets are real keyboard-operable links to the same `?task=<id>` Sheet, including open-in-new-tab behavior. Selecting an already selected task must not create duplicate Sheets, reset edits or duplicate a mutation.
 - Reuse `TaskSheet` → `TargetSheet` with `param="task"`, `size="lg"`, fixed task/workroom target and **Details / Discussion / Activity**. No target dropdown or nested Sheet. A dependency link inside a Sheet must close/resolve dirty state before navigating to the other task; it must not nest a Sheet.
@@ -60,15 +60,15 @@ Provide an accessible table/list with task, status, estimate, authorized predece
 
 **Forecast is an estimate, not a delivery commitment.** It is separate from informational `due_at`; never move due dates or promise a finish by reading them. Show calculation time, input freshness, calendar/timezone and assumptions with the result.
 
-**Proposed safe first version:** a deterministic, read-only scenario forecast over a complete authorized same-workroom DAG, with explicitly supplied planning start, Mon–Fri working-day calendar and whole positive working-day durations. Display the chosen IANA timezone, skip weekends, and state that holidays and resource leveling are excluded. Planning start is a local calendar date, not a timezone-shifted UTC midnight. Inclusive date spans finish at the end of their last working day; successors start on the next working day. Today uses that same timezone. Do not infer a start from task creation, acceptance or `due_at`.
+**Accepted first version ([decisions 67 to 73](PRODUCT.md#decisions-needed)):** a deterministic, read-only baseline over a complete authorized same-workroom DAG, labeled "Baseline plan", with one start date and timezone per room set by the owner or a human admin, a fixed Mon–Fri working-day calendar and whole working-day durations from 1 to 260. Blank means **Not estimated**, and there's no zero. The Gantt is table first, drawn with CSS grid and SVG and no library. Display the chosen IANA timezone, skip weekends, and state that holidays and resource leveling are excluded. Planning start is a local calendar date, not a timezone-shifted UTC midnight. Inclusive date spans finish at the end of their last working day; successors start on the next working day. Today uses that same timezone. Do not infer a start from task creation, acceptance or `due_at`.
 
 Independent paths may run in parallel; forecast duration is the longest dependency path, never the sum of every estimate. This first scenario does not promise simultaneous tasks assigned to one agent can actually run concurrently: show **No capacity/resource leveling**. Display all tied critical paths where calculable. Slack means latest allowed start/finish within the scenario without moving its finish, not evidence of an agent's actual availability.
 
 Separate the static baseline scenario from a live remaining-work forecast. A baseline must be labeled as such; it must not silently advance with today's date. For a live forecast, unfinished tasks require explicit current remaining-duration information and an as-of date; a total original estimate is not automatically remaining work. Submitted work may have zero execution remaining but still has review wait. Accepted work is not automatically partly done.
 
-Acceptance/review waits must be explicit assumptions. **Proposed:** baseline durations include a declared allowance for acceptance and approval, as the image says; alternatively model explicit wait durations in a later contract. Do not double-count them. If those waits or remaining durations are unknown/stale, show **Forecast unavailable** or a clearly qualified scenario with the omitted assumptions, not a confidently dated live finish. Never default unknown waits to zero behind the scenes.
+Acceptance/review waits must be explicit assumptions. **Accepted ([decision 69](PRODUCT.md#decisions-needed)):** baseline durations include acceptance and approval time, as the image says, and the input and the forecast both say so. Do not double-count them. If those waits or remaining durations are unknown/stale, show **Forecast unavailable** or a clearly qualified scenario with the omitted assumptions, not a confidently dated live finish. Never default unknown waits to zero behind the scenes.
 
-Missing estimates/start/calendar, stale remaining-work information, cycles, unresolved canceled predecessors or an incomplete/redacted graph suppress the affected reliable forecast and critical-path claims. Show a generic authorized explanation and known per-task information; never identify a hidden predecessor or reveal its count/duration through an error or finish date. An independent visible-subset scenario may be offered only with an explicit **Visible subset scenario; not overall finish** label and no hidden-derived inputs. The initial implementation may simply suppress it.
+Missing estimates/start/calendar, stale remaining-work information, cycles, unresolved canceled predecessors or an incomplete/redacted graph suppress the affected reliable forecast and critical-path claims. Show a generic authorized explanation and known per-task information; never identify a hidden predecessor or reveal its count/duration through an error or finish date. The first version leaves out a visible-subset scenario ([decision 73](PRODUCT.md#decisions-needed)). If one is added later, it needs an explicit **Visible subset scenario; not overall finish** label and no hidden-derived inputs.
 
 ## Dependencies and authority
 
@@ -78,13 +78,13 @@ A canceled predecessor is **unresolved**, never silently treated as completed or
 
 Read/write authorization must apply to the edge and both endpoints on every request and after membership changes. Hidden/private tasks must not leak through dependency badges, IDs, counts, arrows, audit details, aggregates, forecast times or critical-path lengths. A read model never grants access. If an authorized projection cannot safely attest complete forecast inputs, return an unavailable result without hidden-derived metadata.
 
-**Proposed write policy to ratify:** requester or human room admin may edit a task's planning metadata/dependencies only with current task authority and permission to read both endpoints; agent ownership or a work role alone grants nothing. Define exact scope and terminal/archived-task behavior with policy tests before exposing editing controls. Restricting first delivery to read-only planning views is acceptable while write policy/contracts are resolved.
+**Accepted write policy ([decisions 62 and 63](PRODUCT.md#decisions-needed)):** the task's requester or a human room admin may edit its planning metadata and dependencies, and only if they see the whole room, because refusing a cycle could otherwise reveal a hidden link. Agents get this under the same rule; agent ownership or a work role alone grants nothing. A dependency belongs to its successor. Edits are refused if the successor is terminal or the room is archived, allowed in `submitted`, and a canceled predecessor can be removed. A plan edit never re-offers a task. Write the policy tests before exposing editing controls.
 
 Planning edges do not launch/wake agents, change assignees/execution ownership, grant review/merge/deploy rights or silently add a server lifecycle gate to accept/submit/verify. Lifecycle changes would need a separate approved design. Rust authorizes, the private API remains service-only, the gateway authenticates/translates, and core/policy remain pure.
 
 ## Required data and contracts (documentation only)
 
-Current task contracts do not provide a full planning model. Do not fake production estimates/edges in the UI or broaden `update_task` ad hoc. The following are **proposed concepts/names**, not existing fields/endpoints or approved schemas:
+Current task contracts do not provide a full planning model. Do not fake production estimates/edges in the UI or broaden `update_task` ad hoc. [Decisions 64 to 66](PRODUCT.md#decisions-needed) accept one `plan_revision` per room that leaves `task.version` alone, one `set_task_plan` command (at most 50 predecessors per task and 5,000 edges per room, audited, waking nobody), and one plan read whose `complete` is false for anyone who doesn't see the whole room and for rooms over 3,000 tasks. None of this exists yet. The table below is what those have to cover, and live-forecast fields wait for [decision 68](PRODUCT.md#decisions-needed)'s later step:
 
 | Need | Proposed contract responsibility |
 | --- | --- |
@@ -95,7 +95,7 @@ Current task contracts do not provide a full planning model. Do not fake product
 | Projections | Authorized tasks/edges, scoped aggregates, completeness and freshness flags, source revisions; no hidden-derived totals or permissions inferred from projection |
 | Forecast | Calendar and start assumptions, calculation/as-of time, baseline versus remaining scenario, completeness, unavailable reason and tied critical paths; stable deterministic output |
 
-Any implementation adds reviewed schemas/contracts and forward-only migrations with the code in a coordinated change, following CLAUDE.md's single-owner rule for contracts/migrations. Decide nullability, limits, endpoint names, capability exposure, estimate editing and version ownership before coding persistence. No contract or migration is changed by this handoff.
+Any implementation adds reviewed schemas/contracts and forward-only migrations with the code in a coordinated change, following CLAUDE.md's single-owner rule for contracts/migrations. Settle nullability and endpoint names in that PR. No contract or migration is changed by this handoff.
 
 ## Code map verified on main
 
@@ -115,7 +115,7 @@ Baseline inspected: `84c7c0c`; code pointers rechecked against `4e784b9` (2026-1
 
 ## Implementation sequence
 
-1. Recheck current code and permissions. Settle the proposed calendar, duration/wait, edit-policy and versioning choices. Write a small contract/design amendment before persistence work; coordinate ownership of migrations/contracts.
+1. Recheck current code and permissions. Write a small contract/design amendment from decisions 62 to 73 before persistence work; coordinate ownership of migrations/contracts, taking turns with M2 under [decision 60](PRODUCT.md#decisions-needed).
 2. Add meaningful pure forecast/DAG tests and policy denial tests, then implement validated data/commands and authorized complete projections. No browser-to-private-API route. Keep unsupported forecasting explicitly unavailable.
 3. Lift shared filters/URL view state; ship synchronized List/Board backed by actual authorized task states and complete or labeled-partial progress. Reuse the existing Sheet and lifecycle actions.
 4. Add the accessible Gantt/table and deterministic baseline scenario. Add live remaining-work forecasting only once its freshness/wait data is supportable. No bar dragging/rescheduling in the bounded first version.
@@ -159,4 +159,4 @@ All feature checks below are **not run**; they are implementation acceptance cri
 
 ## Remaining engineering decisions
 
-Ratify duration units/bounds, baseline versus live remaining semantics and freshness threshold, wait allowances, start/calendar ownership, holiday support, resource-capacity disclosure, planning edit permissions/terminal behavior, graph concurrency token and projection completeness contract. Choose a Gantt rendering approach only after checking keyboard/table parity and bundle impact. These are proposed implementation details, not blockers to preserving the approved visual direction in docs.
+The owner settled these on 2026-11-06 as [decisions 62 to 73](PRODUCT.md#decisions-needed). Dependencies need decisions 62 to 66, and the Gantt also needs 67 to 71. Live forecasting, holidays and capacity leveling wait for real use. What remains is engineering detail for the contract PR: field nullability and endpoint names.
