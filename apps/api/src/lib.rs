@@ -10,14 +10,20 @@ mod wake;
 mod workspace;
 
 use error::ApiError;
-use futures_util::future::join_all;
+use futures_util::future::{join_all, select, Either};
 use podster_assertion::{verify, KeySet, Kind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
 use worker::*;
 
 pub const CALLER_HEADER: &str = "x-podster-caller";
 const CARDS_PER_PAGE: u32 = 20;
+const CARD_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
+    300
+} else {
+    3_000
+};
 pub const INTERNAL_INIT_PATH: &str = "/internal/init";
 pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
 pub const INTERNAL_PREVIEW_PATH: &str = "/internal/invitation-preview";
@@ -146,12 +152,17 @@ async fn list_workspace_cards(
     Ok(Response::from_json(&body)?)
 }
 
-/// `None` if the room says this person isn't in it, because the listing can lag. If the room can't answer, the row stays
-/// with no card, since the listing is all that's known.
+/// `None` if the room says this person isn't in it, because the listing can lag. If the room can't answer in time, the row
+/// stays with no card, since the listing is all that's known, and one stuck room doesn't cost the others theirs.
 async fn workspace_card(env: &Env, caller: &Caller, row: &Value) -> Option<Value> {
     let workspace = row["workspace_id"].as_str()?;
     let mut listed = json!({ "workspace_id": workspace, "workspace_name": row["workspace_name"], "role": row["role"], "status": row["workspace_status"], "card": null });
     let read = async {
+        // Tests can't otherwise make a room hang.
+        #[cfg(feature = "failpoints")]
+        if workspace.starts_with("ws_hang_") {
+            Delay::from(Duration::from_millis(CARD_TIMEOUT_MS * 20)).await;
+        }
         let mut caller = caller.clone();
         caller.workspace_id = workspace.to_string();
         let stub = env
@@ -159,22 +170,27 @@ async fn workspace_card(env: &Env, caller: &Caller, row: &Value) -> Option<Value
             .id_from_name(workspace)?
             .get_stub()?;
         let path = format!("/v1/workspaces/{workspace}/card");
-        forward(stub, &path, "", caller_header(&caller)?, Method::Get, None).await
+        let mut response =
+            forward(stub, &path, "", caller_header(&caller)?, Method::Get, None).await?;
+        let card = match response.status_code() {
+            200 => Some(response.json::<Value>().await?),
+            _ => None,
+        };
+        Ok::<_, ApiError>((response.status_code(), card))
     };
-    let mut response: Response = match read.await {
-        Ok(response) => response,
-        Err(_) => return Some(listed),
-    };
-    match response.status_code() {
-        200 => {
-            if let Ok(card) = response.json::<Value>().await {
-                listed["card"] = card;
-            }
-            Some(listed)
+    let timeout = Delay::from(Duration::from_millis(CARD_TIMEOUT_MS));
+    match select(Box::pin(read), timeout).await {
+        Either::Left((Ok((_, Some(card))), _)) => listed["card"] = card,
+        Either::Left((Ok((403 | 404, None)), _)) => return None,
+        Either::Left((Ok((status, None)), _)) => {
+            console_error!("room {workspace} answered {status} for its card");
         }
-        403 | 404 => None,
-        _ => Some(listed),
+        Either::Left((Err(error), _)) => {
+            console_error!("couldn't read room {workspace}'s card: {:?}", error.code());
+        }
+        Either::Right(_) => console_error!("room {workspace}'s card timed out"),
     }
+    Some(listed)
 }
 
 /// Rooms the agents of the organizations this person administers are in. It only shows them, and each read of a task

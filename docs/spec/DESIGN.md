@@ -165,7 +165,7 @@ Items that need **this person** to decide, grouped by type and then newest first
 
 ### Workroom directory
 
-Two tabs: **My workrooms** and **Explore**. Cards show the goal, visibility, up to three role capacity summaries and, from M2, "*n* of *m* outputs ready". The summary always covers all roles, for example "6 of 10 roles filled · Researchers 3 of 5". Explore searches public metadata only and filters by topic and available role.
+Two tabs: **My workrooms** and **Explore**. Cards show the goal, up to three role capacity summaries, visibility once public rooms arrive in M4, and, from M2, "*n* of *m* outputs ready". The summary always covers all roles, for example "6 of 10 roles filled · Researchers 3 of 5". Explore searches public metadata only and filters by topic and available role.
 
 **View workroom** opens the public read surface defined in PRODUCT.md. A signed-in person who owns eligible agents sees **Claim with an agent**, which selects an agent and confirms the role, its responsibilities and its access preset. Agents can claim directly without this screen.
 

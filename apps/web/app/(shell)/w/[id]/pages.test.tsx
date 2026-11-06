@@ -384,7 +384,8 @@ describe("My workrooms", () => {
     expect(screen.getByText("Owner")).toBeInTheDocument();
     expect(screen.getByText("External")).toBeInTheDocument();
     expect(screen.getByText(/<b>Ship<\/b> \*\*it\*\*…$/)).toBeInTheDocument();
-    expect(screen.getByText("1 of 3 roles filled · Writers 1 of 3")).toBeInTheDocument();
+    expect(screen.getByText("1 of 3 roles filled")).toBeInTheDocument();
+    expect(screen.getByText("Writers 1 of 3").textContent).toBe("Roles: Writers 1 of 3");
     expect(screen.queryByRole("link", { name: "More workrooms" })).toBeNull();
   });
 
@@ -392,8 +393,38 @@ describe("My workrooms", () => {
     const card = { goal: null, goal_cut: false, external: false, roles: { count: 2, with_openings: 1, listed: [{ title: "Lead", available: false }, { title: "Writer", available: true }] } };
     replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [{ workspace_id: "ws_1", workspace_name: "L", role: "guest", card }] } });
     render(await MyWorkrooms());
-    expect(screen.getByText("2 roles, 1 with openings · Lead full · Writer open")).toBeInTheDocument();
+    expect(screen.getByText("2 roles, 1 with openings")).toBeInTheDocument();
+    expect(screen.getByText("Lead full · Writer open").textContent).toBe("Roles: Lead full · Writer open");
     expect(screen.queryByText(/Goal:/)).toBeNull();
+  });
+
+  it("keeps a multi-line goal's words apart, and shows no goal when nothing readable is left", async () => {
+    const roles = { count: 0, with_openings: 0, filled: 0, capacity: 0, listed: [] };
+    const row = (workspace_id: string, goal: string) => ({ workspace_id, workspace_name: workspace_id, role: "member", card: { goal, goal_cut: false, external: false, roles } });
+    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [row("a", "Ship the beta\nThen write docs"), row("b", "\u200D")] } });
+    render(await MyWorkrooms());
+    expect(screen.getByText(/Ship the beta Then write docs/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Goal:/)).toHaveLength(1);
+    expect(screen.queryByText(/Unnamed/)).toBeNull();
+  });
+
+  it("doesn't say someone has no rooms when a page came back empty", async () => {
+    const empty = async (data: object, query = {}) => {
+      replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [], ...data } });
+      const view = render(await MyWorkrooms({ searchParams: Promise.resolve(query) }));
+      const said = view.container.textContent ?? "";
+      view.unmount();
+      return said;
+    };
+    // Every row on the page was stale, and there's more.
+    const stale = await empty({ next_offset: 20 });
+    expect(stale).not.toMatch(/aren't in a workroom/);
+    expect(stale).toMatch(/No workrooms to show on this page/);
+    // Past the end.
+    const past = await empty({}, { offset: "500" });
+    expect(past).not.toMatch(/aren't in a workroom/);
+    expect(past).toMatch(/No workrooms to show on this page/);
+    expect(await empty({})).toMatch(/aren't in a workroom/);
   });
 
   it("says so when a room can't answer, and keeps the rest of the row", async () => {

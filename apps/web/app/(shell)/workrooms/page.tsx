@@ -4,11 +4,34 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { roleLabel } from "../w/[id]/team/model";
-import { plainName } from "@/components/agent-content/text";
-import { roleSummary, type WorkroomCard } from "./cards";
+import { plainLine } from "@/components/agent-content/text";
+import { listedRoles, roleTotal, type WorkroomCard } from "./cards";
 import { AdminsOnly, createAccess } from "./new/access";
 
 type Listed = { workspace_id: string; workspace_name: string; role: string; status?: string; card: WorkroomCard | null };
+
+function CardDetails({ card }: { card: WorkroomCard }) {
+  const goal = card.goal ? plainLine(card.goal) : "";
+  const listed = listedRoles(card.roles);
+  return (
+    <>
+      {goal ? (
+        <p className="break-words text-sm">
+          <span className="text-muted-foreground">Goal: </span>
+          {goal}
+          {card.goal_cut ? "…" : ""}
+        </p>
+      ) : null}
+      <p className="text-sm text-muted-foreground">{roleTotal(card.roles)}</p>
+      {listed ? (
+        <p className="break-words text-sm">
+          <span className="text-muted-foreground">Roles: </span>
+          {listed}
+        </p>
+      ) : null}
+    </>
+  );
+}
 
 export default async function MyWorkrooms({ searchParams }: { searchParams?: Promise<{ offset?: string }> } = {}) {
   const offset = (await searchParams)?.offset;
@@ -29,7 +52,8 @@ export default async function MyWorkrooms({ searchParams }: { searchParams?: Pro
       </div>
       {access.state === "refused" ? <AdminsOnly organization={access.organization} adminOf={access.adminOf} /> : null}
       {!rooms.ok ? <ReadFailure /> : null}
-      {rooms.ok && rooms.data.workspaces.length === 0 ? <p className="text-muted-foreground">{access.state === "refused" ? "You aren't in a workroom yet." : "You aren't in a workroom yet. Create one, then add your agents or invite another organization."}</p> : null}
+      {rooms.ok && rooms.data.workspaces.length === 0 && (offset || rooms.data.next_offset) ? <p className="text-muted-foreground">No workrooms to show on this page.</p> : null}
+      {rooms.ok && rooms.data.workspaces.length === 0 && !offset && !rooms.data.next_offset ? <p className="text-muted-foreground">{access.state === "refused" ? "You aren't in a workroom yet." : "You aren't in a workroom yet. Create one, then add your agents or invite another organization."}</p> : null}
       {rooms.ok && rooms.data.workspaces.length > 0 ? (
         <ul className="divide-y rounded-lg border">
           {rooms.data.workspaces.map((room) => (
@@ -44,18 +68,7 @@ export default async function MyWorkrooms({ searchParams }: { searchParams?: Pro
                   <Badge variant="secondary">{roleLabel(room.role)}</Badge>
                 </span>
               </div>
-              {room.card ? (
-                <>
-                  {room.card.goal ? (
-                    <p className="break-words text-sm">
-                      <span className="text-muted-foreground">Goal: </span>
-                      {plainName(room.card.goal)}
-                      {room.card.goal_cut ? "…" : ""}
-                    </p>
-                  ) : null}
-                  <p className="break-words text-sm text-muted-foreground">{roleSummary(room.card.roles)}</p>
-                </>
-              ) : (
+              {room.card ? <CardDetails card={room.card} /> : (
                 <p className="text-sm text-muted-foreground">Couldn't load this workroom's goal and roles.</p>
               )}
             </li>

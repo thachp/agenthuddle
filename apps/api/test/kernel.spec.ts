@@ -5428,6 +5428,21 @@ describe("directory cards", () => {
     await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("ALTER TABLE work_role_away RENAME TO work_role"));
   });
 
+  it("gives up on a room that hangs, and keeps every other row and the next page", async () => {
+    const who: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
+    const mine = (await api(who, "POST", "/v1/workspaces", { name: "A working room", goal: "Ship" })).body.id as string;
+    await runDurableObjectAlarm(stub(mine));
+    const add = (workspace: string, name: string) => BINDINGS.DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, 'org_a', 'member', ?, 0, 1000000)").bind(workspace, who.id, name).run();
+    await add("ws_hang_one", "A hung room");
+    for (let n = 0; n < 20; n++) await add(`ws_after_${n}`, `Later ${n}`);
+    const started = Date.now();
+    const page = await cards(who);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(page.workspaces.find((w) => w.workspace_id === "ws_hang_one")).toMatchObject({ workspace_name: "A hung room", card: null });
+    expect(page.workspaces.find((w) => w.workspace_id === mine).card.goal).toBe("Ship");
+    expect(page.next_offset).toBe(20);
+  });
+
   it("wakes at most a page of rooms, and pages through the rest", async () => {
     const who: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"] };
     for (let n = 0; n < 45; n++) await BINDINGS.DB.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, 'org_a', 'member', ?, 0, 1)").bind(`ws_page_${n}`, who.id, `Room ${n}`).run();

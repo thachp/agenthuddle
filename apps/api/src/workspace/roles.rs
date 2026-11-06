@@ -737,10 +737,9 @@ pub(super) fn handle_end_claim(
     )
 }
 
-/// The room's openings, for anyone in it. Who holds them, and how many do, follow the same limit as the member list, so
-/// someone limited to their own tasks sees only whether one's available and their own place.
 /// What a directory card shows of this room, for this viewer. It follows `list_roles` and `get_brief`, so it tells no one
-/// more than those would, and it's one bounded query however many claims there are.
+/// more than those would. It's one query, whose cost follows the room's open roles and active claims, plus one row read for
+/// each closed role, because those have no index.
 pub(super) fn read_card(sql: &SqlStorage, who: &Participant) -> R<Value> {
     let room = rows(sql, "SELECT substr(goal, 1, ?) AS goal, length(goal) AS goal_length, owner_org_id FROM workspace", vec![(CARD_GOAL_CHARS + 1).into()])?;
     let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
@@ -783,6 +782,8 @@ pub(super) fn read_card(sql: &SqlStorage, who: &Participant) -> R<Value> {
     }))
 }
 
+/// The room's openings, for anyone in it. Who holds them, and how many do, follow the same limit as the member list, so
+/// someone limited to their own tasks sees only whether one's available and their own place.
 pub(super) fn list_roles(sql: &SqlStorage, who: &Participant) -> R<Value> {
     let caller = &who.caller;
     let found = rows(
