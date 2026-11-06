@@ -38,6 +38,8 @@ const EVENT_VERBS: Record<string, string> = {
 };
 
 /** An unknown type shows as the server named it. Types are the API's own constants, never agent text. */
+export const eventsText = (count: number) => `${count} ${count === 1 ? "event" : "events"}`;
+
 export const eventVerb = (type: string) => EVENT_VERBS[type] ?? type;
 
 const AUDIT_ACTIONS: Record<string, string> = {

@@ -222,6 +222,7 @@ const screens = (s) => {
     ["Tasks, board with canceled shown", `${w}/tasks?view=board&canceled=show`, "A canceled task"],
     ["Tasks, board, empty", `/w/${s.emptyRoom}/tasks?view=board`, "No tasks in scope"],
     ["Tasks, long list", `/w/${s.longRoom}/tasks`, "Load more"],
+    ["Activity, long", `/w/${s.longRoom}/activity`, "Load more"],
     ["Task Sheet over the board", `${w}/tasks?view=board&task=${s.reviewScreen.id}`, "Approve submission", "owner", true],
     ["Activity", `${w}/activity`, "Activity"],
     ["Team", `${w}/team`, "Lead agent"],
@@ -939,6 +940,90 @@ async function keyboardPaths(s) {
       });
       console.log(`measure ${TARGET} rows: ${report.join("; ")}; opening a Sheet ${sheet} ms; switching to Board ${switched} ms`);
       ok(sheet < 5000, `opening a Sheet over ${TARGET} rows took ${sheet} ms`);
+    } finally {
+      await own.close();
+    }
+  });
+
+  await keyboardPath("Activity loads as the reader scrolls or presses Load more, one read at a time", async () => {
+    const own = await contextFor(s.owner).newPage();
+    const reads = [];
+    own.on("request", (request) => {
+      if (/\/activity\?.*before=/.test(request.url())) reads.push(request.url());
+    });
+    const events = () => own.locator("main ol > li").count();
+    const grown = (than) => own.waitForFunction((n) => document.querySelectorAll("main ol > li").length > n, than, { timeout: 15_000 });
+    try {
+      await own.goto(`${app}/w/${s.longRoom}/activity`);
+      await hydrated(own);
+      ok((await events()) === 50, `the first read showed ${await events()} events, not one page`);
+      await own.waitForTimeout(500);
+      ok(reads.length === 0, `${reads.length} page reads before anyone scrolled`);
+      // Chromium anchors scrolling by itself, which would hide a page that moves the reader. Safari has no such thing.
+      await own.addStyleTag({ content: "* { overflow-anchor: none !important; }" });
+      const before = await own.evaluate(() => {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+        const row = [...document.querySelectorAll("main ol > li")].find((el) => {
+          const box = el.getBoundingClientRect();
+          return box.top >= 0 && box.bottom <= innerHeight;
+        });
+        window.__row = row;
+        return { top: row?.getBoundingClientRect().top, y: scrollY };
+      });
+      await grown(50);
+      await own.waitForTimeout(3000);
+      ok(reads.length === 1, `one scroll made ${reads.length} reads and ${await events()} events`);
+      const after = await own.evaluate(() => ({ top: window.__row?.getBoundingClientRect().top, y: scrollY }));
+      ok(Math.abs(after.top - before.top) <= 2 && Math.abs(after.y - before.y) <= 2, `a page moved the reader by ${after.top - before.top}px`);
+      // A scroll that goes nowhere asks for nothing, and a move up doesn't either.
+      await own.evaluate(() => window.scrollBy(0, 0));
+      await own.evaluate(() => window.scrollBy(0, -100));
+      await own.waitForTimeout(300);
+      ok(reads.length === 1, "a scroll that wasn't down made another read");
+      // The rest by keyboard: focus stays on the button, in view, until it goes, and each page says what it added.
+      const more = own.getByRole("button", { name: "Load more" });
+      await more.focus();
+      const spoken = new Set();
+      for (let loaded = await events(), presses = 0; presses < 40; presses++) {
+        await own.waitForFunction(() => document.activeElement?.hasAttribute("data-activity-load-more") && document.activeElement.textContent === "Load more", null, { timeout: 15_000 });
+        await own.keyboard.press("Enter");
+        await grown(loaded);
+        loaded = await events();
+        const live = await own.locator('[aria-live="polite"]').filter({ hasText: /more events? loaded/ }).textContent();
+        ok(!spoken.has(live), `the same words were announced twice: ${live}`);
+        spoken.add(live);
+        const end = await own.getByText(/^End of the activity/).count();
+        if (end > 0) break;
+        const box = await own.evaluate(() => {
+          const rect = document.activeElement.getBoundingClientRect();
+          return rect.top >= 0 && rect.bottom <= innerHeight && document.activeElement.hasAttribute("data-activity-load-more");
+        });
+        ok(box, "Load more lost focus, or left the window, after a page landed");
+      }
+      await own.waitForFunction(() => document.activeElement?.textContent?.startsWith("End of the activity"), null, { timeout: 15_000 });
+      const ids = await own.locator("main ol > li").count();
+      ok(reads.length === spoken.size + 1, `${reads.length} reads for ${spoken.size + 1} loads and ${ids} events`);
+      // Filters carry to every page, and a cursor the room doesn't know keeps its own way back.
+      reads.length = 0;
+      await own.goto(`${app}/w/${s.longRoom}/activity?actor=${s.lead.id}`);
+      await hydrated(own);
+      await own.getByRole("button", { name: "Load more" }).click();
+      await grown(50);
+      ok(reads.length === 1 && reads[0].includes(`actor=${s.lead.id}`), `a later page dropped the filter: ${reads[0]}`);
+      await own.goto(`${app}/w/${s.longRoom}/activity?before=evt_${"0".repeat(32)}`);
+      await own.getByText("That page isn't available.").waitFor({ timeout: 15_000 });
+      const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+      const small = await phone.newPage();
+      await small.goto(`${app}/w/${s.longRoom}/activity`);
+      const button = small.getByRole("button", { name: "Load more" });
+      await button.waitFor({ timeout: 15_000 });
+      await button.click();
+      await small.waitForFunction(() => document.querySelectorAll("main ol > li").length > 50, null, { timeout: 15_000 });
+      const size = await button.boundingBox();
+      ok(size && size.height >= 44, `Load more is ${size?.height}px tall at 375px`);
+      const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      ok(overflow <= 0, `long activity scrolls sideways by ${overflow}px at 375px`);
+      await phone.close();
     } finally {
       await own.close();
     }

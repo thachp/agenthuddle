@@ -179,15 +179,13 @@ describe("Activity", () => {
     expect(screen.getAllByText("External").length).toBeGreaterThan(0);
   });
 
-  it("pages back by the event's own ID, keeping filters, and offers the way back", async () => {
+  it("starts from an event's own ID, keeping filters, and offers the way back", async () => {
     replies.set(path, page([event(9, "per_me", "task.message", "tsk_1")], "evt_9"));
     render(await Activity({ params, searchParams: Promise.resolve({ task: "tsk_1", actor: "agt_1", before: "evt_20" }) }));
     expect(seen()[0]).toContain("before=evt_20");
     expect(seen()[0]).toContain("task=tsk_1");
     expect(seen()[0]).toContain("actor=agt_1");
-    const older = screen.getByRole("link", { name: "Older events" }).getAttribute("href") ?? "";
-    expect(older).toContain("before=evt_9");
-    expect(older).toContain("task=tsk_1");
+    expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Back to the newest" }).getAttribute("href")).toBe("/w/ws_1/activity?task=tsk_1&actor=agt_1");
     expect(screen.getByRole("link", { name: "Clear" })).toHaveAttribute("href", "/w/ws_1/activity");
   });

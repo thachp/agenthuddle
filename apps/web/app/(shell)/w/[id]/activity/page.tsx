@@ -1,19 +1,16 @@
 import Link from "next/link";
-import { AgentContent, AuthorLine } from "@/components/agent-content/agent-content";
 import { plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { Button } from "@/components/ui/button";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { loadWorkroom } from "@/lib/workroom";
 import { loadNames, loadTasks, orgNamesOf, orgRows } from "../tasks/load-tasks";
-import { kindOf, nameOf, textNameOf } from "../tasks/task-model";
+import { textNameOf } from "../tasks/task-model";
 import { FIELD, MOBILE_TARGET } from "../team/field";
 import { membersOf } from "../team/model";
+import { ActivityList, type RoomEvent } from "./activity-list";
 import { ClearFilters } from "./clear-filters";
-import { eventVerb, safeId } from "./model";
-import { Time } from "./time";
-
-type RoomEvent = { id: string; type: string; from: { id: string; org?: string | null }; external: boolean; task_id: string | null; task_title: string | null; reason: string | null; created_at: number };
+import { safeId } from "./model";
 
 export default async function Activity({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const [{ id }, query] = await Promise.all([params, searchParams]);
@@ -37,7 +34,6 @@ export default async function Activity({ params, searchParams }: { params: Promi
   const [names, tasks] = await Promise.all([loadNames(gatewayQuery, orgs), loadTasks(gatewayQuery, id, "", 1)]);
   const taskOptions = tasks.ok ? tasks.data.tasks : [];
   const base = `/w/${id}/activity`;
-  const pageLink = (cursor: string) => `${base}?${new URLSearchParams({ before: cursor, ...Object.fromEntries(filters) })}`;
   return (
     <section className="max-w-3xl space-y-3">
       <h1 id="activity-heading" tabIndex={-1} className="text-2xl font-semibold outline-none">
@@ -79,46 +75,24 @@ export default async function Activity({ params, searchParams }: { params: Promi
       {events.ok ? (
         <>
           {rows.length === 0 ? <p className="text-muted-foreground">{before ? "Nothing before this point." : filtered ? "Nothing here matches, or it's not something you can see." : "Nothing has happened here yet."}</p> : null}
-          <ol className="divide-y rounded-lg border empty:hidden">
-            {rows.map((event) => {
-              const author = { name: nameOf(event.from.id, me, names), kind: kindOf(event.from.id), organization: event.from.org ? (orgNames[event.from.org] ?? event.from.org) : undefined, viewer: event.from.id === me };
-              return (
-                <li key={event.id} className="space-y-1 p-3 text-sm">
-                  {/* The name, whether it's a person or an agent, and any label on it, the same as a task's history. */}
-                  <div title={event.from.id}>
-                    <AuthorLine author={author} external={event.external} />
-                  </div>
-                  <p className="break-words">
-                    {eventVerb(event.type)}
-                    {event.task_id ? (
-                      <>
-                        {" "}
-                        <Link href={`/w/${id}/tasks?task=${encodeURIComponent(event.task_id)}`} prefetch={false} title={event.task_id} className="break-words text-primary underline">
-                          {event.task_title ? plainName(event.task_title) : event.task_id}
-                        </Link>
-                      </>
-                    ) : null}
-                  </p>
-                  {event.reason ? <AgentContent author={author} external={event.external} body={event.reason} /> : null}
-                  <p className="text-muted-foreground">
-                    <Time at={event.created_at} now={now} />
-                  </p>
-                </li>
-              );
-            })}
-          </ol>
-          <div className="flex flex-wrap gap-4">
-            {before ? (
-              <Link href={filtered ? `${base}?${filters}` : base} prefetch={false} className="text-primary underline">
-                Back to the newest
-              </Link>
-            ) : null}
-            {events.data.next_before ? (
-              <Link href={pageLink(events.data.next_before)} prefetch={false} className="text-primary underline">
-                Older events
-              </Link>
-            ) : null}
-          </div>
+          {/* Keyed on what it was first given, so new filters or a new first page never join pages already held. */}
+          <ActivityList
+            key={`${id}|${before ?? ""}|${filters}|${rows[0]?.id ?? ""}|${events.data.next_before ?? ""}`}
+            roomId={id}
+            filters={filters.toString()}
+            first={rows}
+            nextBefore={events.data.next_before}
+            newest={filtered ? `${base}?${filters}` : base}
+            me={me}
+            names={names}
+            orgNames={orgNames}
+            now={now}
+          />
+          {before ? (
+            <Link href={filtered ? `${base}?${filters}` : base} prefetch={false} className="block text-primary underline">
+              Back to the newest
+            </Link>
+          ) : null}
         </>
       ) : events.status === 400 ? (
         <p className="text-muted-foreground">
