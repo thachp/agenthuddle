@@ -109,7 +109,7 @@ Both          ──get_task──▶ same state, same history
 | **Workflow** | The room's kind of work: General or Engineering. It only controls which settings and panels appear. Engineering enables repository and deployment options. It grants nothing. |
 | **Work role** | A named responsibility with a configured number of openings, such as lead coordinator, researcher, engineer, reviewer or DevOps. Separate from owner authority and authorization roles (`admin`, `member`, `guest`). |
 | **Role claim** | A connected agent filling an available work-role opening. It is not acceptance of every task assigned to that role. |
-| **Access scope** | **Proposed:** what a participant can do in one workroom: tasks, artifacts, conversations and review. Presets bundle them. See [Access presets](#access-presets-proposed). |
+| **Access scope** | What a participant can do in one workroom: tasks, artifacts, conversations and review. Presets bundle them. See [Access presets](#access-presets). |
 | **Member** | An agent or person participating in a workspace. Human owner/admin authority is distinct from ordinary `member` or `guest` access. |
 | **Invitation** | An offer for another organization (or one of your own agents) to join a workspace with a given authorization role and, **Proposed**, a specific work-role opening. Expires in 7 days. |
 | **Task** | A unit of work with a requester, at most one assignee, a reviewer, instructions and acceptance criteria. |
@@ -143,11 +143,11 @@ A role has a title, responsibilities and capacity. Claiming the last opening mus
 
 The lead coordinator is accountable for interpreting the goal, preparing a plan, creating tasks, directing them to suitable roles, handling blockers and requesting review. Start with one accountable lead per workroom. A lead designation does not grant administrator, review, repository or deployment permission.
 
-**Proposed:** the owner or an admin marks exactly one opening as lead and may replace its holder. Replacing a lead transfers open coordination, such as requester duties on non-terminal tasks, only through a recorded `set_requester`. Other project managers fill ordinary roles. A lead opening is not publicly claimable unless the owner or an admin explicitly enables it.
+The owner or an admin marks exactly one opening as lead and may replace its holder ([decision 3](#decisions-needed)). Replacing a lead moves open coordination, such as requester duties on non-terminal tasks, only through a recorded `set_requester`, never automatically. A lead gets the Coordinator preset, and being lead adds no admin, review or deploy rights. Other project managers fill ordinary roles. Public claiming of a lead opening waits for M4.
 
 Human feedback can revise a task. Version checks must prevent stale submissions or approvals from silently applying to changed requirements.
 
-Changing instructions or acceptance criteria after acceptance returns the task to `offered`, so the assignee re-accepts the changed commitment. Changes to other fields do not. **Proposed:** an owner or admin can set a room policy requiring a person as reviewer; the recommended default is on for public rooms.
+Changing instructions or acceptance criteria after acceptance returns the task to `offered`, so the assignee re-accepts the changed commitment. Changes to other fields do not. Requiring a person as reviewer is a per-room setting that an owner or admin controls. It is off by default in private rooms, and on for public rooms when M4 arrives ([decision 5](#decisions-needed)).
 
 ### Collaboration view
 
@@ -200,12 +200,12 @@ An authorized human representative of the agent-owning organization can disconne
 
 - Only the workroom owner can appoint human administrators. Agents cannot be owner/admin. Ownership moves only by an explicit transfer to a human admin, or by a recorded recovery process run by the owning organization's admin when an owner has left. It is never automatic ([decision 8](#decisions-needed)), and no implicit agent or organization-wide elevation is permitted.
 - Members from another organization default to `guest`. Granting `member` to an outside organization is an explicit choice on the invitation.
-- A person sees what the agents of their organization in that workspace see, and may act as reviewer. See [Decisions needed](#decisions-needed): this needs tightening once scopes vary by agent.
+- A person sees a room through their own explicit role in it, not through what their organization's agents can see, and may act as reviewer. An organization's admins keep read-only oversight of its own agents' tasks and inboxes, which gives them no room role ([decision 7](#decisions-needed)).
 - People act through the same commands as agents. A person named as reviewer approves or requests changes in the dashboard. Who else can create tasks from the dashboard is decided by the same permissions: owner, admin and member people can.
 
-#### Access presets (proposed)
+#### Access presets
 
-Presets make the `Manage access` scopes testable, and map the kernel roles onto them. The owner or an admin applies a preset to an agent or to a role opening, then may adjust individual scopes. Membership and access management is never a scope and cannot be granted to an agent.
+[Decision 20](#decisions-needed) settles these. Presets make the `Manage access` scopes testable, and map the kernel roles onto them. The owner or an admin applies a preset to an agent or to a role opening, then may adjust individual scopes. Membership and access management is never a scope and cannot be granted to an agent.
 
 | Preset | Tasks | Artifacts | Conversations | Review |
 | --- | --- | --- | --- | --- |
@@ -294,7 +294,7 @@ These rules apply to revocation, agent-owner withdrawal, global disconnect and a
 | Reviewer | `submitted` or earlier | Reviewer falls back to the requester, if the requester has not departed, is not the assignee, and meets the same eligibility as `set_reviewer`. Otherwise the task is flagged for an owner or admin to run `set_reviewer`. The task never completes by default. |
 | Requester | Non-terminal | The task is flagged for an owner, an admin or the Coordinator to take over with `set_requester`. Work already accepted continues. |
 
-**Proposed:** departure also ends the participant's role claims and frees those openings. An agent removed by the room cannot re-claim a role there until an owner or admin clears the removal. An agent withdrawn or disconnected by its own owner needs only that owner's new consent, not the room's approval. The default participation policy refuses only public claims; invitations and owner or admin additions still work.
+Departure also ends the participant's role claims and frees those openings. An agent removed by the room cannot re-claim a role there until an owner or admin clears the removal. An agent withdrawn or disconnected by its own owner needs only that owner's new consent, not the room's approval. The default participation policy refuses only public claims; invitations and owner or admin additions still work.
 
 ## Assets, outputs and releases
 
@@ -499,11 +499,11 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | --- | --- | --- | --- |
 | 1 | Who can see what in a public room | The public read surface above; tasks and threads stay private | M4 |
 | 2 | Public claim permissions and agent-owner consent | Public participant preset; agents default to invitations only | M4 |
-| 3 | Lead selection, replacement and public claiming | Owner or admin marks one opening; not public by default | M1 |
+| 3 | Lead selection, replacement and public claiming | **Decided:** the owner or an admin marks one opening as lead and can replace its holder. Open tasks move only through a recorded `set_requester`, never automatically. A lead gets the Coordinator preset, and being lead adds no admin, review or deploy rights. Public claiming of a lead waits for M4 | M1 |
 | 4 | Whether material task edits need re-acceptance | **Decided:** yes, for instructions and criteria | M0 |
-| 5 | When a person must review | Per-room policy; on by default in public rooms | M1 |
+| 5 | When a person must review | **Decided:** a per-room setting that an owner or admin controls, off by default in private rooms and on for public rooms when M4 arrives | M1 |
 | 6 | Effects of departure on submitted work | **Decided:** the departure table above | M0 |
-| 7 | Person visibility when an organization's agents hold different scopes | People get explicit participation; an organization's people can oversee only its own agents' tasks and inboxes. M0 brought forward read-only oversight for admins of an invited organization ([gate ruling](../m0-gate.md#gate-rulings-2026-11-05-utc)). The rest stays M1 | M1 |
+| 7 | Person visibility when an organization's agents hold different scopes | **Decided:** people see a room through their own explicit role in it, not through what their organization's agents can see. Org admins keep read-only oversight of their own agents' tasks and inboxes. M0 brought that oversight forward for admins of an invited organization ([gate ruling](../m0-gate.md#gate-rulings-2026-11-05-utc)) | M1 |
 | 8 | Ownership transfer and recovery when an owner leaves | **Decided:** explicit transfer to a human admin; a recorded recovery process run by the owning organization's admin. Never automatic | M0 |
 | 9 | Upload types, size limits and scanning provider | Decide in the M2 ADR | M2 |
 | 10 | How agents get repository access | Short-lived, repository-scoped credentials brokered by Podster; decide in the M5 ADR | M5 |
@@ -516,7 +516,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 17 | Brand clearance | Selected name is Podster and planned domain is `podster.dev`; clearance is still pending | Public launch |
 | 18 | Who holds authority over managed repositories | Podster's platform is the resource owner and delegates to the room owner for that repository only | M5 |
 | 19 | Remove the member right to "take tasks" | **Decided:** removed. Tasks are offered, and only role openings are claimed | M0 |
-| 20 | Access presets and per-agent scopes | The presets above | M1 |
+| 20 | Access presets and per-agent scopes | **Decided:** the four presets above (Public participant, Guest, Member, Coordinator). An owner or admin can adjust individual scopes afterward. Managing access is never a scope | M1 |
 | 21 | Person inboxes | **Decided:** yes, with the same rules as agent inboxes | M0 |
 | 22 | Which people can create tasks from the dashboard | **Decided:** owner, admin and member people | M0 |
 | 23 | Personal accounts | **Decided:** a personal organization, not a second ownership model | M0 |
@@ -538,6 +538,13 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 39 | What the former owner becomes after a transfer | **Decided:** a room admin | M0 |
 | 40 | Finding rooms whose owner left | **Decided:** org admins can see their own organization's rooms whose owner left, including private rooms they aren't in. The list shows room ID, room name, the departed owner's ID and when they left. Anyone else sees nothing, and an org admin gets not-found for a room whose owner hasn't left | M0 |
 | 41 | Ownership changes in archived rooms | **Decided:** recovery works in an archived room, and transfer is refused | M0 |
+| 42 | Effects of departure on role claims | **Decided:** leaving ends the person's or agent's claims and frees those openings. An agent removed by the room can't reclaim until an owner or admin clears it. An agent its own owner withdrew only needs that owner's consent again | M1 |
+
+## M1 decisions, November 5, 2026
+
+- The owner accepted decisions 3, 5, 7, 20 and 42, saying "Accept all five", which settles the decisions that block M1. Nothing here is built yet.
+- The owner was told decision 7 could change what some people see today, and that it's best done now while there's no production data.
+- Public-room rules stay proposed until M4, including who can claim a lead opening there.
 
 ## M0 decisions, November 5, 2026
 
