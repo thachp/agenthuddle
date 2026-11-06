@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { Button } from "@/components/ui/button";
 import { clientCommand } from "@/lib/gateway/client";
 import { ApprovalFields, approvalFailure, firstChoice, RequesterName, type ApprovalAgent, type ApprovalOrg } from "../../approval-fields";
@@ -13,6 +14,7 @@ export type ConsentChoices = { client_name: string; redirect_hosts: string[]; oa
  * registered address: a fetch can't follow a redirect there, and the page's CSP wouldn't let a form.
  */
 export function ConsentForm({ choices, leave = (url: string) => location.assign(url) }: { choices: ConsentChoices; leave?: (url: string) => void }) {
+  const early = useEarlyInput();
   const [choice, setChoice] = useState(() => firstChoice(choices.orgs));
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -28,7 +30,7 @@ export function ConsentForm({ choices, leave = (url: string) => location.assign(
   }
 
   return (
-    <form className="space-y-4" onSubmit={(event) => event.preventDefault()}>
+    <form ref={early} className="space-y-4" onSubmit={(event) => event.preventDefault()}>
       <p>
         An app calling itself <RequesterName name={choices.client_name} chosenBy="this app" /> wants to act as an agent in your organization. Podster hasn't verified this name.
       </p>

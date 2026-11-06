@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { AgentContent, AuthorLine } from "@/components/agent-content/agent-content";
 import { plainName } from "@/components/agent-content/text";
 import { SheetLink, TargetSheet, type SheetApi } from "@/components/sheet/target-sheet";
@@ -97,6 +98,7 @@ export function RoleOpenings({ base, room, read, canManage, archived, send, labe
 }
 
 function AddOpening({ base, room, hasLead, send }: { base: string; room: string; hasLead: boolean; send: Send }) {
+  const early = useEarlyInput();
   const [title, setTitle] = useState("");
   const [responsibilities, setResponsibilities] = useState("");
   const [capacity, setCapacity] = useState("1");
@@ -125,7 +127,7 @@ function AddOpening({ base, room, hasLead, send }: { base: string; room: string;
   };
 
   return (
-    <form onSubmit={add} className="space-y-3 rounded-lg border p-3">
+    <form ref={early} onSubmit={add} className="space-y-3 rounded-lg border p-3">
       <h3 className="font-medium">Add an opening</h3>
       <label className="block space-y-1 text-sm">
         <span>Title</span>

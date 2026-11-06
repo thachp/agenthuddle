@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { useEffect, useState } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
@@ -61,6 +62,7 @@ function groupLabels(groups: PeopleGroup[]) {
  * could say nothing changed when the first attempt did commit.
  */
 function Row({ room, groups, me, finished, finish, reopen, hold, refresh }: { room: OwnerlessRoom; groups: PeopleGroup[]; me: string; finished: boolean; finish: () => void; reopen: () => void; hold: (unresolved: boolean) => void; refresh: () => void }) {
+  const early = useEarlyInput<HTMLDivElement>();
   const commands = useCommands(null);
   const { send, noticeRef, clear, retrying, review } = commands;
   const [chosen, setChosen] = useState("");
@@ -100,7 +102,7 @@ function Row({ room, groups, me, finished, finish, reopen, hold, refresh }: { ro
         }}
       />
       {/* Hidden, not removed: the confirmation is still closing, and moves focus to the notice when it has. */}
-      <div hidden={finished}>
+      <div ref={early} hidden={finished}>
         <div className="flex flex-wrap items-end gap-2">
           <label className="block min-w-0 flex-1 basis-56 space-y-1">
             <span className="font-medium">New owner</span>

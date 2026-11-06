@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { plainName } from "@/components/agent-content/text";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,6 +13,7 @@ const MAX_NAME_BYTES = 200;
 
 /** Rename, archive and bring back. Shown to those the server says may manage this room, and Rust decides each request. */
 export function RoomControls({ roomId, name, policyVersion, archived }: { roomId: string; name: string; policyVersion: number; archived: boolean }) {
+  const early = useEarlyInput();
   const commands = useCommands(policyVersion);
   const { send, noticeRef, clear, retrying } = commands;
   // Null until the person edits, so a rename from elsewhere shows after a refresh, and their own text survives a conflict.
@@ -34,7 +36,7 @@ export function RoomControls({ roomId, name, policyVersion, archived }: { roomId
   return (
     <div className="space-y-4">
       <CommandNotice commands={commands} />
-      <form onSubmit={rename} className="space-y-2">
+      <form ref={early} onSubmit={rename} className="space-y-2">
         <label className="block space-y-1">
           <span className="font-medium">Name</span>
           <Input

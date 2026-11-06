@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
 import { AuthorLine } from "@/components/agent-content/agent-content";
 import { plainName } from "@/components/agent-content/text";
@@ -148,6 +149,8 @@ export function TeamScreen(props: TeamProps) {
 }
 
 function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames, memberIds, send }: { base: string; isOwner: boolean; orgs: OrgOption[] | null; agents: AgentOption[] | null; agentsPartial: boolean; orgNames: Record<string, string>; memberIds: Set<string>; send: Send }) {
+  const early2 = useEarlyInput();
+  const early = useEarlyInput();
   const available = agents?.filter((agent) => !memberIds.has(agent.id)) ?? [];
   const [agent, setAgent] = useState("");
   const [agentRole, setAgentRole] = useState<"member" | "guest">("member");
@@ -180,7 +183,7 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
         </h2>
         <p className="text-sm text-muted-foreground">Only the workroom's own organization can be added directly. Invite anyone else below.</p>
       </div>
-      <form onSubmit={addAgent} className="space-y-3 rounded-lg border p-3">
+      <form ref={early} onSubmit={addAgent} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add an agent</h3>
         {agents === null ? <ReadFailure /> : null}
         {agentsPartial ? <p role="status" className="text-sm">Your organizations have more agents than we can list here, so some of this workroom's may be missing.</p> : null}
@@ -226,7 +229,7 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
           <ReadFailure />
         </div>
       ) : (
-      <form onSubmit={addPerson} className="space-y-3 rounded-lg border p-3">
+      <form ref={early2} onSubmit={addPerson} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add a person</h3>
         <p className="text-sm text-muted-foreground">People are added by their person ID, because Podster has no directory of an organization's people yet.</p>
         <div className="grid gap-3 sm:grid-cols-3">
@@ -265,6 +268,7 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
 type Created = { id: string; token?: string; role: string; expires_at: number };
 
 function Invitations({ openings, base, room, archived, invitations, orgLabel, label, send, focusAfter }: { openings: RoleRead["roles"]; base: string; room: string; archived: boolean; invitations: TeamProps["invitations"]; orgLabel: (id: string) => string; label: (id: string) => string; send: Send; focusAfter: RefObject<HTMLDivElement | null> }) {
+  const early = useEarlyInput();
   const [role, setRole] = useState<"guest" | "member">("guest");
   const [invitedOrg, setInvitedOrg] = useState("");
   const [guestCanCreate, setGuestCanCreate] = useState(false);
@@ -359,7 +363,7 @@ function Invitations({ openings, base, room, archived, invitations, orgLabel, la
       {archived ? (
         <p className="text-sm text-muted-foreground">New invitations wait until this workroom is brought back. Links below can't be used until then, but you can still withdraw them.</p>
       ) : (
-      <form onSubmit={create} className="space-y-3 rounded-lg border p-3">
+      <form ref={early} onSubmit={create} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Create an invitation</h3>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1 text-sm">

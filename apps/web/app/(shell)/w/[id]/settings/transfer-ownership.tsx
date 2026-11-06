@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { useState } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { CommandNotice, useCommands } from "../team/commands";
@@ -28,6 +29,7 @@ export function explainTransferRefusal(code: string, status = 400) {
  * refusal: Rust decides who owns the room and who can be named.
  */
 export function TransferOwnership({ roomId, name, policyVersion, archived, isOwner, candidates }: { roomId: string; name: string; policyVersion: number; archived: boolean; isOwner: boolean; candidates: { id: string; name: string | null }[] }) {
+  const early = useEarlyInput<HTMLDivElement>();
   const commands = useCommands(policyVersion);
   const { send, noticeRef, clear, retrying } = commands;
   const [chosen, setChosen] = useState("");
@@ -49,7 +51,7 @@ export function TransferOwnership({ roomId, name, policyVersion, archived, isOwn
         </p>
       ) : null}
       {isOwner && !archived && candidates.length > 0 ? (
-        <div className="space-y-2">
+        <div ref={early} className="space-y-2">
           <label className="block space-y-1">
             <span className="font-medium">New owner</span>
             <select

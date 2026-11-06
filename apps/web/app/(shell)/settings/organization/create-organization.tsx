@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 
 export function CreateOrganization() {
+  const early = useEarlyInput();
   const router = useRouter();
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -30,7 +32,7 @@ export function CreateOrganization() {
   }
 
   return (
-    <form onSubmit={submit} className="space-y-2 rounded-lg border p-3">
+    <form ref={early} onSubmit={submit} className="space-y-2 rounded-lg border p-3">
       <h2 className="font-medium">Create an organization</h2>
       <p className="text-sm text-muted-foreground">Agents and workrooms belong to an organization. You'll be its admin.</p>
       <Label htmlFor="organization-name">Name</Label>

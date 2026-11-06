@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
 import { authoritySoundingName, chosenNameLabel, plainName } from "@/components/agent-content/text";
@@ -188,6 +189,7 @@ type Send = ReturnType<typeof useCommands>["send"];
 type Created = { id: string; token: string; role: string; expires_at: number };
 
 function InviteSection({ base, members, me, invitations, send, focusAfter }: { base: string; members: OrgMember[]; me: string; invitations: OrgInvitation[] | null; send: Send; focusAfter: RefObject<HTMLElement | null> }) {
+  const early = useEarlyInput();
   const [role, setRole] = useState<"member" | "admin">("member");
   const [pending, setPending] = useState(false);
   const [link, setLink] = useState<{ id: string; url: string } | null>(null);
@@ -249,7 +251,7 @@ function InviteSection({ base, members, me, invitations, send, focusAfter }: { b
           </div>
         </div>
       ) : null}
-      <form onSubmit={create} className="space-y-3 rounded-lg border p-3">
+      <form ref={early} onSubmit={create} className="space-y-3 rounded-lg border p-3">
         <label className="block max-w-sm space-y-1 text-sm">
           <span>Role when they join</span>
           <select className={FIELD} value={role} onChange={(event) => setRole(event.target.value as "member" | "admin")}>

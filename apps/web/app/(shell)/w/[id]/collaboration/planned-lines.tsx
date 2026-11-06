@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEarlyInput } from "@/hooks/use-early-input";
 import { useRef, useState, type FormEvent } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { ReadFailure } from "@/components/shell/read-failure";
@@ -107,6 +108,7 @@ function NeedsRoles({ roomId }: { roomId: string }) {
 }
 
 function AddLine({ base, roles, send }: { base: string; roles: RoleChoice[]; send: Send }) {
+  const early = useEarlyInput();
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [label, setLabel] = useState("");
@@ -144,7 +146,7 @@ function AddLine({ base, roles, send }: { base: string; roles: RoleChoice[]; sen
     </option>
   ));
   return (
-    <form onSubmit={add} className="space-y-3 rounded-lg border p-3">
+    <form ref={early} onSubmit={add} className="space-y-3 rounded-lg border p-3">
       <h3 className="font-medium">Plan a line</h3>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="min-w-0 space-y-1 text-sm">
