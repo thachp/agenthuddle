@@ -14,6 +14,7 @@ vi.mock("@/lib/workroom", () => ({ loadWorkroom: async () => ({ id: "ws_1" }) })
 
 const { default: Collaboration } = await import("./page");
 const { textNameOf } = await import("../tasks/task-model");
+const { truncate } = await import("@/components/agent-content/text");
 
 const params = Promise.resolve({ id: "ws_1" });
 const path = "/api/v1/workspaces/ws_1/collaboration";
@@ -85,10 +86,12 @@ describe("Collaboration", () => {
   });
 
   it("labels a chosen name in the map, cut without splitting a character", async () => {
-    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_a", name: "😀".repeat(40) }, { id: "agt_b", name: "Podster Admin" }] } });
+    replies.set("/api/agents", { ok: true, data: { agents: [{ id: "agt_a", name: `a${"😀".repeat(40)}` }, { id: "agt_b", name: "Podster" }] } });
     const { container } = await show({ view: "map" });
     const labels = [...container.querySelectorAll("svg g text")].map((el) => el.textContent ?? "");
-    expect(labels.some((label) => label.includes("Podster Admin"))).toBe(true);
+    expect(labels).toContain(truncate(textNameOf("agt_b", "per_me", { agt_b: "Podster" }), 24).text);
+    expect(labels.some((label) => label.startsWith("a😀"))).toBe(true);
+    expect(textNameOf("agt_b", "per_me", { agt_b: "Podster" })).not.toBe("Podster");
     expect(labels.every((label) => !/[\uD800-\uDBFF]$/.test(label))).toBe(true);
   });
 
