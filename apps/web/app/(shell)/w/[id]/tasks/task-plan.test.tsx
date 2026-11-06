@@ -25,6 +25,7 @@ let calls: Call[];
 let answers: Record<string, () => Response | Promise<Response>>;
 const setUnsaved = vi.fn();
 const refresh = vi.fn();
+const refreshList = vi.fn();
 
 const apiFor = (over: { status?: string; requester?: string; archived?: boolean } = {}) =>
   ({
@@ -32,6 +33,7 @@ const apiFor = (over: { status?: string; requester?: string; archived?: boolean 
     setUnsaved,
     setSending: vi.fn(),
     refresh,
+    refreshList,
   }) as unknown as SheetApi<LoadedTask>;
 
 const open = async (api = apiFor(), role: string | undefined = "member") => {
@@ -48,6 +50,7 @@ beforeEach(() => {
   calls = [];
   setUnsaved.mockClear();
   refresh.mockClear();
+  refreshList.mockClear();
   answers = {
     GET: () => json(200, whole),
     PUT: () => json(200, { task_id: "tsk_1", duration_days: 5, predecessors: ["tsk_2", "tsk_3"], plan_revision: 8, plan_changed_at: 2 }),
@@ -152,6 +155,8 @@ describe("editing a plan", () => {
     expect(saves()[0].body).toEqual({ plan_revision: 7, duration_days: 5, predecessors: ["tsk_2", "tsk_3"] });
     expect(screen.getByText(/5 working days/)).toBeInTheDocument();
     expect(refresh).toHaveBeenCalled();
+    // The list behind can show what the plan says, so it reads again too.
+    expect(refreshList).toHaveBeenCalled();
     // The next save answers to the new revision, without reading the whole room again.
     expect(calls.filter((call) => call.method === "GET")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Edit plan" })).toHaveFocus();
@@ -206,6 +211,77 @@ describe("editing a plan", () => {
     await waitFor(() => expect(saves()[0].body).toEqual({ plan_revision: 7, duration_days: 3, predecessors: [] }));
   });
 
+  it("doesn't offer a finished task's plan when the read may have left links out, and says why", async () => {
+    answers.GET = () => json(200, { ...whole, complete: false, tasks: [row("tsk_1", "This task", "completed", 3)], edges: [] });
+    await open(apiFor({ status: "completed" }));
+    expect(await screen.findByText(/may have links this read leaves out/)).toBeInTheDocument();
+    expect(screen.getByText("None shown")).toBeInTheDocument();
+    expect(screen.queryByText("Nothing listed")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit plan" })).toBeNull();
+  });
+
+  it("still offers an unfinished task's plan when the read is cut, because its list is always whole", async () => {
+    answers.GET = () => json(200, { ...whole, complete: false });
+    await openEditor();
+    expect(screen.getByLabelText("Estimate in working days")).toBeInTheDocument();
+  });
+
+  it("goes by the Sheet's status, which is fresher than the plan read", async () => {
+    await openEditor(apiFor({ status: "completed" }));
+    expect(screen.queryByLabelText("Estimate in working days")).toBeNull();
+  });
+
+  it("moves focus somewhere that's still there after Add and Remove, and says what happened", async () => {
+    answers.GET = () => json(200, { ...whole, edges: [{ predecessor: "tsk_2", successor: "tsk_1" }, { predecessor: "tsk_4", successor: "tsk_1" }] });
+    await openEditor();
+    await userEvent.click(screen.getByRole("button", { name: "Add Second step" }));
+    expect(screen.getByLabelText("Add a task that comes first")).toHaveFocus();
+    expect(screen.getByText("Added Second step.")).toHaveAttribute("role", "status");
+    // Removing the first moves to what's now first, then the last to the row before it, then the field.
+    await userEvent.click(screen.getByRole("button", { name: "Remove First step" }));
+    expect(screen.getByRole("button", { name: "Remove Dropped" })).toHaveFocus();
+    expect(screen.getByText("Removed First step.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Remove Second step" }));
+    expect(screen.getByRole("button", { name: "Remove Dropped" })).toHaveFocus();
+    await userEvent.click(screen.getByRole("button", { name: "Remove Dropped" }));
+    expect(screen.getByLabelText("Add a task that comes first")).toHaveFocus();
+  });
+
+  it("on a finished task, moves from the last Remove to Save, because there's no field", async () => {
+    answers.GET = () => json(200, { ...whole, tasks: [row("tsk_1", "This task", "completed"), row("tsk_4", "Dropped", "canceled")], edges: [{ predecessor: "tsk_4", successor: "tsk_1" }] });
+    await openEditor(apiFor({ status: "completed" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove Dropped" }));
+    expect(screen.getByRole("button", { name: "Save plan" })).toHaveFocus();
+  });
+
+  it("stops at 50 predecessors and says so", async () => {
+    const others = Array.from({ length: 51 }, (_, n) => row(`tsk_p${n}`, `Task ${n}`));
+    answers.GET = () => json(200, { ...whole, tasks: [row("tsk_1", "This task"), ...others], edges: others.slice(0, 50).map((o) => ({ predecessor: o.id, successor: "tsk_1" })) });
+    await openEditor();
+    expect(screen.getByText(/can come after 50 others at most/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add Task 50" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Remove Task 0" }));
+    expect(screen.getByRole("button", { name: "Add Task 50" })).toBeEnabled();
+  });
+
+  it("tells tasks with the same title apart on their buttons", async () => {
+    answers.GET = () => json(200, { ...whole, tasks: [row("tsk_1", "This task"), row("tsk_5", "Same"), row("tsk_6", "Same")], edges: [] });
+    await openEditor();
+    expect(screen.getByRole("button", { name: "Add Same (tsk_5)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add Same (tsk_6)" })).toBeInTheDocument();
+  });
+
+  it("closes the form if a newer read shows this person can't edit any more", async () => {
+    answers.PUT = () => refused(409, "plan_conflict");
+    await openEditor();
+    await userEvent.click(screen.getByRole("button", { name: "Add Second step" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save plan" }));
+    answers.GET = () => json(200, { complete: false, tasks: [row("tsk_1", "This task")], edges: [] });
+    await userEvent.click(await screen.findByRole("button", { name: "Load the latest plan" }));
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Edit plan" })).toBeNull());
+    expect(screen.getByText(/shows only tasks you can see/)).toBeInTheDocument();
+  });
+
   it("narrows what can be added, and never offers the task itself or what's chosen", () => {
     const found = candidates(whole, "tsk_1", ["tsk_2"], "");
     expect(found.shown.map((t) => t.id)).toEqual(["tsk_3", "tsk_4"]);
@@ -253,6 +329,21 @@ describe("a refusal", () => {
     expect(screen.getByLabelText("Estimate in working days")).toHaveValue("3");
     await userEvent.click(screen.getByRole("button", { name: "Save plan" }));
     await waitFor(() => expect(saves()[1].body.plan_revision).toBe(9));
+  });
+
+  it("keeps the problem and says so when loading the latest plan fails, with the save still on the old revision", async () => {
+    await refusedWith(409, "plan_conflict");
+    answers.GET = () => refused(500, "internal");
+    await userEvent.click(screen.getByRole("button", { name: "Load the latest plan" }));
+    expect(await screen.findByText(/couldn't load the latest plan/)).toBeInTheDocument();
+    expect(screen.queryByText(/This is the latest plan/)).toBeNull();
+    expect(screen.getByText(/changed this room's plan/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load the latest plan" })).toBeInTheDocument();
+    // It clears once a read works.
+    answers.GET = () => json(200, whole);
+    await userEvent.click(screen.getByRole("button", { name: "Load the latest plan" }));
+    expect(await screen.findByText(/This is the latest plan/)).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load the latest plan/)).toBeNull();
   });
 
   it("after a lost response, can't claim either way, and repeating it uses the same key", async () => {

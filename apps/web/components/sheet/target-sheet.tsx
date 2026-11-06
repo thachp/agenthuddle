@@ -32,6 +32,8 @@ export type SheetApi<T> = {
   run: <R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string) => Promise<GatewayResult<R> | null>;
   /** Reads the target again, for a command that doesn't go through `run`. */
   refresh: () => void;
+  /** Reloads the list behind the Sheet, for a command outside `run` whose result the list can show. */
+  refreshList: () => void;
   close: () => void;
 };
 
@@ -500,7 +502,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
                 {FAILURE_COPY[failedCode] ?? FAILURE_COPY.refused}
               </p>
             ) : null}
-            {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, setSending, saving: inFlight || settling, run, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
+            {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, setSending, saving: inFlight || settling, run, refreshList: onRefreshList, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
           </div>
         </SheetContent>
       </Sheet>

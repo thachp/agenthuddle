@@ -1,6 +1,7 @@
 import { plainName } from "@/components/agent-content/text";
 
 export const MAX_DURATION_DAYS = 260;
+export const MAX_PREDECESSORS = 50;
 
 type PlanTask = { id: string; title: string; status: string; assignee: string | null; reviewer: string; duration_days: number | null };
 type PlanEdge = { predecessor: string; successor: string };
@@ -30,6 +31,24 @@ export const offersEdit = (plan: PlanRead, requester: string, me: string, role: 
 
 export const isFinished = (status: string) => status === "completed" || status === "canceled";
 
+/**
+ * An incomplete read can leave out a finished task's edges, and saving replaces them all, so links nobody saw would go. An
+ * unfinished task always comes with its whole list.
+ */
+export const missesLinks = (plan: PlanRead, status: string) => !plan.complete && isFinished(status);
+
+/** What a person can tell an "Add" or "Remove" button by, when titles repeat. */
+export function repeatedTitles(plan: PlanRead) {
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  for (const task of plan.tasks) {
+    const title = plainName(task.title);
+    if (seen.has(title)) repeated.add(title);
+    seen.add(title);
+  }
+  return repeated;
+}
+
 /** Candidates to add, excluding this task and what's already chosen, with how many matched before the list was cut. */
 export function candidates(plan: PlanRead, task: string, chosen: string[], filter: string, limit = 10) {
   const wanted = filter.trim().toLowerCase();
@@ -50,12 +69,12 @@ export function planProblem(code: string, status: number) {
   const reasons: Record<string, string> = {
     plan_conflict: "Someone changed this room's plan after you read it. Your edits are still here. Load the latest plan, check them and save again.",
     dependency_cycle: "This would make the task wait for itself through its predecessors. Remove one and try again.",
-    limit_exceeded: "This room has reached a limit on how many task links its plan can hold or check, so this can't be added. Removing a link is still possible.",
+    limit_exceeded: "This room has reached a limit on how many task links its plan can hold or check, so this can't be added. Removing links, or finishing or canceling unfinished work, can make room, but a long chain of finished work can't be shortened.",
     invalid_transition: "This task has finished, so its plan can't change, apart from removing a canceled predecessor.",
     workspace_archived: "This workroom is archived, so nothing new can happen in it. Its owner or an admin can bring it back.",
     not_allowed: "Only this task's requester, or a human admin, can change its plan, and only if they can see the whole room.",
     task_not_found: "A task in this plan isn't available any more. Load the latest plan, check your edits and save again.",
-    invalid_argument: `An estimate is a whole number of working days from 1 to ${MAX_DURATION_DAYS}, and a task can be listed only once.`,
+    invalid_argument: `An estimate is a whole number of working days from 1 to ${MAX_DURATION_DAYS}, and a task can come after at most ${MAX_PREDECESSORS} others, each listed once.`,
   };
   return `${NOTHING_CHANGED} ${reasons[code] ?? "You may no longer be allowed to do this."}`;
 }

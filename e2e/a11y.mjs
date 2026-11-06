@@ -689,7 +689,18 @@ async function keyboardPaths(s) {
     await dialog.getByLabel("Add a task that comes first").fill("Plan the first");
     await tabTo(page, add, "Add");
     await page.keyboard.press("Enter");
-    await dialog.getByRole("button", { name: "Remove Plan the first step" }).waitFor({ timeout: 15_000 });
+    const remove = dialog.getByRole("button", { name: "Remove Plan the first step" });
+    await remove.waitFor({ timeout: 15_000 });
+    // The pressed button has gone, so focus moves on, and it's said aloud.
+    await page.waitForFunction(() => document.activeElement?.id === "plan-find", undefined, { timeout: 15_000 });
+    await dialog.getByText("Added Plan the first step.").waitFor({ state: "attached", timeout: 15_000 });
+    await tabTo(page, remove, "Remove");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.activeElement?.id === "plan-find", undefined, { timeout: 15_000 });
+    await dialog.getByText("Removed Plan the first step.").waitFor({ state: "attached", timeout: 15_000 });
+    await tabTo(page, add, "Add again");
+    await page.keyboard.press("Enter");
+    await remove.waitFor({ timeout: 15_000 });
     ok((await days.inputValue()) === "3", "the estimate didn't stay while adding a task");
     const save = dialog.getByRole("button", { name: "Save plan" });
     await tabTo(page, save, "Save plan");

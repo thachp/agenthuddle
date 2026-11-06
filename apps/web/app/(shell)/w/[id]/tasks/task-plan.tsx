@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import { goToSignIn } from "./go-to-sign-in";
 import { taskPath } from "./task-actions";
-import { candidates, durationText, isFinished, MAX_DURATION_DAYS, needsLatest, offersEdit, parseDuration, planProblem, predecessorsOf, type PlanRead } from "./task-plan-model";
+import { candidates, durationText, isFinished, MAX_DURATION_DAYS, MAX_PREDECESSORS, missesLinks, needsLatest, offersEdit, parseDuration, planProblem, predecessorsOf, repeatedTitles, type PlanRead } from "./task-plan-model";
 import { isArchivedRoom, TASK_STATUS, type TaskStatus } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
 
@@ -23,7 +23,7 @@ type Saved = { plan_revision: number; plan_changed_at: number | null; duration_d
  * plan revision and not the task's version, so it stays out of the Sheet's `run`, and a plan edit can't get in the way of one.
  */
 export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: string; role: string | undefined }) {
-  const { data, setUnsaved, setSending, refresh } = api;
+  const { data, setUnsaved, setSending, refresh, refreshList } = api;
   const { task, room } = data;
   const [plan, setPlan] = useState<PlanRead | null>(null);
   const [loading, setLoading] = useState(false);
@@ -35,19 +35,26 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
   const [saving, setSaving] = useState(false);
   const [problem, setProblem] = useState<{ code: string; status: number } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Add and Remove take away the button that was pressed, so this says what happened, and focus goes somewhere that's still there.
+  const [listNotice, setListNotice] = useState("");
   const reader = useRef<AbortController | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const editButton = useRef<HTMLButtonElement>(null);
   const durationField = useRef<HTMLInputElement>(null);
   const problemRef = useRef<HTMLParagraphElement>(null);
-  const focusNext = useRef<"heading" | "edit" | "duration" | null>(null);
+  const focusNext = useRef<"heading" | "edit" | "duration" | "list" | null>(null);
+  const removedAt = useRef(0);
+  const findField = useRef<HTMLInputElement>(null);
+  const saveButton = useRef<HTMLButtonElement>(null);
+  const removeButtons = useRef(new Map<string, HTMLButtonElement>());
   // Keeps its key for a save whose outcome is unknown, so saving the same thing again can't apply twice.
   const unknownKeys = useRef(new Map<string, string>());
 
   const row = plan?.tasks.find((other) => other.id === task.id);
   const stored = plan ? predecessorsOf(plan, task.id) : [];
   const storedDays = row?.duration_days ?? null;
-  const finished = isFinished(row?.status ?? task.status);
+  // The Sheet's own read of the task is the fresher one.
+  const finished = isFinished(task.status);
   const parsed = parseDuration(duration);
   const changed = editing && (parsed !== storedDays || chosen.length !== stored.length || chosen.some((id) => !stored.includes(id)));
   const titleOf = (id: string) => {
@@ -69,7 +76,8 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
     focusNext.current = null;
     if (next === "heading") heading.current?.focus();
     if (next === "edit") (editButton.current ?? heading.current)?.focus();
-    if (next === "duration") durationField.current?.focus();
+    if (next === "duration") (durationField.current ?? removeButtons.current.get(chosen[0]) ?? saveButton.current)?.focus();
+    if (next === "list") (removeButtons.current.get(chosen[Math.min(removedAt.current, chosen.length - 1)]) ?? findField.current ?? saveButton.current)?.focus();
   });
 
   const load = async () => {
@@ -96,6 +104,7 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
     setFilter("");
     setProblem(null);
     setNotice(null);
+    setListNotice("");
     setEditing(true);
     focusNext.current = "duration";
   };
@@ -137,6 +146,7 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
       setNotice("Plan saved. Nobody is told, and the task's status doesn't change.");
       focusNext.current = "edit";
       refresh();
+      refreshList();
     } finally {
       setSaving(false);
       setSending(false);
@@ -145,7 +155,9 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
 
   const loadLatest = async () => {
     // Only the read changes, so the person's edits stay as they are, ready to check against it.
-    await load();
+    const latest = await load();
+    // Until a read succeeds, what's on screen is still the old plan, and the problem still stands.
+    if (!latest) return;
     setProblem(null);
     setNotice("This is the latest plan. Your edits are still here.");
   };
@@ -178,8 +190,14 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
     );
   }
 
-  const offered = offersEdit(plan, task.requester, me, role, isArchivedRoom(room));
+  const incomplete = missesLinks(plan, task.status);
+  const offered = offersEdit(plan, task.requester, me, role, isArchivedRoom(room)) && !incomplete;
+  const repeated = repeatedTitles(plan);
+  const tellApart = (title: string, id: string) => (repeated.has(title) ? `${title} (${id})` : title);
+  const full = chosen.length >= MAX_PREDECESSORS;
   const found = candidates(plan, task.id, chosen, filter);
+  // A newer read can show this person no longer gets to edit, or that the task isn't in it.
+  if (editing && (!offered || !row)) setEditing(false);
   const unsure = problem ? needsLatest(problem.code, problem.status) : false;
   return (
     <section aria-labelledby="task-plan" className="space-y-2">
@@ -195,7 +213,7 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
           <dt className="text-muted-foreground">Comes after</dt>
           <dd>
             {stored.length === 0 ? (
-              "Nothing listed"
+              plan.complete ? "Nothing listed" : "None shown"
             ) : (
               <ul className="space-y-1">
                 {stored.map((id) => (
@@ -213,6 +231,12 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
       <p role="status" className="text-sm empty:hidden">
         {notice}
       </p>
+      {incomplete && row ? <p className="text-sm text-muted-foreground">This task has finished, and it may have links this read leaves out, so its plan can't be edited here.</p> : null}
+      {loadFailed ? (
+        <p role="alert" className="text-sm">
+          We couldn't load the latest plan, so what's shown may be out of date. Try again.
+        </p>
+      ) : null}
       {offered && row && !editing ? (
         <Button ref={editButton} type="button" variant="outline" size="sm" className={TARGET} onClick={startEdit}>
           Edit plan
@@ -242,7 +266,24 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
                     <span className="min-w-0 break-words">
                       <PredecessorLine title={titleOf(id)} status={status} />
                     </span>
-                    <Button type="button" variant="ghost" size="sm" className={TARGET} disabled={saving} aria-label={`Remove ${titleOf(id)}`} onClick={() => setChosen(chosen.filter((other) => other !== id))}>
+                    <Button
+                      ref={(button) => {
+                        if (button) removeButtons.current.set(id, button);
+                        else removeButtons.current.delete(id);
+                      }}
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className={TARGET}
+                      disabled={saving}
+                      aria-label={`Remove ${tellApart(titleOf(id), id)}`}
+                      onClick={() => {
+                        removedAt.current = chosen.indexOf(id);
+                        setChosen(chosen.filter((other) => other !== id));
+                        setListNotice(`Removed ${titleOf(id)}.`);
+                        focusNext.current = "list";
+                      }}
+                    >
                       Remove
                     </Button>
                   </li>
@@ -253,9 +294,9 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
           {finished ? null : (
             <div className="space-y-1">
               <Label htmlFor="plan-find">Add a task that comes first</Label>
-              <Input id="plan-find" autoComplete="off" value={filter} onChange={(event) => setFilter(event.target.value)} aria-describedby="plan-find-count" />
+              <Input ref={findField} id="plan-find" autoComplete="off" value={filter} onChange={(event) => setFilter(event.target.value)} aria-describedby="plan-find-count" />
               <p id="plan-find-count" className="text-xs text-muted-foreground">
-                {found.total === 0 ? "No tasks match." : found.total > found.shown.length ? `Showing ${found.shown.length} of ${found.total}. Type to narrow them.` : `${found.total} ${found.total === 1 ? "task matches" : "tasks match"}.`}
+                {full ? `A task can come after ${MAX_PREDECESSORS} others at most. Remove one to add another.` : found.total === 0 ? "No tasks match." : found.total > found.shown.length ? `Showing ${found.shown.length} of ${found.total}. Type to narrow them.` : `${found.total} ${found.total === 1 ? "task matches" : "tasks match"}.`}
               </p>
               <ul className="space-y-1">
                 {found.shown.map((other) => (
@@ -263,7 +304,19 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
                     <span className="min-w-0 break-words">
                       <PredecessorLine title={plainName(other.title)} status={other.status} />
                     </span>
-                    <Button type="button" variant="outline" size="sm" className={TARGET} disabled={saving} aria-label={`Add ${plainName(other.title)}`} onClick={() => setChosen([...chosen, other.id])}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className={TARGET}
+                      disabled={saving || full}
+                      aria-label={`Add ${tellApart(plainName(other.title), other.id)}`}
+                      onClick={() => {
+                        setChosen([...chosen, other.id]);
+                        setListNotice(`Added ${plainName(other.title)}.`);
+                        findField.current?.focus();
+                      }}
+                    >
                       Add
                     </Button>
                   </li>
@@ -271,13 +324,16 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
               </ul>
             </div>
           )}
+          <p role="status" className="sr-only">
+            {listNotice}
+          </p>
           {problem ? (
             <p ref={problemRef} tabIndex={-1} role="alert" className="text-sm outline-none">
               {planProblem(problem.code, problem.status)}
             </p>
           ) : null}
           <div className="flex flex-wrap gap-2">
-            <Button type="submit" size="sm" className={TARGET} disabled={saving || !changed || parsed === undefined}>
+            <Button ref={saveButton} type="submit" size="sm" className={TARGET} disabled={saving || !changed || parsed === undefined}>
               {saving ? "Saving…" : "Save plan"}
             </Button>
             {unsure ? (
