@@ -1,12 +1,15 @@
-import { progressOf, progressScope, type TaskViewState } from "./task-views";
+import type { Counts } from "./plan-summary";
+import { progressOf, progressScope, withPercent, type TaskViewState } from "./task-views";
 import type { TaskSummary } from "./task-model";
 
 /**
- * Covers exactly the tasks it's given. When the read stopped early those are a page and not the workroom, so it gives the
- * loaded counts and no percentage or bar, which would read as the room's progress.
+ * Covers exactly the tasks it's given, unless `every` gives the server's counts of all the tasks in scope. When neither reaches
+ * the whole set, those tasks are a page and not the workroom, so it gives the loaded counts and no percentage or bar, which would
+ * read as the room's progress. `note` says what Blocked leaves out.
  */
-export function TaskProgress({ tasks, partial, state, limited }: { tasks: TaskSummary[]; partial: boolean; state: Pick<TaskViewState, "reviewMine">; limited: boolean }) {
-  const { completed, active, percent } = progressOf(tasks);
+export function TaskProgress({ tasks, every, partial: stoppedEarly, state, limited, note }: { tasks: TaskSummary[]; every?: Counts | null; partial: boolean; state: Pick<TaskViewState, "reviewMine">; limited: boolean; note?: string | null }) {
+  const partial = stoppedEarly && !every;
+  const { completed, active, percent } = every ? withPercent(every) : progressOf(tasks);
   const scope = progressScope({ filtered: state.reviewMine, limited });
   return (
     <div className="space-y-1 text-sm">
@@ -29,6 +32,7 @@ export function TaskProgress({ tasks, partial, state, limited }: { tasks: TaskSu
           <div className="h-full rounded-full bg-primary" style={{ width: `${percent}%` }} />
         </div>
       ) : null}
+      {note ? <p className="text-xs text-muted-foreground">{note}</p> : null}
     </div>
   );
 }

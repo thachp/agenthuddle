@@ -81,8 +81,11 @@ export type Progress = { completed: number; active: number; percent: number | nu
 export function progressOf(tasks: Pick<TaskSummary, "status">[]): Progress {
   const active = tasks.filter((task) => task.status !== "canceled").length;
   const completed = tasks.filter((task) => task.status === "completed").length;
-  return { completed, active, percent: active === 0 ? null : Math.floor((200 * completed + active) / (2 * active)) };
+  return withPercent({ completed, active });
 }
+
+/** To the nearest whole number, with a half going up, in whole numbers so nothing can round the wrong way. */
+export const withPercent = ({ completed, active }: { completed: number; active: number }): Progress => ({ completed, active, percent: active === 0 ? null : Math.floor((200 * completed + active) / (2 * active)) });
 
 /** A filter is the viewer's choice, and "you can see" is an authorization boundary. The label keeps them apart. */
 export function progressScope({ filtered, limited }: { filtered: boolean; limited: boolean }) {
