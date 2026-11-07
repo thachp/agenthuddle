@@ -93,18 +93,27 @@ On 2026-11-06, at `5ae3dad`, the lead drove the screens in a browser pane as the
 
 The seen list covers [the checklist](#the-checklist)'s steps 1 to 3. Its agent steps weren't run this way, and the journey covers those through the API.
 
-### What's left to call M1 met
+### What the call on M1 rests on
 
-M1 isn't called met here, and that's the owner's to say.
+**The owner called M1 met on 2026-11-06, at `5ae3dad`** ([decision 80](spec/PRODUCT.md#decisions-needed)). It's met by that ruling. The rows above keep their own statuses, so "Passed through the API" and "seen by hand" don't become **Passed on a deployment**.
 
-**No further run is planned for M1's four criteria. The items under [Not seen](#screens-seen-on-staging) and the smaller gaps below stay open. What's left is the owner's call:**
+The call rests on:
 
-1. **Whether a check by hand counts for criterion 1's screens.** [Decision 79](spec/PRODUCT.md#decisions-needed) rules on test people, not on this, and [by hand isn't the same as passed](#m1-criteria-on-staging) on this page.
-2. **Whether the smaller gaps in the table above matter.** The owner hasn't ruled on them, so they stay open: a claim holder on Agent Auth, presets other than Coordinator and Member held in a claim, the owner rather than a lead moving the reviewer, duplicates sent as the same request twice rather than delivered twice by a transport, a person's Activity against their inbox, and a narrowed viewer's Activity screen.
+1. **The API checks for all four criteria,** which passed on a deployment with test people. Test people count for these criteria ([decision 79](spec/PRODUCT.md#decisions-needed)).
+2. **The screens,** [seen by hand](#screens-seen-on-staging) once, as the owner, in Chromium. The by-hand check counts for M1's screens ([decision 80](spec/PRODUCT.md#decisions-needed)).
+3. **The smaller gaps, accepted for M1,** which stay open: a claim holder on Agent Auth, presets other than Coordinator and Member held in a claim, the owner rather than a lead moving the reviewer, duplicates sent as the same request twice rather than delivered twice by a transport, a person's Activity against their inbox, and a narrowed viewer's Activity screen.
 
-**Outside the four criteria, for the owner to weigh:** [M1's scope](spec/PRODUCT.md#product-direction-and-delivery-scope) also names the collaboration list and map, which no criterion covers. They were [seen by hand as the owner](#screens-seen-on-staging). A narrowed or guest viewer's haven't been.
+[M1's scope](spec/PRODUCT.md#product-direction-and-delivery-scope) also names the collaboration list and map, which no criterion covers. They were [seen by hand as the owner](#screens-seen-on-staging).
 
-**Owed before production, whether or not M1 is called met:**
+**Still open, after this call:**
+
+- Those smaller gaps.
+- Load more on a long list, on a deployment.
+- The form fixes for typing before load.
+- Narrowed or guest views in a browser, including Collaboration's.
+- An agent in the browser.
+
+**Owed before production:**
 
 - A second real person, and the two-person kernel journey.
 - The probes at the end of [ADR 0001](adr/0001-application-host-and-session-cookie.md#what-staging-needs). The owner's sign-in reached the application host, but no probe measured GitHub's callback or the cookie crossing the web Worker.
@@ -176,7 +185,7 @@ On 2026-11-05, with `main` at `84c7c0c` deployed, the project's owner ran part o
 
 ## M1 criteria on staging
 
-M1 is [expanded criteria 1, 3, 4 and 5 for private rooms](spec/PRODUCT.md#expanded-workroom-acceptance-criteria), without input assets and expected outputs ([decision 47](spec/PRODUCT.md#decisions-needed)). The [journey passed on staging with test people](#journey-on-staging-with-test-people) on 2026-11-06 at `5ae3dad`, including checks written for these criteria, and test people count for these criteria ([decision 79](spec/PRODUCT.md#decisions-needed)). [The screens were then seen by hand](#screens-seen-on-staging) at the same commit. **No criterion is marked Passed on a deployment: the API checks passed with test people, and the screens were seen by hand once, as the owner, in Chromium.** [What's left to call M1 met](#whats-left-to-call-m1-met) is at the end of this section.
+M1 is [expanded criteria 1, 3, 4 and 5 for private rooms](spec/PRODUCT.md#expanded-workroom-acceptance-criteria), without input assets and expected outputs ([decision 47](spec/PRODUCT.md#decisions-needed)). The [journey passed on staging with test people](#journey-on-staging-with-test-people) on 2026-11-06 at `5ae3dad`, including checks written for these criteria, and test people count for these criteria ([decision 79](spec/PRODUCT.md#decisions-needed)). [The screens were then seen by hand](#screens-seen-on-staging) at the same commit. **The owner called M1 met on 2026-11-06, by ruling** ([decision 80](spec/PRODUCT.md#decisions-needed)). **No criterion is marked Passed on a deployment: the API checks passed with test people, and the screens were seen by hand once, as the owner, in Chromium.** [What the call rests on](#what-the-call-on-m1-rests-on) is at the end of this section.
 
 | Criterion | On a deployment, with test people, 2026-11-06 at `5ae3dad` | Still open | Local proof |
 | --- | --- | --- | --- |
@@ -185,7 +194,7 @@ M1 is [expanded criteria 1, 3, 4 and 5 for private rooms](spec/PRODUCT.md#expand
 | 4. A lead coordinates through one task history, and duplicates don't compete | **Passed through the API: creating and sending back over MCP, approving over Agent Auth.** `M1-LEAD`: a lead holding the opening creates a task and sends it back over MCP. The opening then moves to an agent on Agent Auth, who approves it. So "coordinates work and review" is shown only in this split form, not by one lead doing all of it on each connection method. All parties read the same history and task. The former lead loses its access. The same request sent twice makes one task | **The reviewer's move:** a lead didn't move the reviewer; the owner did, because that's a requester's or admin's power. **Duplicates:** shown as the same request sent twice, not a transport delivering it twice. A2A is M3 | apps/api's idempotency tests |
 | 5. Activity and inbox agree, and rooms stay apart | **Passed through the API, for the four agents in the run.** `M1-AGREE`: every inbox event is in the agent's Activity, in the same order. Of Activity, a limited agent sees only room notices about itself, and each was told to it unless it caused it. Task events in Activity aren't required to be in the inbox. A guest sees no task it isn't party to, in either. `M1-APART`: an agent in two rooms gets each room's goal and context only from that room, no read shows an invitation token, and one room's access or invitation opens nothing in the other | **A person's** Activity against their inbox isn't compared. **The Activity screen** was [seen by hand](#screens-seen-on-staging) as the owner only, and not as a narrowed viewer. **An existing room:** the `event.subject_id` migration was [seen on a room from before it](#screens-seen-on-staging), whose events all have a null subject. Old events stay hidden from limited agents, and a backfill wasn't done | apps/api, including an upgrade test |
 
-**By hand isn't the same as passed.** The steps below are a check by hand, like the other three on this page. Finishing them shows the product working for the people who ran them, and doesn't by itself make a criterion **Passed on a deployment**. That status means the test itself passed against a real hostname, with two separate people, so it needs [the journey on staging](#running-it-on-staging), or the owner ruling that a by-hand run counts. Record a by-hand run here with its date, commit and who ran it, and leave the statuses above alone unless one of those has happened.
+**By hand isn't the same as passed.** For M1's screens, the owner ruled that the by-hand check counts toward calling M1 met ([decision 80](spec/PRODUCT.md#decisions-needed)), and it still isn't a pass. The steps below are a check by hand, like the other three on this page. Finishing them shows the product working for the people who ran them, and doesn't by itself make a criterion **Passed on a deployment**. That status means the test itself passed against a real hostname, with two separate people, so it needs [the journey on staging](#running-it-on-staging), or the owner ruling that a by-hand run counts. Record a by-hand run here with its date, commit and who ran it, and leave the statuses above alone unless one of those has happened.
 
 ### The checklist
 
