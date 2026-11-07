@@ -5739,6 +5739,116 @@ describe("planned relationships", () => {
   });
 });
 
+describe("where a long list ends", () => {
+  const PAGE = 50;
+  /** Tops the room's events up to exactly this many, as copies of one the whole room can see. */
+  const eventsUpTo = (id: string, total: number) => runInDurableObject(stub(id), (_: any, state: any) => {
+    const sql = state.storage.sql;
+    const have = sql.exec("SELECT count(*) AS n FROM event").one().n as number;
+    const names = sql.exec("PRAGMA table_info(event)").toArray().map((c: any) => c.name).filter((n: string) => n !== "seq");
+    const chosen = names.map((n: string) => (n === "id" ? "'evt_fill' || g.n" : `t.${n}`)).join(",");
+    for (let i = have; i < total; i++) sql.exec(`INSERT INTO event (${names.join(",")}) SELECT ${chosen} FROM (SELECT ? AS n) g, (SELECT * FROM event WHERE task_id IS NULL LIMIT 1) t`, i);
+    expect(sql.exec("SELECT count(*) AS n FROM event").one().n).toBe(total);
+  });
+  const tasksFor = (id: string, count: number, assignee: string | null = null) => runInDurableObject(stub(id), (_: any, state: any) => {
+    for (let i = 0; i < count; i++) state.storage.sql.exec("INSERT INTO task (id, title, instructions, requester_id, assignee_id, reviewer_id, status, version, created_at, updated_at) VALUES (?, 't', 'i', 'r', ?, 'v', 'open', 1, 0, 0)", `tsk_seed${assignee ?? "x"}${i}`, assignee);
+  });
+
+  describe.each([["newest", "order=newest", "next_before", "before"], ["oldest", "", "next_after", "after"]])("Activity, %s first", (_name, order, nextKey, cursorKey) => {
+    const page = async (id: string, cursor: string | null = null) => (await api(OWNER, "GET", `/v1/workspaces/${id}/activity?${order}${cursor ? `&${cursorKey}=${cursor}` : ""}`)).body;
+
+    it("says there's nothing more on a full last page, at exactly one page", async () => {
+      const { id } = await room();
+      await eventsUpTo(id, PAGE);
+      const first = await page(id);
+      expect(first.events).toHaveLength(PAGE);
+      expect(first[nextKey]).toBeNull();
+    });
+
+    it("says there's nothing more on a full last page, at exactly two pages", async () => {
+      const { id } = await room();
+      await eventsUpTo(id, PAGE * 2);
+      const first = await page(id);
+      expect(first.events).toHaveLength(PAGE);
+      expect(first[nextKey]).toBe(first.events[PAGE - 1].id);
+      const second = await page(id, first[nextKey]);
+      expect(second.events).toHaveLength(PAGE);
+      expect(second[nextKey]).toBeNull();
+      expect(new Set([...first.events, ...second.events].map((e: any) => e.id)).size).toBe(PAGE * 2);
+    });
+
+    it("still offers the next page with one row past a full page", async () => {
+      const { id } = await room();
+      await eventsUpTo(id, PAGE + 1);
+      const first = await page(id);
+      expect(first.events).toHaveLength(PAGE);
+      expect(first[nextKey]).toBe(first.events[PAGE - 1].id);
+      const second = await page(id, first[nextKey]);
+      expect(second.events).toHaveLength(1);
+      expect(second[nextKey]).toBeNull();
+    });
+  });
+
+  it("counts only what a limited viewer can see, so what's hidden past a full page doesn't promise more", async () => {
+    const { id, tasks } = await room();
+    await offer(tasks, { title: "Bob's" });
+    // Events on tasks Bob isn't part of sit among his, older and newer.
+    for (const title of ["Hidden one", "Hidden two"]) await offer(tasks, { assignee: REVIEWER.id, reviewer: LEAD.id, title });
+    const all = (await api(BOB, "GET", `/v1/workspaces/${id}/activity?order=newest`)).body;
+    expect(all.next_before).toBeNull();
+    expect(JSON.stringify(all)).not.toContain("Hidden");
+    const exact = (await api(BOB, "GET", `/v1/workspaces/${id}/activity?order=newest&limit=${all.events.length}`)).body;
+    expect(exact.events).toHaveLength(all.events.length);
+    expect(exact.next_before).toBeNull();
+    const short = (await api(BOB, "GET", `/v1/workspaces/${id}/activity?order=newest&limit=${all.events.length - 1}`)).body;
+    expect(short.next_before).toBe(short.events[short.events.length - 1].id);
+  });
+
+  describe.each([["newest", "order=newest&"], ["oldest", ""]])("Tasks, %s first", (_name, order) => {
+    const page = async (who: Who, tasks: string, cursor = 0) => (await api(who, "GET", `${tasks}?${order}cursor=${cursor}`)).body;
+
+    it("says there's nothing more on a full last page, at exactly one page", async () => {
+      const { id, tasks } = await room();
+      await tasksFor(id, PAGE);
+      const first = await page(OWNER, tasks);
+      expect(first.tasks).toHaveLength(PAGE);
+      expect(first.next_cursor).toBeNull();
+    });
+
+    it("says there's nothing more on a full last page, at exactly two pages", async () => {
+      const { id, tasks } = await room();
+      await tasksFor(id, PAGE * 2);
+      const first = await page(OWNER, tasks);
+      expect(first.tasks).toHaveLength(PAGE);
+      expect(first.next_cursor).toEqual(expect.any(Number));
+      const second = await page(OWNER, tasks, first.next_cursor);
+      expect(second.tasks).toHaveLength(PAGE);
+      expect(second.next_cursor).toBeNull();
+      expect(new Set([...first.tasks, ...second.tasks].map((t: any) => t.id)).size).toBe(PAGE * 2);
+    });
+
+    it("still offers the next page with one row past a full page", async () => {
+      const { id, tasks } = await room();
+      await tasksFor(id, PAGE + 1);
+      const first = await page(OWNER, tasks);
+      expect(first.tasks).toHaveLength(PAGE);
+      expect(first.next_cursor).toEqual(expect.any(Number));
+      const second = await page(OWNER, tasks, first.next_cursor);
+      expect(second.tasks).toHaveLength(1);
+      expect(second.next_cursor).toBeNull();
+    });
+
+    it("counts only a limited viewer's own tasks", async () => {
+      const { id, tasks } = await room();
+      await tasksFor(id, 20);
+      await tasksFor(id, PAGE, BOB.id);
+      const first = await page(BOB, tasks);
+      expect(first.tasks).toHaveLength(PAGE);
+      expect(first.next_cursor).toBeNull();
+    });
+  });
+});
+
 describe("the baseline forecast", () => {
   const planOf = (id: string) => `/v1/workspaces/${id}/plan`;
   const read = async (who: Who, id: string, query = "") => {
