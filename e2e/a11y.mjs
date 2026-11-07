@@ -1285,6 +1285,8 @@ async function keyboardPaths(s) {
       await small.goto(`${app}/w/${s.longRoom}/activity`);
       const button = small.getByRole("button", { name: "Load more" });
       await button.waitFor({ timeout: 15_000 });
+      // The server's HTML shows the button before React can hear it, and a click in that gap is lost, which a slow machine can hit.
+      await hydrated(small);
       await button.click();
       await small.waitForFunction(() => document.querySelectorAll("main ol > li").length > 50, null, { timeout: 15_000 });
       const size = await button.boundingBox();
