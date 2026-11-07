@@ -579,6 +579,7 @@ components:
         due_at: { type: [integer, "null"] }
         follow_up_of: { type: [string, "null"] }
         submission_no: { type: integer }
+        approved_submission_no: { type: [integer, "null"], description: "The submission a reviewer approved, or null if none has been. It's set in the same transaction as the approval and can't change after it. A task completed before this was recorded has its latest submission here, which is the only one that could have been approved." }
         needs_attention: { type: boolean }
     CreateTask:
       type: object

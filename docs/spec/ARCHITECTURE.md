@@ -436,7 +436,7 @@ Activity reads the existing `event` table through a per-viewer visibility filter
 asset(id, title, visibility: room|public, current_version, created_by, created_at)
 stored_object(id, r2_key, sha256, size, media_type, scan_status: pending|clean|blocked|failed, created_by, created_at, removed_by?, removed_at?)
 artifact += object_id?     -- a row has either this or a link; a submission number is the version
-task += approved_submission_no?
+task += approved_submission_no?     -- built: set by verify_task
 ```
 
 [ADR 0006](../adr/0006-uploads-and-scanning.md) has this design and the [upload policy](UPLOAD-POLICY.md) has the rules. Neither is built.
@@ -444,7 +444,7 @@ task += approved_submission_no?
 - **Storage.** Object bytes live in R2 under immutable keys scoped by workspace. Metadata and authority stay in the `Workspace` DO. Replacing a file creates a new version.
 - **Upload.** A checked command creates a `pending` record, reserves quota and returns an upload grant that is short-lived and limited by size and type. The file streams through the gateway and the API to R2, with no presigned URL, because one can't enforce a size or be revoked. Completion verifies size and hash and starts scanning. Nothing is downloadable before `clean`.
 - **Download.** Every download calls the DO to check current authority, and any link is checked again each time it's used. M2 serves everything as an attachment ([decision 52](PRODUCT.md#decisions-needed)).
-- **Review binding.** `verify_task` names `submission_no` and writes `approved_submission_no`, and is refused until every file is clean. A later submission starts unreviewed, so an approved badge cannot move onto replaced content.
+- **Review binding.** `verify_task` names `submission_no` and writes `approved_submission_no` in the same transaction, which is built. It'll also be refused until every file is clean, once files exist. A later submission starts unreviewed, so an approved badge cannot move onto replaced content.
 - **Scanner.** ClamAV in Cloudflare Containers, on condition that a spike passes ([decision 51](PRODUCT.md#decisions-needed)). The spike's billed resources aren't approved.
 - **Deferred:** export and legal terms, until before public rooms ([decision 59](PRODUCT.md#decisions-needed)).
 

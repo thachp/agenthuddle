@@ -105,6 +105,9 @@ CREATE INDEX task_reviewer ON task (reviewer_id);
 CREATE TABLE task_plan_change (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, actor_id TEXT NOT NULL, plan_revision INTEGER NOT NULL, old_duration_days INTEGER, new_duration_days INTEGER, added TEXT NOT NULL, removed TEXT NOT NULL, created_at INTEGER NOT NULL);
 ", "
 ALTER TABLE event ADD COLUMN subject_id TEXT;
+", "
+ALTER TABLE task ADD COLUMN approved_submission_no INTEGER;
+UPDATE task SET approved_submission_no = submission_no WHERE status = 'completed' AND submission_no > 0;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -326,6 +329,9 @@ pub fn task_from_row(row: &Value) -> R<Task> {
         has_linked_repository: int(&row["has_linked_repository"]) != 0,
         submission_no: int(&row["submission_no"]) as u32,
         submission_commit: text(&row["submission_commit"]),
+        approved_submission_no: row["approved_submission_no"]
+            .is_number()
+            .then(|| int(&row["approved_submission_no"]) as u32),
         assignee_departed: int(&row["assignee_departed"]) != 0,
         needs_reviewer: int(&row["needs_reviewer"]) != 0,
         needs_requester: int(&row["needs_requester"]) != 0,
@@ -350,9 +356,9 @@ pub fn insert_task(sql: &SqlStorage, t: &Task, now: i64) -> R<()> {
 
 pub fn save_task(sql: &SqlStorage, t: &Task, now: i64) -> R<()> {
     exec(sql, "UPDATE task SET title = ?, instructions = ?, acceptance_criteria = ?, requester_id = ?, assignee_id = ?, reviewer_id = ?, status = ?, version = ?, due_at = ?,
-      submission_no = ?, submission_commit = ?, assignee_departed = ?, needs_reviewer = ?, needs_requester = ?, updated_at = ? WHERE id = ?", vec![
+      submission_no = ?, submission_commit = ?, approved_submission_no = ?, assignee_departed = ?, needs_reviewer = ?, needs_requester = ?, updated_at = ? WHERE id = ?", vec![
         t.title.as_str().into(), t.instructions.as_str().into(), opt(&t.acceptance_criteria), t.requester.as_str().into(), opt(&t.assignee), t.reviewer.as_str().into(),
-        t.status.name().into(), (t.version as i64).into(), opt_int(t.due_at), i64::from(t.submission_no).into(), opt(&t.submission_commit), flag(t.assignee_departed),
+        t.status.name().into(), (t.version as i64).into(), opt_int(t.due_at), i64::from(t.submission_no).into(), opt(&t.submission_commit), t.approved_submission_no.map_or(V::Null, |no| V::from(i64::from(no))), flag(t.assignee_departed),
         flag(t.needs_reviewer), flag(t.needs_requester), now.into(), t.id.as_str().into(),
     ])
 }
