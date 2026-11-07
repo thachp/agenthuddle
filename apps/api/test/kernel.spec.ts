@@ -5811,7 +5811,7 @@ describe("the baseline forecast", () => {
     expect([forecast.start_date, forecast.begins_on, forecast.timezone, forecast.calendar]).toEqual(["2026-11-02", "2026-11-02", "America/New_York", "mon_fri"]);
     expect(forecast.assumptions).toContain("No capacity/resource leveling.");
     expect(forecast.assumptions.join(" ")).toMatch(/acceptance and review/);
-    expect(forecast.assumptions.join(" ")).toMatch(/holidays are excluded/);
+    expect(forecast.assumptions).toContain("Working days are Monday to Friday. Holidays aren't taken into account.");
     expect(forecast.duration_days).toBe(10);
     expect(forecast.finish_date).toBe("2026-11-13");
     const row = (name: string) => forecast.tasks.find((t: any) => t.id === ids[name]);
