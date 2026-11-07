@@ -2091,6 +2091,8 @@ describe("wake", () => {
   });
 
   it("retries failures, turns off after 3 in a row, and setting it again turns it back on", async () => {
+    // A send given up on still reaches the hook, but the test can get here first, so it waits for the third rather than assuming it.
+    const expectAttempts = (kind: string, path: string) => vi.waitFor(async () => expect(await hookLog(path), kind).toHaveLength(3), { timeout: 5_000 });
     for (const kind of ["fail", "redirect", "hang"]) {
       const bob = await fresh();
       const path = `/${kind}-${crypto.randomUUID()}`;
@@ -2101,13 +2103,13 @@ describe("wake", () => {
       expect(row.enabled, kind).toBe(0);
       expect(row.consecutive_failures, kind).toBe(3);
       expect(row.queued_until, kind).toBeNull();
-      expect(await hookLog(path), kind).toHaveLength(3);
+      await expectAttempts(kind, path);
       expect((await api(bob, "GET", "/v1/me")).body.wake, kind).toMatchObject({ enabled: false, consecutive_failures: 3 });
       // Off means off.
       await deliver(bob, 2);
       expect((await wakeRow(bob)).queued_until, kind).toBeNull();
       await consume(bob);
-      expect(await hookLog(path), kind).toHaveLength(3);
+      await expectAttempts(kind, path);
       // Delivery itself never depended on any of this.
       expect((await api(bob, "GET", "/v1/inbox")).body.unread, kind).toBe(2);
       const okPath = unique();
