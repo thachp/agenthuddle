@@ -18,6 +18,7 @@ const scrollTo = (top: number) => {
   bottomTop = top;
   fireEvent.scroll(window);
 };
+const scrolledDown = (y: number) => Object.defineProperty(window, "scrollY", { value: y, configurable: true });
 const settled = () => act(() => new Promise((resolve) => setTimeout(resolve, 10)));
 
 beforeEach(() => {
@@ -36,7 +37,10 @@ beforeEach(() => {
     return new Response(JSON.stringify(status === 200 ? { events, next_before } : { error: { code: "error" } }), { status });
   });
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  scrolledDown(0);
+});
 
 const list = (filters = "", first = [event("a")], nextBefore: string | null = "evt_a", fromOlder = false) => <ActivityList roomId="ws_1" filters={filters} first={first} nextBefore={nextBefore} newest="/w/ws_1/activity" fromOlder={fromOlder} me="per_me" names={{}} orgNames={{}} now={2} />;
 const button = () => screen.getByRole("button", { name: /Load more|Loading more/ });
@@ -104,6 +108,46 @@ describe("Activity's Load more", () => {
     scrollTo(98);
     scrollTo(300);
     await settled();
+    expect(reads).toHaveLength(1);
+  });
+
+  it("reads once for a reader already near the bottom when it starts, and doesn't run on from there", async () => {
+    scrolledDown(4000);
+    bottomTop = 100;
+    replies.evt_a = { events: [event("b")], next_before: "evt_b" };
+    render(list());
+    expect(await screen.findByRole("link", { name: "Task b" })).toBeInTheDocument();
+    await settled();
+    // Still near the bottom with another page to read, and nobody has moved.
+    expect(reads).toHaveLength(1);
+  });
+
+  it("doesn't read when it starts for a reader at the top, or one far from the bottom", async () => {
+    bottomTop = 100;
+    const top = render(list());
+    await settled();
+    expect(reads).toEqual([]);
+    top.unmount();
+    scrolledDown(100);
+    bottomTop = 5000;
+    render(list());
+    await settled();
+    expect(reads).toEqual([]);
+  });
+
+  it("makes one read when the button is pressed as it starts, whichever goes first", async () => {
+    scrolledDown(4000);
+    bottomTop = 100;
+    let finish = (_: Reply) => {};
+    replies.evt_a = () => new Promise((resolve) => (finish = resolve));
+    render(list());
+    fireEvent.click(button());
+    await settled();
+    fireEvent.click(button());
+    await settled();
+    expect(reads).toHaveLength(1);
+    finish({ events: [event("b")], next_before: null });
+    expect(await screen.findByRole("link", { name: "Task b" })).toBeInTheDocument();
     expect(reads).toHaveLength(1);
   });
 

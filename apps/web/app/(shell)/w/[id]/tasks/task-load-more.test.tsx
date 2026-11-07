@@ -6,6 +6,7 @@ import { summaryOf, type Room, type Task } from "./task-model";
 import { rememberPlace } from "./task-pages";
 import { advanceFirstPage, endOfListText, MAX_PUSHED_OFF, mergeTasks, soFarText, type FirstPageHistory } from "./task-views";
 import { TasksScreen } from "./tasks-screen";
+import { useLoadOnScroll } from "./task-pages";
 
 const signIn = vi.hoisted(() => vi.fn());
 vi.mock("./go-to-sign-in", () => ({ goToSignIn: signIn }));
@@ -25,6 +26,7 @@ const scrollTo = (top: number) => {
   bottomTop = top;
   fireEvent.scroll(window);
 };
+const scrolledDown = (y: number) => Object.defineProperty(window, "scrollY", { value: y, configurable: true });
 const settled = () => act(() => new Promise((resolve) => setTimeout(resolve, 10)));
 
 beforeEach(() => {
@@ -44,7 +46,10 @@ beforeEach(() => {
     return new Response(JSON.stringify(status === 200 ? { tasks, next_cursor } : { error: { code: "error" } }), { status });
   });
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  scrolledDown(0);
+});
 
 const screenWith = (tasks = [task("a")], cursor: number | null = 50, role = "member") => <TasksScreen room={room(role)} tasks={tasks} cursor={cursor} me="per_me" names={{}} />;
 const show = (tasks = [task("a")], cursor: number | null = 50) => render(screenWith(tasks, cursor));
@@ -124,6 +129,61 @@ describe("Load more", () => {
 });
 
 describe("loading as the reader scrolls", () => {
+  it("reads once for a reader already near the bottom when it starts, and doesn't run on from there", async () => {
+    scrolledDown(4000);
+    bottomTop = 100;
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };
+    show();
+    expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
+    await settled();
+    expect(reads).toEqual(["cursor=50&order=newest"]);
+  });
+
+  it("doesn't read when it starts for a reader far from the bottom", async () => {
+    scrolledDown(100);
+    show();
+    await settled();
+    expect(reads).toEqual([]);
+  });
+
+  it("makes one read when the button is pressed as it starts", async () => {
+    scrolledDown(4000);
+    bottomTop = 100;
+    replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };
+    show();
+    fireEvent.click(button());
+    expect(await screen.findByRole("link", { name: "Title b" })).toBeInTheDocument();
+    await settled();
+    expect(reads).toEqual(["cursor=50&order=newest"]);
+  });
+
+  it("looks only once, so a list that gains a next page later doesn't read without a move", async () => {
+    scrolledDown(4000);
+    bottomTop = 100;
+    const load = vi.fn();
+    const Probe = ({ cursor }: { cursor: number | null }) => {
+      const bottom = useLoadOnScroll({ cursor, status: "idle", load, tasks: [] }, false);
+      return <div ref={bottom} />;
+    };
+    const { rerender } = render(<Probe cursor={50} />);
+    await settled();
+    expect(load).toHaveBeenCalledTimes(1);
+    rerender(<Probe cursor={null} />);
+    await settled();
+    rerender(<Probe cursor={100} />);
+    await settled();
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("doesn't read when it starts with a Sheet open over the list", async () => {
+    scrolledDown(4000);
+    bottomTop = 100;
+    setUrl("/w/ws_1/tasks?task=tsk_a");
+    show();
+    await settled();
+    expect(reads.filter((query) => query.startsWith("cursor="))).toEqual([]);
+  });
+
   it("reads nothing until they move", async () => {
     bottomTop = 100;
     replies["cursor=50&order=newest"] = { tasks: [task("b")], next_cursor: 100 };

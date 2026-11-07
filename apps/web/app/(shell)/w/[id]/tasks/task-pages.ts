@@ -141,6 +141,10 @@ const MOVED_PX = 4;
  * bottom, so being near isn't enough, or one scroll would run through the whole room with nobody reading it. What's
  * measured is the bottom's distance from the top of the window: new rows above and that correction leave it alone, and so
  * does a browser's own anchoring, whose scroll event would otherwise look like the reader's.
+ *
+ * A reader can get to the bottom before this is listening, on a slow page, and then has nowhere further down to move. So it looks
+ * once when it starts, and reads for someone who has moved down the page and is near the bottom. That's still a move of theirs,
+ * and being scrolled to the top isn't, so a list that fits the window waits for the button.
  */
 export function useLoadOnScroll(pages: { cursor: unknown; status: string; load: () => void; tasks: unknown }, paused: boolean) {
   const bottom = useRef<HTMLDivElement>(null);
@@ -156,6 +160,18 @@ export function useLoadOnScroll(pages: { cursor: unknown; status: string; load: 
     last.current = measure();
   }, [arrived]);
   const present = pages.cursor !== null;
+  const looked = useRef(false);
+  useEffect(() => {
+    if (looked.current || !present) return;
+    looked.current = true;
+    // After this commit's other effects, because a list's own start cancels any read begun before it.
+    const look = setTimeout(() => {
+      const now = measure();
+      const { status, paused: stopped, load } = latest.current;
+      if (now !== null && window.scrollY > 0 && now < window.innerHeight + NEAR_BOTTOM_PX && status === "idle" && !stopped) load();
+    });
+    return () => clearTimeout(look);
+  }, [present]);
   useEffect(() => {
     if (!present) return;
     last.current = measure();
