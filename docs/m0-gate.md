@@ -12,7 +12,7 @@ A status is one of these, and an item only moves when the run has actually happe
 - **Local only:** a test passes under Miniflare or `wrangler dev`.
 - **Passed on a deployment:** the test passed against a real hostname, with two separate people where people are involved. If those were [test people](#with-test-people), the status says so.
 
-Last updated on 2026-11-06 UTC. Rows keep the date and commit of the run that first passed them, and the latest run is `5ae3dad`. The AC-19 probe has not been rerun since `abe92ef`. `journey` means [e2e/journey.mjs](../e2e/journey.mjs), and the ID after it is the check's ID in its output. "Partial" means the journey reaches only part of the item from outside, and the rest runs only in the named tests.
+Last updated on 2026-11-07 UTC. Rows keep the date and commit of the run that first passed them, and the latest run is `5ae3dad`. The AC-19 probe has not been rerun since `abe92ef`. `journey` means [e2e/journey.mjs](../e2e/journey.mjs), and the ID after it is the check's ID in its output. "Partial" means the journey reaches only part of the item from outside, and the rest runs only in the named tests.
 
 ## Kernel success criteria
 
@@ -84,12 +84,14 @@ On 2026-11-06, at `5ae3dad`, the lead drove the screens in a browser pane as the
 
 - Load more on a long list, on a deployment.
 - The form fixes for typing before load.
-- Narrowed or guest views in a browser, including Collaboration's.
+- Narrowed or guest views in a browser on a deployment, including Collaboration's. They now have [local paths only](#what-the-call-on-m1-rests-on).
 - An agent in the browser.
 - Safari, Firefox and a real screen reader.
 - A second real person.
 
 **Left behind:** `M1 Screens Check` is a leftover test room in the owner's personal organization.
+
+**The Approved mark on the Task Sheet ([#101](https://github.com/thachp/podster/pull/101)):** on 2026-11-07 UTC, at `404dab7`, the lead saw it on staging in the Smoke room, on a task whose approved submission is also its latest. This is a check by hand, recorded from the lead's report. An approved earlier submission, which a task can't reach today, and a limited viewer have component tests only, and no browser test looks for the mark.
 
 The seen list covers [the checklist](#the-checklist)'s steps 1 to 3. Its agent steps weren't run this way, and the journey covers those through the API.
 
@@ -105,14 +107,16 @@ The call rests on:
 
    Four of these now have checks that pass against the local stack only, and none has run on a deployment: `M1-CLAIM-AUTH`, `M1-CLAIM-PRESETS` and `M1-PERSON-AGREE` in `e2e/journey.mjs`, and two paths in `e2e/a11y.mjs` for a guest's screens and a narrowed agent's work. People's access follows their role, so no narrowed person exists: the narrowed viewer's Activity is an admin's oversight of a narrowed agent, and a person's limited view is a guest's. The owner moving the reviewer and duplicates from a transport have no new check.
 
+   With these, all four presets have been held in a claim, locally. `M1-PERSON-AGREE` covers a person who sees the whole room, not a limited one. The guest path doesn't look for planned lines, so [UI-08](spec/DESIGN.md#12-design-acceptance-criteria)'s planned half still has no browser check. [#102](https://github.com/thachp/podster/pull/102) reports the local results: the journey at 52 passed on `1a9bebe`, and 94 axe runs with 0 violations on `404dab7` plus its changes.
+
 [M1's scope](spec/PRODUCT.md#product-direction-and-delivery-scope) also names the collaboration list and map, which no criterion covers. They were [seen by hand as the owner](#screens-seen-on-staging).
 
 **Still open, after this call:**
 
-- Those smaller gaps.
+- Those smaller gaps, on a deployment. Nothing from #102 has run there.
 - Load more on a long list, on a deployment.
 - The form fixes for typing before load.
-- Narrowed or guest views in a browser, including Collaboration's.
+- Narrowed or guest views in a browser on a deployment, including Collaboration's.
 - An agent in the browser.
 
 **Owed before production:**
@@ -192,9 +196,9 @@ M1 is [expanded criteria 1, 3, 4 and 5 for private rooms](spec/PRODUCT.md#expand
 | Criterion | On a deployment, with test people, 2026-11-06 at `5ae3dad` | Still open | Local proof |
 | --- | --- | --- | --- |
 | 1. Create a room with goal, context and roles, launching nothing | **Passed through the API.** `M1-CREATE`: a room has its goal and context, and openings with a count of 1 and 2 are added. No agent is added or told, no agent lists or reads it, and adding one agent adds only that one. Its card's counts match. `M1-BRIEF`: an agent reads the goal and context and gains nothing from them. `M1-COUNT`: a count of 2 takes two holders and refuses a third | **Open: only the owner as a person; the screens are seen by hand, not passed.** That's [the create screen with roles set while creating, Overview, Team and the card](#screens-seen-on-staging), once, in Chromium. `M1-CREATE` itself adds openings after the room exists | `create-form.test.tsx` |
-| 3. A claim grants only its scope, and a task still needs accepting | **Passed through the API, for agents on MCP.** `M1-CLAIM`: holders of a Coordinator and a Member opening can't approve or send back work they aren't reviewing, have no access tool, and have the member role, not an admin's. A task offered after a claim stays offered, can't be submitted early, and needs accepting. `M1-ROLES`: a claim needs an invite and copies the preset. `M1-ACCESS`: what an agent sees follows its access | **A holder on Agent Auth:** the refusals ran over MCP only. **Other presets:** only those two were held. **Merge and deploy:** shown by no such tool existing, since neither is built. Public claims are M4 | apps/api role tests |
+| 3. A claim grants only its scope, and a task still needs accepting | **Passed through the API, for agents on MCP.** `M1-CLAIM`: holders of a Coordinator and a Member opening can't approve or send back work they aren't reviewing, have no access tool, and have the member role, not an admin's. A task offered after a claim stays offered, can't be submitted early, and needs accepting. `M1-ROLES`: a claim needs an invite and copies the preset. `M1-ACCESS`: what an agent sees follows its access | **A holder on Agent Auth:** the refusals ran over MCP only. **Other presets:** only those two were held. **Merge and deploy:** shown by no such tool existing, since neither is built. Public claims are M4 | apps/api role tests; `M1-CLAIM-AUTH` and `M1-CLAIM-PRESETS` on the local stack |
 | 4. A lead coordinates through one task history, and duplicates don't compete | **Passed through the API: creating and sending back over MCP, approving over Agent Auth.** `M1-LEAD`: a lead holding the opening creates a task and sends it back over MCP. The opening then moves to an agent on Agent Auth, who approves it. So "coordinates work and review" is shown only in this split form, not by one lead doing all of it on each connection method. All parties read the same history and task. The former lead loses its access. The same request sent twice makes one task | **The reviewer's move:** a lead didn't move the reviewer; the owner did, because that's a requester's or admin's power. **Duplicates:** shown as the same request sent twice, not a transport delivering it twice. A2A is M3 | apps/api's idempotency tests |
-| 5. Activity and inbox agree, and rooms stay apart | **Passed through the API, for the four agents in the run.** `M1-AGREE`: every inbox event is in the agent's Activity, in the same order. Of Activity, a limited agent sees only room notices about itself, and each was told to it unless it caused it. Task events in Activity aren't required to be in the inbox. A guest sees no task it isn't party to, in either. `M1-APART`: an agent in two rooms gets each room's goal and context only from that room, no read shows an invitation token, and one room's access or invitation opens nothing in the other | **A person's** Activity against their inbox isn't compared. **The Activity screen** was [seen by hand](#screens-seen-on-staging) as the owner only, and not as a narrowed viewer. **An existing room:** the `event.subject_id` migration was [seen on a room from before it](#screens-seen-on-staging), whose events all have a null subject. Old events stay hidden from limited agents, and a backfill wasn't done | apps/api, including an upgrade test |
+| 5. Activity and inbox agree, and rooms stay apart | **Passed through the API, for the four agents in the run.** `M1-AGREE`: every inbox event is in the agent's Activity, in the same order. Of Activity, a limited agent sees only room notices about itself, and each was told to it unless it caused it. Task events in Activity aren't required to be in the inbox. A guest sees no task it isn't party to, in either. `M1-APART`: an agent in two rooms gets each room's goal and context only from that room, no read shows an invitation token, and one room's access or invitation opens nothing in the other | **A person's** Activity against their inbox isn't compared. **The Activity screen** was [seen by hand](#screens-seen-on-staging) as the owner only, and not as a narrowed viewer. **An existing room:** the `event.subject_id` migration was [seen on a room from before it](#screens-seen-on-staging), whose events all have a null subject. Old events stay hidden from limited agents, and a backfill wasn't done | apps/api, including an upgrade test; on the local stack, `M1-PERSON-AGREE` and the browser paths for a guest and for oversight of a narrowed agent |
 
 **By hand isn't the same as passed.** For M1's screens, the owner ruled that the by-hand check counts toward calling M1 met ([decision 80](spec/PRODUCT.md#decisions-needed)), and it still isn't a pass. The steps below are a check by hand, like the other three on this page. Finishing them shows the product working for the people who ran them, and doesn't by itself make a criterion **Passed on a deployment**. That status means the test itself passed against a real hostname, with two separate people, so it needs [the journey on staging](#running-it-on-staging), or the owner ruling that a by-hand run counts. Record a by-hand run here with its date, commit and who ran it, and leave the statuses above alone unless one of those has happened.
 
@@ -299,6 +303,8 @@ Wake is part of M0's scope and has no AC of its own. It has merged, in PR [#22](
 - A public name pointing at a private address (`127.0.0.1.nip.io`) was accepted at set time. Its send then failed and was counted, but the reason isn't confirmed, because the log capture crashed and no receiver sat at that address.
 - A receiver returning errors, and a failing URL's retries running out, haven't been tested on staging.
 - There's no repeatable check. Wake isn't in the journey, because a run needs a public receiver.
+
+**The wake test, [#102](https://github.com/thachp/podster/pull/102):** `retries failures…` failed once on #98, because a hang's send is given up on at 300 ms and the test read the fake hook's log before the last attempt reached it. The test now waits up to 5 s for exactly 3 attempts. It's a test change only, with no product change, and nothing above moves.
 
 ## AC-19: the API's public reachability
 
