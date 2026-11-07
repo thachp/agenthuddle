@@ -9,7 +9,13 @@ import { freePort, local, prepareStack, repo, run, startGateway, startWrangler }
 
 const here = dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes("--skip-build");
-const browserName = process.argv.find((arg) => arg.startsWith("--browser="))?.slice("--browser=".length);
+// Checked before anything builds, and `--browser firefox` is refused rather than quietly running Chromium.
+const browserArgs = process.argv.slice(2).filter((arg) => arg.startsWith("--browser"));
+const browserName = browserArgs[0]?.slice("--browser=".length);
+if (browserArgs.length > 1 || (browserArgs.length === 1 && !["chromium", "firefox", "webkit"].includes(browserName))) {
+  console.error(`Choose one browser, as --browser=chromium, --browser=firefox or --browser=webkit, not: ${browserArgs.join(" ")}`);
+  process.exit(2);
+}
 const web = join(repo, "apps/web");
 
 const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild });

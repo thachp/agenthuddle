@@ -387,8 +387,9 @@ function fail(path, message) {
 async function tabTo(page, locator, label, limit = 80) {
   let backwards = false;
   for (let i = 0; i < limit; i++) {
-    // It may have focus already, and pressing Tab would leave it.
-    const there = await locator.evaluate((el) => el === document.activeElement || el.contains(document.activeElement)).catch(() => false);
+    // Firefox and WebKit may not come back round to what has focus already, so there it's counted without a key. Chromium always comes
+    // round, and has to press Tab to show the keyboard reaches it.
+    const there = browserName !== "chromium" && (await locator.evaluate((el) => el === document.activeElement || el.contains(document.activeElement)).catch(() => false));
     if (!there) await page.keyboard.press(backwards ? SHIFT_TAB : TAB);
     // Firefox here doesn't come round from the end of a page, and Option-Tab doesn't come round in a dialog, so from there it goes back.
     if (browserName !== "chromium" && !there) backwards ||= await page.evaluate(() => {
@@ -410,6 +411,12 @@ async function tabTo(page, locator, label, limit = 80) {
 
 const activeText = (page) => page.evaluate(() => `${document.activeElement?.tagName} ${document.activeElement?.getAttribute("role") ?? ""} ${(document.activeElement?.textContent ?? "").trim().slice(0, 60)}`);
 const insideDialog = (page) => page.evaluate(() => Boolean(document.activeElement?.closest('[role="dialog"], [role="alertdialog"]')));
+
+/** A check Playwright's WebKit can't answer, recorded as skipped with what it did, so the path's pass can't be read as covering it. */
+const unseenInWebKit = (name, happened) => {
+  console.log(`skip keyboard: ${name}: unseen in WebKit, which ${happened ? "did" : "didn't"} scroll here`);
+  results.push({ keyboard: name, status: "skipped", detail: `Playwright's WebKit ${happened ? "scrolled" : "didn't scroll"}. Needs Safari.` });
+};
 
 /** A path that needs Chromium's debugging protocol is named as skipped elsewhere, so a pass can't be read as covering it. */
 const chromiumOnly = (name, fn) => {
@@ -600,7 +607,7 @@ async function keyboardPaths(s) {
     const own = await contextFor(s.owner).newPage();
     const sent = [];
     await own.route(/\/api\/v1\/workspaces\/[^/]+\/(brief|review-policy)$/, (route) => {
-      if (route.request().method() !== "PUT" && route.request().method() !== "PATCH") return route.fallback();
+      if (route.request().method() !== "PUT") return route.fallback();
       sent.push([new URL(route.request().url()).pathname.split("/").at(-1), route.request().postDataJSON()]);
       return route.fulfill({ status: 403, json: { error: { code: "not_allowed" } } });
     });
@@ -621,12 +628,11 @@ async function keyboardPaths(s) {
       await hydrated(own);
       await own.waitForTimeout(500);
       ok(sent.length === 0, `something early was sent without being asked: ${JSON.stringify(sent)}`);
-      await own.getByRole("button", { name: "Save goal and context" }).click();
-      await own.waitForTimeout(300);
+      const answered = (what) => own.waitForResponse((response) => response.url().endsWith(`/${what}`) && response.request().method() === "PUT", { timeout: 15_000 });
+      await Promise.all([answered("brief"), own.getByRole("button", { name: "Save goal and context" }).click()]);
       const brief = sent.filter(([what]) => what === "brief");
       ok(brief.length === 1 && brief[0][1].goal?.includes("Typed before load"), `the goal sent wasn't what it showed: ${JSON.stringify(sent)}`);
-      await own.getByRole("button", { name: "Save review setting" }).click();
-      await own.waitForTimeout(300);
+      await Promise.all([answered("review-policy"), own.getByRole("button", { name: "Save review setting" }).click()]);
       const policy = sent.filter(([what]) => what === "review-policy");
       ok(policy.length === 1 && policy[0][1].require_person === true, `the review setting sent wasn't what it showed: ${JSON.stringify(sent)}`);
     } finally {
@@ -840,7 +846,10 @@ async function keyboardPaths(s) {
     await box.focus();
     await small.keyboard.press("ArrowRight");
     // See the table's arrow keys: in Playwright's WebKit, a key doesn't move even a plain box with focus.
-    if (browserName !== "webkit") await small.waitForFunction(() => document.activeElement?.scrollLeft > 0, null, { timeout: 15_000 });
+    if (browserName === "webkit") {
+      await small.waitForTimeout(1_000);
+      unseenInWebKit("arrow keys scrolling the map", await box.evaluate((el) => el.scrollLeft > 0));
+    } else await small.waitForFunction(() => document.activeElement?.scrollLeft > 0, null, { timeout: 15_000 });
     await phone.close();
   });
 
@@ -1662,7 +1671,7 @@ async function keyboardPaths(s) {
     await small.keyboard.press("ArrowRight");
     await small.waitForFunction((el) => el.scrollLeft > 0, await scroller.elementHandle(), { timeout: 5_000 }).catch(() => {});
     // Whether Safari does this needs Safari. In Playwright's WebKit the table has focus and can scroll, and a key doesn't move even a plain box.
-    if (browserName === "webkit") console.log(`     arrow keys ${(await scroller.evaluate((el) => el.scrollLeft > 0)) ? "scrolled" : "didn't scroll"} the table in WebKit`);
+    if (browserName === "webkit") unseenInWebKit("arrow keys scrolling a table", await scroller.evaluate((el) => el.scrollLeft > 0));
     else ok(await scroller.evaluate((el) => el.scrollLeft > 0), "the arrow keys don't scroll the table");
     const box = small.getByRole("checkbox", { name: "Author's mark, not verified by Podster" }).first();
     ok(await box.isDisabled(), "a checklist mark isn't disabled");
