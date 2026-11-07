@@ -18,6 +18,8 @@ export type Task = {
   due_at: number | null;
   follow_up_of: string | null;
   submission_no: number;
+  /** The submission a reviewer approved, or null if none has been. The Sheet reads it, and lists never need it. */
+  approved_submission_no?: number | null;
   needs_attention: boolean;
 };
 
