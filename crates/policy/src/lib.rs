@@ -5,6 +5,8 @@
 
 use podster_core::{PrincipalId, Task};
 
+pub mod files;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalKind {
     Person,
