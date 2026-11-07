@@ -6,8 +6,32 @@ export const MAX_PREDECESSORS = 50;
 type PlanTask = { id: string; title: string; status: string; assignee: string | null; reviewer: string; duration_days: number | null };
 type PlanEdge = { predecessor: string; successor: string };
 
-/** One read of the room's plan. `plan_revision` comes only to someone who sees the whole room. */
-export type PlanRead = { complete: boolean; tasks: PlanTask[]; edges: PlanEdge[]; plan_revision?: number; plan_changed_at?: number | null };
+/** One task in a baseline. Dates are local calendar dates, and a finish is the span's last working day. */
+export type ForecastTask = { id: string; duration_days: number; earliest_start: string; earliest_finish: string; latest_start: string; latest_finish: string; slack_days: number; critical: boolean };
+export type AvailableForecast = {
+  label: string;
+  available: true;
+  plan_revision: number;
+  plan_changed_at: number | null;
+  /** The date as entered, which can fall on a weekend. */
+  start_date: string;
+  /** The first working day the plan really begins. */
+  begins_on: string;
+  timezone: string;
+  calendar: string;
+  assumptions: string[];
+  duration_days: number;
+  finish_date: string;
+  tasks: ForecastTask[];
+  critical_paths: string[][];
+  critical_paths_cut: boolean;
+  left_out: string[];
+};
+export type UnavailableForecast = { label: string; available: false; reasons: string[]; explanation: string };
+export type PlanStart = { date: string; timezone: string };
+
+/** One read of the room's plan. `plan_revision` comes only to someone who sees the whole room, and `start` only to someone the server gives a forecast. */
+export type PlanRead = { complete: boolean; tasks: PlanTask[]; edges: PlanEdge[]; plan_revision?: number; plan_changed_at?: number | null; start?: PlanStart | null; forecast?: AvailableForecast | UnavailableForecast };
 
 export const predecessorsOf = (plan: PlanRead, task: string) => plan.edges.filter((edge) => edge.successor === task).map((edge) => edge.predecessor);
 
