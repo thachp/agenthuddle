@@ -10,7 +10,7 @@ import { goToSignIn } from "./go-to-sign-in";
 import { TaskActions, type SavedEdit } from "./task-actions";
 import { TaskComposer } from "./task-composer";
 import { TaskPlan } from "./task-plan";
-import { PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
+import { ApprovedMark, PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
 import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail, type TaskSummary } from "./task-model";
 
 export type LoadedTask = TaskDetail & { workspace: string; room: Room };
@@ -198,6 +198,7 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
             <li key={submission.submission_no} className="space-y-2 rounded-lg border p-3">
               <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
                 Submission {submission.submission_no}
+                {submission.submission_no === task.approved_submission_no ? <ApprovedMark /> : null}
                 {submission.submission_no === task.submission_no ? <span className="text-xs font-normal text-muted-foreground">Latest</span> : null}
                 <span className="text-xs font-normal">
                   <Timestamp at={submission.created_at} />

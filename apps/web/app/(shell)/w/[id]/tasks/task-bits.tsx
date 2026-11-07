@@ -29,6 +29,16 @@ export function TaskStatusBadge({ status }: { status: TaskStatus }) {
   );
 }
 
+/** The same label-and-icon rule as the status, in the color a completed task has. */
+export function ApprovedMark() {
+  return (
+    <span className={cn("inline-flex w-fit shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap", TONES.green)}>
+      <CheckCircle2 className="size-3" aria-hidden />
+      Approved
+    </span>
+  );
+}
+
 const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
   ["day", 86_400_000],
   ["hour", 3_600_000],

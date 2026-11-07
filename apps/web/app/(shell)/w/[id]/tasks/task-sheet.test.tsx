@@ -85,6 +85,36 @@ describe("what the Sheet shows", () => {
     expect(screen.getByText("tsk_1")).toBeInTheDocument();
   });
 
+  const rowOf = (no: number) => screen.getByText(new RegExp(`^Submission ${no}`), { selector: "p" });
+
+  it("marks the submission a reviewer approved, and only that one", async () => {
+    answer = () => json(200, detail({ status: "completed", approved_submission_no: 2 }));
+    await open();
+    expect(within(rowOf(2)).getByText("Approved")).toBeInTheDocument();
+    expect(within(rowOf(1)).queryByText("Approved")).not.toBeInTheDocument();
+  });
+
+  it("marks the number it was given, even when that isn't the latest", async () => {
+    answer = () => json(200, detail({ status: "completed", approved_submission_no: 1 }));
+    await open();
+    expect(within(rowOf(1)).getByText("Approved")).toBeInTheDocument();
+    expect(within(rowOf(2)).queryByText("Approved")).not.toBeInTheDocument();
+  });
+
+  it.each([["null", { approved_submission_no: null }], ["missing", {}]])("shows no mark when the approved submission is %s", async (_name, over) => {
+    answer = () => json(200, detail(over));
+    await open();
+    expect(rowOf(2)).toBeInTheDocument();
+    expect(screen.queryByText("Approved")).not.toBeInTheDocument();
+  });
+
+  it("has no row to mark for someone who can't see the submissions, and doesn't invent one", async () => {
+    answer = () => json(200, detail({ status: "completed", approved_submission_no: 2 }, { submissions: [], artifacts: [], messages: [], visible: { submissions: "own", conversation: false } }));
+    await open();
+    expect(screen.getByText(/has submissions your access doesn't show/)).toBeInTheDocument();
+    expect(screen.queryByText("Approved")).not.toBeInTheDocument();
+  });
+
   it("shows instructions, criteria, each submission and its artifacts with the link's real host", async () => {
     await open();
     expect(screen.getByText("Write it")).toBeInTheDocument();
