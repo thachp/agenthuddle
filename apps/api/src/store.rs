@@ -329,7 +329,9 @@ pub fn task_from_row(row: &Value) -> R<Task> {
         has_linked_repository: int(&row["has_linked_repository"]) != 0,
         submission_no: int(&row["submission_no"]) as u32,
         submission_commit: text(&row["submission_commit"]),
-        approved_submission_no: row["approved_submission_no"].as_u64().map(|no| no as u32),
+        approved_submission_no: row["approved_submission_no"]
+            .is_number()
+            .then(|| int(&row["approved_submission_no"]) as u32),
         assignee_departed: int(&row["assignee_departed"]) != 0,
         needs_reviewer: int(&row["needs_reviewer"]) != 0,
         needs_requester: int(&row["needs_requester"]) != 0,

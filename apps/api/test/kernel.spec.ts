@@ -6240,6 +6240,13 @@ describe("the approved submission", () => {
     expect((await api(CAROL, "GET", `${tasks}/${sent.id}`)).code).toBe("task_not_found");
     expect(JSON.stringify((await api(CAROL, "GET", tasks)).body)).not.toContain(sent.id);
     expect((await api(OUTSIDER, "GET", `/v1/workspaces/${id}/tasks/${sent.id}`)).status).toBe(404);
+    // Someone who may read the task but only their own submissions sees no rows, and still the number.
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${CAROL.id}/access`, { scopes: { tasks: "all" } })).status).toBe(200);
+    const narrow = await read(CAROL, tasks, sent.id);
+    expect(narrow.visible.submissions).toBe("own");
+    expect(narrow.submissions).toEqual([]);
+    expect(narrow.task.approved_submission_no).toBe(1);
+    expect(narrow.task.approved_submission_no).toBe(narrow.task.submission_no);
   });
 
   it("gives a task approved before this its only possible approved submission, and leaves the rest empty", async () => {
