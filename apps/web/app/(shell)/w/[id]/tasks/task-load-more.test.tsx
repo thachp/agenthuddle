@@ -7,6 +7,7 @@ import { rememberPlace } from "./task-pages";
 import { advanceFirstPage, endOfListText, MAX_PUSHED_OFF, mergeTasks, soFarText, type FirstPageHistory } from "./task-views";
 import { TasksScreen } from "./tasks-screen";
 import { useLoadOnScroll } from "./task-pages";
+import { StrictMode } from "react";
 
 const signIn = vi.hoisted(() => vi.fn());
 vi.mock("./go-to-sign-in", () => ({ goToSignIn: signIn }));
@@ -171,6 +172,38 @@ describe("loading as the reader scrolls", () => {
     rerender(<Probe cursor={null} />);
     await settled();
     rerender(<Probe cursor={100} />);
+    await settled();
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("still looks if the list's bottom goes away and comes back before the look could run", async () => {
+    scrolledDown(4000);
+    bottomTop = 100;
+    const load = vi.fn();
+    const Probe = ({ cursor }: { cursor: number | null }) => {
+      const bottom = useLoadOnScroll({ cursor, status: "idle", load, tasks: [] }, false);
+      return <div ref={bottom} />;
+    };
+    const { rerender } = render(<Probe cursor={50} />);
+    rerender(<Probe cursor={null} />);
+    rerender(<Probe cursor={100} />);
+    await settled();
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("still looks, once, when React runs its effects twice", async () => {
+    scrolledDown(4000);
+    bottomTop = 100;
+    const load = vi.fn();
+    const Probe = () => {
+      const bottom = useLoadOnScroll({ cursor: 50, status: "idle", load, tasks: [] }, false);
+      return <div ref={bottom} />;
+    };
+    render(
+      <StrictMode>
+        <Probe />
+      </StrictMode>,
+    );
     await settled();
     expect(load).toHaveBeenCalledTimes(1);
   });

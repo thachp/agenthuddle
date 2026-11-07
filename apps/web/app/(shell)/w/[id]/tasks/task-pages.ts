@@ -163,9 +163,10 @@ export function useLoadOnScroll(pages: { cursor: unknown; status: string; load: 
   const looked = useRef(false);
   useEffect(() => {
     if (looked.current || !present) return;
-    looked.current = true;
     // After this commit's other effects, because a list's own start cancels any read begun before it.
     const look = setTimeout(() => {
+      // Only here, so a look cleared before it ran, as when the bottom goes away that soon, still happens later.
+      looked.current = true;
       const now = measure();
       const { status, paused: stopped, load } = latest.current;
       if (now !== null && window.scrollY > 0 && now < window.innerHeight + NEAR_BOTTOM_PX && status === "idle" && !stopped) load();
