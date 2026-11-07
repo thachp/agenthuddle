@@ -1251,6 +1251,12 @@ async function keyboardPaths(s) {
     }
   });
 
+  /**
+   * Waits for text a person can see, and fails if they could see it twice. A slow page can also hold React's hidden streamed copy
+   * for a moment after React has drawn the screen itself, and that copy is in the document without being on screen.
+   */
+  const shownOnce = (where, text) => where.getByText(text).filter({ visible: true }).waitFor({ timeout: 15_000 });
+
   await keyboardPath("progress counts past the loaded pages, and Blocked shows in both views, at phone width too", async () => {
     const own = await contextFor(s.owner).newPage();
     try {
@@ -1267,7 +1273,7 @@ async function keyboardPaths(s) {
         const said = await bar.getAttribute("aria-valuetext");
         ok(/^0 of 32\d completed, 0%$/.test(said), `progress past the first page reads ${said}`);
         ok((await own.getByText(/partial/).count()) === 0, "progress still says partial with a complete plan");
-        await own.getByText("Blocked: waiting on “Long task 318”").waitFor({ timeout: 15_000 });
+        await shownOnce(own, "Blocked: waiting on “Long task 318”");
         ok((await own.getByRole("heading", { name: /^Blocked/ }).count()) === 0, "Blocked became a column");
       }
     } finally {
@@ -1277,7 +1283,7 @@ async function keyboardPaths(s) {
     const small = await phone.newPage();
     for (const query of ["", "?view=board"]) {
       await small.goto(longUrl(query));
-      await small.getByText("Blocked: waiting on “Long task 318”").waitFor({ timeout: 15_000 });
+      await shownOnce(small, "Blocked: waiting on “Long task 318”");
       const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       ok(overflow <= 0, `tasks${query} scrolls sideways by ${overflow}px at 375px with Blocked on it`);
     }

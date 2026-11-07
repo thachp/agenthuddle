@@ -27,6 +27,7 @@ fn task(requester: &str, assignee: &str, reviewer: &str) -> Task {
         has_linked_repository: false,
         submission_no: 0,
         submission_commit: None,
+        approved_submission_no: None,
         assignee_departed: false,
         needs_reviewer: false,
         needs_requester: false,
