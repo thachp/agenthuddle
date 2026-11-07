@@ -105,6 +105,7 @@ fn agents_never_hold_admin_authority_even_with_a_stored_role() {
             WorkroomAction::ReadAuditLog,
             WorkroomAction::ManageRoom,
             WorkroomAction::PlanRelationship,
+            WorkroomAction::SetPlanStart,
             WorkroomAction::CreateTask,
         ] {
             assert_eq!(
@@ -1253,4 +1254,79 @@ fn an_agent_limited_to_its_own_tasks_sees_notices_about_itself_and_nobody_elses(
         None,
         Some("agt_me")
     ));
+}
+
+#[test]
+fn only_a_person_who_runs_the_room_sets_the_plan_start() {
+    for (kind, role, allowed) in [
+        (Person, Role::Owner, true),
+        (Person, Role::Admin, true),
+        (Person, Role::Member, false),
+        (Person, Role::Guest, false),
+        (Agent, Role::Owner, false),
+        (Agent, Role::Admin, false),
+        (Agent, Role::Member, false),
+        (Agent, Role::Guest, false),
+    ] {
+        let verdict = authorize_workroom(&caller("x", kind, role), WorkroomAction::SetPlanStart);
+        assert_eq!(verdict == Verdict::Allow, allowed, "{kind:?} {role:?}");
+    }
+    assert_eq!(
+        authorize_workroom(
+            &caller("x", Person, Role::None),
+            WorkroomAction::SetPlanStart
+        ),
+        Verdict::NotParticipant
+    );
+}
+
+#[test]
+fn a_forecast_goes_only_to_someone_who_sees_the_whole_plan_and_never_to_a_guest() {
+    let with = |kind, role, tasks| Caller {
+        scopes: Scopes {
+            tasks,
+            ..Scopes::GUEST
+        },
+        ..caller("x", kind, role)
+    };
+    assert!(sees_plan_forecast(&caller("x", Person, Role::Owner)));
+    assert!(sees_plan_forecast(&caller("x", Person, Role::Admin)));
+    assert!(sees_plan_forecast(&with(
+        Agent,
+        Role::Member,
+        TaskScope::All
+    )));
+    assert!(sees_plan_forecast(&with(
+        Person,
+        Role::Member,
+        TaskScope::All
+    )));
+    assert!(!sees_plan_forecast(&with(
+        Agent,
+        Role::Member,
+        TaskScope::Own
+    )));
+    assert!(!sees_plan_forecast(&with(
+        Person,
+        Role::Member,
+        TaskScope::Own
+    )));
+    assert!(
+        !sees_plan_forecast(&with(Person, Role::Guest, TaskScope::All)),
+        "widened or not, a guest gets none"
+    );
+    assert!(!sees_plan_forecast(&with(
+        Agent,
+        Role::Guest,
+        TaskScope::All
+    )));
+    assert!(
+        !sees_plan_forecast(&with(Agent, Role::Admin, TaskScope::All)),
+        "an agent stored as an admin counts as a guest"
+    );
+    assert!(!sees_plan_forecast(&with(
+        Person,
+        Role::None,
+        TaskScope::All
+    )));
 }

@@ -3626,6 +3626,14 @@ impl Workspace {
                     },
                 )
             }
+            (Method::Put, ["plan", "start"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| plan::handle_set_start(sql, &who.caller, &body, now),
+            ),
             (Method::Put, ["tasks", task, "plan"]) => {
                 let task = (*task).to_string();
                 self.command(

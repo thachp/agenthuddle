@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod baseline;
 pub mod files;
 
 pub const MAX_ARTIFACTS: usize = 10;

@@ -51,6 +51,7 @@ person_only:
   - withdrawRoleInvite
   - endRoleClaim
   - setWorkspaceBrief
+  - setPlanStart
   - setMemberAccess
   - transferOwner
   - recoverOwner
