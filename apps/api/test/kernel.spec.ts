@@ -826,6 +826,51 @@ describe("review findings", () => {
     expect(versions).toEqual([...new Set(versions)].sort((a, b) => a - b));
   });
 
+  describe("where the audit history ends", () => {
+    const PAGE = 50;
+    /** Tops the audit history up to exactly this many entries, each with its own position, as copies of the newest. */
+    const auditUpTo = (id: string, total: number) => runInDurableObject(stub(id), (_: any, state: any) => {
+      const sql = state.storage.sql;
+      const have = sql.exec("SELECT count(*) AS n FROM audit_event").one().n as number;
+      const names = sql.exec("PRAGMA table_info(audit_event)").toArray().map((c: any) => c.name).filter((n: string) => n !== "seq");
+      const chosen = names.map((n: string) => (n === "id" ? "'aud_fill' || g.n" : n === "policy_version" ? "t.policy_version + 1" : `t.${n}`)).join(",");
+      for (let i = have; i < total; i++) sql.exec(`INSERT INTO audit_event (${names.join(",")}) SELECT ${chosen} FROM (SELECT ? AS n) g, (SELECT * FROM audit_event ORDER BY policy_version DESC LIMIT 1) t`, i);
+      expect(sql.exec("SELECT count(*) AS n FROM audit_event").one().n).toBe(total);
+    });
+    const page = async (id: string, after = 0) => (await api(OWNER, "GET", `/v1/workspaces/${id}/audit?after=${after}`)).body;
+
+    it("says there's nothing more on a full last page, at exactly one page", async () => {
+      const { id } = await room();
+      await auditUpTo(id, PAGE);
+      const first = await page(id);
+      expect(first.audit).toHaveLength(PAGE);
+      expect(first.next_cursor).toBeNull();
+    });
+
+    it("says there's nothing more on a full last page, at exactly two pages", async () => {
+      const { id } = await room();
+      await auditUpTo(id, PAGE * 2);
+      const first = await page(id);
+      expect(first.audit).toHaveLength(PAGE);
+      expect(first.next_cursor).toBe(first.audit[PAGE - 1].policy_version);
+      const second = await page(id, first.next_cursor);
+      expect(second.audit).toHaveLength(PAGE);
+      expect(second.next_cursor).toBeNull();
+      expect(new Set([...first.audit, ...second.audit].map((a: any) => a.policy_version)).size).toBe(PAGE * 2);
+    });
+
+    it("still offers the next page with one entry past a full page", async () => {
+      const { id } = await room();
+      await auditUpTo(id, PAGE + 1);
+      const first = await page(id);
+      expect(first.audit).toHaveLength(PAGE);
+      expect(first.next_cursor).toBe(first.audit[PAGE - 1].policy_version);
+      const second = await page(id, first.next_cursor);
+      expect(second.audit).toHaveLength(1);
+      expect(second.next_cursor).toBeNull();
+    });
+  });
+
   it("enforces the open-task limit", async () => {
     const { id, tasks } = await room();
     await runInDurableObject(stub(id), (_: any, state: any) => {
