@@ -224,7 +224,7 @@ async function seed() {
   // A task waiting on another, both on the first page.
   const planned = await owner.must("GET", `/v1/workspaces/${longRoom}/plan`);
   const longId = (title) => planned.tasks.find((task) => task.title === title).id;
-  await owner.must("PUT", `/v1/workspaces/${longRoom}/tasks/${longId("Long task 319")}/plan`, { plan_revision: planned.plan_revision, predecessors: [longId("Long task 318")] });
+  await owner.must("PUT", `/v1/workspaces/${longRoom}/tasks/${longId("Long task 319")}/plan`, { plan_revision: planned.plan_revision, duration_days: 3, predecessors: [longId("Long task 318")] });
   return { viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
@@ -253,6 +253,10 @@ const screens = (s) => {
     ["Tasks, board", `${w}/tasks?view=board`, "An open task"],
     ["Tasks, board with canceled shown", `${w}/tasks?view=board&canceled=show`, "A canceled task"],
     ["Tasks, board, empty", `/w/${s.emptyRoom}/tasks?view=board`, "No tasks in scope"],
+    ["Tasks, Gantt", `${w}/tasks?view=gantt`, "Forecast unavailable"],
+    ["Tasks, Gantt, empty", `/w/${s.emptyRoom}/tasks?view=gantt`, "No tasks in scope"],
+    ["Tasks, Gantt, long", `/w/${s.longRoom}/tasks?view=gantt`, "Load more"],
+    ["Task Sheet over the Gantt", `${w}/tasks?view=gantt&task=${s.reviewScreen.id}`, "Approve submission", "owner", true],
     ["Tasks, long list", `/w/${s.longRoom}/tasks`, "Load more"],
     ["Activity, long", `/w/${s.longRoom}/activity`, "Load more"],
     ["Task Sheet over the board", `${w}/tasks?view=board&task=${s.reviewScreen.id}`, "Approve submission", "owner", true],
@@ -1312,6 +1316,56 @@ async function keyboardPaths(s) {
       const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       ok(overflow <= 0, `tasks${query} scrolls sideways by ${overflow}px at 375px with Blocked on it`);
     }
+    await phone.close();
+  });
+
+  await keyboardPath("the Gantt table: real rows, a keyboard path to the Sheet and back, and no sideways page at phone width", async () => {
+    const own = await contextFor(s.owner).newPage();
+    try {
+      await own.goto(longUrl());
+      await hydrated(own);
+      const gantt = own.getByRole("link", { name: "Gantt", exact: true });
+      await tabTo(own, gantt, "the Gantt link");
+      await own.keyboard.press("Enter");
+      await own.waitForURL(/view=gantt/, { timeout: 15_000 });
+      const row = own.getByRole("row").filter({ has: own.getByRole("link", { name: "Long task 319", exact: true }) });
+      await row.getByRole("cell", { name: "Long task 318" }).waitFor({ timeout: 15_000 });
+      ok(await row.getByRole("cell", { name: "3 working days", exact: true }).count() === 1, "the estimate didn't show with its units");
+      ok(await row.getByRole("cell", { name: "Unavailable", exact: true }).count() === 1, "planned dates should be unavailable");
+      await shownOnce(own, "Forecast unavailable");
+      await shownOnce(own, "No capacity/resource leveling");
+      const link = row.getByRole("link", { name: "Long task 319", exact: true });
+      await hydrated(own);
+      await tabTo(own, link, "the row's link");
+      await own.keyboard.press("Enter");
+      await own.getByRole("dialog").waitFor({ timeout: 15_000 });
+      ok(own.url().includes("view=gantt") && own.url().includes("task="), `opening a row changed the view: ${own.url()}`);
+      await own.keyboard.press("Escape");
+      await own.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
+      await own.waitForFunction(() => document.activeElement?.getAttribute("data-sheet-launcher")?.startsWith("task:"), undefined, { timeout: 5000 }).catch(async () => {
+        throw new Error(`closing the Sheet left focus on ${await activeText(own)}, not the row that opened it`);
+      });
+      ok(own.url().includes("view=gantt"), `closing the Sheet lost the view: ${own.url()}`);
+    } finally {
+      await own.close();
+    }
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    await small.goto(longUrl("?view=gantt"));
+    await hydrated(small);
+    const region = small.getByRole("region", { name: "Task plan table" });
+    await region.waitFor({ timeout: 15_000 });
+    const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    ok(overflow <= 0, `the Gantt scrolls the page sideways by ${overflow}px at 375px`);
+    ok(await region.evaluate((el) => el.scrollWidth > el.clientWidth), "the table should scroll inside its region at 375px");
+    const share = await region.evaluate((el) => el.querySelector("tbody th").getBoundingClientRect().width / el.clientWidth);
+    ok(share <= 0.55, `the column that stays put takes ${Math.round(share * 100)}% of the table's width at 375px`);
+    await region.focus();
+    await small.keyboard.press("ArrowRight");
+    await small.waitForFunction(() => document.querySelector('[role="region"][aria-label="Task plan table"]').scrollLeft > 0, undefined, { timeout: 5000 }).catch(() => {
+      throw new Error("the arrow keys don't scroll the table");
+    });
+    await audit(small, "Tasks, Gantt, phone");
     await phone.close();
   });
 

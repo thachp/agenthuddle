@@ -10,7 +10,8 @@ describe("the URL's view state", () => {
     ["", { view: "list", reviewMine: false, showCanceled: false }],
     ["view=list", { view: "list", reviewMine: false, showCanceled: false }],
     ["view=board&review=mine&canceled=show", { view: "board", reviewMine: true, showCanceled: true }],
-    ["view=gantt&review=everyone&canceled=1", { view: "list", reviewMine: false, showCanceled: false }],
+    ["view=gantt&review=mine", { view: "gantt", reviewMine: true, showCanceled: false }],
+    ["view=chart&review=everyone&canceled=1", { view: "list", reviewMine: false, showCanceled: false }],
   ])("reads %j", (query, expected) => {
     expect(readViewState(new URLSearchParams(query))).toEqual(expected);
   });
