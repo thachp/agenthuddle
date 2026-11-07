@@ -65,7 +65,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
 | **M6 Release** | Workroom-level deployment, separate content domain, custom domains | Expanded criteria 7 and 8 |
-| **M7 Runner** (nothing published until this gate passes) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-24](RUNNER.md#proposed-acceptance-criteria-not-executed); provider and sandbox proof of concept; security review of the threat model |
+| **M7 Runner** (nothing published until this gate passes) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-30](RUNNER.md#proposed-acceptance-criteria-not-executed), including the proposed one-agent pairing proof of concept; provider and sandbox proof of concept; security review of the threat model |
 
 A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms. M7's outbound default needs M0. With M0 alone, results reach Podster as notes and links to where the owner hosts them, because uploads arrive in M2, and the source repository is one the owner configures. Tests marked inbound need M3, and public-room cases need M4.
 

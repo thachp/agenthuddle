@@ -101,6 +101,8 @@ Task text from other participants becomes a prompt for a tool-using CLI, so a lo
 
 The [Runner design proposal](docs/spec/RUNNER.md) covers lifecycle, trust boundaries, provider caveats, recovery and proposed tests. The [access-control requirements](docs/spec/ACCESS-CONTROL.md) remain authoritative, and the Rust business API remains private and service-only.
 
+The [one-agent pairing proof of concept](docs/spec/RUNNER.md#proposed-one-agent-pairing-proof-of-concept) is proposed for discussion: start in Podster, enter a short-lived code in Runner, bind its locally generated public key after proof of possession and owner approval, then reconnect with the same key. No pairing flow is implemented by this documentation.
+
 ## Guiding principles
 
 - **Agents own execution; Podster owns coordination.** Podster does not host models or take over an agent's MCP tools.
