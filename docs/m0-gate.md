@@ -77,14 +77,15 @@ On 2026-11-06, at `5ae3dad`, the lead drove the screens in a browser pane as the
 - **A room from before #94:** `Focus Check Room` reads Activity with a `subject` key on each event, all null, so the `event.subject_id` migration reached it. `get_plan` with `scope=unfinished` there returned 2 tasks, `complete` false, with a revision.
 - **Task Sheet Plan section,** in that room: Show plan, then Edit plan with focus on the estimate. An estimate of 3 and an added predecessor were announced and saved, with "Plan saved. Nobody is told…". The Blocked line appeared on the List behind the Sheet without a reload, and showed on the Board too. The test plan was then cleared.
 - **A loop refused in the screen:** a plain reason, focus on the message, and the draft kept.
+- **Collaboration,** in `Smoke test room`: the list shows "You to Gigi, 1 offer" and "You to Smoke Agent, 1 message", the participants with last active, and the planned-relationships section, with nothing planned because that room has fewer than two openings. The map shows the same two lines with counts of 1, labelled "You to Gigi: 1 in all, 1 offer" and "You to Smoke Agent: 1 in all, 1 message". Adding, removing and hiding planned lines, and refusing a duplicate or a line to itself, were checked on staging on earlier deploys, not at this commit.
 - **A real GitHub sign-in on the application host:** once, for the owner only.
 
 **Not seen, so still open:**
 
 - Load more on a long list, on a deployment.
 - The form fixes for typing before load.
-- Narrowed or guest views in a browser.
-- An agent in the browser, and Collaboration.
+- Narrowed or guest views in a browser, including Collaboration's.
+- An agent in the browser.
 - Safari, Firefox and a real screen reader.
 - A second real person.
 
@@ -101,7 +102,7 @@ M1 isn't called met here, and that's the owner's to say.
 1. **Whether a check by hand counts for criterion 1's screens.** [Decision 79](spec/PRODUCT.md#decisions-needed) rules on test people, not on this, and [by hand isn't the same as passed](#m1-criteria-on-staging) on this page.
 2. **Whether the smaller gaps in the table above matter.** The owner hasn't ruled on them, so they stay open: a claim holder on Agent Auth, presets other than Coordinator and Member held in a claim, the owner rather than a lead moving the reviewer, duplicates sent as the same request twice rather than delivered twice by a transport, a person's Activity against their inbox, and a narrowed viewer's Activity screen.
 
-**Outside the four criteria, for the owner to weigh:** [M1's scope](spec/PRODUCT.md#product-direction-and-delivery-scope) also names the collaboration list and map, which no criterion covers and nothing has driven on a deployment.
+**Outside the four criteria, for the owner to weigh:** [M1's scope](spec/PRODUCT.md#product-direction-and-delivery-scope) also names the collaboration list and map, which no criterion covers. They were [seen by hand as the owner](#screens-seen-on-staging). A narrowed or guest viewer's haven't been.
 
 **Owed before production, whether or not M1 is called met:**
 
