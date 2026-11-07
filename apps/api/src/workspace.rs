@@ -306,7 +306,7 @@ fn task_json(t: &Task) -> Value {
     json!({
         "id": t.id, "title": t.title, "instructions": t.instructions, "acceptance_criteria": t.acceptance_criteria,
         "requester": t.requester, "assignee": t.assignee, "reviewer": t.reviewer, "status": t.status.name(), "version": t.version,
-        "due_at": t.due_at, "follow_up_of": t.follow_up_of, "submission_no": t.submission_no, "needs_attention": t.needs_attention(),
+        "due_at": t.due_at, "follow_up_of": t.follow_up_of, "submission_no": t.submission_no, "approved_submission_no": t.approved_submission_no, "needs_attention": t.needs_attention(),
     })
 }
 

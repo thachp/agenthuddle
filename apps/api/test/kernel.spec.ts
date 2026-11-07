@@ -83,7 +83,13 @@ const offer = async (tasks: string, extra: object = {}) => {
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 /** Puts a room back to what the last deployment left, with only the newest migration undone. */
+const undoApprovedMigration = (state: any) => {
+  state.storage.sql.exec("ALTER TABLE task DROP COLUMN approved_submission_no");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before events named a subject. */
 const undoSubjectMigration = (state: any) => {
+  undoApprovedMigration(state);
   state.storage.sql.exec("ALTER TABLE event DROP COLUMN subject_id");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
 };
@@ -4478,7 +4484,7 @@ describe("rooms from before access grants", () => {
     const version = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number);
     const read = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body;
     expect([read.goal, read.context]).toEqual([null, null]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 7);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 8);
     const accessOf = (who: Who) => read.members.find((m: any) => m.principal_id === who.id).access;
     expect(accessOf(LEAD).preset).toBe("member");
     expect(accessOf(BOB).preset).toBe("guest");
@@ -4668,7 +4674,7 @@ describe("work roles and claims", () => {
     expect(read.status).toBe(200);
     expect(read.body.members.find((m: any) => m.principal_id === BOB.id).access.preset).toBe("public_participant");
     expect(await count(id, "access_grant")).toBe(before);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 6);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 7);
     const role = await opening(id);
     expect((await invite(id, role, BOB)).status).toBe(200);
     expect((await claim(id, role, BOB)).body.access.preset).toBe("member");
@@ -5156,7 +5162,7 @@ describe("requiring a person to review (decision 5)", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 5);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 6);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     expect((await setting(id, true)).code).toBe("workspace_archived");
   });
@@ -5653,7 +5659,7 @@ describe("planned relationships", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).planned).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 3);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 4);
     expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).status).toBe(200);
   });
 
@@ -6165,6 +6171,93 @@ describe("task plans", () => {
   });
 });
 
+describe("the approved submission", () => {
+  const artifacts = [{ uri: "https://example.com/a", label: "A" }];
+  const read = async (who: Who, tasks: string, id: string) => (await api(who, "GET", `${tasks}/${id}`)).body;
+  const accepted = async (tasks: string, title = "Work") => {
+    const t = await offer(tasks, { title });
+    return (await api(BOB, "POST", `${tasks}/${t.id}/accept`, { version: t.version })).body;
+  };
+  const submit = async (tasks: string, t: any) => (await api(BOB, "POST", `${tasks}/${t.id}/submit`, { version: t.version, artifacts })).body;
+  const verify = (tasks: string, id: string, submission_no: number, opts: object = {}) => api(REVIEWER, "POST", `${tasks}/${id}/verify`, { submission_no }, opts);
+
+  it("names the exact submission approved, and none before that", async () => {
+    const { tasks } = await room();
+    const first = await submit(tasks, await accepted(tasks));
+    expect((await read(LEAD, tasks, first.id)).task.approved_submission_no).toBeNull();
+    const back = await api(REVIEWER, "POST", `${tasks}/${first.id}/request-changes`, { submission_no: 1, reason: "More" });
+    expect(back.status).toBe(200);
+    expect(back.body.approved_submission_no).toBeNull();
+    const second = await submit(tasks, back.body);
+    const done = await verify(tasks, second.id, 2);
+    expect(done.status).toBe(200);
+    expect(done.body.approved_submission_no).toBe(2);
+    expect((await read(LEAD, tasks, first.id)).task.approved_submission_no).toBe(2);
+  });
+
+  it("refuses a stale submission and records nothing", async () => {
+    const { tasks } = await room();
+    const first = await submit(tasks, await accepted(tasks));
+    const back = (await api(REVIEWER, "POST", `${tasks}/${first.id}/request-changes`, { submission_no: 1, reason: "More" })).body;
+    await submit(tasks, back);
+    const stale = await verify(tasks, first.id, 1);
+    expect([stale.status, stale.code]).toEqual([409, "submission_mismatch"]);
+    const after = (await read(LEAD, tasks, first.id)).task;
+    expect([after.status, after.approved_submission_no]).toEqual(["submitted", null]);
+  });
+
+  it("can't move once approved: a resubmission, a change request and a second approval are all refused", async () => {
+    const { tasks } = await room();
+    const sent = await submit(tasks, await accepted(tasks));
+    const done = (await verify(tasks, sent.id, 1)).body;
+    expect((await api(BOB, "POST", `${tasks}/${sent.id}/submit`, { version: done.version, artifacts })).code).toBe("invalid_transition");
+    expect((await api(REVIEWER, "POST", `${tasks}/${sent.id}/request-changes`, { submission_no: 1, reason: "No" })).code).toBe("invalid_transition");
+    expect((await verify(tasks, sent.id, 1)).code).toBe("invalid_transition");
+    const after = (await read(LEAD, tasks, sent.id)).task;
+    expect([after.status, after.submission_no, after.approved_submission_no, after.version]).toEqual(["completed", 1, 1, done.version]);
+  });
+
+  it("is written with the approval, so a failed one leaves nothing, and a retry answers the same", async () => {
+    const { tasks } = await room();
+    const sent = await submit(tasks, await accepted(tasks));
+    expect((await verify(tasks, sent.id, 1, { fail: true })).status).toBe(500);
+    const after = (await read(LEAD, tasks, sent.id)).task;
+    expect([after.status, after.approved_submission_no]).toEqual(["submitted", null]);
+    const key = nextKey();
+    const done = await verify(tasks, sent.id, 1, { key });
+    expect((await verify(tasks, sent.id, 1, { key })).body).toEqual(done.body);
+  });
+
+  it("shows it to anyone who can read the task, as a number they already had, and to nobody else", async () => {
+    const { id, tasks } = await room();
+    const sent = await submit(tasks, await accepted(tasks));
+    await verify(tasks, sent.id, 1);
+    const asParty = await read(BOB, tasks, sent.id);
+    expect(asParty.task.approved_submission_no).toBe(asParty.task.submission_no);
+    const listed = (await api(OWNER, "GET", tasks)).body.tasks.find((t: any) => t.id === sent.id);
+    expect(listed.approved_submission_no).toBe(1);
+    // A guest who isn't on the task gets no task to read it from.
+    expect((await api(CAROL, "GET", `${tasks}/${sent.id}`)).code).toBe("task_not_found");
+    expect(JSON.stringify((await api(CAROL, "GET", tasks)).body)).not.toContain(sent.id);
+    expect((await api(OUTSIDER, "GET", `/v1/workspaces/${id}/tasks/${sent.id}`)).status).toBe(404);
+  });
+
+  it("gives a task approved before this its only possible approved submission, and leaves the rest empty", async () => {
+    const { id, tasks } = await room();
+    const approved = await submit(tasks, await accepted(tasks, "Approved"));
+    const returned = (await api(REVIEWER, "POST", `${tasks}/${(await submit(tasks, await accepted(tasks, "Twice"))).id}/request-changes`, { submission_no: 1, reason: "More" })).body;
+    const approvedTwice = await submit(tasks, returned);
+    await verify(tasks, approved.id, 1);
+    await verify(tasks, approvedTwice.id, 2);
+    const waiting = await submit(tasks, await accepted(tasks, "Waiting"));
+    const canceled = await submit(tasks, await accepted(tasks, "Canceled"));
+    expect((await api(LEAD, "POST", `${tasks}/${canceled.id}/cancel`, { version: canceled.version, reason: "No" })).status).toBe(200);
+    await runInDurableObject(stub(id), (_: any, state: any) => undoApprovedMigration(state));
+    const now = async (t: any) => (await read(LEAD, tasks, t.id)).task.approved_submission_no;
+    expect([await now(approved), await now(approvedTwice), await now(waiting), await now(canceled)]).toEqual([1, 2, null, null]);
+  });
+});
+
 describe("notices in a limited agent's Activity", () => {
   const events = async (who: Who, id: string) => {
     const r = await api(who, "GET", `/v1/workspaces/${id}/activity?order=newest`);
@@ -6624,6 +6717,6 @@ describe("the collaboration list and map", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).edges).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 4);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 5);
   });
 });

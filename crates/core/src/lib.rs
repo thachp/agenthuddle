@@ -93,6 +93,8 @@ pub struct Task {
     /// The latest submission's number, or 0 if none.
     pub submission_no: u32,
     pub submission_commit: Option<String>,
+    /// The submission a reviewer approved, set only by `Verify`. A completed task can't be submitted to again, so it can't move.
+    pub approved_submission_no: Option<u32>,
     /// Set when an assignee leaves after submitting, so a change request reopens the task.
     pub assignee_departed: bool,
     /// Set when a departed reviewer has no eligible fallback, until `set_reviewer` runs.
@@ -579,6 +581,7 @@ pub fn decide_create(actor: &str, new: NewTask) -> Result<Decision, CoreError> {
         has_linked_repository: new.has_linked_repository,
         submission_no: 0,
         submission_commit: None,
+        approved_submission_no: None,
         assignee_departed: false,
         needs_reviewer: false,
         needs_requester: false,
@@ -809,6 +812,7 @@ pub fn decide(
                 }
             }
             next.status = TaskStatus::Completed;
+            next.approved_submission_no = Some(submission_no);
             vec![event(
                 EventKind::TaskCompleted,
                 actor,

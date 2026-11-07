@@ -63,7 +63,7 @@ If it fails, the fallback in decision 51 applies, and the owner hears before any
 Extend `artifact` and `submission` instead of adding the `artifact_version` table the architecture first drew. Submissions are already numbered and immutable, so a submission number is the version.
 
 - `artifact` gains an optional `object_id`, and a row has either that or a link.
-- `verify_task` already names `submission_no`. It also records the approved submission on the task, in the same transaction.
+- `verify_task` already names `submission_no`. It also records the approved submission on the task, in the same transaction. This part is built, as `approved_submission_no`, and needed no storage. A task completed before it has its latest submission recorded, the only one that could have been approved.
 - `crates/core` gets "all files clean" through its existing `observed` input, and refuses approval without it. Core stays pure.
 - An object can be attached only by the person or agent who uploaded it, on a task in the same room.
 

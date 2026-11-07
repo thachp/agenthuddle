@@ -25,6 +25,7 @@ fn task(status: TaskStatus) -> Task {
         has_linked_repository: false,
         submission_no: 2,
         submission_commit: None,
+        approved_submission_no: None,
         assignee_departed: false,
         needs_reviewer: false,
         needs_requester: false,
@@ -1375,4 +1376,51 @@ fn a_cycle_check_ignores_the_edges_being_replaced_and_stops_on_a_stored_loop() {
         &ids(&["a"]),
         &edges(&[("a", "b"), ("b", "a")])
     ));
+}
+
+#[test]
+fn approving_records_the_exact_submission_and_nothing_else_touches_it() {
+    let observed = Observed::default();
+    let mut submitted = task(Submitted);
+    submitted.submission_no = 3;
+    let verify = |no| Command::Verify {
+        submission_no: no,
+        commit_sha: None,
+    };
+    let approved = decide(&submitted, "rev", verify(3), &observed)
+        .unwrap()
+        .task;
+    assert_eq!(approved.approved_submission_no, Some(3));
+    assert_eq!(
+        decide(&submitted, "rev", verify(2), &observed).unwrap_err(),
+        CoreError::SubmissionMismatch
+    );
+    // Every other command, from every status, leaves it as it was.
+    for (name, command) in commands() {
+        for status in TaskStatus::ALL {
+            let mut before = task(status);
+            before.approved_submission_no = Some(7);
+            if name == "verify" {
+                continue;
+            }
+            for actor in ["req", "asg", "rev"] {
+                if let Ok(decision) = decide(&before, actor, command.clone(), &observed) {
+                    assert_eq!(
+                        decision.task.approved_submission_no,
+                        Some(7),
+                        "{name} from {status:?}"
+                    );
+                }
+            }
+        }
+    }
+    // Finished is finished, so nothing can follow an approval.
+    for (name, command) in commands() {
+        for actor in ["req", "asg", "rev"] {
+            assert!(
+                decide(&approved, actor, command.clone(), &observed).is_err(),
+                "{name}"
+            );
+        }
+    }
 }

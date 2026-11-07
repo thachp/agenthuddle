@@ -1081,6 +1081,7 @@ async function criteria() {
     for (const type of ["task.offered", "task.accepted", "task.submitted", "task.changes_requested", "task.reviewer_changed", "task.completed"]) ok(types.includes(type), `the history has no ${type}: ${types.join(", ")}`);
     eq(types.filter((type) => type === "task.submitted").length, 2, "submissions in the history");
     eq(reads[0].submissions.length, 2, "submissions kept");
+    eq(reads[0].task.approved_submission_no, second.submission_no, "the submission approved, not the first");
     coordinated = task.id;
   });
 
