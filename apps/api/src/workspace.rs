@@ -2189,11 +2189,13 @@ mod queries {
         if !whole_room {
             bindings.push(id.into());
         }
-        bindings.push(limit.into());
+        // One row past the page, which only says whether there is more, so a full last page doesn't promise another.
+        bindings.push((limit + 1).into());
         let found = rows(sql, &query, bindings)?;
+        let more = found.len() as i64 > limit;
         let mut events = Vec::with_capacity(found.len());
         let mut last = None;
-        for row in &found {
+        for row in found.iter().take(limit as usize) {
             let kind = row["type"].as_str().unwrap_or_default();
             let actor = row["actor_id"].as_str().unwrap_or_default();
             let task = match row["task_id"].as_str() {
@@ -2230,7 +2232,7 @@ mod queries {
                 "reason": reason, "prior_status": row["prior_status"], "new_status": row["new_status"], "created_at": row["created_at"],
             }));
         }
-        let next = (found.len() as i64 == limit).then_some(last).flatten();
+        let next = more.then_some(last).flatten();
         Ok(if newest {
             json!({ "events": events, "next_before": next })
         } else {
@@ -2288,17 +2290,20 @@ mod queries {
         let narrow = mine || !sees_whole_room(caller);
         let found = rows(sql, &format!("SELECT * FROM task WHERE {position} AND (? IS NULL OR status = ?)
             AND (? = 0 OR requester_id = ? OR assignee_id = ? OR reviewer_id = ?) ORDER BY seq {direction} LIMIT ?"), vec![
-            cursor.into(), opt(&status), opt(&status), i64::from(narrow).into(), caller.id.as_str().into(), caller.id.as_str().into(), caller.id.as_str().into(), PAGE_SIZE.into(),
+            cursor.into(), opt(&status), opt(&status), i64::from(narrow).into(), caller.id.as_str().into(), caller.id.as_str().into(), caller.id.as_str().into(), (PAGE_SIZE + 1).into(),
         ])?;
+        // One row past the page, which only says whether there is more, so a full last page doesn't promise another.
+        let more = found.len() as i64 > PAGE_SIZE;
+        let page = || found.iter().take(PAGE_SIZE as usize);
         let mut tasks = Vec::new();
-        for row in &found {
+        for row in page() {
             let task = store::task_from_row(row)?;
             if can_see_task(caller, &task) {
                 tasks.push(task_json(&task));
             }
         }
-        let next = (found.len() as i64 == PAGE_SIZE)
-            .then(|| found.last().map(|r| int(&r["seq"])))
+        let next = more
+            .then(|| page().next_back().map(|r| int(&r["seq"])))
             .flatten();
         Ok(json!({ "tasks": tasks, "next_cursor": next }))
     }
