@@ -13,6 +13,10 @@
 //! - Text at both ends of a file with anything in the middle.
 //! - A file valid as two formats, unless the second is a zip ending the file.
 //! - Anything inside an archive: an executable, a nested password-protected archive or a zip bomb.
+//! - A password-protected OpenDocument file. It marks encryption in its manifest and leaves the zip flags at 0, so it passes
+//!   as an ordinary zip. Refusing all OpenDocument files would close this, and that's the owner's call. The scanner may or
+//!   may not flag these.
+//! - A DOS program written entirely in printable characters, which reads as text.
 //! - A zip whose local header claims encryption where neither sample reaches it, and only there.
 //! - A PDF whose last trailer points to an encryption dictionary outside both samples.
 //! - Macros other than the Office and OpenDocument paths named in `zip_kind`, and exploits in an allowed format.
@@ -246,8 +250,8 @@ pub fn clean_file_name(raw: &str) -> Result<CleanFileName, FileRefusal> {
 /// Whether a name would run when someone opens the download, whatever its content. This is the one place a name matters:
 /// it can get a file refused, because what the browser saves is what the name says.
 ///
-/// **Proposed.** It covers formats nobody uploads as code. Scripts such as `.bat`, `.ps1`, `.sh` and `.js` aren't here
-/// because code is on the allowed list.
+/// **Proposed.** It covers formats nobody uploads as code. Whether to add `.bat`, `.cmd`, `.ps1`, `.sh`, `.js`, `.vbs`, `.msc`,
+/// `.inf`, `.url`, `.jnlp` or `.application` is open, as code is on the allowed list and some of these run when opened.
 fn has_refused_extension(name: &CleanFileName) -> bool {
     let Some((_, ext)) = name.as_str().rsplit_once('.') else {
         return false;
@@ -290,14 +294,26 @@ fn has_refused_extension(name: &CleanFileName) -> bool {
     )
 }
 
-/// What someone asks to upload. There's deliberately no content type: it would only be a claim.
-#[derive(Clone, Copy, Debug)]
+/// What someone asks to upload. There's deliberately no content type: it would only be a claim. Its `Debug` leaves out
+/// the name, which hasn't been cleaned.
+#[derive(Clone, Copy)]
 pub struct UploadRequest<'a> {
     pub name: &'a str,
     pub size: u64,
     /// Space the room has kept and reserved, every version counted.
     pub room_used: u64,
     pub room_archived: bool,
+}
+
+impl fmt::Debug for UploadRequest<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UploadRequest")
+            .field("name_bytes", &self.name.len())
+            .field("size", &self.size)
+            .field("room_used", &self.room_used)
+            .field("room_archived", &self.room_archived)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -395,12 +411,22 @@ impl ContentKind {
 }
 
 /// The ends of a file. `head` is its first `SAMPLE_HEAD_BYTES` and `tail` its last `SAMPLE_TAIL_BYTES`, or all of it when
-/// it's shorter, and the two can overlap. A sample of any other length is refused.
-#[derive(Clone, Copy, Debug)]
+/// it's shorter, and the two can overlap. A sample of any other length is refused. Its `Debug` prints lengths, never bytes.
+#[derive(Clone, Copy)]
 pub struct FileSample<'a> {
     pub head: &'a [u8],
     pub tail: &'a [u8],
     pub total_size: u64,
+}
+
+impl fmt::Debug for FileSample<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileSample")
+            .field("head_bytes", &self.head.len())
+            .field("tail_bytes", &self.tail.len())
+            .field("total_size", &self.total_size)
+            .finish()
+    }
 }
 
 impl FileSample<'_> {
@@ -429,26 +455,51 @@ fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(raw.try_into().ok()?))
 }
 
+/// Whether this is a Windows program: `MZ`, then at 0x3C the place of its `PE` header, with the header there. Two letters
+/// alone would catch text that starts "MZ".
+///
+/// A file whose header is out of both samples still can't be accepted. A pointer to anywhere under the size limit has a NUL
+/// in its top bytes, so it isn't text, and it matches no other allowed format, so it's refused as not on the list. Only a
+/// DOS program written entirely in printable characters gets through as text, and its name can't end `.exe` or `.com`.
+fn has_pe_header(sample: &FileSample<'_>) -> bool {
+    if !sample.head.starts_with(b"MZ") {
+        return false;
+    }
+    u32_at(sample.head, 0x3C).is_some_and(|at| {
+        let at = u64::from(at);
+        let in_head = usize::try_from(at)
+            .ok()
+            .and_then(|at| sample.head.get(at..));
+        let in_tail = at
+            .checked_sub(sample.tail_start())
+            .and_then(|at| usize::try_from(at).ok())
+            .and_then(|at| sample.tail.get(at..));
+        [in_head, in_tail]
+            .into_iter()
+            .flatten()
+            .any(|found| found.starts_with(b"PE\0\0"))
+    })
+}
+
 fn is_executable(sample: &FileSample<'_>) -> bool {
-    const SIGNATURES: [&[u8]; 16] = [
-        b"MZ",               // Windows and DOS programs, and self-extractors
-        b"\x7fELF",          // Linux programs
-        b"\xFE\xED\xFA\xCE", // Mach-O
-        b"\xFE\xED\xFA\xCF", // Mach-O
-        b"\xCE\xFA\xED\xFE", // Mach-O
-        b"\xCF\xFA\xED\xFE", // Mach-O
-        b"\xCA\xFE\xBA\xBE", // Mach-O universal, and Java classes
-        b"\0asm",            // WebAssembly
-        b"dex\n0",           // Android
-        b"\xED\xAB\xEE\xDB", // RPM
-        b"!<arch>",          // deb, and static libraries
-        b"MSCF",             // Windows cabinets
-        b"ISc(",             // InstallShield
-        b"xar!",             // macOS installers
-        b"Cr24",             // Chrome extensions
+    const SIGNATURES: [&[u8]; 15] = [
+        b"\x7fELF",                                        // Linux programs
+        b"\xFE\xED\xFA\xCE",                               // Mach-O
+        b"\xFE\xED\xFA\xCF",                               // Mach-O
+        b"\xCE\xFA\xED\xFE",                               // Mach-O
+        b"\xCF\xFA\xED\xFE",                               // Mach-O
+        b"\xCA\xFE\xBA\xBE",                               // Mach-O universal, and Java classes
+        b"\0asm",                                          // WebAssembly
+        b"dex\n0",                                         // Android
+        b"\xED\xAB\xEE\xDB",                               // RPM
+        b"!<arch>",                                        // deb, and static libraries
+        b"MSCF",                                           // Windows cabinets
+        b"ISc(",                                           // InstallShield
+        b"xar!",                                           // macOS installers
+        b"Cr24",                                           // Chrome extensions
         b"L\0\0\0\x01\x14\x02\0\0\0\0\0\xC0\0\0\0\0\0\0F", // Windows shortcuts
     ];
-    if SIGNATURES.iter().any(|s| sample.head.starts_with(s)) {
+    if SIGNATURES.iter().any(|s| sample.head.starts_with(s)) || has_pe_header(sample) {
         return true;
     }
     // A disk image says what it is in its last 512 bytes.
@@ -666,6 +717,8 @@ fn names_pdf_encryption(bytes: &[u8]) -> bool {
     })
 }
 
+/// Any `/Encrypt` refuses a PDF. That includes one with only an owner password, which opens and scans fine. Whether those
+/// should pass is open.
 fn pdf_kind(sample: &FileSample<'_>) -> Result<ContentKind, FileRefusal> {
     if names_pdf_encryption(sample.head) || names_pdf_encryption(sample.tail) {
         return Err(FileRefusal::PasswordProtected);
@@ -850,14 +903,25 @@ impl ObjectState {
     }
 }
 
-/// What the Worker found once the bytes stopped arriving.
-#[derive(Clone, Copy, Debug)]
+/// What the Worker found once the bytes stopped arriving. Its `Debug` prints sizes only: an announced hash is whatever the
+/// sender wrote.
+#[derive(Clone, Copy)]
 pub struct Arrival<'a> {
     pub announced_size: u64,
     pub announced_sha256: &'a str,
     pub received_size: u64,
     pub received_sha256: &'a str,
     pub sample: FileSample<'a>,
+}
+
+impl fmt::Debug for Arrival<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Arrival")
+            .field("announced_size", &self.announced_size)
+            .field("received_size", &self.received_size)
+            .field("sample", &self.sample)
+            .finish()
+    }
 }
 
 fn is_sha256(hash: &str) -> bool {

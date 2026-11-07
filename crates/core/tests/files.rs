@@ -206,6 +206,8 @@ fn reserved_device_names_are_defused_with_any_case_or_extension() {
         ("com1.txt", "_com1.txt"),
         ("LPT9", "_LPT9"),
         ("com¹.txt", "_com¹.txt"),
+        ("COM².txt", "_COM².txt"),
+        ("LPT³", "_LPT³"),
         ("conin$", "_conin$"),
         ("con .txt", "_con .txt"),
         ("con\u{200B}.txt", "_con.txt"),
@@ -294,6 +296,35 @@ fn cleaning_twice_changes_nothing() {
 }
 
 #[test]
+fn debug_output_never_shows_a_raw_name_or_file_bytes() {
+    const SECRET_NAME: &str = "secret-plan.pdf";
+    let asked = UploadRequest {
+        name: SECRET_NAME,
+        ..request(1, 0)
+    };
+    let shown = format!("{asked:?}");
+    assert!(!shown.contains("secret"), "{shown}");
+    assert!(shown.contains("name_bytes: 15"), "{shown}");
+
+    let file = whole(b"secret bytes");
+    let shown = format!("{:?}", file.sample());
+    assert!(!shown.contains('['), "{shown}");
+    assert!(shown.contains("head_bytes: 12"), "{shown}");
+
+    let announced = "secret-announced-hash";
+    let received = "secret-received-hash";
+    let arrived = Arrival {
+        announced_sha256: announced,
+        received_sha256: received,
+        ..arrival(&file)
+    };
+    let shown = format!("{arrived:?}");
+    assert!(!shown.contains('['), "{shown}");
+    assert!(!shown.contains("secret"), "{shown}");
+    assert!(shown.contains("received_size: 12"), "{shown}");
+}
+
+#[test]
 fn debug_output_never_shows_a_name() {
     let accepted = check_upload(request(1, 0)).unwrap();
     let shown = format!("{accepted:?}");
@@ -347,7 +378,7 @@ fn shortening_cannot_uncover_a_name_that_runs() {
 
 #[test]
 fn a_name_only_refuses_and_a_harmless_name_lets_nothing_in() {
-    let exe = whole(b"MZ\x90\0\x03\0\0\0 this runs");
+    let exe = Whole(windows_program());
     assert_eq!(classify(&exe.sample()).unwrap_err(), R::Executable);
     assert!(
         check_upload(request(exe.0.len() as u64, 0)).is_ok(),
@@ -392,8 +423,7 @@ fn kind_of(bytes: &[u8]) -> Result<ContentKind, R> {
 
 #[test]
 fn executables_are_refused_by_their_bytes() {
-    let signatures: [&[u8]; 16] = [
-        b"MZ",
+    let signatures: [&[u8]; 15] = [
         b"\x7fELF",
         b"\xFE\xED\xFA\xCE",
         b"\xFE\xED\xFA\xCF",
@@ -425,6 +455,88 @@ fn executables_are_refused_by_their_bytes() {
     }
 }
 
+/// `MZ`, with the place of its `PE` header at 0x3C and the header there.
+fn windows_program() -> Vec<u8> {
+    let mut program = b"MZ\x90\0".to_vec();
+    program.resize(0x3C, 0);
+    program.extend_from_slice(&0x80_u32.to_le_bytes());
+    program.resize(0x80, 0);
+    program.extend_from_slice(b"PE\0\0");
+    program.extend_from_slice(&[0; 64]);
+    program
+}
+
+/// `MZ`, pointing at a `PE` header at `at`, in a file of `len` zeroes otherwise.
+fn program_with_header_at(at: usize, len: usize) -> Vec<u8> {
+    let mut program = vec![0_u8; len];
+    program[..2].copy_from_slice(b"MZ");
+    program[0x3C..0x40].copy_from_slice(&(at as u32).to_le_bytes());
+    program[at..at + 4].copy_from_slice(b"PE\0\0");
+    program
+}
+
+#[test]
+fn a_windows_program_is_refused_by_its_header() {
+    assert_eq!(kind_of(&windows_program()).unwrap_err(), R::Executable);
+    // Near the end of a long file, so only the tail sample holds it.
+    let len = SAMPLE_HEAD_BYTES + SAMPLE_TAIL_BYTES + 5000;
+    let in_tail = program_with_header_at(len - 100, len);
+    assert_eq!(kind_of(&in_tail).unwrap_err(), R::Executable);
+}
+
+#[test]
+fn only_a_file_starting_mz_can_be_a_windows_program() {
+    let mut image = windows_program();
+    image[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    assert_eq!(kind_of(&image), Ok(ContentKind::Png));
+}
+
+#[test]
+fn text_starting_with_mz_is_still_text() {
+    assert_eq!(kind_of(b"MZ report\n"), Ok(ContentKind::Text));
+    let mut mz_long = b"MZ".to_vec();
+    mz_long.resize(200, b'a');
+    assert_eq!(kind_of(&mz_long), Ok(ContentKind::Text));
+}
+
+#[test]
+fn a_program_whose_header_is_out_of_reach_fails_closed() {
+    // Past the head and before the tail: the signature can't be seen, and the file still isn't accepted.
+    let at = SAMPLE_HEAD_BYTES + 1000;
+    let unseen = program_with_header_at(at, SAMPLE_HEAD_BYTES + SAMPLE_TAIL_BYTES + 5000);
+    assert_eq!(kind_of(&unseen).unwrap_err(), R::NotOnList);
+
+    // A pointer past the end of the file, and a pointer to something else.
+    let mut past_the_end = b"MZ\x90\0".to_vec();
+    past_the_end.resize(0x3C, 0);
+    past_the_end.extend_from_slice(&0x0100_0000_u32.to_le_bytes());
+    assert_eq!(kind_of(&past_the_end).unwrap_err(), R::NotOnList);
+
+    let mut wrong_header = windows_program();
+    wrong_header[0x80] = b'X';
+    assert_eq!(kind_of(&wrong_header).unwrap_err(), R::NotOnList);
+
+    // Too short to hold a pointer, and not text.
+    assert_eq!(kind_of(b"MZ\x90\0\x03\0\0\0").unwrap_err(), R::NotOnList);
+}
+
+#[test]
+fn a_dos_program_in_printable_characters_reads_as_text() {
+    // A documented limit, pinned so it can't be mistaken for a check. Its name can't end .exe or .com.
+    assert_eq!(kind_of(b"MZ!printable!program\n"), Ok(ContentKind::Text));
+}
+
+#[test]
+fn a_password_protected_open_document_file_passes_as_a_zip() {
+    // A documented limit, pinned so it can't be mistaken for a check: its zip flags are 0, and only the manifest says so.
+    let file = zip(&[
+        entry("mimetype"),
+        entry("META-INF/manifest.xml"),
+        entry("content.xml"),
+    ]);
+    assert_eq!(kind_of(&file), Ok(ContentKind::Zip));
+}
+
 #[test]
 fn a_disk_image_is_refused_by_its_trailer() {
     let mut dmg = vec![b'a'; 2048];
@@ -435,9 +547,14 @@ fn a_disk_image_is_refused_by_its_trailer() {
 
 #[test]
 fn a_self_extractor_is_an_executable_not_a_zip() {
-    let mut sfx = b"MZ\x90\0".to_vec();
+    let mut sfx = windows_program();
     sfx.extend_from_slice(&zip(&[entry("a.txt")]));
     assert_eq!(kind_of(&sfx).unwrap_err(), R::Executable);
+
+    // Without the header it's no program, and a zip on the end of unknown bytes still isn't accepted.
+    let mut stub = b"MZ\x90\0".to_vec();
+    stub.extend_from_slice(&zip(&[entry("a.txt")]));
+    assert_eq!(kind_of(&stub).unwrap_err(), R::CannotInspect);
 }
 
 #[test]
@@ -1180,10 +1297,10 @@ fn a_file_over_the_limit_cannot_complete_even_if_it_was_announced() {
 #[test]
 fn spoofed_content_never_reaches_the_scanner() {
     for (bytes, want) in [
-        (&b"MZ\x90\0 claims to be a pdf"[..], R::Executable),
-        (b"\x01\x02unknown", R::NotOnList),
+        (windows_program(), R::Executable),
+        (b"\x01\x02unknown".to_vec(), R::NotOnList),
     ] {
-        let file = whole(bytes);
+        let file = Whole(bytes);
         assert_eq!(
             complete_upload(Uploading, &arrival(&file)).unwrap_err(),
             want
