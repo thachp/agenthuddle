@@ -2,7 +2,9 @@
 
 The order of work for [M2 Assets and artifacts](spec/PRODUCT.md#product-direction-and-delivery-scope). The owner accepted this order and the choices behind it on 2026-11-06, as [decisions 47, 49 and 50 to 60](spec/PRODUCT.md#decisions-needed). Design is in [ADR 0006](adr/0006-uploads-and-scanning.md), and the rules are in the [upload policy](spec/UPLOAD-POLICY.md).
 
-**Nothing in this plan is built.** It starts after M1 closes, and step 0 also needs the owner to approve the billed staging resources.
+**Status, 2026-11-07 UTC:** M1 is [met by the owner's ruling](spec/PRODUCT.md#decisions-needed), and the owner approved the billed staging resources on 2026-11-06. Two pieces have merged: the record of the exact approved submission ([#97](https://github.com/thachp/podster/pull/97), part of step 6) and the pure upload rules ([#98](https://github.com/thachp/podster/pull/98), with no route or storage). The rest isn't built.
+
+**Step 0 is partly deployed and blocked.** The scan queues and the bucket exist, but the scanner's Worker and Container don't. Its deploy needs the owner to run `wrangler login` at the Mac. The spike's code is in [#99](https://github.com/thachp/podster/pull/99), unmerged, and it has no result, so step 1 hasn't started. Separately, `docker-credential-desktop` hangs on that Mac and stalls image pulls with no error. A temporary `DOCKER_CONFIG` gets past it.
 
 ## What M2 includes
 
@@ -20,7 +22,7 @@ C changes contracts and M adds a migration. Those PRs merge one at a time, and t
 
 | Step | Work | C | M | After |
 | --- | --- | --- | --- | --- |
-| 0 | Spike on staging: stream 100 MB through web, gateway and API to R2, and run ClamAV in a Container | | | Cloud approval |
+| 0 | Spike on staging: stream 100 MB through web, gateway and API to R2, and run ClamAV in a Container | | | Partly deployed, waiting on the owner's login |
 | 1 | The storage and scanning details the spike settles, as an update to ADR 0006 | | | 0 |
 | 2 | Storage: `stored_object`, `create_upload`, streamed upload, quota, R2 binding | Yes | Yes | 1 |
 | 3 | Scanning: queue, Container, clean or blocked, fail closed | | If the ADR adds a state | 2 |

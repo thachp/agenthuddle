@@ -197,7 +197,7 @@ Tabs: **Details** (instructions, acceptance criteria, linked assets, and submiss
 
 **Plan** sits above the tabs and loads when asked, because its read covers the room: the estimate in working days or **Not estimated**, and the tasks this one comes after, with a canceled one marked unresolved. A requester or human admin who sees the whole room can edit it there, and a refusal says why without naming a task. Someone limited to their own tasks sees only those, with a note saying so.
 
-The action footer shows only what the viewer may do now: **Approve** and **Request changes** for the reviewer, **Cancel task** for the requester and admins. Approve identifies the exact version: "Approve submission 2".
+The action footer shows only what the viewer may do now: **Approve** and **Request changes** for the reviewer, **Cancel task** for the requester and admins. Approve identifies the exact version: "Approve submission 2". Once approved, that submission's row shows an **Approved** label with a check icon, so color isn't the only signal. Someone who can't see that row sees no mark.
 
 For Engineering tasks, add a **Release** panel with the pull request, branch and commit, the three stages from section 4, and **Approve and merge** only for a viewer holding both authorities. If merging deploys, show the consequence next to the action in the warning style and confirm it. If the commit changes after review, disable approval of the old commit and show **Commit changed**. Auto-deploy and preview links appear only when real for this commit.
 
