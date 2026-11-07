@@ -2091,13 +2091,8 @@ describe("wake", () => {
   });
 
   it("retries failures, turns off after 3 in a row, and setting it again turns it back on", async () => {
-    // A send given up on can be cut off before the hook has logged it, or even been reached, so a hang's log can be short.
-    // Its count of failures above is what says three were sent. The other two kinds show the exact number, by the same path.
-    const expectAttempts = async (kind: string, path: string) => {
-      const attempts = await hookLog(path);
-      if (kind === "hang") expect(attempts.length, kind).toBeLessThanOrEqual(3);
-      else expect(attempts, kind).toHaveLength(3);
-    };
+    // A send given up on still reaches the hook, but the test can get here first, so it waits for the third rather than assuming it.
+    const expectAttempts = (kind: string, path: string) => vi.waitFor(async () => expect(await hookLog(path), kind).toHaveLength(3), { timeout: 5_000 });
     for (const kind of ["fail", "redirect", "hang"]) {
       const bob = await fresh();
       const path = `/${kind}-${crypto.randomUUID()}`;

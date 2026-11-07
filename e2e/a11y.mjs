@@ -1797,18 +1797,19 @@ async function keyboardPaths(s) {
       for (const [label, path] of [["Tasks", `${w}/tasks`], ["the Board", `${w}/tasks?view=board`]]) {
         await own.goto(`${app}${path}`);
         await hydrated(own);
-        await own.getByText("Gia reviews this").first().waitFor({ timeout: 15_000 });
+        await shownOnce(own, "Gia reviews this");
         await hidesAll(`a guest's ${label}`);
       }
       await own.goto(`${app}${w}/activity`);
       await hydrated(own);
-      await own.locator("main ol > li").first().waitFor({ timeout: 15_000 });
+      await own.locator("main ol > li").filter({ visible: true }).first().waitFor({ timeout: 15_000 });
       await hidesAll("a guest's Activity");
       for (const [label, path] of [["Collaboration list", `${w}/collaboration`], ["Collaboration map", `${w}/collaboration?view=map`]]) {
         await own.goto(`${app}${path}`);
         await hydrated(own);
-        await own.getByRole("heading", { name: "Collaboration" }).waitFor({ timeout: 15_000 });
-        await own.waitForTimeout(300);
+        // Someone the guest has worked with, so what's absent below is absent from a screen that has its data. Another organization's agent shows by its ID.
+        await own.getByRole("heading", { name: "Collaboration" }).filter({ visible: true }).waitFor({ timeout: 15_000 });
+        await own.getByText(s.narrowed.id).filter({ visible: true }).first().waitFor({ timeout: 15_000 });
         await hidesAll(`a guest's ${label}`);
       }
       await own.goto(`${app}${w}/tasks?task=${s.viewerTask.id}`);
@@ -1828,7 +1829,7 @@ async function keyboardPaths(s) {
     try {
       await own.goto(`${app}/oversight/${s.limitedRoom}/${s.narrowed.id}`);
       await hydrated(own);
-      await own.getByText("Gia reviews this").first().waitFor({ timeout: 15_000 });
+      await shownOnce(own, "Gia reviews this");
       // This admin's own agents include that worker, so only its work is out of bounds.
       await hidesAll("a narrowed agent's oversight", []);
     } finally {
