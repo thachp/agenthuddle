@@ -333,6 +333,8 @@ pub enum WorkroomAction {
     TransferOwner,
     /// Adding or removing a planned line between work roles. No agent yet, the lead included (decision 45).
     PlanRelationship,
+    /// The room's planning start date and timezone (decision 70).
+    SetPlanStart,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -402,6 +404,7 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("POST", ["tasks", _, "set-reviewer"]) => "task.set_reviewer",
         ("POST", ["tasks", _, "set-requester"]) => "task.set_requester",
         ("PUT", ["tasks", _, "plan"]) => "task.set_plan",
+        ("PUT", ["plan", "start"]) => "room.set_plan_start",
         ("POST", ["members"]) => "member.add",
         ("POST", ["members", _, "role"]) => "member.change_role",
         ("POST", ["members", _, "clear-removal"]) => "member.clear_removal",
@@ -509,7 +512,8 @@ pub fn authorize_workroom(caller: &Caller, action: WorkroomAction) -> Verdict {
         WorkroomAction::ManageAccess
         | WorkroomAction::ReadAuditLog
         | WorkroomAction::ManageRoom
-        | WorkroomAction::PlanRelationship => is_human_admin(caller),
+        | WorkroomAction::PlanRelationship
+        | WorkroomAction::SetPlanStart => is_human_admin(caller),
     };
     if allowed {
         Verdict::Allow
@@ -545,6 +549,13 @@ pub fn sees_planned_relationships(caller: &Caller) -> bool {
 /// nothing that moves with the rest of the room's plan.
 pub fn sees_whole_plan(caller: &Caller) -> bool {
     sees_whole_room(caller)
+}
+
+/// Whether the caller gets a forecast, and the start date it runs from. Someone who can't see the whole plan could otherwise learn
+/// a hidden task's existence or length from a finish date, and a guest gets none even if their access was widened. Everyone else
+/// is told the same thing, whatever the room holds.
+pub fn sees_plan_forecast(caller: &Caller) -> bool {
+    sees_whole_plan(caller) && caller.role != Role::Guest
 }
 
 /// Whether the caller sees who set a planned line. It can name someone who isn't otherwise visible to a viewer limited to

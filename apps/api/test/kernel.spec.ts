@@ -83,7 +83,14 @@ const offer = async (tasks: string, extra: object = {}) => {
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 /** Puts a room back to what the last deployment left, with only the newest migration undone. */
+const undoPlanStartMigration = (state: any) => {
+  state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN plan_start_date");
+  state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN plan_timezone");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before approval recorded a submission. */
 const undoApprovedMigration = (state: any) => {
+  undoPlanStartMigration(state);
   state.storage.sql.exec("ALTER TABLE task DROP COLUMN approved_submission_no");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
 };
@@ -4486,7 +4493,7 @@ describe("rooms from before access grants", () => {
     const version = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number);
     const read = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body;
     expect([read.goal, read.context]).toEqual([null, null]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 8);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 9);
     const accessOf = (who: Who) => read.members.find((m: any) => m.principal_id === who.id).access;
     expect(accessOf(LEAD).preset).toBe("member");
     expect(accessOf(BOB).preset).toBe("guest");
@@ -4676,7 +4683,7 @@ describe("work roles and claims", () => {
     expect(read.status).toBe(200);
     expect(read.body.members.find((m: any) => m.principal_id === BOB.id).access.preset).toBe("public_participant");
     expect(await count(id, "access_grant")).toBe(before);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 7);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 8);
     const role = await opening(id);
     expect((await invite(id, role, BOB)).status).toBe(200);
     expect((await claim(id, role, BOB)).body.access.preset).toBe("member");
@@ -5164,7 +5171,7 @@ describe("requiring a person to review (decision 5)", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 6);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 7);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     expect((await setting(id, true)).code).toBe("workspace_archived");
   });
@@ -5661,7 +5668,7 @@ describe("planned relationships", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).planned).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 4);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 5);
     expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).status).toBe(200);
   });
 
@@ -5684,6 +5691,284 @@ describe("planned relationships", () => {
     // Removing one makes room.
     expect((await managed(OWNER, "DELETE", `${planned(id)}/rel_1`, id)).status).toBe(200);
     expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).status).toBe(200);
+  });
+});
+
+describe("the baseline forecast", () => {
+  const planOf = (id: string) => `/v1/workspaces/${id}/plan`;
+  const read = async (who: Who, id: string, query = "") => {
+    const r = await api(who, "GET", `${planOf(id)}${query}`);
+    expect(r.status).toBe(200);
+    return r.body as any;
+  };
+  const revision = async (id: string) => (await read(OWNER, id)).plan_revision as number;
+  const setStart = async (who: Who, id: string, body: object = {}, opts: object = {}) =>
+    api(who, "PUT", `${planOf(id)}/start`, { start_date: "2026-11-02", timezone: "America/New_York", plan_revision: await revision(id), ...body }, opts);
+  const setPlan = async (tasks: string, id: string, task: string, duration_days: number | null, predecessors: string[] = []) => {
+    const r = await api(OWNER, "PUT", `${tasks}/${task}/plan`, { plan_revision: await revision(id), duration_days, predecessors });
+    expect(r.status).toBe(200);
+  };
+  const NOT_AVAILABLE = { label: "Baseline plan", available: false, reasons: ["not_available"], explanation: "A baseline plan needs the room's whole plan, and this view doesn't show one." };
+  /** The worked example in TASK-PLANNING.md. */
+  const example = async (tasks: string, id: string) => {
+    const days: [string, number, string[]][] = [["101", 1, []], ["102", 2, []], ["103", 1, ["101"]], ["104", 2, ["103"]], ["105", 2, ["102"]], ["106", 4, ["104", "105"]], ["107", 2, ["106"]], ["108", 1, ["106"]]];
+    const ids: Record<string, string> = {};
+    for (const [name, duration, before] of days) {
+      ids[name] = (await offer(tasks, { title: name })).id;
+      await setPlan(tasks, id, ids[name], duration, before.map((p) => ids[p]));
+    }
+    return ids;
+  };
+
+  it("lets the owner and a human admin set the room's start, and nobody else", async () => {
+    const { id } = await room();
+    expect((await read(OWNER, id)).start).toBeNull();
+    const first = await setStart(OWNER, id);
+    expect(first.status).toBe(200);
+    expect(first.body.start).toEqual({ date: "2026-11-02", timezone: "America/New_York" });
+    const before = (await read(OWNER, id)).plan_revision;
+    expect(first.body.plan_revision).toBe(before);
+    expect((await setStart(ADMIN, id, { start_date: "2026-12-01" })).status).toBe(200);
+    expect((await read(OWNER, id)).start).toEqual({ date: "2026-12-01", timezone: "America/New_York" });
+    for (const who of [LEAD, REVIEWER, BOB, CAROL]) {
+      const refused = await api(who, "PUT", `${planOf(id)}/start`, { start_date: "2027-01-04", timezone: "UTC", plan_revision: await revision(id) });
+      expect(refused.status).toBe(403);
+    }
+    const stranger = await api(OUTSIDER, "PUT", `${planOf(id)}/start`, { start_date: "2027-01-04", timezone: "UTC", plan_revision: 0 });
+    expect(stranger.status).toBe(404);
+    expect((await read(OWNER, id)).start).toEqual({ date: "2026-12-01", timezone: "America/New_York" });
+  });
+
+  it("refuses an impossible date, a timezone that isn't one and a missing field", async () => {
+    const { id } = await room();
+    for (const bad of [
+      { start_date: "2026-02-30" }, { start_date: "2026-11-2" }, { start_date: "1999-12-31" }, { start_date: "2101-01-01" }, { start_date: 20261102 }, { start_date: null },
+      { timezone: "Mars/Olympus_Mons" }, { timezone: "+01:00" }, { timezone: "" }, { timezone: null }, { plan_revision: null },
+    ]) {
+      expect((await setStart(OWNER, id, bad)).code, JSON.stringify(bad)).toBe("invalid_argument");
+    }
+    expect((await read(OWNER, id)).start).toBeNull();
+    for (const timezone of ["UTC", "Asia/Kolkata", "America/Argentina/Buenos_Aires", "Etc/GMT+5"]) {
+      expect((await setStart(OWNER, id, { timezone })).status, timezone).toBe(200);
+    }
+  });
+
+  it("moves the plan's revision and time with the start, conflicts when stale, and changes nothing for the same save", async () => {
+    const { id } = await room();
+    const before = await read(OWNER, id);
+    const stale = before.plan_revision;
+    expect((await setStart(OWNER, id)).status).toBe(200);
+    const after = await read(OWNER, id);
+    expect(after.plan_revision).toBe(stale + 1);
+    expect(after.plan_changed_at).toEqual(expect.any(Number));
+    expect((await setStart(OWNER, id, { start_date: "2026-11-09", plan_revision: stale })).code).toBe("plan_conflict");
+    const same = await setStart(OWNER, id, { plan_revision: stale + 1 });
+    expect(same.body.plan_revision).toBe(stale + 1);
+    expect((await read(OWNER, id)).plan_revision).toBe(stale + 1);
+  });
+
+  it("commits or rolls back whole, replays, and stops when the room is archived", async () => {
+    const { id } = await room();
+    const failed = await setStart(OWNER, id, {}, { fail: true });
+    expect(failed.status).toBe(500);
+    expect((await read(OWNER, id)).start).toBeNull();
+    expect((await read(OWNER, id)).plan_revision).toBe(0);
+    const key = nextKey();
+    const once = await setStart(OWNER, id, { plan_revision: 0 }, { key });
+    const again = await api(OWNER, "PUT", `${planOf(id)}/start`, { start_date: "2026-11-02", timezone: "America/New_York", plan_revision: 0 }, { key });
+    expect(again.body).toEqual(once.body);
+    expect((await read(OWNER, id)).plan_revision).toBe(1);
+    const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: version })).status).toBe(200);
+    expect((await setStart(OWNER, id, { start_date: "2026-11-09" })).code).toBe("workspace_archived");
+    expect((await read(OWNER, id)).start.date).toBe("2026-11-02");
+  });
+
+  it("is audited with old and new values, and its event wakes nobody and stays with those who see the whole room", async () => {
+    const { id } = await room();
+    await setStart(OWNER, id);
+    await setStart(ADMIN, id, { start_date: "2026-11-09" });
+    const log = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit.filter((e: any) => e.action === "workspace.plan_start_changed");
+    expect(log.length).toBe(2);
+    expect(JSON.stringify(log)).toContain("2026-11-09");
+    const seenBy = async (who: Who) => (await api(who, "GET", `/v1/workspaces/${id}/activity`)).body.events.map((e: any) => e.type);
+    expect(await seenBy(OWNER)).toContain("workspace.plan_start_changed");
+    expect(await seenBy(BOB)).not.toContain("workspace.plan_start_changed");
+    expect(await seenBy(CAROL)).not.toContain("workspace.plan_start_changed");
+    const told = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM event e JOIN outbox o ON o.event_id = e.id WHERE e.type = 'workspace.plan_start_changed'").one().n);
+    expect(told).toBe(0);
+  });
+
+  it("gives the worked example's dates, tied paths and slack, labeled, with when the plan last changed", async () => {
+    const { id, tasks } = await room();
+    const ids = await example(tasks, id);
+    await setStart(OWNER, id);
+    const plan = await read(OWNER, id);
+    const { forecast } = plan;
+    expect(forecast.available).toBe(true);
+    expect(forecast.label).toBe("Baseline plan");
+    expect([forecast.plan_revision, forecast.plan_changed_at]).toEqual([plan.plan_revision, plan.plan_changed_at]);
+    expect([forecast.start_date, forecast.begins_on, forecast.timezone, forecast.calendar]).toEqual(["2026-11-02", "2026-11-02", "America/New_York", "mon_fri"]);
+    expect(forecast.assumptions).toContain("No capacity/resource leveling.");
+    expect(forecast.assumptions.join(" ")).toMatch(/acceptance and review/);
+    expect(forecast.assumptions.join(" ")).toMatch(/holidays are excluded/);
+    expect(forecast.duration_days).toBe(10);
+    expect(forecast.finish_date).toBe("2026-11-13");
+    const row = (name: string) => forecast.tasks.find((t: any) => t.id === ids[name]);
+    expect([row("106").earliest_start, row("106").earliest_finish]).toEqual(["2026-11-06", "2026-11-11"]);
+    expect(row("108")).toMatchObject({ earliest_start: "2026-11-12", latest_start: "2026-11-13", latest_finish: "2026-11-13", slack_days: 1, critical: false, duration_days: 1 });
+    expect(row("107")).toMatchObject({ slack_days: 0, critical: true });
+    const named = forecast.critical_paths.map((path: string[]) => path.map((t) => Object.keys(ids).find((k) => ids[k] === t)));
+    expect(named.sort()).toEqual([["101", "103", "104", "106", "107"], ["102", "105", "106", "107"]]);
+    expect(forecast.critical_paths_cut).toBe(false);
+    expect(forecast.left_out).toEqual([]);
+    // Asking twice gives the same answer, because it reads no clock.
+    expect((await read(OWNER, id)).forecast).toEqual(forecast);
+    // A lifecycle command doesn't move a baseline.
+    expect((await api(BOB, "POST", `${tasks}/${ids["101"]}/accept`, { version: 1 })).status).toBe(200);
+    expect((await read(OWNER, id)).forecast).toEqual(forecast);
+  });
+
+  it("keeps a weekend start as entered, and says the Monday the plan really begins", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks, { title: "A" });
+    await setPlan(tasks, id, t.id, 1);
+    await setStart(OWNER, id, { start_date: "2026-11-07" });
+    const plan = await read(OWNER, id);
+    expect(plan.start.date).toBe("2026-11-07");
+    expect([plan.forecast.start_date, plan.forecast.begins_on, plan.forecast.finish_date]).toEqual(["2026-11-07", "2026-11-09", "2026-11-09"]);
+    expect(plan.forecast.tasks[0].earliest_start).toBe("2026-11-09");
+  });
+
+  it("withholds for a missing start, a missing estimate or no tasks, says why, and names no task", async () => {
+    const { id, tasks } = await room();
+    expect((await read(OWNER, id)).forecast.reasons).toEqual(["no_start", "no_tasks"]);
+    const t = await offer(tasks, { title: "A secret title" });
+    const both = (await read(OWNER, id)).forecast;
+    expect(both.available).toBe(false);
+    expect(both.reasons).toEqual(["no_start", "missing_estimates"]);
+    expect(Object.keys(both).sort()).toEqual(["available", "explanation", "label", "reasons"]);
+    expect(JSON.stringify(both)).not.toContain(t.id);
+    expect(JSON.stringify(both)).not.toContain("A secret title");
+    await setStart(OWNER, id);
+    expect((await read(OWNER, id)).forecast.reasons).toEqual(["missing_estimates"]);
+    await setPlan(tasks, id, t.id, 3);
+    expect((await read(OWNER, id)).forecast.available).toBe(true);
+  });
+
+  it("withholds for a canceled predecessor until someone removes the link", async () => {
+    const { id, tasks } = await room();
+    await setStart(OWNER, id);
+    const first = await offer(tasks, { title: "First" });
+    const next = await offer(tasks, { title: "Next" });
+    await setPlan(tasks, id, first.id, 9);
+    await setPlan(tasks, id, next.id, 1, [first.id]);
+    expect((await read(OWNER, id)).forecast.duration_days).toBe(10);
+    expect((await api(LEAD, "POST", `${tasks}/${first.id}/cancel`, { version: first.version, reason: "No" })).status).toBe(200);
+    expect((await read(OWNER, id)).forecast.reasons).toEqual(["canceled_predecessor"]);
+    await setPlan(tasks, id, next.id, 1);
+    const forecast = (await read(OWNER, id)).forecast;
+    expect(forecast.duration_days).toBe(1);
+    expect(forecast.tasks.map((t: any) => t.id)).toEqual([next.id]);
+  });
+
+  it("withholds for a loop, which only bad stored data could make", async () => {
+    const { id, tasks } = await room();
+    await setStart(OWNER, id);
+    const a = await offer(tasks, { title: "A" });
+    const b = await offer(tasks, { title: "B" });
+    await setPlan(tasks, id, a.id, 1);
+    await setPlan(tasks, id, b.id, 1, [a.id]);
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("INSERT INTO task_dependency (successor_id, predecessor_id, created_by, created_at) VALUES (?, ?, 'x', 0)", a.id, b.id));
+    const forecast = (await read(OWNER, id)).forecast;
+    expect(forecast.reasons).toEqual(["cycle"]);
+    expect(JSON.stringify(forecast)).not.toContain(a.id);
+  });
+
+  it("leaves out a finished task with no estimate, and withholds if unfinished work follows it", async () => {
+    const { id, tasks } = await room();
+    await setStart(OWNER, id);
+    const old = await offer(tasks, { title: "From before estimates" });
+    const accepted = (await api(BOB, "POST", `${tasks}/${old.id}/accept`, { version: old.version })).body;
+    const sent = (await api(BOB, "POST", `${tasks}/${old.id}/submit`, { version: accepted.version, artifacts: [{ uri: "https://example.com/a", label: "A" }] })).body;
+    expect((await api(REVIEWER, "POST", `${tasks}/${old.id}/verify`, { submission_no: sent.submission_no })).status).toBe(200);
+    const now = await offer(tasks, { title: "Now" });
+    await setPlan(tasks, id, now.id, 2);
+    const forecast = (await read(OWNER, id)).forecast;
+    expect(forecast.left_out).toEqual([old.id]);
+    expect(forecast.tasks.map((t: any) => t.id)).toEqual([now.id]);
+    expect(forecast.duration_days).toBe(2);
+    expect(forecast.finish_date).toBe("2026-11-03");
+    expect(forecast.critical_paths).toEqual([[now.id]]);
+    await setPlan(tasks, id, now.id, 2, [old.id]);
+    expect((await read(OWNER, id)).forecast.reasons).toEqual(["missing_estimates"]);
+  });
+
+  it("tells someone limited to their own tasks the same thing whatever the room holds, and shows nothing hidden", async () => {
+    const { id, tasks } = await room();
+    await setStart(OWNER, id);
+    const hidden = await api(LEAD, "POST", tasks, { title: "A hidden task", instructions: "x", reviewer: REVIEWER.id });
+    const own = await offer(tasks, { title: "Bob's" });
+    const noEstimates = await read(BOB, id);
+    expect(noEstimates.forecast).toEqual(NOT_AVAILABLE);
+    await setPlan(tasks, id, hidden.body.id, 77);
+    await setPlan(tasks, id, own.id, 2, [hidden.body.id]);
+    const whole = await read(OWNER, id);
+    expect(whole.forecast.available).toBe(true);
+    expect(whole.forecast.duration_days).toBe(79);
+    const after = await read(BOB, id);
+    expect(after.forecast).toEqual(NOT_AVAILABLE);
+    expect(after.complete).toBe(false);
+    expect(after).not.toHaveProperty("start");
+    expect(after).not.toHaveProperty("plan_revision");
+    expect(after).not.toHaveProperty("plan_changed_at");
+    expect(after.edges).toEqual([]);
+    const words = JSON.stringify(after);
+    for (const leak of [hidden.body.id, "A hidden task", "2026-11", "America/New_York"]) expect(words, leak).not.toContain(leak);
+    // Numbers are checked by field, because a random ID can hold any digits.
+    expect(after.tasks.map((t: any) => [t.id, t.duration_days])).toEqual([[own.id, 2]]);
+    // Someone on no task at all, a loop and a canceled predecessor change nothing either.
+    expect((await read(CAROL, id)).forecast).toEqual(NOT_AVAILABLE);
+    await api(LEAD, "POST", `${tasks}/${hidden.body.id}/cancel`, { version: hidden.body.version, reason: "No" });
+    expect((await read(OWNER, id)).forecast.reasons).toEqual(["canceled_predecessor"]);
+    expect((await read(BOB, id)).forecast).toEqual(NOT_AVAILABLE);
+  });
+
+  it("gives a guest no forecast or start, even with access to every task, and a member with that access both", async () => {
+    const { id, tasks } = await room();
+    await example(tasks, id);
+    await setStart(OWNER, id);
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${LEAD.id}/access`, { scopes: { tasks: "all" } })).status).toBe(200);
+    // CAROL joined as a guest, and this widens what that agent sees of the plan but doesn't change its role.
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${CAROL.id}/access`, { scopes: { tasks: "all" } })).status).toBe(200);
+    const guest = await read(CAROL, id);
+    expect(guest.complete).toBe(true);
+    expect(guest.forecast).toEqual(NOT_AVAILABLE);
+    expect(guest).not.toHaveProperty("start");
+    const member = await read(LEAD, id);
+    expect(member.forecast.available).toBe(true);
+    expect(member.start.date).toBe("2026-11-02");
+  });
+
+  it("says a partial read can't give a forecast", async () => {
+    const { id, tasks } = await room();
+    await example(tasks, id);
+    await setStart(OWNER, id);
+    expect((await read(OWNER, id, "?scope=unfinished")).forecast.reasons).toEqual(["incomplete"]);
+    expect((await read(BOB, id, "?scope=unfinished")).forecast).toEqual(NOT_AVAILABLE);
+  });
+
+  it("gives a room from before this no start, and keeps its plan", async () => {
+    const { id, tasks } = await room();
+    const t = await offer(tasks, { title: "Old" });
+    await setPlan(tasks, id, t.id, 3);
+    await runInDurableObject(stub(id), (_: any, state: any) => undoPlanStartMigration(state));
+    const plan = await read(OWNER, id);
+    expect(plan.start).toBeNull();
+    expect(plan.forecast.reasons).toEqual(["no_start"]);
+    expect(plan.tasks[0].duration_days).toBe(3);
+    expect((await setStart(OWNER, id)).status).toBe(200);
+    expect((await read(OWNER, id)).forecast.duration_days).toBe(3);
   });
 });
 
@@ -6726,6 +7011,6 @@ describe("the collaboration list and map", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).edges).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 5);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 6);
   });
 });

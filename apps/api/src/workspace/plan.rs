@@ -4,12 +4,17 @@
 //! Plan edits move one `plan_revision` for the room and leave `task.version` alone, so an estimate can't fail an accept or an
 //! approval in progress. A loop can run through any task, which is why a stale writer conflicts on the whole room's revision.
 use super::*;
+use podster_core::baseline::{
+    baseline, validate_plan_start, BaselineInput, BaselineTask, CalendarDate, Withheld,
+    BASELINE_ASSUMPTIONS, BASELINE_LABEL,
+};
 use podster_core::{
     plan_change_allowed, plan_would_cycle, validate_task_plan, PlanChange, MAX_PLAN_EDGES,
     MAX_PLAN_TASKS, MAX_PLAN_WALK_EDGES,
 };
-use podster_policy::TASK_PLAN_CHANGED;
+use podster_policy::{sees_plan_forecast, TASK_PLAN_CHANGED};
 use std::collections::{BTreeSet, HashSet};
+use wasm_bindgen::JsCast;
 
 const UNFINISHED: &str = "('open', 'offered', 'accepted', 'submitted')";
 const FINISHED: &str = "('completed', 'canceled')";
@@ -195,6 +200,192 @@ pub(super) fn handle_set(
     Ok(answer(next, json!(now)))
 }
 
+/// Whether the runtime's timezone database knows this name. Core checks its shape first, so an offset never gets here. `Intl` takes
+/// a name in any case, and what's stored is what was sent, since it's what the person chose.
+fn is_known_timezone(name: &str) -> bool {
+    let options = js_sys::Object::new();
+    let set = js_sys::Reflect::set(&options, &"timeZone".into(), &name.into());
+    let intl = js_sys::Reflect::get(&js_sys::global(), &"Intl".into());
+    let format = intl.and_then(|intl| js_sys::Reflect::get(&intl, &"DateTimeFormat".into()));
+    let (Ok(_), Ok(format)) = (set, format) else {
+        return false;
+    };
+    let format: js_sys::Function = format.unchecked_into();
+    let arguments = js_sys::Array::new();
+    arguments.push(&"en-US".into());
+    arguments.push(&options);
+    js_sys::Reflect::construct(&format, &arguments).is_ok()
+}
+
+fn start_of(sql: &SqlStorage) -> R<Option<(String, String)>> {
+    let room = rows(
+        sql,
+        "SELECT plan_start_date, plan_timezone FROM workspace",
+        vec![],
+    )?;
+    let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
+    Ok(text(&room["plan_start_date"]).zip(text(&room["plan_timezone"])))
+}
+
+/// Sets the room's one start date and timezone. A forecast moves with them, so this moves the plan's revision and time like any
+/// other plan edit. It wakes nobody, and only a person who runs the room can do it.
+pub(super) fn handle_set_start(
+    sql: &SqlStorage,
+    caller: &Caller,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::SetPlanStart))?;
+    let revision = body
+        .get("plan_revision")
+        .and_then(Value::as_i64)
+        .ok_or_else(ApiError::invalid_argument)?;
+    let field = |name: &str| {
+        body.get(name)
+            .and_then(Value::as_str)
+            .ok_or_else(ApiError::invalid_argument)
+    };
+    let (date, timezone) = (field("start_date")?, field("timezone")?);
+    validate_plan_start(date, timezone).map_err(|e| ApiError::from_core(&e))?;
+    if !is_known_timezone(timezone) {
+        return Err(ApiError::invalid_argument());
+    }
+    let (current, changed_at) = plan_state(sql)?;
+    if revision != current {
+        return Err(ApiError::plan_conflict());
+    }
+    let answer = |revision: i64, changed_at: Value| {
+        json!({
+            "start": { "date": date, "timezone": timezone },
+            "plan_revision": revision, "plan_changed_at": changed_at,
+        })
+    };
+    let old = start_of(sql)?;
+    // Saving what's already there changes nothing, so it can't make someone else's edit conflict.
+    if old
+        .as_ref()
+        .is_some_and(|(d, z)| d == date && z == timezone)
+    {
+        return Ok(answer(current, changed_at));
+    }
+    let next = current + 1;
+    exec(
+        sql,
+        "UPDATE workspace SET plan_start_date = ?, plan_timezone = ?, plan_revision = ?, plan_changed_at = ?",
+        vec![date.into(), timezone.into(), next.into(), now.into()],
+    )?;
+    audit(
+        sql,
+        caller,
+        "workspace.plan_start_changed",
+        "workspace",
+        None,
+        Some(
+            json!({
+                "old": old.map(|(date, timezone)| json!({ "date": date, "timezone": timezone })),
+                "new": { "date": date, "timezone": timezone },
+            })
+            .to_string(),
+        ),
+        now,
+    )?;
+    // Nobody is told, because a plan asks nothing of anyone.
+    record_event(
+        sql,
+        "workspace.plan_start_changed",
+        &caller.id,
+        None,
+        &Transition::NONE,
+        Vec::<String>::new(),
+        now,
+    )?;
+    Ok(answer(next, json!(now)))
+}
+
+/// Why there's no forecast, in words anyone who sees the whole room can act on. None of these names a task.
+fn withheld_words(reason: Withheld) -> &'static str {
+    match reason {
+        Withheld::NoStart => "Set the room's start date and timezone.",
+        Withheld::NoTasks => "There are no tasks to plan.",
+        Withheld::MissingEstimates => {
+            "A task still needs an estimate, or follows a finished task that has none."
+        }
+        Withheld::CanceledPredecessor => {
+            "A task still has a canceled task before it. Remove or replace that link."
+        }
+        Withheld::Cycle => "The plan's links form a loop.",
+        Withheld::Incomplete => "This read doesn't hold the room's whole plan.",
+    }
+}
+
+/// What everyone who can't have a forecast gets, whatever the room holds, so it can't tell them anything about what they can't see.
+fn forecast_not_available() -> Value {
+    json!({
+        "label": BASELINE_LABEL, "available": false, "reasons": ["not_available"],
+        "explanation": "A baseline plan needs the room's whole plan, and this view doesn't show one.",
+    })
+}
+
+fn forecast_withheld(reasons: &[Withheld]) -> Value {
+    let words: Vec<&str> = reasons.iter().map(|&r| withheld_words(r)).collect();
+    let codes: Vec<&str> = reasons.iter().map(|r| r.code()).collect();
+    json!({
+        "label": BASELINE_LABEL, "available": false, "reasons": codes,
+        "explanation": format!("No baseline plan yet. {}", words.join(" ")),
+    })
+}
+
+/// The forecast for someone who sees the whole plan, from exactly what this read returns.
+fn forecast(
+    tasks: &[Value],
+    edges: &[(String, String)],
+    start: Option<&(String, String)>,
+    (revision, changed_at): (i64, &Value),
+) -> Value {
+    let input = BaselineInput {
+        start: start.and_then(|(date, _)| CalendarDate::parse(date)),
+        tasks: tasks
+            .iter()
+            .filter_map(|row| {
+                Some(BaselineTask {
+                    id: text(&row["id"])?,
+                    status: row["status"].as_str().and_then(TaskStatus::from_name)?,
+                    duration_days: row["duration_days"]
+                        .is_number()
+                        .then(|| int(&row["duration_days"])),
+                })
+            })
+            .collect(),
+        edges: edges.to_vec(),
+    };
+    let found = match baseline(&input) {
+        Ok(found) => found,
+        Err(reasons) => return forecast_withheld(&reasons),
+    };
+    let scheduled: Vec<Value> = found
+        .tasks
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id, "duration_days": t.duration_days,
+                "earliest_start": t.earliest_start.to_string(), "earliest_finish": t.earliest_finish.to_string(),
+                "latest_start": t.latest_start.to_string(), "latest_finish": t.latest_finish.to_string(),
+                "slack_days": t.slack_days, "critical": t.critical,
+            })
+        })
+        .collect();
+    json!({
+        "label": BASELINE_LABEL, "available": true,
+        "plan_revision": revision, "plan_changed_at": changed_at,
+        "start_date": start.map(|(date, _)| date), "begins_on": found.begins_on.to_string(), "timezone": start.map(|(_, zone)| zone), "calendar": "mon_fri",
+        "assumptions": BASELINE_ASSUMPTIONS,
+        "duration_days": found.duration_days, "finish_date": found.finish.to_string(),
+        "tasks": scheduled,
+        "critical_paths": found.critical_paths, "critical_paths_cut": found.critical_paths_cut,
+        "left_out": found.left_out,
+    })
+}
+
 const EDGES_BEFORE: &str = "WITH RECURSIVE before(id) AS (SELECT value FROM json_each(?1) UNION SELECT d.predecessor_id FROM before CROSS JOIN task_dependency d ON d.successor_id = before.id)
     SELECT d.predecessor_id, d.successor_id FROM before CROSS JOIN task_dependency d ON d.successor_id = before.id LIMIT ?2";
 
@@ -338,11 +529,27 @@ pub(super) fn read(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
         .iter()
         .map(|(from, to)| json!({ "predecessor": from, "successor": to }))
         .collect();
-    let mut plan = json!({ "complete": whole && !over && !cut && !unfinished_only, "tasks": tasks, "edges": edges });
+    let complete = whole && !over && !cut && !unfinished_only;
+    let mut plan = json!({ "complete": complete, "tasks": tasks, "edges": edges });
     if whole {
         let (revision, changed_at) = plan_state(sql)?;
         plan["plan_revision"] = json!(revision);
-        plan["plan_changed_at"] = changed_at;
+        plan["plan_changed_at"] = changed_at.clone();
+        if sees_plan_forecast(caller) {
+            let start = start_of(sql)?;
+            plan["start"] = start.as_ref().map_or(
+                Value::Null,
+                |(date, timezone)| json!({ "date": date, "timezone": timezone }),
+            );
+            plan["forecast"] = if complete {
+                forecast(&tasks, &listed, start.as_ref(), (revision, &changed_at))
+            } else {
+                forecast_withheld(&[Withheld::Incomplete])
+            };
+        }
+    }
+    if plan.get("forecast").is_none() {
+        plan["forecast"] = forecast_not_available();
     }
     Ok(plan)
 }

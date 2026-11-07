@@ -387,7 +387,16 @@ paths:
     get: { operationId: getTask, tags: [queries], summary: "One task with submissions, artifacts, recent messages and history. `visible` says what the caller's access leaves out: when `submissions` is `own`, `submissions` and `artifacts` hold only what the caller submitted, and when `conversation` is false, `messages` is empty and each history `reason` is null. Those values then don't mean none exist", responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/plan:
     parameters: [{ $ref: "#/components/parameters/ws" }]
-    get: { operationId: getPlan, tags: [queries], parameters: [{ name: scope, in: query, required: false, schema: { type: string, enum: [unfinished] }, description: "`unfinished` lists only unfinished tasks. `complete` is then always false, because finished tasks are left out, so don't work out a finish from it. Someone who sees the whole room still gets every unfinished task, each one's whole predecessor list and `plan_revision`, so it's enough to edit from, and a predecessor that's finished shows only as an ID in `edges`. Someone limited to their own tasks gets those of their tasks that are unfinished, and only edges with both ends among them. It shows them only tasks they're named on, and it has no per-column cut, so someone named on over 3,001 tasks can see an older one of their own here that the default read leaves out. Any other value gets `invalid_argument`" }], summary: "One read of the room's plan: `tasks` with `id`, `title`, `status`, `assignee`, `reviewer` and `duration_days`, where null means not estimated, plus `edges` of `predecessor` and `successor`, and `complete`. Someone who sees the whole room also gets `plan_revision` and `plan_changed_at`. Someone limited to their own tasks gets only those and the edges between them, with `complete` false and no revision or time. `complete` is also false over 3,000 tasks, or with more than 5,000 finished tasks' edges. A read holds unfinished tasks first, then the newest finished ones, so someone who sees the whole room always gets every task whose plan can change, and each one's whole predecessor list, even if a predecessor is too old to be listed. Don't work out a finish from an incomplete plan", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getPlan, tags: [queries], parameters: [{ name: scope, in: query, required: false, schema: { type: string, enum: [unfinished] }, description: "`unfinished` lists only unfinished tasks. `complete` is then always false, because finished tasks are left out, so don't work out a finish from it. Someone who sees the whole room still gets every unfinished task, each one's whole predecessor list and `plan_revision`, so it's enough to edit from, and a predecessor that's finished shows only as an ID in `edges`. Someone limited to their own tasks gets those of their tasks that are unfinished, and only edges with both ends among them. It shows them only tasks they're named on, and it has no per-column cut, so someone named on over 3,001 tasks can see an older one of their own here that the default read leaves out. Any other value gets `invalid_argument`" }], summary: "One read with `forecast`, a `PlanForecast` that every viewer gets, and `start`, `{ date, timezone }` or null, only for someone who can have a forecast. One read of the room's plan: `tasks` with `id`, `title`, `status`, `assignee`, `reviewer` and `duration_days`, where null means not estimated, plus `edges` of `predecessor` and `successor`, and `complete`. Someone who sees the whole room also gets `plan_revision` and `plan_changed_at`. Someone limited to their own tasks gets only those and the edges between them, with `complete` false and no revision or time. `complete` is also false over 3,000 tasks, or with more than 5,000 finished tasks' edges. A read holds unfinished tasks first, then the newest finished ones, so someone who sees the whole room always gets every task whose plan can change, and each one's whole predecessor list, even if a predecessor is too old to be listed. Don't work out a finish from an incomplete plan", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}/plan/start:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    put:
+      operationId: setPlanStart
+      tags: [commands]
+      summary: "Set the room's one planning start date and timezone. Only the owner or a human admin can (decision 70). It moves `plan_revision` and `plan_changed_at` like any plan edit, unless it saves what's already there, and it wakes nobody. A date on a weekend is accepted and kept as entered, and the plan begins that Monday, which the forecast gives as `begins_on`. It can be changed but not cleared"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetPlanStart" } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}/plan:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
     put:
@@ -592,6 +601,50 @@ components:
         reviewer: { type: string }
         due_at: { type: integer }
         follow_up_of: { type: string }
+    SetPlanStart:
+      type: object
+      required: [start_date, timezone, plan_revision]
+      additionalProperties: false
+      properties:
+        start_date: { type: string, format: date, description: "A local calendar date, `YYYY-MM-DD`, from 2000-01-01 to 2100-12-31. It isn't shifted by the timezone." }
+        timezone: { type: string, maxLength: 64, description: "An IANA name such as `America/New_York`. An offset such as `+01:00` is refused. It labels the dates and doesn't change them." }
+        plan_revision: { type: integer, description: "The revision last read. Anything else gets `plan_conflict`." }
+    PlanForecast:
+      type: object
+      description: "A read-only baseline, never a delivery commitment. `available` true has every field below. `available` false has only `label`, `reasons` and `explanation`. Someone who can't have a forecast, because they don't see the whole plan or are a guest, always gets `reasons` of exactly `not_available` and the same `explanation`, whatever the room holds. Someone who sees the whole plan gets any of `no_start`, `no_tasks`, `missing_estimates`, `canceled_predecessor`, `cycle` and `incomplete`, which name no task."
+      required: [label, available]
+      properties:
+        label: { type: string, enum: ["Baseline plan"] }
+        available: { type: boolean }
+        reasons: { type: array, items: { type: string, enum: [not_available, no_start, no_tasks, missing_estimates, canceled_predecessor, cycle, incomplete] } }
+        explanation: { type: string }
+        plan_revision: { type: integer, description: "The plan this was worked out from. With `plan_changed_at`, it's the forecast's as-of: it reads no clock, so it doesn't move with today's date." }
+        plan_changed_at: { type: [integer, "null"], description: "When the plan last changed, in milliseconds." }
+        start_date: { type: string, format: date, description: "The date as entered, which can fall on a weekend." }
+        begins_on: { type: string, format: date, description: "The first working day on or after `start_date`, where the plan really begins. Show this if it differs." }
+        timezone: { type: string }
+        calendar: { type: string, enum: [mon_fri], description: "Fixed, with no holidays." }
+        assumptions: { type: array, items: { type: string }, description: "Fixed text to show with the forecast." }
+        duration_days: { type: integer, description: "The longest dependency path in working days, never the sum of every estimate." }
+        finish_date: { type: string, format: date, description: "The last working day of the plan, inclusive." }
+        tasks:
+          type: array
+          description: "Sorted by ID. Every unfinished task and every completed task with an estimate. Canceled tasks aren't here."
+          items:
+            type: object
+            required: [id, duration_days, earliest_start, earliest_finish, latest_start, latest_finish, slack_days, critical]
+            properties:
+              id: { type: string }
+              duration_days: { type: integer }
+              earliest_start: { type: string, format: date }
+              earliest_finish: { type: string, format: date, description: "Inclusive: the span's last working day." }
+              latest_start: { type: string, format: date }
+              latest_finish: { type: string, format: date }
+              slack_days: { type: integer, description: "Working days it can slip without moving the finish. It isn't evidence anyone is free." }
+              critical: { type: boolean, description: "Exact, even when `critical_paths_cut` is true." }
+        critical_paths: { type: array, items: { type: array, items: { type: string } }, description: "Each tied path, first task to last, sorted, up to 20 paths and 10,000 IDs." }
+        critical_paths_cut: { type: boolean, description: "Whether more tied paths exist than are listed." }
+        left_out: { type: array, items: { type: string }, description: "Completed tasks with no estimate, which aren't in the scenario and count toward nothing here. A screen must say which they are, so a finish date doesn't look complete." }
     SetTaskPlan:
       type: object
       additionalProperties: false

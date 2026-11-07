@@ -108,6 +108,9 @@ ALTER TABLE event ADD COLUMN subject_id TEXT;
 ", "
 ALTER TABLE task ADD COLUMN approved_submission_no INTEGER;
 UPDATE task SET approved_submission_no = submission_no WHERE status = 'completed' AND submission_no > 0;
+", "
+ALTER TABLE workspace ADD COLUMN plan_start_date TEXT;
+ALTER TABLE workspace ADD COLUMN plan_timezone TEXT;
 "];
 
 pub fn int(value: &Value) -> i64 {

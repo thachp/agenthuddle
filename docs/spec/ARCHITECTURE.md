@@ -315,7 +315,8 @@ The consumer in `apps/api` rechecks everything before sending: the connection is
 ```
 GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
-GET    /v1/workspaces/{ws}/plan?scope=              tasks, durations, edges, plan_revision and complete, narrowed per viewer (decisions 64 to 66); scope=unfinished for unfinished tasks only (decision 77)
+GET    /v1/workspaces/{ws}/plan?scope=              tasks, durations, edges, plan_revision and complete, narrowed per viewer (decisions 64 to 66); scope=unfinished for unfinished tasks only (decision 77); start and the baseline forecast (decisions 67 to 73), which only someone who sees the whole plan and isn't a guest gets
+PUT    /v1/workspaces/{ws}/plan/start               set_plan_start, for the owner or a human admin: the room's start date and timezone, checked against plan_revision (decision 70)
 PUT    /v1/workspaces/{ws}/tasks/{t}/plan           set_task_plan: a task's whole duration and predecessor list, checked against plan_revision
 GET    /v1/workspaces/cards?offset=                 20 rooms at most: membership_index says which to ask, and each room answers what this viewer sees
 GET    /v1/workspaces/{ws}/card                     goal and role summary, narrowed per viewer as the room and role reads are
