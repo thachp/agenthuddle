@@ -2,13 +2,14 @@ import { GROUP_ORDER, TASK_STATUS, TASK_STATUSES, type TaskStatus, type TaskSumm
 
 /** What the Tasks page shows, all of it held in the URL (docs/spec/TASK-PLANNING.md). Nothing here decides anything: it arranges what the server already allowed. */
 
-export type TaskView = "list" | "board";
+export type TaskView = "list" | "board" | "gantt";
 export type TaskViewState = { view: TaskView; reviewMine: boolean; showCanceled: boolean };
 type Changes = Record<string, string | null>;
 
 /** A missing or unknown value means the default, so an old or mistyped link still opens the page. */
 export function readViewState(search: Pick<URLSearchParams, "get">): TaskViewState {
-  return { view: search.get("view") === "board" ? "board" : "list", reviewMine: search.get("review") === "mine", showCanceled: search.get("canceled") === "show" };
+  const view = search.get("view");
+  return { view: view === "board" || view === "gantt" ? view : "list", reviewMine: search.get("review") === "mine", showCanceled: search.get("canceled") === "show" };
 }
 
 /** Changes only the named parameters, so `task` and anything else in the URL stay as they are. */

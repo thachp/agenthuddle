@@ -8,6 +8,7 @@ import { ReadFailure } from "@/components/shell/read-failure";
 import { Button } from "@/components/ui/button";
 import { NewTask } from "./new-task";
 import { TaskBoard } from "./task-board";
+import { TaskGantt, useGanttPlan } from "./task-gantt";
 import { TaskList } from "./task-list";
 import { TaskLoadMore } from "./task-load-more";
 import { planNote, type PlanSummary } from "./plan-summary";
@@ -45,6 +46,7 @@ const NOTHING_BLOCKED: Record<string, string> = {};
 const VIEWS: { view: TaskView; label: string }[] = [
   { view: "list", label: "List" },
   { view: "board", label: "Board" },
+  { view: "gantt", label: "Gantt" },
 ];
 
 /**
@@ -129,6 +131,7 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
   // A created task goes on top until a read of the first page has it, which then puts it wherever it belongs.
   const createdNow = created.generation === generation ? created.tasks.filter((task) => !firstPage.some((row) => row.id === task.id)) : [];
   const tasks = current(mergeTasks(createdNow, firstPage, pushedOff, roomPages.tasks));
+  const ganttRead = useGanttPlan(room.id, state.view === "gantt" && tasks.length > 0, firstPage);
   const filtered = askServer ? applyReviewFilter(current(mergeTasks(tasks, reviewPages.tasks)), state, me) : applyReviewFilter(tasks, state, me);
   const shown = state.view === "board" ? onBoard(filtered, state) : filtered;
   // A room that fits on one page counts what's on screen, which already has what the person just did. Any longer one counts the same way however far they've read.
@@ -180,7 +183,7 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
       {/* Says what a switch or a filter did, which nothing else on the page announces. */}
       <p aria-live="polite" aria-atomic="true" className="sr-only">
         {spoken ? `${spoken} more ${spoken === 1 ? "task" : "tasks"} loaded. ` : ""}
-        {state.view === "board" ? "Board" : "List"} view, showing {askServer ? `${shown.length} waiting for your review${more ? " so far" : ""}.` : `${shown.length} of ${tasks.length} ${roomPages.cursor !== null ? "loaded " : ""}tasks.`}
+        {VIEWS.find(({ view }) => view === state.view)?.label} view, showing {askServer ? `${shown.length} waiting for your review${more ? " so far" : ""}.` : `${shown.length} of ${tasks.length} ${roomPages.cursor !== null ? "loaded " : ""}tasks.`}
       </p>
       {stale ? (
         <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
@@ -193,7 +196,9 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
       <TaskProgress tasks={filtered} every={every} partial={more} state={state} limited={plan ? !plan.whole : isLimitedViewer(role)} note={tasks.length > 0 ? planNote(plan) : null} />
       {tasks.length === 0 ? <p className="text-muted-foreground">{canCreate ? "No tasks yet. Create one and offer it to an agent in this workroom." : "No tasks you can see here yet. Tasks you're part of will show up here."}</p> : null}
       {tasks.length > 0 && filtered.length === 0 ? <p className="text-muted-foreground">{more ? "None of the loaded tasks are waiting for your review. There may be more that this page doesn't reach." : "No submissions are waiting for your review in this workroom."}</p> : null}
-      {state.view === "board" ? <TaskBoard blocked={blocked} tasks={shown} partial={more} showCanceled={state.showCanceled} selected={search.get("task")} me={me} names={names} /> : <TaskList blocked={blocked} tasks={shown} partial={more} me={me} names={names} />}
+      {state.view === "board" ? <TaskBoard blocked={blocked} tasks={shown} partial={more} showCanceled={state.showCanceled} selected={search.get("task")} me={me} names={names} /> : null}
+      {state.view === "gantt" && tasks.length > 0 ? <TaskGantt blocked={blocked} tasks={shown} read={ganttRead} selected={search.get("task")} me={me} names={names} /> : null}
+      {state.view === "list" ? <TaskList blocked={blocked} tasks={shown} partial={more} me={me} names={names} /> : null}
       {state.view === "board" && (state.showCanceled || canceledHere > 0) ? (
         <p className="text-sm text-muted-foreground">
           {state.showCanceled ? null : <>Canceled tasks hidden ({countText(canceledHere, more)}). </>}
