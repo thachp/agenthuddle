@@ -5824,9 +5824,43 @@ describe("the baseline forecast", () => {
     expect(forecast.left_out).toEqual([]);
     // Asking twice gives the same answer, because it reads no clock.
     expect((await read(OWNER, id)).forecast).toEqual(forecast);
-    // A lifecycle command doesn't move a baseline.
+    // Accepting leaves the scenario as it was, unlike the commands in the test below.
     expect((await api(BOB, "POST", `${tasks}/${ids["101"]}/accept`, { version: 1 })).status).toBe(200);
     expect((await read(OWNER, id)).forecast).toEqual(forecast);
+  });
+
+  it("changes with cancel, create and complete while the plan's revision and time stay put, and says so", async () => {
+    const { id, tasks } = await room();
+    await setStart(OWNER, id);
+    const long = await offer(tasks, { title: "Long" });
+    const short = await offer(tasks, { title: "Short" });
+    await setPlan(tasks, id, long.id, 9);
+    await setPlan(tasks, id, short.id, 2);
+    const stamp = async () => { const { plan_revision, plan_changed_at, forecast } = await read(OWNER, id); return { plan_revision, plan_changed_at, forecast }; };
+    const first = await stamp();
+    const pinned = [first.plan_revision, first.plan_changed_at];
+    expect([first.forecast.duration_days, first.forecast.finish_date]).toEqual([9, "2026-11-12"]);
+    expect(first.forecast.assumptions.join(" ")).toMatch(/status and which tasks exist when this is read/);
+    // Canceling a critical task with no successors shortens the plan.
+    expect((await api(LEAD, "POST", `${tasks}/${long.id}/cancel`, { version: long.version, reason: "No" })).status).toBe(200);
+    const canceled = await stamp();
+    expect([canceled.forecast.duration_days, canceled.forecast.finish_date]).toEqual([2, "2026-11-03"]);
+    expect([canceled.plan_revision, canceled.plan_changed_at]).toEqual(pinned);
+    expect([canceled.forecast.plan_revision, canceled.forecast.plan_changed_at]).toEqual(pinned);
+    // Creating an unestimated task withholds it.
+    const fresh = await offer(tasks, { title: "Fresh" });
+    const created = await stamp();
+    expect(created.forecast.reasons).toEqual(["missing_estimates"]);
+    expect([created.plan_revision, created.plan_changed_at]).toEqual(pinned);
+    // Completing that task brings it back, with the task left out.
+    const accepted = (await api(BOB, "POST", `${tasks}/${fresh.id}/accept`, { version: fresh.version })).body;
+    const sent = (await api(BOB, "POST", `${tasks}/${fresh.id}/submit`, { version: accepted.version, artifacts: [{ uri: "https://example.com/a", label: "A" }] })).body;
+    expect((await api(REVIEWER, "POST", `${tasks}/${fresh.id}/verify`, { submission_no: sent.submission_no })).status).toBe(200);
+    const completed = await stamp();
+    expect(completed.forecast.available).toBe(true);
+    expect(completed.forecast.left_out).toEqual([fresh.id]);
+    expect(completed.forecast.duration_days).toBe(2);
+    expect([completed.plan_revision, completed.plan_changed_at]).toEqual(pinned);
   });
 
   it("keeps a weekend start as entered, and says the Monday the plan really begins", async () => {

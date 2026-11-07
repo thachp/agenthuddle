@@ -611,15 +611,15 @@ components:
         plan_revision: { type: integer, description: "The revision last read. Anything else gets `plan_conflict`." }
     PlanForecast:
       type: object
-      description: "A read-only baseline, never a delivery commitment. `available` true has every field below. `available` false has only `label`, `reasons` and `explanation`. Someone who can't have a forecast, because they don't see the whole plan or are a guest, always gets `reasons` of exactly `not_available` and the same `explanation`, whatever the room holds. Someone who sees the whole plan gets any of `no_start`, `no_tasks`, `missing_estimates`, `canceled_predecessor`, `cycle` and `incomplete`, which name no task."
+      description: "A read-only baseline, never a delivery commitment. `available` true has every field below except `reasons` and `explanation`. `available` false has only `label`, `reasons` and `explanation`. Someone who can't have a forecast, because they don't see the whole plan or are a guest, always gets `reasons` of exactly `not_available` and the same `explanation`, whatever the room holds. Someone who sees the whole plan gets any of `no_start`, `no_tasks`, `missing_estimates`, `canceled_predecessor`, `cycle` and `incomplete`, which name no task."
       required: [label, available]
       properties:
         label: { type: string, enum: ["Baseline plan"] }
         available: { type: boolean }
         reasons: { type: array, items: { type: string, enum: [not_available, no_start, no_tasks, missing_estimates, canceled_predecessor, cycle, incomplete] } }
         explanation: { type: string }
-        plan_revision: { type: integer, description: "The plan this was worked out from. With `plan_changed_at`, it's the forecast's as-of: it reads no clock, so it doesn't move with today's date." }
-        plan_changed_at: { type: [integer, "null"], description: "When the plan last changed, in milliseconds." }
+        plan_revision: { type: integer, description: "Moves when estimates, dependencies or the start change. It isn't a version of this forecast and can't key a cache: the forecast also reflects current task status and which tasks exist when read, so canceling, completing or creating a task can change it while this stays the same. Nothing here moves with today's date." }
+        plan_changed_at: { type: [integer, "null"], description: "When estimates, dependencies or the start last changed, in milliseconds. A task's lifecycle doesn't move it, so the forecast can have changed since." }
         start_date: { type: string, format: date, description: "The date as entered, which can fall on a weekend." }
         begins_on: { type: string, format: date, description: "The first working day on or after `start_date`, where the plan really begins. Show this if it differs." }
         timezone: { type: string }

@@ -2,14 +2,16 @@
 //! [task planning](../../../docs/spec/TASK-PLANNING.md), decisions 67 to 73.
 //!
 //! The same inputs always give the same answer, whatever order they come in. It reads no clock, so it doesn't move with today's
-//! date, and a task's status never changes its dates: a finished task sits where its estimate puts it, not where it really ran.
+//! date. Among the tasks in the scenario, status changes no date: a finished task sits where its estimate puts it, not where it
+//! really ran. Status does decide which tasks are in the scenario, so canceling, completing or creating a task can change the
+//! answer with no plan edit. That's why the API doesn't offer the plan's revision as a version of the forecast.
 //!
 //! What's in the scenario:
 //!
 //! - Every unfinished task, which has to have an estimate.
 //! - Every completed task with an estimate.
-//! - No canceled task. If a task in the scenario still has one as a predecessor, the forecast is withheld until someone removes
-//!   that edge, so canceling never quietly shortens a plan.
+//! - No canceled task. Canceling one with no successors in the scenario can shorten the plan. If a task in the scenario still has
+//!   one as a predecessor, the forecast is withheld until someone removes that edge.
 //! - No completed task without an estimate, because a finished task's plan can't be edited and one from before estimates would
 //!   otherwise withhold the room's forecast for good. These are listed in `left_out`. An unfinished task that follows one is
 //!   withheld as missing an estimate, since its start depends on an unknown, and removing the edge fixes that. A completed task
@@ -23,10 +25,11 @@ use std::fmt;
 
 pub const BASELINE_LABEL: &str = "Baseline plan";
 /// Said with every forecast, so nobody takes one for more than it is (decisions 69, 70 and 72).
-pub const BASELINE_ASSUMPTIONS: [&str; 3] = [
+pub const BASELINE_ASSUMPTIONS: [&str; 4] = [
     "Estimates include acceptance and review time.",
     "Working days are Monday to Friday, and holidays are excluded.",
     "No capacity/resource leveling.",
+    "Dates reflect each task's status and which tasks exist when this is read. The last-changed time covers only estimates, dependencies and the start date, so this can change without it.",
 ];
 /// How many tied critical paths a forecast lists, since ties multiply. Each task still says whether it's critical.
 pub const MAX_CRITICAL_PATHS: usize = 20;
