@@ -1165,6 +1165,101 @@ async function criteria() {
     refused(await personB.accept(swapped, personB.org, [partner]), "invitation_not_found", "an invitation to one room, with another room's ID in it");
   });
 
+  // The rest of what M1 accepted as open, in a room of its own so it can't disturb the checks above.
+  const presetRoom = await personA.createRoom(roomName("presets"));
+  const here = { workspace_id: presetRoom };
+  const roomPath = `/v1/workspaces/${presetRoom}`;
+  const openAndInvite = async (title, preset, agent) => {
+    const role = await personA.must("POST", `${roomPath}/roles`, { title, responsibilities: "Works here", preset, policy_version: await personA.policyVersion(presetRoom) });
+    await personA.must("POST", `${roomPath}/roles/${role.id}/invites`, { principal_id: agent.id, policy_version: await personA.policyVersion(presetRoom) });
+    return role;
+  };
+  const submittedBySpare = async (title, reviewer) => {
+    const task = await personA.must("POST", `${roomPath}/tasks`, { title, instructions: "x", assignee: spare.id, reviewer });
+    const at = { ...here, task_id: task.id };
+    const taken = await spare.must("accept_task", { ...at, version: task.version });
+    return { at, sent: await spare.must("submit_task", { ...at, version: taken.version, note: "Done", artifacts: [{ uri: "https://example.com/preset", label: "Work" }] }) };
+  };
+  await personA.addAgent(presetRoom, spare, "member");
+  let others;
+
+  await check("M1-CLAIM-AUTH", "a claim holder on Agent Auth can't approve or send back work it isn't reviewing, as on MCP", async () => {
+    const holder = await AuthAgent.connect(target, personA, "M1 auth holder");
+    await personA.addAgent(presetRoom, holder, "guest");
+    const role = await openAndInvite("Auth writer", "member", holder);
+    eq((await holder.must("claim_role", { ...here, role_id: role.id })).access.preset, "member", "the holder's preset");
+    others = await submittedBySpare("Spare's work", personA.id);
+    refused(await holder.call("verify_task", { ...others.at, submission_no: others.sent.submission_no, idempotency_key: key() }), "not_allowed", "approving over Agent Auth");
+    refused(await holder.call("request_changes", { ...others.at, submission_no: others.sent.submission_no, reason: "No", idempotency_key: key() }), "not_allowed", "sending back over Agent Auth");
+    eq((await personA.must("GET", `${roomPath}/tasks/${others.at.task_id}`)).task.status, "submitted", "the task it tried to decide");
+    eq((await personA.must("GET", roomPath)).members.find((m) => m.principal_id === holder.id).role, "member", "its role, after claiming");
+  });
+
+  await check("M1-CLAIM-PRESETS", "holding a Guest or Public participant opening limits an agent to its own tasks, and only a Guest may review when named", async () => {
+    ok(others, "M1-CLAIM-AUTH didn't finish, so there's no task to keep them from");
+    const holders = [["guest", writer], ["public_participant", lead]];
+    await personA.addAgent(presetRoom, lead, "member");
+    const namedEarlier = await submittedBySpare("Named before claiming", lead.id);
+    for (const [preset, holder] of holders) {
+      // Added as a member, so the narrowing below comes from the claim.
+      if (holder !== lead) await personA.addAgent(presetRoom, holder, "member");
+      const role = await openAndInvite(`Holds ${preset}`, preset, holder);
+      const claimed = await holder.must("claim_role", { ...here, role_id: role.id });
+      eq([claimed.access.preset, claimed.access.tasks], [preset, "own"], `${holder.label}'s access from the claim`);
+      eq((await personA.must("GET", roomPath)).members.find((m) => m.principal_id === holder.id).role, "guest", `${holder.label}'s role`);
+      // Someone else's task doesn't exist for it, by any read.
+      refused(await holder.call("get_task", others.at, false), "task_not_found", `${holder.label} reading another's task`);
+      ok(!(await holder.must("list_tasks", here, false)).tasks.some((task) => task.id === others.at.task_id), `${holder.label} lists another's task`);
+      ok(!(await holder.must("list_activity", here, false)).events.some((event) => event.task_id === others.at.task_id), `${holder.label}'s Activity shows another's task`);
+      refused(await holder.call("verify_task", { ...others.at, submission_no: others.sent.submission_no, idempotency_key: key() }), "task_not_found", `${holder.label} approving another's task`);
+      refused(await holder.call("create_task", { ...here, title: "x", instructions: "y", idempotency_key: key() }), "not_allowed", `${holder.label} creating a task`);
+      // Its own work goes as normal.
+      const mine = await personA.must("POST", `${roomPath}/tasks`, { title: `For ${preset}`, instructions: "x", assignee: holder.id, reviewer: personA.id });
+      eq((await holder.must("accept_task", { ...here, task_id: mine.id, version: mine.version })).status, "accepted", `${holder.label} accepting its own task`);
+    }
+    const [[, guestHolder], [, publicHolder]] = holders;
+    const forGuest = await submittedBySpare("Named a guest", guestHolder.id);
+    eq((await guestHolder.must("verify_task", { ...forGuest.at, submission_no: forGuest.sent.submission_no })).status, "completed", "a Guest approving work it's named on");
+    // A Public participant can't review at all: it can't be named, and being named before it claimed ends with the claim.
+    refused(await personA.dash("POST", `${roomPath}/tasks`, { title: "Named a public participant", instructions: "x", assignee: spare.id, reviewer: publicHolder.id }), "invalid_argument", "naming a Public participant as reviewer");
+    refused(await publicHolder.call("verify_task", { ...namedEarlier.at, submission_no: namedEarlier.sent.submission_no, idempotency_key: key() }), "task_not_found", "a Public participant approving work it was named on before claiming");
+    const moved = (await personA.must("GET", `${roomPath}/tasks/${namedEarlier.at.task_id}`)).task;
+    eq([moved.status, moved.reviewer], ["submitted", personA.id], "the task it was named on, which waits for the person who asked for it");
+    eq((await personA.must("POST", `${roomPath}/tasks/${namedEarlier.at.task_id}/verify`, { submission_no: namedEarlier.sent.submission_no })).status, "completed", "the person approving it");
+  });
+
+  await check("M1-PERSON-AGREE", "a person's inbox and their Activity agree, in the same order", async () => {
+    ok(others, "M1-CLAIM-AUTH didn't finish, so nothing waits for this person");
+    const inboxOf = async () => {
+      const events = [];
+      for (let after = 0;;) {
+        const page = await personA.must("GET", `/v1/inbox?after=${after}&limit=50`);
+        events.push(...page.events);
+        if (page.events.length < 50) return events.filter((event) => event.workspace_id === presetRoom);
+        after = page.events.at(-1).seq;
+      }
+    };
+    const deadline = Date.now() + 30_000;
+    let inbox = await inboxOf();
+    while (!inbox.some((event) => event.type === "task.submitted" && event.task_id === others.at.task_id)) {
+      ok(Date.now() < deadline, "the person named as reviewer was never told of the submission");
+      await sleep(1000);
+      inbox = await inboxOf();
+    }
+    const shown = [];
+    for (let after;;) {
+      const page = await personA.must("GET", `${roomPath}/activity${after ? `?after=${after}` : ""}`);
+      shown.push(...page.events);
+      if (!page.next_after) break;
+      after = page.next_after;
+    }
+    const problems = disagreements({ label: personA.label ?? "The person", agent: personA.id, limited: false, inbox, activity: shown });
+    ok(problems.length === 0, problems.join("; "));
+    const order = inbox.map((event) => event.event_id);
+    eq(order, shown.map((event) => event.id).filter((id) => order.includes(id)), "the order of the person's events");
+    return `inbox ${inbox.length} events, Activity ${shown.length}: ${[...new Set(inbox.map((event) => event.type))].join(", ")}`;
+  });
+
   await lead.close();
   await writer.close();
   await spare.close();

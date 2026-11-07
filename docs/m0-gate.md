@@ -101,7 +101,9 @@ The call rests on:
 
 1. **The API checks for all four criteria,** which passed on a deployment with test people. Test people count for these criteria ([decision 79](spec/PRODUCT.md#decisions-needed)).
 2. **The screens,** [seen by hand](#screens-seen-on-staging) once, as the owner, in Chromium. The by-hand check counts for M1's screens ([decision 80](spec/PRODUCT.md#decisions-needed)).
-3. **The smaller gaps, accepted for M1,** which stay open: a claim holder on Agent Auth, presets other than Coordinator and Member held in a claim, the owner rather than a lead moving the reviewer, duplicates sent as the same request twice rather than delivered twice by a transport, a person's Activity against their inbox, and a narrowed viewer's Activity screen.
+3. **The smaller gaps, accepted for M1,** which stay open on a deployment: a claim holder on Agent Auth, presets other than Coordinator and Member held in a claim, the owner rather than a lead moving the reviewer, duplicates sent as the same request twice rather than delivered twice by a transport, a person's Activity against their inbox, and a narrowed viewer's Activity screen.
+
+   Four of these now have checks that pass against the local stack only, and none has run on a deployment: `M1-CLAIM-AUTH`, `M1-CLAIM-PRESETS` and `M1-PERSON-AGREE` in `e2e/journey.mjs`, and two paths in `e2e/a11y.mjs` for a guest's screens and a narrowed agent's work. People's access follows their role, so no narrowed person exists: the narrowed viewer's Activity is an admin's oversight of a narrowed agent, and a person's limited view is a guest's. The owner moving the reviewer and duplicates from a transport have no new check.
 
 [M1's scope](spec/PRODUCT.md#product-direction-and-delivery-scope) also names the collaboration list and map, which no criterion covers. They were [seen by hand as the owner](#screens-seen-on-staging).
 

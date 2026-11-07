@@ -169,6 +169,31 @@ async function seed() {
   await until(async () => (await partner.must("GET", "/v1/workspaces")).workspaces.some((w) => w.workspace_id === ownerlessRoom), "the workroom being listed");
   await owner.must("DELETE", `/orgs/${teamOrg}/members/${partner.id}`);
   await until(async () => (await owner.must("GET", "/v1/oversight/ownerless")).rooms.some((r) => r.workspace_id === ownerlessRoom), "the workroom reaching the ownerless list");
+  // A workroom a person holds only as a guest, an agent narrowed to its own tasks, and work neither is party to, with words to look for anywhere.
+  const SECRET = { title: "SECRET-TITLE-OTHERS", instructions: "SECRET-INSTRUCTIONS-OTHERS", message: "SECRET-MESSAGE-OTHERS", note: "SECRET-NOTE-OTHERS" };
+  const viewer = await signUp("Gia Guest");
+  await join(viewer, "member");
+  const limitedRoom = (await owner.must("POST", "/v1/workspaces", { name: "Limited room" }, inTeam)).id;
+  const inLimited = `/v1/workspaces/${limitedRoom}`;
+  const version = async () => (await owner.must("GET", inLimited, undefined, inTeam)).policy_version;
+  await owner.must("POST", `${inLimited}/members`, { principal_id: viewer.id, kind: "person", org_id: teamOrg, role: "guest", policy_version: await version() }, inTeam);
+  const narrowed = await AuthAgent.connect(target, partner, "Narrowed agent");
+  const otherWorker = await AuthAgent.connect(target, partner, "Other worker");
+  const limitedInvite = await owner.must("POST", `${inLimited}/invitations`, { role: "member", invited_org_id: partner.org, policy_version: await version() }, inTeam);
+  ok((await partner.accept(limitedInvite.token, partner.org, [narrowed, otherWorker])).ok, "the partner's agents joining the limited room");
+  await owner.must("PUT", `${inLimited}/members/${narrowed.id}/access`, { scopes: { tasks: "own", artifacts: "own", conversations: "own" }, policy_version: await version() }, inTeam);
+  const inRoom = (task) => ({ workspace_id: limitedRoom, task_id: task.id });
+  const worked = async (agent, title, reviewer, extra = {}) => {
+    const task = await owner.must("POST", `${inLimited}/tasks`, { title, instructions: extra.instructions ?? "Ordinary", assignee: agent.id, reviewer }, inTeam);
+    const taken = await agent.must("accept_task", { ...inRoom(task), version: task.version });
+    if (extra.message) await agent.must("send_message", { ...inRoom(task), body: extra.message });
+    await agent.must("submit_task", { ...inRoom(task), version: taken.version, note: extra.note ?? "Ready", artifacts: [{ uri: "https://example.com/own", label: "Work" }] });
+    return task;
+  };
+  const secretTask = await worked(otherWorker, SECRET.title, owner.id, SECRET);
+  const viewerTask = await worked(narrowed, "Gia reviews this", viewer.id);
+  const plan = await owner.must("GET", `${inLimited}/plan`, undefined, inTeam);
+  await owner.must("PUT", `${inLimited}/tasks/${viewerTask.id}/plan`, { plan_revision: plan.plan_revision, predecessors: [secretTask.id] }, inTeam);
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
   const consent = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: "https://e2e-client.invalid/cb", scope: "mcp", code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", code_challenge_method: "S256", state: "s" });
   const opening = (await owner.must("POST", `/v1/workspaces/${room}/roles`, { title: "Lead coordinator", responsibilities: "Plans the work and **follows up**.", is_lead: true, policy_version: (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version })).id;
@@ -200,7 +225,7 @@ async function seed() {
   const planned = await owner.must("GET", `/v1/workspaces/${longRoom}/plan`);
   const longId = (title) => planned.tasks.find((task) => task.title === title).id;
   await owner.must("PUT", `/v1/workspaces/${longRoom}/tasks/${longId("Long task 319")}/plan`, { plan_revision: planned.plan_revision, predecessors: [longId("Long task 318")] });
-  return { longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -1731,6 +1756,89 @@ async function keyboardPaths(s) {
     await toggle.click();
     await sheet.getByRole("region", { name: "Preview of your message" }).locator("li").nth(599).waitFor({ state: "attached", timeout: 15_000 });
     await phone.close();
+  });
+
+  // Everything a page holds or was sent, hidden or not, so nothing can pass by being out of sight.
+  const limitedPage = async (person, org) => {
+    const context = contextFor(person);
+    if (org) await context.addCookies([{ name: ORG_COOKIE, value: org, domain: new URL(app).hostname, path: "/" }]);
+    const own = await context.newPage();
+    const sent = [];
+    own.on("response", (response) => {
+      if (!response.url().startsWith(app) || /_next\/static/.test(response.url())) return;
+      const url = response.url().replace(app, "");
+      // The shell asks for this to keep the session fresh and never reads the answer, so it never finishes. It's the person's own session.
+      if (url === "/api/auth/get-session") return;
+      // A redirect has no body, and neither has a response the page left behind. One still open is named rather than waited on.
+      const read = response.text().then((text) => ({ url, text }), () => ({ url, text: "" }));
+      sent.push(Promise.race([read, new Promise((resolve) => setTimeout(() => resolve({ url, open: true }), 5_000).unref())]));
+    });
+    const hidesAll = async (label, also = [s.otherWorker.id, "Other worker"]) => {
+      // `also` has the worker, because Collaboration shows people rather than tasks.
+      const words = [...Object.values(s.SECRET), s.secretTask.id, ...also];
+      const held = await own.content();
+      for (const word of words) ok(!held.includes(word), `${label} holds ${word} in its page`);
+      for (const { url, text, open } of await Promise.all(sent.splice(0))) {
+        ok(!open, `${label} couldn't read what ${url} sent`);
+        for (const word of words) ok(!text.includes(word), `${label} was sent ${word} by ${url}`);
+      }
+    };
+    const done = async () => {
+      await own.close();
+      if (org) await context.clearCookies({ name: ORG_COOKIE });
+    };
+    return { own, hidesAll, done };
+  };
+
+  await keyboardPath("a guest's screens show only what they may, with nothing hidden in the page", async () => {
+    const { own, hidesAll, done } = await limitedPage(s.viewer, s.teamOrgId);
+    const w = `/w/${s.limitedRoom}`;
+    try {
+      for (const [label, path] of [["Tasks", `${w}/tasks`], ["the Board", `${w}/tasks?view=board`]]) {
+        await own.goto(`${app}${path}`);
+        await hydrated(own);
+        await own.getByText("Gia reviews this").first().waitFor({ timeout: 15_000 });
+        await hidesAll(`a guest's ${label}`);
+      }
+      await own.goto(`${app}${w}/activity`);
+      await hydrated(own);
+      await own.locator("main ol > li").first().waitFor({ timeout: 15_000 });
+      await hidesAll("a guest's Activity");
+      for (const [label, path] of [["Collaboration list", `${w}/collaboration`], ["Collaboration map", `${w}/collaboration?view=map`]]) {
+        await own.goto(`${app}${path}`);
+        await hydrated(own);
+        await own.getByRole("heading", { name: "Collaboration" }).waitFor({ timeout: 15_000 });
+        await own.waitForTimeout(300);
+        await hidesAll(`a guest's ${label}`);
+      }
+      await own.goto(`${app}${w}/tasks?task=${s.viewerTask.id}`);
+      const sheet = own.getByRole("dialog");
+      await sheet.getByRole("button", { name: "Show plan" }).click();
+      await sheet.getByText(/shows only tasks you can see/).waitFor({ timeout: 15_000 });
+      ok((await sheet.getByRole("button", { name: "Edit plan" }).count()) === 0, "a limited viewer is offered Edit plan");
+      await hidesAll("a limited viewer's Plan section");
+      await audit(own, "Plan section, limited viewer");
+    } finally {
+      await done();
+    }
+  });
+
+  await keyboardPath("a narrowed agent's work shows only what it may, to the admin overseeing it", async () => {
+    const { own, hidesAll, done } = await limitedPage(s.partner);
+    try {
+      await own.goto(`${app}/oversight/${s.limitedRoom}/${s.narrowed.id}`);
+      await hydrated(own);
+      await own.getByText("Gia reviews this").first().waitFor({ timeout: 15_000 });
+      // This admin's own agents include that worker, so only its work is out of bounds.
+      await hidesAll("a narrowed agent's oversight", []);
+    } finally {
+      await done();
+    }
+    // People's access follows their role, so a narrowed member on these screens can't exist. If that changes, this path needs a person.
+    const room = `/v1/workspaces/${s.limitedRoom}`;
+    const version = (await s.owner.must("GET", room, undefined, { org: s.teamOrgId })).policy_version;
+    const refused = await s.owner.dash("PUT", `${room}/members/${s.viewer.id}/access`, { preset: "member", policy_version: version }, { org: s.teamOrgId });
+    ok(refused.status === 400, `narrowing a person answered ${refused.status} ${refused.code}`);
   });
 
   await keyboardPath("long messages are in the accessibility tree, off-screen too", async () => {
