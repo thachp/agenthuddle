@@ -17,7 +17,7 @@
 //!   withheld as missing an estimate, since its start depends on an unknown, and removing the edge fixes that. A completed task
 //!   that follows one can't be fixed by anyone, so that edge alone is ignored.
 //!
-//! Durations are whole working days on a fixed Mon to Fri calendar, with no holidays. Task `i` starting on index `s` for `d` days
+//! Durations are whole working days on a fixed Mon to Fri calendar that ignores holidays, so one counts as a working day. Task `i` starting on index `s` for `d` days
 //! covers indexes `s..s + d`, and a successor starts on the next index, so spans are inclusive of their last day.
 use crate::{TaskStatus, MAX_TASK_DURATION_DAYS};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -27,7 +27,7 @@ pub const BASELINE_LABEL: &str = "Baseline plan";
 /// Said with every forecast, so nobody takes one for more than it is (decisions 69, 70 and 72).
 pub const BASELINE_ASSUMPTIONS: [&str; 4] = [
     "Estimates include acceptance and review time.",
-    "Working days are Monday to Friday, and holidays are excluded.",
+    "Working days are Monday to Friday. Holidays aren't taken into account.",
     "No capacity/resource leveling.",
     "Dates reflect each task's status and which tasks exist when this is read. The last-changed time covers only estimates, dependencies and the start date, so this can change without it.",
 ];
