@@ -172,6 +172,14 @@ fn weekends_are_skipped_and_a_weekend_start_begins_on_monday() {
     }
 }
 
+#[test]
+fn a_holiday_counts_as_a_working_day() {
+    // Friday December 25 2026, then the next working day is Monday.
+    assert_eq!(date("2026-12-25").working_day(0), date("2026-12-25"));
+    assert_eq!(date("2026-12-24").working_day(1), date("2026-12-25"));
+    assert_eq!(date("2026-12-24").working_day(2), date("2026-12-28"));
+}
+
 /// Worked out separately from the code under test, with Zeller's congruence.
 fn weekday_name(text: &str) -> &'static str {
     let (y, m, d): (i64, i64, i64) = (

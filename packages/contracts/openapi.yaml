@@ -623,7 +623,7 @@ components:
         start_date: { type: string, format: date, description: "The date as entered, which can fall on a weekend." }
         begins_on: { type: string, format: date, description: "The first working day on or after `start_date`, where the plan really begins. Show this if it differs." }
         timezone: { type: string }
-        calendar: { type: string, enum: [mon_fri], description: "Fixed, with no holidays." }
+        calendar: { type: string, enum: [mon_fri], description: "Fixed. Holidays aren't taken into account, so one counts as a working day." }
         assumptions: { type: array, items: { type: string }, description: "Fixed text to show with the forecast." }
         duration_days: { type: integer, description: "The longest dependency path in working days, never the sum of every estimate." }
         finish_date: { type: string, format: date, description: "The last working day of the plan, inclusive." }
