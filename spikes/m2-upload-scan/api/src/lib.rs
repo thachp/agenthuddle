@@ -160,7 +160,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             answer(200, serde_json::json!({ "queued": true }))
         }
         (Method::Get, ["objects", id]) if valid_id(id) => {
-            let found = env.bucket("ASSETS")?.head(&format!("spike/{id}")).await?;
+            let found = env.bucket("ASSETS")?.head(format!("spike/{id}")).await?;
             answer(
                 200,
                 serde_json::json!({ "present": found.is_some(), "bytes": found.map(|object| object.size()) }),
@@ -177,7 +177,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         }
         (Method::Get, ["results", id]) if valid_id(id) => match env
             .bucket("ASSETS")?
-            .get(&format!("results/{id}"))
+            .get(format!("results/{id}"))
             .execute()
             .await?
         {
