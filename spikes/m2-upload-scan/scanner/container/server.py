@@ -15,13 +15,13 @@ import threading
 import time
 import urllib.request
 import zipfile
-import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SOCKET = "/tmp/clamd.sock"
 MAX_BYTES = 105 * 1000 * 1000
 READY_WAIT_SECONDS = 600
 CHUNK = 64 * 1024
+READ_TIMEOUT_SECONDS = int(os.environ.get("SCAN_READ_TIMEOUT", "60"))
 # The same limits as scan.conf. clamd stops at these without saying so for some archives, so this walk says so.
 MAX_UNPACKED = 400 * 1000 * 1000
 MAX_ENTRY = 150 * 1000 * 1000
@@ -56,6 +56,8 @@ def run_clamd():
         time.sleep(0.1)
     state["clamd_exit"] = clamd.wait()
     ready.clear()
+    # A scanner with no clamd can't recover. Exiting drops any scan in progress without a verdict, and the next request starts fresh.
+    os._exit(1)
 
 
 CLOUDFLARE_CA = "/etc/cloudflare/certs/cloudflare-containers-ca.crt"
@@ -118,6 +120,9 @@ def memory():
 
 
 class Handler(BaseHTTPRequestHandler):
+    # A stalled upload shouldn't keep the Container awake and billing. It ends as no verdict, which the queue retries.
+    timeout = READ_TIMEOUT_SECONDS
+
     def log_message(self, *_):
         pass
 
@@ -192,7 +197,11 @@ class Handler(BaseHTTPRequestHandler):
                 copy.write(chunk)
                 sock.sendall(struct.pack("!L", len(chunk)) + chunk)
             sock.sendall(struct.pack("!L", 0))
-            return sock.makefile("rb").read().rstrip(b"\0\n").decode(errors="replace")
+            reply = sock.makefile("rb").read().rstrip(b"\0\n").decode(errors="replace")
+            # No answer means clamd fell over. That's no verdict, and it mustn't read as a detection.
+            if not reply:
+                raise ValueError("clamd gave no answer")
+            return reply
 
 
 def verdict(reply):
@@ -213,7 +222,8 @@ def archive_problem(handle):
     budget = [MAX_UNPACKED]
     try:
         return walk_zip(handle, 0, budget)
-    except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError, ValueError, OSError):
+    except Exception:  # pylint: disable=broad-except
+        # Whatever stopped the walk, it didn't finish reading the file, and that's what blocked means.
         return "unreadable_archive"
 
 
@@ -260,5 +270,6 @@ def reach(host):
         return {"error": type(problem).__name__}
 
 
-threading.Thread(target=run_clamd, daemon=True).start()
-ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+if __name__ == "__main__":
+    threading.Thread(target=run_clamd, daemon=True).start()
+    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()

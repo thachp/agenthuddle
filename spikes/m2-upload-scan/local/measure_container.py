@@ -3,12 +3,12 @@
 
 Docker's limits stand in for Cloudflare's. They show memory and behavior fairly, but not Cloudflare's CPU, disk or start time.
 """
-import hashlib
 import http.client
 import json
 import os
+import socket
 import subprocess
-import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,8 +23,10 @@ EXPECTED = {
     "eicar.txt": "blocked", "eicar-in-zip.zip": "blocked", "eicar-in-nested-zip.zip": "blocked",
     "bomb-flat-2gb.zip": "blocked", "bomb-deep-15.zip": "blocked", "bomb-many-20000.zip": "blocked", "bomb-wide-655gb.zip": "blocked",
     "eicar-past-limit.zip": "blocked", "clean-archive.zip": "clean",
-    "encrypted.zip": "blocked", "truncated.zip": "blocked", "not-really.zip": "blocked",
+    "encrypted.zip": "blocked", "truncated.zip": "blocked", "not-really.zip": "blocked", "corrupt-lzma.zip": "blocked",
 }
+# What the walk doesn't cover. Recorded, because the upload type check is the real control here, but it's not a pass.
+KNOWN_GAPS = ["gap-prefixed-eicar-past-limit.bin"]
 
 
 def docker(*args, check=True, capture=True):
@@ -46,10 +48,10 @@ def request(method, path, body=None, timeout=900):
     return response.status, data
 
 
-def run(name, memory, cpus):
+def run(name, memory, cpus, extra=()):
     docker("rm", "-f", name, check=False)
     # UPDATE_SIGNATURES is off, so nothing in the image reaches out. Only the Worker's allowlist, on a deployment, enforces that.
-    docker("run", "-d", "--name", name, "--platform", PLATFORM, "--memory", memory, "--memory-swap", memory, "--cpus", cpus, "--network", "bridge", "-p", f"127.0.0.1:{PORT}:8080", IMAGE)
+    docker("run", "-d", "--name", name, "--platform", PLATFORM, "--memory", memory, "--memory-swap", memory, "--cpus", cpus, "--network", "bridge", "-p", f"127.0.0.1:{PORT}:8080", *extra, IMAGE)
 
 
 def wait_ready(name, limit=900):
@@ -68,6 +70,39 @@ def wait_ready(name, limit=900):
             pass
         time.sleep(0.25)
     return {"ready": False, "timed_out": True}
+
+
+def failures(name):
+    """A stalled upload and a dead clamd must both end without a verdict, and never as clean or blocked."""
+    results = {}
+    run(name, *LIMITS["standard-1"], extra=["-e", "SCAN_READ_TIMEOUT=3"])
+    wait_ready(name)
+    begun = time.monotonic()
+    sock = socket.create_connection(("127.0.0.1", PORT), timeout=30)
+    sock.sendall(b"POST /scan HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\npartial")
+    reply = sock.recv(200).decode(errors="replace")
+    sock.close()
+    results["stalled_upload_answers_503"] = " 503 " in reply
+    results["stalled_upload_ended_within_10s"] = time.monotonic() - begun < 10
+    # A scan that's in clamd's hands when clamd dies.
+    outcome = {}
+
+    def scan():
+        try:
+            status, data = request("POST", "/scan", body=os.path.join(FIXTURES, "clean-100mb.bin"))
+            outcome.update(status=status, verdict=data.get("verdict"))
+        except (OSError, http.client.HTTPException, json.JSONDecodeError):
+            outcome.update(status=None, verdict=None)
+
+    thread = threading.Thread(target=scan)
+    thread.start()
+    time.sleep(1.5)
+    docker("exec", name, "sh", "-c", 'for p in /proc/[0-9]*; do if grep -q "^clamd" "$p/comm" 2>/dev/null; then kill -9 "${p#/proc/}"; fi; done', check=False)
+    thread.join(120)
+    results["dead_clamd_gives_no_verdict"] = outcome.get("verdict") is None and outcome.get("status") != 200
+    time.sleep(1)
+    results["dead_clamd_stops_the_container"] = docker("inspect", "-f", "{{.State.Running}}", name).stdout.strip() == "false"
+    return results
 
 
 def main():
@@ -116,9 +151,16 @@ def main():
         if not alive.startswith("true") or data.get("verdict") is None:
             run(name, *LIMITS["standard-1"])
             wait_ready(name)
+    for fixture in KNOWN_GAPS:
+        status, data = request("POST", "/scan", body=os.path.join(FIXTURES, fixture))
+        report["known_gaps"] = {**report.get("known_gaps", {}), fixture: {"verdict": data.get("verdict"), "reason": data.get("reason")}}
+        print("known gap", fixture, json.dumps(report["known_gaps"][fixture]), flush=True)
     status, health = request("GET", "/health")
     report["memory_after_all"] = health.get("memory")
     report["clamd_exit_after_all"] = health.get("clamd_exit")
+    report["failures"] = failures(name)
+    print("failures", json.dumps(report["failures"]), flush=True)
+    wrong += sum(1 for ok in report["failures"].values() if not ok)
     docker("rm", "-f", name, check=False)
     os.makedirs(os.path.join(ROOT, "results"), exist_ok=True)
     out = os.path.join(ROOT, "results", f"container-{PLATFORM.replace('/', '-')}.json")

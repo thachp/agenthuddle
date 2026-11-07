@@ -76,6 +76,10 @@ def main():
     # An ordinary archive the walk has to let through, within every limit, and one with a file of its own inside.
     write("clean-archive.zip", zipped([("a.txt", b"note\n" * 1000), ("inner.zip", zipped([("b.txt", b"note\n" * 1000)]))]))
 
+    # The walk's known gap: a zip that doesn't start with PK, as a self-extracting one doesn't, isn't walked. This shows what happens.
+    with open(path("eicar-past-limit.zip"), "rb") as source:
+        write("gap-prefixed-eicar-past-limit.bin", b"#!/bin/sh\n" + source.read())
+
     # Things it can't read. Policy says these are blocked.
     write("plain.txt", b"Inside a locked archive.\n")
     if shutil.which("zip"):
@@ -85,6 +89,14 @@ def main():
         subprocess.run(["zip", "-j", "-q", "-P", "fixture", target, path("plain.txt")], check=True)
     whole = zipped([("data.bin", os.urandom(MB))])
     write("truncated.zip", whole[: len(whole) // 2])
+    # Damage only a real decompressor finds, of a kind the walk didn't list by name before.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_LZMA) as archive:
+        archive.writestr("data.bin", os.urandom(4096))
+    damaged = bytearray(buffer.getvalue())
+    for offset in range(40, 120):
+        damaged[offset] ^= 0xFF
+    write("corrupt-lzma.zip", bytes(damaged))
     write("not-really.zip", b"PK\x03\x04" + os.urandom(4096))
     for name in sorted(os.listdir(OUT)):
         print(f"{os.path.getsize(path(name)):>12}  {name}")

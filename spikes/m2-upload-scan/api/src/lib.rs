@@ -159,6 +159,25 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 .await?;
             answer(200, serde_json::json!({ "queued": true }))
         }
+        // For teardown, because wrangler can't list a bucket. It can only ever touch this spike's two prefixes.
+        (Method::Post, ["cleanup"]) => {
+            let bucket = env.bucket("ASSETS")?;
+            let mut deleted = 0;
+            for prefix in ["spike/", "results/"] {
+                for object in bucket
+                    .list()
+                    .prefix(prefix)
+                    .limit(200)
+                    .execute()
+                    .await?
+                    .objects()
+                {
+                    bucket.delete(object.key()).await?;
+                    deleted += 1;
+                }
+            }
+            answer(200, serde_json::json!({ "deleted": deleted }))
+        }
         (Method::Get, ["objects", id]) if valid_id(id) => {
             let found = env.bucket("ASSETS")?.head(format!("spike/{id}")).await?;
             answer(

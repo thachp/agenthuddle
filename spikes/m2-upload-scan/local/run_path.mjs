@@ -78,6 +78,18 @@ async function waitForServer() {
   throw new Error("the local Workers didn't start");
 }
 
+/** Deletes everything under the spike's two prefixes, a batch at a time. */
+export async function emptyBucket() {
+  let deleted = 0;
+  for (let round = 0; round < 100; round += 1) {
+    const res = await raw("POST", "/cleanup", {}, (req) => req.end());
+    if (res.status !== 200) return { deleted, left: -1, status: res.status };
+    if (res.body.deleted === 0) return { deleted, left: 0 };
+    deleted += res.body.deleted;
+  }
+  return { deleted, left: -1 };
+}
+
 let dev;
 if (!deployed) {
   const wrangler = join(root, "node_modules/.bin/wrangler");
@@ -170,4 +182,9 @@ const out = join(root, "results", deployed ? "path-deployed.json" : "path-local.
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, JSON.stringify(rows, null, 2));
 console.log(`wrote ${out}; ${failures.length} failed`);
+if (!deployed) {
+  // The same cleanup teardown uses.
+  const emptied = await emptyBucket();
+  check(emptied.left === 0, `cleanup removed ${emptied.deleted} objects and left ${emptied.left}`);
+}
 process.exit(failures.length === 0 ? 0 : 1);
