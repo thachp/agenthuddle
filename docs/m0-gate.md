@@ -63,22 +63,62 @@ The November 4 staging run doesn't count here. Its driver was never committed, o
 | AC-32 | journey `OVERSIGHT` is partial; apps/api "an organization's oversight of its own agent" | Passed on a deployment, with test people, 2026-11-06 at `abe92ef`, for an invited organization's admin reading only its own agent's tasks with no room role. The cases in the next column stay local only | A plain member, a removed admin and a whole-organization revocation run only in apps/api tests |
 | AC-33 | journey `AC-33` is partial; apps/api "transferring and recovering a room's ownership"; gateway "doesn't give a room's owner their room back when they rejoin, until recovery names them" | Passed on a deployment, with test people, 2026-11-06 at `abe92ef`, for transfer and handing back, a departed owner refused even after rejoining, and recovery by an organization admin who's in the room, with its audit. The cases in the next column stay local only | An admin outside the room whose owner left and no admin remains, an archived room, a retry and a partial failure run only in apps/api tests. Part of AC-33 ran by hand on staging: see [the ownership check](#two-person-ownership-check-on-staging) |
 
-### What's left to call M1 met
+### Screens seen on staging
 
-M1 isn't called met here, and that's the owner's to say. What would be left, as things stand:
+On 2026-11-06, at `5ae3dad`, the lead drove the screens in a browser pane as the owner, signed in with their own GitHub account. It was Chromium, with no screen reader. This is a check by hand, and it's recorded from the lead's report.
 
-**For M1's criteria:**
+**Seen:**
 
-1. **The screens on a deployment.** Drive the create screen, Overview, Team, Activity and the cards in a browser on staging, including roles set while creating. [The checklist](#the-checklist) covers most of this, by hand, and an owner's ruling would decide whether that counts.
-2. **An existing room's migration.** Show `event.subject_id` applied to a room that existed before it.
-3. **The owner's ruling on what's enough:** whether test people count for M1, since a pass by [this page's definition](#m0-gate) says so when they were used, and whether the smaller gaps in the table above matter, such as a claim holder on Agent Auth.
+- **Create screen:** made a room, `M1 Screens Check`, with a goal, context, a lead opening and a Writer opening with a count of 2, all set while creating. "Adding opening 2 of 2…" showed, then it landed on Overview.
+- **Overview:** the goal, context, owner, "Lead: nobody holds it yet", and 0 people and 0 agents plus the owner.
+- **Team:** Lead with Coordinator, 0 of 1, and Writer with Member, 0 of 2.
+- **Activity:** created this workroom and two openings, newest first.
+- **My workrooms card:** "0 of 3 roles filled", "Roles: Lead 0 of 1 · Writer 0 of 2", and the goal.
+- **A room from before #94:** `Focus Check Room` reads Activity with a `subject` key on each event, all null, so the `event.subject_id` migration reached it. `get_plan` with `scope=unfinished` there returned 2 tasks, `complete` false, with a revision.
+- **Task Sheet Plan section,** in that room: Show plan, then Edit plan with focus on the estimate. An estimate of 3 and an added predecessor were saved, with "Plan saved. Nobody is told…". The live status region showed "Added Hostile nesting." and "Unsaved changes". No screen reader ran, so what it would say wasn't checked. The Blocked line appeared on the List behind the Sheet without a reload, and showed on the Board too. The test plan was then cleared.
+- **A loop refused in the screen:** a plain reason, focus on the message, and the draft kept.
+- **Collaboration,** in `Smoke test room`: the list shows "You to Gigi, 1 offer" and "You to Smoke Agent, 1 message", the participants with last active, and the planned-relationships section, with nothing planned because that room has fewer than two openings. The map shows the same two lines with counts of 1, labelled "You to Gigi: 1 in all, 1 offer" and "You to Smoke Agent: 1 in all, 1 message". Adding, removing and hiding planned lines, and refusing a duplicate or a line to itself, were checked on staging on earlier deploys, not at this commit.
+- **A real GitHub sign-in on the application host:** once, for the owner only.
 
-**Owed before production, whether or not M1 is called met:**
+**Not seen, so still open:**
+
+- Load more on a long list, on a deployment.
+- The form fixes for typing before load.
+- Narrowed or guest views in a browser, including Collaboration's.
+- An agent in the browser.
+- Safari, Firefox and a real screen reader.
+- A second real person.
+
+**Left behind:** `M1 Screens Check` is a leftover test room in the owner's personal organization.
+
+The seen list covers [the checklist](#the-checklist)'s steps 1 to 3. Its agent steps weren't run this way, and the journey covers those through the API.
+
+### What the call on M1 rests on
+
+**The owner called M1 met on 2026-11-06, at `5ae3dad`** ([decision 80](spec/PRODUCT.md#decisions-needed)). It's met by that ruling. The rows above keep their own statuses, so "Passed through the API" and "seen by hand" don't become **Passed on a deployment**.
+
+The call rests on:
+
+1. **The API checks for all four criteria,** which passed on a deployment with test people. Test people count for these criteria ([decision 79](spec/PRODUCT.md#decisions-needed)).
+2. **The screens,** [seen by hand](#screens-seen-on-staging) once, as the owner, in Chromium. The by-hand check counts for M1's screens ([decision 80](spec/PRODUCT.md#decisions-needed)).
+3. **The smaller gaps, accepted for M1,** which stay open: a claim holder on Agent Auth, presets other than Coordinator and Member held in a claim, the owner rather than a lead moving the reviewer, duplicates sent as the same request twice rather than delivered twice by a transport, a person's Activity against their inbox, and a narrowed viewer's Activity screen.
+
+[M1's scope](spec/PRODUCT.md#product-direction-and-delivery-scope) also names the collaboration list and map, which no criterion covers. They were [seen by hand as the owner](#screens-seen-on-staging).
+
+**Still open, after this call:**
+
+- Those smaller gaps.
+- Load more on a long list, on a deployment.
+- The form fixes for typing before load.
+- Narrowed or guest views in a browser, including Collaboration's.
+- An agent in the browser.
+
+**Owed before production:**
 
 - A second real person, and the two-person kernel journey.
-- A real sign-in on the application host.
-- Decision 23 and gap 8, which need an OAuth sign-up.
-- Safari, Firefox and a real screen reader. Browser checks so far ran locally in Chromium only.
+- The probes at the end of [ADR 0001](adr/0001-application-host-and-session-cookie.md#what-staging-needs). The owner's sign-in reached the application host, but no probe measured GitHub's callback or the cookie crossing the web Worker.
+- Decision 23 and gap 8, which need an OAuth sign-up to create a personal organization. The owner's sign-in wasn't a check of that.
+- Safari, Firefox and a real screen reader. Browser checks so far ran in Chromium only.
 
 **UI-10 isn't an M1 criterion.** It asks for a keyboard and screen-reader pass on creating a room, reviewing a task and revoking access, and creating a room is one of M1's screens. But [M1's gate](spec/PRODUCT.md#product-direction-and-delivery-scope) names only expanded criteria 1, 3, 4 and 5, and [DESIGN.md](spec/DESIGN.md#12-design-acceptance-criteria) sets UI-10 as a design criterion, with the screen-reader pass due before launch. So it's listed under production, and it's still open.
 
@@ -110,11 +150,11 @@ Earlier on 2026-11-06, with the owner's approval, `e2e/journey.mjs` ran against 
 **Still owed before production:**
 
 - The two-person kernel journey, with two real people and their own sign-ins.
-- A real sign-in on the application host: GitHub's callback, the cookie crossing the web Worker, and the probes at the end of [ADR 0001](adr/0001-application-host-and-session-cookie.md#what-staging-needs).
+- The probes at the end of [ADR 0001](adr/0001-application-host-and-session-cookie.md#what-staging-needs). [The owner's sign-in](#screens-seen-on-staging) reached the application host, but no probe measured GitHub's callback or the cookie crossing the web Worker.
 - Everything else listed under [With test people](#with-test-people), which stays open.
 - Safari, Firefox and a real screen reader.
 
-These runs drive APIs and agents, not screens, so they say nothing about the web app on staging.
+These runs drive APIs and agents, not screens. [The screens seen by hand](#screens-seen-on-staging) are recorded separately.
 
 ## One-person smoke test on staging
 
@@ -145,16 +185,16 @@ On 2026-11-05, with `main` at `84c7c0c` deployed, the project's owner ran part o
 
 ## M1 criteria on staging
 
-M1 is [expanded criteria 1, 3, 4 and 5 for private rooms](spec/PRODUCT.md#expanded-workroom-acceptance-criteria), without input assets and expected outputs ([decision 47](spec/PRODUCT.md#decisions-needed)). The [journey passed on staging with test people](#journey-on-staging-with-test-people) on 2026-11-06 at `5ae3dad`, including checks written for these criteria. **That covers the API and agents, not the screens, so no criterion is marked fully passed.** The by-hand checklist below hasn't been run. [What's left to call M1 met](#whats-left-to-call-m1-met) is at the end of this section.
+M1 is [expanded criteria 1, 3, 4 and 5 for private rooms](spec/PRODUCT.md#expanded-workroom-acceptance-criteria), without input assets and expected outputs ([decision 47](spec/PRODUCT.md#decisions-needed)). The [journey passed on staging with test people](#journey-on-staging-with-test-people) on 2026-11-06 at `5ae3dad`, including checks written for these criteria, and test people count for these criteria ([decision 79](spec/PRODUCT.md#decisions-needed)). [The screens were then seen by hand](#screens-seen-on-staging) at the same commit. **The owner called M1 met on 2026-11-06, by ruling** ([decision 80](spec/PRODUCT.md#decisions-needed)). **No criterion is marked Passed on a deployment: the API checks passed with test people, and the screens were seen by hand once, as the owner, in Chromium.** [What the call rests on](#what-the-call-on-m1-rests-on) is at the end of this section.
 
 | Criterion | On a deployment, with test people, 2026-11-06 at `5ae3dad` | Still open | Local proof |
 | --- | --- | --- | --- |
-| 1. Create a room with goal, context and roles, launching nothing | **Passed through the API.** `M1-CREATE`: a room has its goal and context, and openings with a count of 1 and 2 are added. No agent is added or told, no agent lists or reads it, and adding one agent adds only that one. Its card's counts match. `M1-BRIEF`: an agent reads the goal and context and gains nothing from them. `M1-COUNT`: a count of 2 takes two holders and refuses a third | **The screens:** the create screen, Overview, Team and the cards haven't been driven in a browser on a deployment. **Roles set while creating:** `M1-CREATE` adds openings after the room exists, as two kinds of request in the screen's order, so doing it from the create form is shown locally only | `create-form.test.tsx` |
+| 1. Create a room with goal, context and roles, launching nothing | **Passed through the API.** `M1-CREATE`: a room has its goal and context, and openings with a count of 1 and 2 are added. No agent is added or told, no agent lists or reads it, and adding one agent adds only that one. Its card's counts match. `M1-BRIEF`: an agent reads the goal and context and gains nothing from them. `M1-COUNT`: a count of 2 takes two holders and refuses a third | **Open: only the owner as a person; the screens are seen by hand, not passed.** That's [the create screen with roles set while creating, Overview, Team and the card](#screens-seen-on-staging), once, in Chromium. `M1-CREATE` itself adds openings after the room exists | `create-form.test.tsx` |
 | 3. A claim grants only its scope, and a task still needs accepting | **Passed through the API, for agents on MCP.** `M1-CLAIM`: holders of a Coordinator and a Member opening can't approve or send back work they aren't reviewing, have no access tool, and have the member role, not an admin's. A task offered after a claim stays offered, can't be submitted early, and needs accepting. `M1-ROLES`: a claim needs an invite and copies the preset. `M1-ACCESS`: what an agent sees follows its access | **A holder on Agent Auth:** the refusals ran over MCP only. **Other presets:** only those two were held. **Merge and deploy:** shown by no such tool existing, since neither is built. Public claims are M4 | apps/api role tests |
 | 4. A lead coordinates through one task history, and duplicates don't compete | **Passed through the API: creating and sending back over MCP, approving over Agent Auth.** `M1-LEAD`: a lead holding the opening creates a task and sends it back over MCP. The opening then moves to an agent on Agent Auth, who approves it. So "coordinates work and review" is shown only in this split form, not by one lead doing all of it on each connection method. All parties read the same history and task. The former lead loses its access. The same request sent twice makes one task | **The reviewer's move:** a lead didn't move the reviewer; the owner did, because that's a requester's or admin's power. **Duplicates:** shown as the same request sent twice, not a transport delivering it twice. A2A is M3 | apps/api's idempotency tests |
-| 5. Activity and inbox agree, and rooms stay apart | **Passed through the API, for the four agents in the run.** `M1-AGREE`: every inbox event is in the agent's Activity, in the same order. Of Activity, a limited agent sees only room notices about itself, and each was told to it unless it caused it. Task events in Activity aren't required to be in the inbox. A guest sees no task it isn't party to, in either. `M1-APART`: an agent in two rooms gets each room's goal and context only from that room, no read shows an invitation token, and one room's access or invitation opens nothing in the other | **A person's** Activity against their inbox isn't compared. **The Activity screen** hasn't been driven on a deployment. **An existing room:** the journey makes new rooms, so the `event.subject_id` migration ran on those, and hasn't been shown on a room that existed before it. Old events stay hidden from limited agents, and a backfill wasn't done | apps/api, including an upgrade test |
+| 5. Activity and inbox agree, and rooms stay apart | **Passed through the API, for the four agents in the run.** `M1-AGREE`: every inbox event is in the agent's Activity, in the same order. Of Activity, a limited agent sees only room notices about itself, and each was told to it unless it caused it. Task events in Activity aren't required to be in the inbox. A guest sees no task it isn't party to, in either. `M1-APART`: an agent in two rooms gets each room's goal and context only from that room, no read shows an invitation token, and one room's access or invitation opens nothing in the other | **A person's** Activity against their inbox isn't compared. **The Activity screen** was [seen by hand](#screens-seen-on-staging) as the owner only, and not as a narrowed viewer. **An existing room:** the `event.subject_id` migration was [seen on a room from before it](#screens-seen-on-staging), whose events all have a null subject. Old events stay hidden from limited agents, and a backfill wasn't done | apps/api, including an upgrade test |
 
-**By hand isn't the same as passed.** The steps below are a check by hand, like the other three on this page. Finishing them shows the product working for the people who ran them, and doesn't by itself make a criterion **Passed on a deployment**. That status means the test itself passed against a real hostname, with two separate people, so it needs [the journey on staging](#running-it-on-staging), or the owner ruling that a by-hand run counts. Record a by-hand run here with its date, commit and who ran it, and leave the statuses above alone unless one of those has happened.
+**By hand isn't the same as passed.** For M1's screens, the owner ruled that the by-hand check counts toward calling M1 met ([decision 80](spec/PRODUCT.md#decisions-needed)), and it still isn't a pass. The steps below are a check by hand, like the other three on this page. Finishing them shows the product working for the people who ran them, and doesn't by itself make a criterion **Passed on a deployment**. That status means the test itself passed against a real hostname, with two separate people, so it needs [the journey on staging](#running-it-on-staging), or the owner ruling that a by-hand run counts. Record a by-hand run here with its date, commit and who ran it, and leave the statuses above alone unless one of those has happened.
 
 ### The checklist
 

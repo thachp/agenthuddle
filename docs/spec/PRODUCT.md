@@ -59,7 +59,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | Milestone | Delivers | Gate |
 | --- | --- | --- |
 | **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-09, AC-12 to AC-17, AC-19 to AC-22, AC-25, AC-26, AC-29 and AC-30, for the features M0 includes |
-| **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets and expected outputs, which M2 adds), 3, 4 and 5 for private rooms |
+| **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets and expected outputs, which M2 adds), 3, 4 and 5 for private rooms. **Met by the owner's ruling on 2026-11-06, at `5ae3dad`** ([decision 80](#decisions-needed), [what it rests on](../m0-gate.md#what-the-call-on-m1-rests-on)) |
 | **M2 Assets and artifacts** ([plan](../m2-plan.md)) | Upload, scanning, expected and versioned outputs, exact-version review | The input assets and expected outputs in expanded criterion 1; expanded criterion 6; upload policy |
 | **M3 A2A** | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
@@ -583,6 +583,8 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 76 | Whether guests see planned lines | **Decided:** yes, guests keep seeing planned lines | M1 |
 | 77 | A plan read that fits an agent | **Decided:** `get_plan` gets an unfinished-only option, built as `scope=unfinished`. The name is the implementer's choice. The default read doesn't change | Planning |
 | 78 | Notices about an agent in its own Activity | **Decided:** a limited agent's Activity shows `member.added`, `role.invited` and `role.claim_ended` when they're about that agent. The inbox keeps sending them | M1 |
+| 79 | Whether test people count for M1 | **Decided:** test people count for M1's criteria. Real people stay owed before production | M1 |
+| 80 | Whether M1 is met | **Decided:** the by-hand check counts for M1's screens. The smaller gaps are accepted for M1 and stay listed as open. The owner calls M1 met | M1 |
 ## M2 and planning decisions, November 6, 2026
 
 - The owner accepted the open plan questions, now decisions 74 to 77, saying "accept all".
@@ -594,6 +596,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 
 ## M1 decisions, November 6, 2026
 
+- The owner called M1 met, now decision 80, answering "Yes, accept them" when asked whether they accepted the smaller gaps and would call M1 met once this was recorded. They'd been told this meant the by-hand check counts for M1's screens and that the gaps stay listed as open.
 - The owner approved all seven recommendations, now decisions 43 to 49, saying "i approved. continue work".
 - Decisions 43, 44, 46 and 48 describe what's already built locally. Decisions 45 and 49 aren't built yet. Decision 47 moves work to M2.
 - Decision 45 approves the planned-relationship schema only for the owner and admins setting them. The lead's part stays proposed.
