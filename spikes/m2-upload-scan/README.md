@@ -101,7 +101,7 @@ npm run measure:path
 
 ## Deploy to staging (for whoever holds the account)
 
-None of this has been run. It needs the owner to have turned R2 on, and Docker running. The queues `podster-scan-staging` and `podster-scan-dlq-staging` already exist. Keep the account ID in the environment, not in this repo.
+None of this has been run. It needs Docker running. The queues `podster-scan-staging` and `podster-scan-dlq-staging` and the private bucket `podster-assets-staging` already exist. Keep the account ID in the environment, not in this repo.
 
 ```bash
 export CLOUDFLARE_ACCOUNT_ID=<the account holding podster.dev>
@@ -115,11 +115,7 @@ export PATH="$(dirname "$(rustup which rustc)"):$HOME/.cargo/bin:$PATH"
 npm ci
 ```
 
-Create the private bucket. New buckets have no public access unless it's turned on. The rule removes what the spike leaves behind.
-
-```bash
-npx wrangler r2 bucket create podster-assets-staging
-```
+Add a rule that removes what the spike leaves behind. It covers the whole bucket, so only add it while the bucket holds nothing else.
 
 ```bash
 npx wrangler r2 bucket lifecycle add podster-assets-staging spike-expiry --expire-days 7 --force
