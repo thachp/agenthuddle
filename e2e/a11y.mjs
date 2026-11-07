@@ -225,7 +225,23 @@ async function seed() {
   const planned = await owner.must("GET", `/v1/workspaces/${longRoom}/plan`);
   const longId = (title) => planned.tasks.find((task) => task.title === title).id;
   await owner.must("PUT", `/v1/workspaces/${longRoom}/tasks/${longId("Long task 319")}/plan`, { plan_revision: planned.plan_revision, duration_days: 3, predecessors: [longId("Long task 318")] });
-  return { viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  // A whole forecast: a start on a Saturday, a link, a parallel task, and a finished task with no estimate that it leaves out.
+  const plannedRoom = await owner.createRoom("Planned room");
+  await owner.addAgent(plannedRoom, lead);
+  await owner.addAgent(plannedRoom, longWorker);
+  const inPlanned = (title, extra = {}) => lead.must("create_task", { workspace_id: plannedRoom, title, instructions: "A planned task.", idempotency_key: crypto.randomUUID(), ...extra });
+  const [firstStep, nextStep, sideStep] = [await inPlanned("First step"), await inPlanned("Next step"), await inPlanned("Side step")];
+  const finished = await inPlanned("Finished with no estimate", { assignee: longWorker.id });
+  const finishedAt = { workspace_id: plannedRoom, task_id: finished.id };
+  const finishedTaken = await longWorker.must("accept_task", { ...finishedAt, version: finished.version });
+  const finishedSent = await longWorker.must("submit_task", { ...finishedAt, version: finishedTaken.version, note: "Ready", artifacts: [], idempotency_key: crypto.randomUUID() });
+  await lead.must("verify_task", { ...finishedAt, version: finishedSent.version, submission_no: 1 });
+  let planRevision = (await owner.must("GET", `/v1/workspaces/${plannedRoom}/plan`)).plan_revision;
+  for (const [step, duration_days, predecessors] of [[firstStep, 2, []], [nextStep, 13, [firstStep.id]], [sideStep, 1, []]]) {
+    planRevision = (await owner.must("PUT", `/v1/workspaces/${plannedRoom}/tasks/${step.id}/plan`, { plan_revision: planRevision, duration_days, predecessors })).plan_revision;
+  }
+  await owner.must("PUT", `/v1/workspaces/${plannedRoom}/plan/start`, { start_date: "2026-11-07", timezone: "America/New_York", plan_revision: planRevision });
+  return { plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -255,6 +271,7 @@ const screens = (s) => {
     ["Tasks, board, empty", `/w/${s.emptyRoom}/tasks?view=board`, "No tasks in scope"],
     ["Tasks, Gantt", `${w}/tasks?view=gantt`, "Forecast unavailable"],
     ["Tasks, Gantt, empty", `/w/${s.emptyRoom}/tasks?view=gantt`, "No tasks in scope"],
+    ["Tasks, Gantt, baseline plan", `/w/${s.plannedRoom}/tasks?view=gantt`, "Baseline plan"],
     ["Tasks, Gantt, long", `/w/${s.longRoom}/tasks?view=gantt`, "Load more"],
     ["Task Sheet over the Gantt", `${w}/tasks?view=gantt&task=${s.reviewScreen.id}`, "Approve submission", "owner", true],
     ["Tasks, long list", `/w/${s.longRoom}/tasks`, "Load more"],
@@ -1369,6 +1386,75 @@ async function keyboardPaths(s) {
     await phone.close();
   });
 
+  await keyboardPath("the baseline plan: dates from the server, bars by keyboard, and setting the start", async () => {
+    const own = await contextFor(s.owner).newPage();
+    const url = `${app}/w/${s.plannedRoom}/tasks?view=gantt`;
+    try {
+      await own.goto(url);
+      await hydrated(own);
+      await shownOnce(own, "Baseline plan");
+      await shownOnce(own, "The start date, Saturday, Nov 7, 2026, isn't a working day, so the plan begins on Monday, Nov 9, 2026.");
+      await shownOnce(own, "Left out of this plan: 1 completed task with no estimate");
+      const panel = own.locator('section[aria-labelledby="gantt-forecast"]');
+      await panel.getByText("Finished with no estimate").waitFor({ timeout: 5000 });
+      ok((await panel.getByRole("listitem").filter({ hasText: "No capacity/resource leveling." }).count()) === 1, "the assumptions should come from the server");
+      const row = own.getByRole("row").filter({ has: own.getByRole("link", { name: "Next step", exact: true }) });
+      await row.getByRole("cell", { name: /Nov 11 to Nov 27, 2026/ }).waitFor({ timeout: 5000 });
+      await row.getByRole("cell", { name: "First step", exact: true }).waitFor({ timeout: 5000 });
+      const region = own.getByRole("region", { name: "Timeline" });
+      await region.waitFor({ timeout: 5000 });
+      ok((await region.locator("path[marker-end]").count()) === 1, "the one link should draw one arrow");
+      const bar = region.getByRole("link", { name: /^Next step, Nov 11 to Nov 27, 2026, Critical/ });
+      await hydrated(own);
+      await tabTo(own, bar, "the bar");
+      await own.keyboard.press("Enter");
+      await own.getByRole("dialog").waitFor({ timeout: 15_000 });
+      ok(own.url().includes("view=gantt") && own.url().includes("task="), `opening a bar changed the view: ${own.url()}`);
+      await own.keyboard.press("Escape");
+      await own.getByRole("dialog").waitFor({ state: "hidden", timeout: 15_000 });
+      await own.waitForFunction(() => document.activeElement?.getAttribute("aria-label")?.startsWith("Next step,"), undefined, { timeout: 5000 }).catch(async () => {
+        throw new Error(`closing the Sheet left focus on ${await activeText(own)}, not the bar that opened it`);
+      });
+      const skip = own.getByRole("button", { name: "Skip to the table" });
+      await skip.focus();
+      await own.keyboard.press("Enter");
+      ok(await own.getByRole("region", { name: "Task plan table" }).evaluate((el) => el === document.activeElement), "skipping the bars didn't reach the table");
+      // By keyboard, through the real command, and read back from the server.
+      const change = own.getByRole("button", { name: "Change start date" });
+      await change.focus();
+      await own.keyboard.press("Enter");
+      const date = own.getByLabel("Start date");
+      await date.waitFor({ timeout: 5000 });
+      ok(await date.evaluate((el) => el === document.activeElement), "opening the form didn't move focus to the date");
+      await date.fill("2026-11-16");
+      await tabTo(own, own.getByRole("button", { name: "Save start" }), "Save start");
+      await own.keyboard.press("Enter");
+      await row.getByRole("cell", { name: /Nov 18 to Dec 4, 2026/ }).waitFor({ timeout: 15_000 });
+      ok((await own.getByText("isn't a working day").count()) === 0, "a Monday start shouldn't say it moved");
+      await own.waitForFunction(() => document.activeElement?.textContent === "Change start date", undefined, { timeout: 5000 }).catch(async () => {
+        throw new Error(`saving left focus on ${await activeText(own)}`);
+      });
+      await own.reload();
+      await row.getByRole("cell", { name: /Nov 18 to Dec 4, 2026/ }).waitFor({ timeout: 15_000 });
+    } finally {
+      await own.close();
+    }
+    const phone = await browser.newContext({ reducedMotion: "reduce", viewport: { width: 375, height: 800 }, storageState: await contextFor(s.owner).storageState() });
+    const small = await phone.newPage();
+    await small.goto(url);
+    await shownOnce(small, "Baseline plan");
+    await hydrated(small);
+    const closed = small.getByRole("region", { name: "Timeline" });
+    ok(!(await closed.isVisible()), "the timeline should start closed on a phone");
+    await small.getByText("Timeline", { exact: true }).click();
+    await closed.waitFor({ timeout: 5000 });
+    ok(await closed.evaluate((el) => el.scrollWidth > el.clientWidth), "the timeline should scroll inside its region at 375px");
+    const overflow = await small.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    ok(overflow <= 0, `the baseline plan scrolls the page sideways by ${overflow}px at 375px`);
+    await audit(small, "Tasks, Gantt, baseline plan, phone, open");
+    await phone.close();
+  });
+
   await keyboardPath("a long list loads near the bottom without moving the reader, and what it costs", async () => {
     for (const [view, query] of [["List", ""], ["Board", "?view=board"]]) {
       const own = await contextFor(s.owner).newPage();
@@ -1844,11 +1930,27 @@ async function keyboardPaths(s) {
     return { own, hidesAll, done };
   };
 
+  await keyboardPath("a guest's Gantt has no forecast, no Today and no start form", async () => {
+    const { own: limited, done } = await limitedPage(s.viewer, s.teamOrgId);
+    try {
+      await limited.goto(`${app}/w/${s.limitedRoom}/tasks?view=gantt`);
+      await shownOnce(limited, "Forecast unavailable");
+      await hydrated(limited);
+      await shownOnce(limited, "A baseline plan needs the room's whole plan, and this view doesn't show one.");
+      ok((await limited.getByRole("region", { name: "Timeline" }).count()) === 0, "a limited viewer got a timeline");
+      ok((await limited.getByText(/Today is/).count()) === 0, "a limited viewer got a Today");
+      ok((await limited.getByRole("button", { name: /start date/ }).count()) === 0, "a limited viewer was offered the start form");
+      ok((await limited.getByText(s.SECRET).count()) === 0, "the Gantt showed a hidden task");
+    } finally {
+      await done();
+    }
+  });
+
   await keyboardPath("a guest's screens show only what they may, with nothing hidden in the page", async () => {
     const { own, hidesAll, done } = await limitedPage(s.viewer, s.teamOrgId);
     const w = `/w/${s.limitedRoom}`;
     try {
-      for (const [label, path] of [["Tasks", `${w}/tasks`], ["the Board", `${w}/tasks?view=board`]]) {
+      for (const [label, path] of [["Tasks", `${w}/tasks`], ["the Board", `${w}/tasks?view=board`], ["the Gantt", `${w}/tasks?view=gantt`]]) {
         await own.goto(`${app}${path}`);
         await hydrated(own);
         await shownOnce(own, "Gia reviews this");
