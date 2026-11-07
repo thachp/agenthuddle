@@ -19,15 +19,15 @@ beforeEach(() => {
 });
 
 describe("switching views", () => {
-  it("opens on the list, says which view is current, and offers no Gantt", () => {
+  it("opens on the list, says which view is current, and offers Gantt", () => {
     show(everyState);
     expect(screen.getByRole("link", { name: "List" })).toHaveAttribute("aria-current", "true");
     expect(screen.getByRole("link", { name: "Board" })).not.toHaveAttribute("aria-current");
-    expect(screen.queryByText("Gantt")).toBeNull();
+    expect(screen.getByRole("link", { name: "Gantt" })).toHaveAttribute("href", "/w/ws_1/tasks?view=gantt");
   });
 
-  it("an unknown view is the list, including one we haven't built", () => {
-    setUrl("/w/ws_1/tasks?view=gantt");
+  it("an unknown view is the list", () => {
+    setUrl("/w/ws_1/tasks?view=chart");
     show(everyState);
     expect(screen.getByRole("link", { name: "List" })).toHaveAttribute("aria-current", "true");
   });

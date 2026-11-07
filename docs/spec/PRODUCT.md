@@ -590,8 +590,8 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - The owner accepted the open plan questions, now decisions 74 to 77, saying "accept all".
 
 - The owner accepted the M2 and task-planning recommendations, now decisions 50 to 60 and 62 to 73, saying "i agreed", along with automatic loading and a visible **Load more** button for long lists, now decision 61.
-- None of it is built. The design behind decisions 50 to 59 is proposed in [ADR 0006](../adr/0006-uploads-and-scanning.md), and the order of work is in the [M2 plan](../m2-plan.md).
-- The billed staging resources for the upload spike haven't been approved, so decision 51's scanner is still conditional.
+- None of it was built then. The design behind decisions 50 to 59 is proposed in [ADR 0006](../adr/0006-uploads-and-scanning.md), and the order of work is in the [M2 plan](../m2-plan.md).
+- The billed staging resources for the upload spike were approved separately, later that day. Decision 51's scanner stays conditional until the spike passes.
 - Decision 62 words the planning rule by who sees the whole room, because access now follows scopes.
 
 ## M1 decisions, November 6, 2026
